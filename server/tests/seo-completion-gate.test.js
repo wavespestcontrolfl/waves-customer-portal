@@ -2360,8 +2360,14 @@ describe('sourced competitor prices survive the SEO price check (r13)', () => {
     expect(detectHardcodedPrice(sourced, brief)).toBe(false);
   });
 
-  test('an UNSOURCED intercept price still parks', () => {
-    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(true);
+  // Owner ruling 2026-09-28 ("list them, we don't have to link to their
+  // site, or say verified or not verified") retired the source-and-date
+  // requirement — a deliberate contract change, not a review rewrite. An
+  // attributed competitor price with no link or date is accepted; a Waves
+  // price on the same intercept brief still parks.
+  test('an unlinked, undated intercept competitor price is accepted; a Waves price still parks', () => {
+    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(false);
+    expect(detectHardcodedPrice('Our quarterly service is $89 per application.', brief)).toBe(true);
   });
 
   test('a non-intercept brief keeps the full guard', () => {

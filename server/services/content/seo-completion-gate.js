@@ -1321,24 +1321,12 @@ function detectHardcodedPrice(body = '', brief = null) {
   // legacy briefs without the marker fail closed.
   const isOperatorIntercept = brief?.gsc_signal?.bucket === 'operator_intercept';
   const thirdPartyCitations = isOperatorIntercept && brief?.gsc_signal?.intercept === true;
-  // The source-and-date requirement means the price check also needs the
-  // CITATION context, or a properly sourced intercept parks here even though
-  // the run-context guardrail passed it — the same drift that put a private
-  // copy of this check out of step before (Codex). Sources come off the
-  // persisted brief so this stays usable from remediation.
+  // No citation context: a competitor price needs no link or as-of date
+  // (owner ruling 2026-09-28), so attribution alone decides it.
   const operatorBrief = brief?.voice_constraints?.operator_brief || null;
-  const requiredSourceUrls = [
-    ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
-    ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
-  ];
   // A brief-level ban outranks every exemption here too (Codex).
   const forbidAllPrices = briefForbidsPrices(operatorBrief, brief?.gsc_signal);
-  return findHardcodedPrice(body, {
-    thirdPartyCitations,
-    operatorCitations: isOperatorIntercept,
-    requiredSourceUrls,
-    forbidAllPrices,
-  }) !== null;
+  return findHardcodedPrice(body, { thirdPartyCitations, forbidAllPrices }) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

@@ -1294,15 +1294,19 @@ describe('outbound-link gate: operator-intercept citation exceptions (Codex roun
     );
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
   });
-  test('operatorCitations allows curated citation hosts, subdomains included, and curated competitor source hosts', () => {
+  test('operatorCitations allows curated citation hosts, subdomains included — never a competitor site', () => {
     for (const body of [
       'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/) research.',
-      'Per [Orkin\'s published terms](https://www.orkin.com/terms) as of June 2026.',
       'Per [FDACS](https://www.fdacs.gov/Consumer-Resources) guidance.',
     ]) {
       const r = guardrails.evaluate({ body }, { operatorCitations: true });
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
     }
+    // Owner ruling 2026-09-28: a blog post never links a competitor's site.
+    // Curated competitor source hosts used to be citable on operator drafts;
+    // that allowance is gone (deliberate contract change).
+    const r = guardrails.evaluate({ body: 'Per [Orkin\'s published terms](https://www.orkin.com/terms).' }, { operatorCitations: true });
+    expect(r.findings.map((f) => f.code)).toEqual(expect.arrayContaining(['DISALLOWED_EXTERNAL_LINK', 'COMPETITOR_LINK']));
   });
   test('operatorCitations still blocks non-curated hosts and suffix-spoofed domains', () => {
     expect(guardrails.evaluate({ body: 'Buy [links](https://spam.example/x).' }, { operatorCitations: true })
@@ -3570,12 +3574,11 @@ describe('third-party price citations and trusted sources', () => {
   const { findHardcodedPrice } = guardrails;
   // Operator provenance unlocks the PRICE exemption. Trusted-source links
   // alone never permit prices in mined drafts.
-  // A competitor-price draft is ALWAYS an operator draft, so the citation
-  // allowlist is in scope — the source URL must be one the gate accepts.
+  // A competitor-price draft is ALWAYS an operator draft.
   const OP = { thirdPartyCitations: true, operatorCitations: true };
-  // The exemption now requires the amount's paragraph to carry BOTH a
-  // citation link and an "as of <date>" — the manifest's global sourcing
-  // rule. Fixtures that expect an exemption must therefore be sourced.
+  // Fixtures written under the retired source-and-date rule (r12–r15) keep
+  // this harmless prefix. Since the owner ruling of 2026-09-28 a competitor
+  // price needs no link or date; the prefix neither helps nor hurts.
   const SRC = 'Per ConsumerAffairs (https://www.consumeraffairs.com/x), as of June 2026, ';
 
   test('mined drafts get NO third-party exemption — the P0 price guard holds (Codex P1)', () => {
@@ -3706,32 +3709,60 @@ describe('third-party price citations and trusted sources', () => {
     expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report.js today.', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
   });
 
-  test('the source and date must be RENDERED, not hidden (r12)', () => {
+  test('hidden markup in the amount\'s paragraph still disqualifies the exemption (r12)', () => {
     expect(findHardcodedPrice('{/* as of June 2026 https://x.com/y */} Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<!-- as of June 2026 https://x.com/y --> Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Per (https://x.com/y) {/* as of June 2026 */} Orkin charges a $199 fee.', OP)).not.toBeNull();
   });
 
-  test('the citation must be an ALLOWED source, not just any URL (r12 P0)', () => {
-    expect(findHardcodedPrice('Per https://random-blog.example.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
-    // A curated host, or a source this brief named, both qualify.
-    expect(findHardcodedPrice('Per https://www.consumeraffairs.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-    expect(findHardcodedPrice('Per https://legalclarity.org/a, as of June 2026, Orkin charges a $199 fee.',
-      { ...OP, requiredSourceUrls: ['https://legalclarity.org/a'] })).toBeNull();
-  });
-
-  test('generic framing cannot excuse an unsourced intercept price (r13 P0)', () => {
+  test('generic framing cannot excuse an UNATTRIBUTED intercept price (r13 P0)', () => {
     // "though pricing varies by contract" is exactly the phrasing the seeder
-    // tells writers to add, and it walked straight past the source rule.
-    expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Aptive charges $199 — get a quote for your home.', OP)).not.toBeNull();
+    // tells writers to add. On an intercept draft it never exempts an amount
+    // by itself; only attribution to a competitor does. Since the owner
+    // ruling of 2026-09-28 an attributed competitor price needs no source or
+    // date, so the attributed forms now pass (deliberate contract change).
+    expect(findHardcodedPrice('Quarterly pest control is $199, though pricing varies by contract.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Quarterly pest control is $199 — get a quote for your home.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).toBeNull();
     // Non-intercept drafts keep the long-standing framing exemption.
     expect(findHardcodedPrice('Use the calculator for a $99 estimate.', {})).toBeNull();
   });
 
-  test('reference definitions are found DOC-WIDE, not just in the paragraph (r13)', () => {
-    // Definitions are conventionally collected at the end of the document.
-    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n\nMore prose.\n\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+  // Owner ruling 2026-09-28: "list them, we don't have to link to their
+  // site, or say verified or not verified." Competitor claims, prices
+  // included, are stated plainly. This deliberately retires the r12–r15
+  // source-and-date contract (citation link + "as of" date in the amount's
+  // sentence); it is an owner-ruled change, not a review-driven rewrite.
+  test('a competitor price needs NO citation link and NO as-of date (owner ruling 2026-09-28)', () => {
+    for (const body of [
+      'Orkin charges a $199 cancellation fee.',
+      'Other companies charge a $199 cancellation fee.',
+      'Aptive charges from $49 to $99 per month for comparable plans.',
+      "Orkin's cancellation fee is $199.",
+      // Any old citation shape is simply irrelevant now — not required, not
+      // disqualifying.
+      'Per https://random-blog.example.com/x, Orkin charges a $199 fee.',
+      'Orkin charges a $199 fee. June 2026 was rainy.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).toBeNull();
+      expect(findHardcodedPrice(body, { thirdPartyCitations: true })).toBeNull();
+    }
+  });
+
+  test('a Waves price stays blocked on the same intercept draft (owner ruling 2026-09-28 changes nothing here)', () => {
+    for (const body of [
+      'Our quarterly service is $89 per application.',
+      'Waves charges $89 per visit.',
+      'Unlike Orkin, {{brandName}} charges $89.',
+      'Orkin is expensive. Quarterly pest control is $129.',
+      'Orkin charges too much, but quarterly pest control is $129 per application.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
+    }
+    // Mined drafts still get no competitor-price exemption at all.
+    expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.')).not.toBeNull();
+    // …and an attributed price in a table still fails closed.
+    expect(findHardcodedPrice('| Orkin charges | $199 |', OP)).not.toBeNull();
   });
 
   test('raw HTML is a CLOSED allowlist, not a blacklist (r14 P0)', () => {
@@ -3773,13 +3804,6 @@ describe('third-party price citations and trusted sources', () => {
     }
   });
 
-  test('the citation must be in the amount\'s OWN SENTENCE (r14 P0)', () => {
-    // An unrelated citation elsewhere in the paragraph is not evidence for
-    // this price; the briefs' mandated shape puts the source in-sentence.
-    expect(findHardcodedPrice('Per [UF](https://ufl.edu/chinch), chinch bugs peak in July. Orkin charges a $199 fee as of June 2026.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/x)).', OP)).toBeNull();
-  });
-
   test('a URL inside an MDX expression is never a citation (r14 P0)', () => {
     // Expressions execute at render and are not tags, so the raw-HTML
     // allowlist never saw them — a brief-named URL could ride into code.
@@ -3805,53 +3829,10 @@ describe('third-party price citations and trusted sources', () => {
     expect(guardrails._internals.externalLinkFinding('{/* a note */} Orkin charges a fee.', N)).toBeNull();
   });
 
-  test('the date must be GOVERNED by "as of" (r14)', () => {
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), Orkin charges a $199 fee. June 2026 was rainy.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-  });
-
-  test('a code span or escaped bracket is not a citation (r15)', () => {
-    // Both render literal text — nothing a reader can click.
-    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 `[source](https://www.consumeraffairs.com/x)`.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 \\[source](https://www.consumeraffairs.com/x).', OP)).not.toBeNull();
-  });
-
   test('HTML deletion elements are not attribution either (r15)', () => {
     // Same as "~~": the reader sees the owner struck out and the price live.
     expect(findHardcodedPrice('<del>Other companies charge</del> $89 per visit for local quarterly service.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<s>Other companies charge</s> $89 per visit for local quarterly service.', OP)).not.toBeNull();
-  });
-
-  test('shortcut and collapsed reference citations qualify (r14)', () => {
-    // The label lives in the FIRST bracket for these two forms.
-    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 [source].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-    expect(findHardcodedPrice('Aptive charges a $199 fee as of July 2026 [source][].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-  });
-
-  test('OUR OWN links cannot source a competitor price (r14)', () => {
-    // Hub and spoke domains are navigation, not third-party evidence.
-    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee as of July 2026 ([source](https://www.wavespestcontrol.com/pest-control-calculator/)).', OP)).not.toBeNull();
-    // A genuine third-party source still qualifies.
-    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
-  });
-
-  test('the citation must be reader-VISIBLE, not an image or dangling ref (r13 P0)', () => {
-    // Image destinations and unused reference definitions are stripped from
-    // the rendered page, so neither is a citation a reader can follow.
-    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 fee.\n[unused]: https://www.consumeraffairs.com/x', OP)).not.toBeNull();
-    expect(findHardcodedPrice('![img](https://www.consumeraffairs.com/x) As of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
-    // A USED reference link resolves and does qualify.
-    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
-  });
-
-  test('a cited price must actually BE cited — source AND date (r12)', () => {
-    // Grammar alone let an invented figure through: the manifest requires
-    // every dollar figure sourced and dated in-post.
-    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('Per ConsumerAffairs (https://www.consumeraffairs.com/x), Orkin charges a $199 fee.', OP)).not.toBeNull();
-    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 cancellation fee.', OP)).not.toBeNull();
-    // Both present → exempt.
-    expect(findHardcodedPrice(`${SRC}Orkin charges a $199 cancellation fee.`, OP)).toBeNull();
   });
 
   test('PROSE attribution still works — this is what the exemption is for', () => {

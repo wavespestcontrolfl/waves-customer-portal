@@ -818,114 +818,6 @@ function blankToRenderedText(s) {
   return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
-// A cited competitor price must actually BE cited. The grammar alone —
-// party plus pricing verb — let "Other companies charge a $199 cancellation
-// fee" through with no source and no date, which is an invented figure as
-// far as the reader is concerned (Codex). The manifest's global rule is
-// "all dollar figures re-verified at publish + dated in-post ('as of
-// [date]')", so the amount's paragraph must carry BOTH a citation link and a
-// date. Absent either, the draft parks for review.
-// The date must be GOVERNED by "as of" — a bare "June 2026 was rainy" is not
-// a verification date, and accepting one let a stale price publish (Codex).
-const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,40}?\b(?:19|20)\d{2}\b/i;
-// Hosts that can EVIDENCE a claim: the curated citation list, curated
-// competitor-fact sources, and editorially-approved external domains. Our own
-// hub and spoke domains are deliberately absent.
-function citationOnlyHosts({ operatorCitations = false } = {}) {
-  const hosts = new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost));
-  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
-    const h = normalizeHost(d);
-    if (h) hosts.add(h);
-  }
-  if (operatorCitations) {
-    // Archive.org includes user-uploaded files; retain its existing operator
-    // scope instead of granting it to every mined draft.
-    hosts.add('archive.org');
-    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
-  }
-  return hosts;
-}
-
-// URLs a READER can actually follow from this paragraph. An image
-// destination and an UNUSED reference definition are both stripped from the
-// rendered page, so neither is a citation — accepting them let an unrelated
-// "![image](…)" or a dangling "[unused]: …" stand in for the source (Codex).
-function visibleCitationUrls(citationParaRaw, renderedPara, citationDoc) {
-  // A code span renders literal text, not a link, and "\[" is an escaped
-  // bracket — neither produces something a reader can click, so neither is a
-  // citation (Codex). Blanked length-preservingly so offsets are unaffected.
-  const citationPara = String(citationParaRaw || '')
-    .replace(/(`+)(?:[^`]|(?!\1)`)*\1/g, blankSpan)
-    .replace(/\\[[\]()]/g, '  ');
-  const out = [];
-  const push = (u) => { if (u) out.push(String(u).replace(/[).,;:!?]+$/, '')); };
-  // Inline links — NOT images.
-  const inline = /(!)?\[[^\]\n]*\]\(\s*<?\s*(https?:\/\/[^)\s>]+)/g;
-  let m;
-  while ((m = inline.exec(citationPara)) !== null) { if (!m[1]) push(m[2]); }
-  // Autolinks and bare URLs the reader sees in the rendered text.
-  const bare = /https?:\/\/[^\s<>()"'\]]+/gi;
-  while ((m = bare.exec(renderedPara)) !== null) push(m[0]);
-  // Reference LINKS resolve to their definition; reference IMAGES do not.
-  // Full "[text][ref]", COLLAPSED "[ref][]" and SHORTCUT "[ref]" — the last
-  // two carry the label in the FIRST bracket, so reading only the second one
-  // parked compliant intercepts on formatting alone (Codex).
-  const refUse = /(!)?\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
-  const usedRefs = new Set();
-  while ((m = refUse.exec(citationPara)) !== null) {
-    if (m[1]) continue; // image
-    if (citationPara[m.index + m[0].length] === '(') continue; // inline link
-    // A DEFINITION line ("[label]: https://…") is not a use of itself —
-    // counting it made a dangling definition self-referencing (Codex).
-    if (citationPara[m.index + m[0].length] === ':') continue;
-    const label = ((m[3] || '').trim() || (m[2] || '').trim());
-    if (label) usedRefs.add(label.toLowerCase());
-  }
-  if (usedRefs.size) {
-    // Definitions are conventionally collected at the END of the document,
-    // so they are looked up DOC-WIDE — only the reference USE has to sit in
-    // the price's paragraph (Codex).
-    const defs = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(https?:\/\/\S+)/gm;
-    while ((m = defs.exec(citationDoc)) !== null) {
-      if (usedRefs.has(m[1].trim().toLowerCase())) push(m[2]);
-    }
-  }
-  return out;
-}
-
-// Reads RENDERED text: a date or URL parked in a comment or a reference
-// definition is invisible to the customer and cannot satisfy a sourcing
-// rule that exists for their benefit (Codex).
-function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
-  // SENTENCE scope, not paragraph. A citation anywhere in the paragraph let
-  // an unrelated link — a chinch-bug study next to a competitor fee —
-  // authorize the price (Codex). The briefs' own mandated shape puts the
-  // source in the sentence: "Aptive charges a $199 fee as of July 2026
-  // ([source](…))." Reference DEFINITIONS are still resolved doc-wide.
-  const para = (text) => sentenceAround(String(text || ''), index).text;
-  // The URL comes from text with link DESTINATIONS intact — rendered text
-  // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
-  // could never qualify (Codex). Hidden content is still blanked there, so
-  // a URL buried in a comment does not count. The DATE must be rendered.
-  // The URL must be a CITATION the gate would actually accept — an
-  // allowlisted host or a source this brief named. Any-URL-will-do let an
-  // unrelated link stand in for the source (Codex).
-  // CITATION hosts only. allowedLinkHosts also carries every hub and spoke
-  // domain — navigation destinations, not third-party evidence — so a link
-  // to our own calculator was standing in as the source for a competitor's
-  // price (Codex).
-  const allowedHosts = citationOnlyHosts(opts);
-  const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
-  const urls = visibleCitationUrls(para(citationText), para(renderedText), String(citationText || ''));
-  const cited = urls.some((u) => {
-    const raw = u.replace(/[).,;:!?]+$/, '');
-    if (exact.has(normalizeSourceUrl(raw) || '\u0000')) return true;
-    try { return hostAllowed(normalizeHost(new URL(raw).hostname), allowedHosts); } catch { return false; }
-  });
-  if (!cited) return false;
-  return AS_OF_DATE_RE.test(para(renderedText));
-}
-
 // Any markup in the amount's paragraph disqualifies the prose exemption.
 // Blunt by design: "<" opens a tag or comment, "{" an MDX expression, "&"
 // an entity. Over-matching costs an exemption; under-matching publishes a
@@ -993,7 +885,7 @@ function isInsideTableMarkup(text, index) {
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, operatorCitations = false, requiredSourceUrls = [] } = {}) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false } = {}) {
   const s = String(text || '');
   // Attribution is decided against what READERS SEE. Comments and tag
   // attributes are stripped at render, so "{/* other companies charge */} $89
@@ -1002,9 +894,6 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
   // exemption (Codex r6/r7). Detection still runs on the original text — a
   // price hidden in markup stays flagged (conservative in both directions).
   const proseText = blankToRenderedText(s);
-  // Link destinations intact, hidden content still gone — used only to look
-  // for the citation URL behind the price.
-  const citationText = blankTags(blankHiddenContent(blankComments(s)));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -1020,8 +909,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price. NOT on an
     // intercept draft: those are exactly the posts that quote competitor
-    // figures, and the framing words let one through unsourced, straight
-    // past the source-and-date requirement (Codex).
+    // figures, so every amount there must pass the attribution test below —
+    // framing words alone must not wave a first-party price through (Codex).
     if (!thirdPartyCitations
       && /\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
@@ -1030,6 +919,11 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // A price ATTRIBUTED to a named competitor is reporting, not our price
     // list (owner ruling 2026-08-01) — "cancel your pest control contract"
     // posts have to name the other company's cancellation fee to be useful.
+    // It is stated PLAINLY: no citation link and no as-of / verified label
+    // (owner ruling 2026-09-28: "list them, we don't have to link to their
+    // site, or say verified or not verified"). That ruling retired the old
+    // source-and-date requirement; a blog post never links a competitor's
+    // site at all (competitor-links.js).
     //
     // PROSE ONLY. A table-cell exemption was built and then REMOVED (owner
     // ruling 2026-08-01, second): deciding ownership inside Markdown/JSX
@@ -1068,14 +962,13 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // two bugs, one where invisible text ATTRIBUTES a price and one where
     // it SPLITS the first-party marker that should block it, and the two
     // want opposite handling. Requiring plain prose closes both at once.
-    // The cost is only a lost exemption — a sourced competitor price in a
-    // marked-up paragraph parks for review, and sourced price sentences are
-    // plain prose in practice.
+    // The cost is only a lost exemption — a competitor price in a
+    // marked-up paragraph parks for review, and competitor price sentences
+    // are plain prose in practice.
     if (thirdPartyCitations
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
       && !paragraphHasMarkup(s, tokenIndex)
-      && priceParagraphIsSourced(citationText, proseText, tokenIndex, { operatorCitations, requiredSourceUrls })
       && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }
@@ -1571,29 +1464,13 @@ function normalizeHost(host) {
 }
 
 // Established educational, regulatory and consumer-reference sources. This
-// baseline applies to both mined and operator-directed content; competitor
-// websites still require operator provenance or an exact brief source URL.
+// baseline applies to both mined and operator-directed content. Competitor
+// websites are never linkable (owner ruling 2026-09-28): the publisher
+// unlinks them and COMPETITOR_LINK blocks any that remain.
 const TRUSTED_CITATION_HOSTS = [
   'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
   'consumeraffairs.com', 'bbb.org',
 ];
-
-// Hosts of the curated competitor-facts `source` URLs — the exact pages an
-// operator directive like "Orkin published terms/plan pages" resolves to.
-function curatedCompetitorSourceHosts() {
-  const hosts = new Set();
-  try {
-    const { COMPETITORS } = require('./competitor-facts');
-    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
-      for (const attr of Object.values(c?.attributes || {})) {
-        const src = attr?.source;
-        if (!src) continue;
-        try { hosts.add(normalizeHost(new URL(src).hostname)); } catch { /* not a URL */ }
-      }
-    }
-  } catch { /* competitor-facts unavailable — fall through to the base allowlist */ }
-  return hosts;
-}
 
 // Scheme and host are case-INSENSITIVE; the PATH is not. Lowercasing the
 // whole URL made "/Payload.js" and "/payload.js" the same resource, so a
@@ -2939,8 +2816,11 @@ function allowedLinkHosts({ operatorCitations = false } = {}) {
   return new Set([
     ...HUB_DOMAINS,
     ...SPOKE_SITE_KEYS,
-    ...citationOnlyHosts({ operatorCitations }),
-  ].map(normalizeHost));
+    ...TRUSTED_CITATION_HOSTS,
+    ...String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(','),
+    // Archive.org includes user-uploaded files; operator scope only.
+    ...(operatorCitations ? ['archive.org'] : []),
+  ].map(normalizeHost).filter(Boolean));
 }
 
 
@@ -6561,7 +6441,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // citation hosts, but only true competitor-intercept briefs may cite
     // competitor prices (Codex: seed lanes auto-publish informational posts
     // and must keep the full price guard).
-    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
+    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
@@ -6748,7 +6628,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
+  _internals: { competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call
