@@ -296,7 +296,12 @@ async function sendFollowupEmail({
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
     ...(combinedVariant ? {
       invoice_count: combinedVariant.invoiceCount,
-      total_due: combinedVariant.totalDue,
+      // The combined email template's shared paragraph has no literal '$'
+      // before {{total_due}} (unlike the SMS templates' bodies, which do)
+      // — currency()-format it for the email leg only. combinedVariant.
+      // totalDue itself stays the bare numeric string SMS wants (Claude
+      // pre-push review r2 P1).
+      total_due: currency(Number(combinedVariant.totalDue)),
       // One line per included invoice — email-template-library.js's
       // rowsFromVariable/rowTemplate renders these into the combined
       // template's details block. Built from resolveCombinedVariant's own
@@ -345,12 +350,18 @@ async function sendFollowupEmail({
  * Returns null (fall back to the normal single-invoice template, on BOTH
  * legs — never a mismatched combined-text/single-email pair) when: the
  * gate is off, either combined template is missing/inactive, the link
- * can't be built, it covers fewer than 2 invoices, or its per-invoice
- * lines don't reconcile to its own total (a payment/edit landing between
- * two reads inside buildPayBalanceLink itself — defensive; the same call
- * supplies both).
+ * can't be built, it covers fewer than 2 invoices, THIS invoice itself
+ * isn't among the ones it covers (buildPayBalanceLink is keyed by
+ * customer, not by invoice — it can legitimately settle on a DIFFERENT
+ * anchor invoice than the one this touch is for, excluding this one for
+ * its own reason; a touch must never render combined copy about OTHER
+ * invoices while quoting a pay link that does not even settle its own —
+ * Claude pre-push review r2 P1's sibling-coverage finding, applied here
+ * too), or its per-invoice lines don't reconcile to its own total (a
+ * payment/edit landing between two reads inside buildPayBalanceLink
+ * itself — defensive; the same call supplies both).
  */
-async function resolveCombinedVariant(customer, step) {
+async function resolveCombinedVariant(customer, invoiceId, step) {
   if (!combinedMessageLive()) return null;
   const smsTemplateKey = COMBINED_SMS_TEMPLATE_BY_STEP_ID[step.id];
   const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
@@ -366,6 +377,7 @@ async function resolveCombinedVariant(customer, step) {
     const link = await buildPayBalanceLink([customer.id]);
     const coveredIds = (link?.coveredInvoiceIds || []).map(String);
     if (!link?.url || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
+    if (!coveredIds.includes(String(invoiceId))) return null;
 
     // The itemized lines come from the SAME read as the total and must add
     // up to it exactly, or this touch is not rendered combined.
@@ -393,6 +405,14 @@ async function resolveCombinedVariant(customer, step) {
       totalDue: link.balance.total.toFixed(2),
       invoiceCount: coveredIds.length,
       invoices,
+      // The exact set the rendered message actually named — runPending's
+      // fireGroupedRows checks a sibling's OWN invoice_id against this
+      // before treating it as covered by the anchor's send (Claude
+      // pre-push review r2 P1): coveredIds can legitimately exclude an
+      // otherwise-open due invoice (a different payer, an ineligible
+      // status, …), and a sibling outside it was never actually
+      // communicated to the customer this run.
+      coveredInvoiceIds: coveredIds,
     };
   } catch (err) {
     logger.warn(`[invoice-followups] combined variant resolution failed for customer ${customer.id}: ${err.message}`);
@@ -1102,10 +1122,19 @@ async function fireGroupedRows(toFire) {
     const [anchor, ...siblings] = sorted;
     const anchorOutcome = await fireOne(anchor);
     const anchorSent = anchorOutcome?.sent === true;
+    // Which invoices the anchor's ACTUAL rendered message named — null
+    // unless it rendered combined (the anchor may have sent its own plain
+    // single-invoice touch: template inactive, link unavailable, fewer
+    // than 2 covered invoices, …). A due sibling not in this set was never
+    // told about, whatever its coincidental presence in this customer's
+    // group — Claude pre-push review r2 P1.
+    const coveredIds = anchorOutcome?.coveredInvoiceIds || null;
     for (const sibling of siblings) {
+      const siblingCovered = !!coveredIds && coveredIds.includes(String(sibling.invoice_id));
       // A sibling already further along its OWN cadence than the anchor —
       // rare, but never deferred: it fires exactly as it would ungrouped.
-      if (sibling.step_index > anchor.step_index || !anchorSent) {
+      // Same for one the anchor's own send did not actually cover.
+      if (sibling.step_index > anchor.step_index || !anchorSent || !siblingCovered) {
         await fireOne(sibling);
         continue;
       }
@@ -1123,11 +1152,17 @@ async function fireGroupedRows(toFire) {
       // active (a concurrent payment/pause since the batch select is left
       // alone, not revived).
       try {
-        const steps = followupSteps();
         const siblingNextIndex = sibling.step_index + 1;
-        const outOfSteps = siblingNextIndex >= steps.length;
-        const nextAt = outOfSteps ? null
-          : (anchorOutcome.nextTouchAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+        // The sibling's OWN cadence-appropriate interval, the SAME
+        // computation a normal touch would use for it — never the
+        // anchor's own nextTouchAt (which is null whenever the anchor's
+        // send just finished ITS last ladder step, a common case here
+        // since the anchor is always the OLDER, further-along invoice)
+        // and never a flat constant (Claude pre-push review r2 P1).
+        const siblingAnchorAt = sibling.anchor_at || sibling.invoice_sent_at
+          || sibling.invoice_sms_sent_at || sibling.invoice_created_at || sibling.created_at;
+        const nextAt = computeNextTouchAt(siblingAnchorAt, siblingNextIndex);
+        const outOfSteps = nextAt === null;
         const updated = await db('invoice_followup_sequences')
           .where({ id: sibling.id, status: 'active' })
           .update({
@@ -1664,7 +1699,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // below except the one that renders the combined copy — computed once,
   // ahead of the mdPending diversion, which never uses it (a bank-
   // verification nudge is not a dunning message).
-  const combinedVariant = await resolveCombinedVariant(customer, step);
+  const combinedVariant = await resolveCombinedVariant(customer, row.invoice_id, step);
   const mdPending = gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
@@ -2196,13 +2231,20 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
   // An already delivered leg advances its step without a new outbound touch.
-  // The return value below (sent/nextTouchAt) is read by GATE_DUNNING_
-  // COMBINED_MESSAGE callers (runPending's fireGroupedRows) to decide
-  // whether a sibling invoice's touch this run should wait for this one —
-  // fireStep passes it straight through. Every other early `return;` above
+  // The return value below (sent/nextTouchAt/coveredInvoiceIds) is read by
+  // GATE_DUNNING_COMBINED_MESSAGE callers (runPending's fireGroupedRows) to
+  // decide whether a sibling invoice's touch this run should wait for this
+  // one — fireStep passes it straight through. coveredInvoiceIds is null
+  // unless this touch actually rendered combined (Claude pre-push review
+  // r2 P1): a sibling's own invoice_id must appear in it before that
+  // sibling is treated as covered — resolveCombinedVariant's coveredIds
+  // can legitimately exclude an otherwise-due invoice the customer was
+  // never actually told about this run. Every other early `return;` above
   // is equivalent to { sent: false }; callers that don't check it (the
   // existing sendNextTouchNow) are unaffected.
-  if (!freshDelivery) return { sent: false, nextTouchAt: nextAt };
+  if (!freshDelivery) {
+    return { sent: false, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
+  }
 
   // Log to customer_interactions for the 360 view
   try {
@@ -2223,7 +2265,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }),
     });
   } catch { /* non-critical */ }
-  return { sent: true, nextTouchAt: nextAt };
+  return { sent: true, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
 }
 
 /**

@@ -222,7 +222,11 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
       payload: expect.objectContaining({
         invoice_count: 2,
-        total_due: '258.00',
+        // The email leg gets the '$' prefix the template's shared
+        // paragraph text doesn't supply itself; the SMS leg (asserted
+        // above) keeps the bare numeric string its own template's literal
+        // '$' already supplies.
+        total_due: '$258.00',
         pay_url: 'https://portal.wavespestcontrol.com/pay/combined-token',
         invoices: [
           { invoice_number: 'WPC-2026-1042', invoice_title: 'Quarterly Pest Control', amount_due: '$129.00' },
@@ -300,16 +304,20 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
     }));
 
-    // The sibling: re-timed to the anchor's new schedule AND its OWN step
-    // advances by one (lockstep with the anchor) — never left frozen at
-    // its original step while real time (and the anchor's cadence) moves
-    // on. Still active (it has steps left).
+    // The sibling: its OWN step advances by one (lockstep with the anchor)
+    // — never left frozen at its original step while real time (and the
+    // anchor's cadence) moves on — and re-times to ITS OWN cadence-
+    // appropriate interval (d7_reminder, +7 days from ITS OWN
+    // invoice_created_at at 10am NY), never a copy of the anchor's own
+    // next_touch_at (the two invoices can be on very different cadences).
+    // Still active (it has steps left).
     expect(siblingUpdate.where).toHaveBeenCalledWith({ id: 'seq-2', status: 'active' });
     const siblingPatch = siblingUpdate.update.mock.calls[0][0];
     expect(siblingPatch.step_index).toBe(1);
     expect(siblingPatch.status).toBe('active');
-    const anchorNextTouchAt = sequenceUpdate.update.mock.calls[0][0].next_touch_at;
-    expect(siblingPatch.next_touch_at).toEqual(anchorNextTouchAt);
+    expect(siblingPatch.next_touch_at).toEqual(new Date('2026-05-28T14:00:00.000Z'));
+    // Confirms it's independent of the anchor's own new schedule, not a copy.
+    expect(sequenceUpdate.update).toHaveBeenCalled();
 
     // A best-effort audit row records that the sibling was covered by this
     // run's combined touch, even though it never got its own fireTouch.
@@ -435,7 +443,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     await InvoiceFollowUps.runPending();
 
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      payload: expect.objectContaining({ invoice_count: 3, total_due: '387.00' }),
+      payload: expect.objectContaining({ invoice_count: 3, total_due: '$387.00' }),
     }));
     expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
       'invoice_followup_combined_3day',
@@ -476,5 +484,54 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     expect(siblingPatch.status).toBe('completed');
     expect(siblingPatch.next_touch_at).toBeNull();
     expect(siblingAudit.insert).toHaveBeenCalled();
+  });
+
+  test('the anchor sends combined, but the pay-balance link excludes the sibling\'s own invoice — the sibling fires normally, never marked covered', async () => {
+    // The customer has a THIRD open invoice (inv-3, not due this run) that
+    // buildPayBalanceLink's own eligibility DOES include — e.g. the
+    // sibling (inv-2) has a different payer or an ineligible status the
+    // link excludes for its own reasons. The anchor's combined message
+    // therefore names inv-1 + inv-3, never inv-2: the due sibling must
+    // fire through its own normal touch, not be silently marked covered.
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const sequenceUpdate = chain();
+    const siblingSend = chain();
+    ComposerLinks.buildPayBalanceLink.mockResolvedValue(payLink({
+      coveredInvoiceIds: ['inv-1', 'inv-3'],
+      coveredInvoiceCents: { 'inv-1': 12900, 'inv-3': 12900 },
+    }));
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-3', invoice_number: 'WPC-2026-1088', title: 'Mosquito' },
+        ] }),
+        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain(), chain(), chain()],
+      invoice_followup_sequences: [...claimCycle(anchorSeq, sequenceUpdate), ...claimCycle(siblingSeq, siblingSend)],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // The anchor rendered combined (naming inv-1 + inv-3)...
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+      idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
+    }));
+    // ...but the sibling (inv-2, excluded from the link) fired its OWN
+    // normal single-invoice touch instead of being deferred/marked covered.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_3_day',
+      idempotencyKey: 'invoice_followup_email:inv-2:d3_friendly',
+    }));
+    expect(siblingSend.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
   });
 });
