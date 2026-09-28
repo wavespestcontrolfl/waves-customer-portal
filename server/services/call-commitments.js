@@ -315,6 +315,18 @@ function isoOrNull(value) {
   return d instanceof Date ? d.toISOString() : null;
 }
 
+// The ET wall clock a stated time was SPOKEN at, 'YYYY-MM-DDTHH:MM', by the
+// booking path's rule (confirmedWallClockET): an ET offset — either season —
+// or none keeps the written clock; any other offset is converted. due_at
+// keeps the instant; this keeps what was said (persisted as due_local).
+function spokenWallClock(value) {
+  if (value == null || value === '') return null;
+  const wall = require('./call-booking-miss-watchdog').confirmedWallClockET(value);
+  if (!wall || !/^\d{4}-\d{2}-\d{2}$/.test(wall.dateET) || !Number.isFinite(wall.minutes)) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${wall.dateET}T${pad(Math.floor(wall.minutes / 60))}:${pad(wall.minutes % 60)}`;
+}
+
 // The persisted V2 schema types scheduling.callback_window_start as a TIME
 // ("14:00" — the caller said "call me back at two"), not a datetime. A
 // bare time is pinned to the ET date of the call, or to the next ET day
@@ -680,6 +692,7 @@ function groundModelCommitments(items, transcript, reference = null) {
       // the raw wording rides in due_text so the row still says WHEN)
       // rather than persisted as "stated" with no instant (Codex r12 P2).
       due_at: malformedDue ? null : isoOrNull(item.due_at),
+      due_local: malformedDue ? null : spokenWallClock(item.due_at),
       due_basis: !malformedDue && item.due_at ? 'stated' : null,
       due_type: !malformedDue && item.due_at && ['floor', 'deadline'].includes(item.due_type) ? item.due_type : null,
       due_text: item.due_text || (malformedDue ? String(item.due_at).slice(0, 80) : null),
@@ -747,6 +760,7 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     description: String(item.due_text && !item.due_at ? `${item.description || ''} (${item.due_text})` : (item.description || '')).slice(0, 2000),
     channel: CHANNELS.includes(item.channel) ? item.channel : 'unknown',
     due_at: item.due_at ? new Date(item.due_at) : null,
+    due_local: item.due_at && item.due_local ? item.due_local : null,
     due_basis: item.due_basis || null,
     due_type: item.due_type || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
@@ -961,14 +975,15 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
       // generation so the UI can say "still detected" vs "not seen lately".
       const result = await trx.raw(
         `INSERT INTO call_commitments
-           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, due_type, confidence,
+           (call_log_id, commitment_key, party, kind, description, channel, due_at, due_local, due_basis, due_type, confidence,
             evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at, subject)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
            ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
+           due_local = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_local ELSE call_commitments.due_local END,
            due_basis = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_basis ELSE call_commitments.due_basis END,
            due_type = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_type ELSE call_commitments.due_type END,
            confidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.confidence ELSE call_commitments.confidence END,
@@ -981,7 +996,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
            updated_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.updated_at ELSE call_commitments.updated_at END
          RETURNING id, (xmax = 0) AS inserted`,
         [
-          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.due_type, row.confidence,
+          row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_local, row.due_basis, row.due_type, row.confidence,
           row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at, row.subject,
         ],
       );
@@ -1456,10 +1471,24 @@ const SLOT_OFF_BOOKS_STATUSES = ["cancelled", "canceled", "rescheduled", "skippe
 // for the action, not an appointment), or one no later than the evidence
 // boundary (nothing left to book).
 function statedSlot(commitment, after) {
-  const at = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
-  if (!at || Number.isNaN(at.getTime()) || at.getTime() <= after.getTime()) return null;
+  const due = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
+  if (!due || Number.isNaN(due.getTime())) return null;
+  const local = spokenSlotOf(commitment.due_local, due);
+  const at = local ? parseETDateTime(local) : due;
+  if (at.getTime() <= after.getTime()) return null;
   const { hour, minute } = etParts(at);
   return { at, day: etDateString(at), minutes: hour * 60 + minute, time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+}
+
+// The spoken wall clock (due_local) when it still names due_at — the same
+// instant, or an hour off (the model's seasonally wrong ET offset, the case
+// it exists for). Anything else means due_at was rewritten without it: the
+// instant wins. The lapse sweep applies the same rule (listSlotKeptCallIds).
+function spokenSlotOf(dueLocal, due) {
+  if (!dueLocal || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dueLocal)) return null;
+  const spoken = parseETDateTime(dueLocal);
+  if (!(spoken instanceof Date) || Number.isNaN(spoken.getTime())) return null;
+  return [0, 60 * 60 * 1000].includes(Math.abs(spoken.getTime() - due.getTime())) ? dueLocal : null;
 }
 
 // A scheduling promise's stated time is usually the appointment itself
@@ -2056,29 +2085,39 @@ async function rejudgeSlotKept(conn, kept, row, callLogId) {
 // naive confirmed_start_at compared as written — the booking path's rule;
 // any other encoding is simply re-judged).
 async function listSlotKeptCallIds(conn) {
+  // The basis is inlined (a constant) so the planner can match the partial
+  // index call_commitments_slot_kept_idx. `slot` is the promise's ET wall
+  // clock by statedSlot's rule: due_local while it still names due_at (same
+  // instant or an hour off), else due_at's own ET clock.
   const rows = await conn.raw(
     `SELECT DISTINCT cc.call_log_id
        FROM call_commitments cc
        JOIN call_log cl ON cl.id = cc.call_log_id
        LEFT JOIN scheduled_services ss ON ss.id::text = cc.fulfillment ->> 'record_id'
+       CROSS JOIN LATERAL (
+         SELECT CASE
+           WHEN cc.due_local IS NOT NULL
+             AND abs(extract(epoch FROM (cc.due_local::timestamp AT TIME ZONE 'America/New_York') - cc.due_at)) IN (0, 3600)
+             THEN cc.due_local
+           ELSE to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI') END AS local
+       ) slot
       WHERE cc.status = 'fulfilled' AND cc.human_state IS NULL
-        AND cc.fulfillment ->> 'basis' = ?
+        AND (cc.fulfillment ->> 'basis') = '${SLOT_BOOKING_BASIS}'
         AND (ss.id IS NULL
           OR ss.status = ANY(?)
           OR ss.customer_id IS DISTINCT FROM cl.customer_id
           OR cc.due_at IS NULL
-          OR ss.created_at >= cc.due_at
-          OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
-          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI')
+          OR ss.created_at >= (slot.local::timestamp AT TIME ZONE 'America/New_York')
+          OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM left(slot.local, 10)
+          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM right(slot.local, 5)
           OR cc.kind IS DISTINCT FROM 'schedule_visit'
           OR cc.due_type IS NOT DISTINCT FROM 'deadline'
           OR cl.v2_extraction_status IS DISTINCT FROM 'valid'
           OR cl.ai_extraction_enriched #>> '{scheduling,status}' IS DISTINCT FROM 'confirmed'
           OR NOT COALESCE(
             cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+){0,1}){0,1}(-0[45]:{0,1}00){0,1}$'
-            AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16)
-              = to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI'), false))`,
-    [SLOT_BOOKING_BASIS, SLOT_OFF_BOOKS_STATUSES],
+            AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16) = slot.local, false))`,
+    [SLOT_OFF_BOOKS_STATUSES],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
 }

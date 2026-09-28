@@ -289,6 +289,19 @@ describe('groundModelCommitments', () => {
     expect(out.kept[0].due_basis).toBe('stated');
   });
 
+  test('the stated time is kept as SPOKEN beside the instant: a wrong-season ET offset keeps its wall clock, a UTC one is converted (#5081 follow-up)', () => {
+    const say = (due_at) => groundModelCommitments([
+      { party: 'waves', kind: 'callback', description: 'Call back at three', confidence: 0.8, due_at, evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'agent' }] },
+    ], TRANSCRIPT).kept[0];
+    // July is EDT (-04:00): "-05:00" is the model's season slip — due_at
+    // reads 16:00 ET as an instant, the spoken clock stays 15:00.
+    expect(say('2026-07-10T15:00:00-05:00')).toMatchObject({ due_at: '2026-07-10T20:00:00.000Z', due_local: '2026-07-10T15:00' });
+    expect(say('2026-07-10T15:00:00-04:00')).toMatchObject({ due_at: '2026-07-10T19:00:00.000Z', due_local: '2026-07-10T15:00' });
+    expect(say('2026-07-10T15:00:00')).toMatchObject({ due_local: '2026-07-10T15:00' });
+    expect(say('2026-07-10T19:00:00Z')).toMatchObject({ due_local: '2026-07-10T15:00' });
+    expect(say('tomorrow-ish')).toMatchObject({ due_at: null, due_local: null });
+  });
+
   test('a nonempty due_at the parser rejects is not a stated deadline: kept, counted, and its wording rides in due_text (codex gh-r12 P2)', () => {
     const out = groundModelCommitments([
       { party: 'waves', kind: 'callback', description: 'Call back tomorrow morning', confidence: 0.8, due_at: 'tomorrow-ish', evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'agent' }] },
