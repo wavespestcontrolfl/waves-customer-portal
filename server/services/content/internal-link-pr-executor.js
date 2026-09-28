@@ -16,7 +16,7 @@ const policy = require('./internal-link-seo-policy');
 const judge = require('./internal-link-judge');
 const protectedPages = require('./protected-pages');
 const { runExclusive } = require('../../utils/cron-lock');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, etWeekStart, parseETDateTime } = require('../../utils/datetime-et');
 // Text-level checks are OWNED by the planner and shared here — the planner
 // applies every one of them before its site-wide cap, so it never plans a
 // task this executor's gate would reject on corpus-knowable grounds.
@@ -244,24 +244,51 @@ function codexGraceGate(ctx) {
   return waiting ? { hold: 'codex_review_pending' } : null;
 }
 
-// The autonomous daily publish cap (AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY),
-// same env and zero-inclusive semantics the blog lane's auto-merge honors:
-// 0 is the ops freeze. Link PRs count per ET day by distinct merged PR; a
-// count error fails closed (hold).
-async function publishCapGate() {
-  const maxPerDay = Number(process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY);
-  if (!Number.isFinite(maxPerDay) || maxPerDay < 0) return null;
-  if (maxPerDay === 0) return { hold: 'publish_frozen' };
-  try {
-    const { parseETDateTime } = require('../../utils/datetime-et');
-    const startOfEtDay = parseETDateTime(`${etDateString(new Date())}T00:00`);
-    const row = await db(TABLE).where('merged_at', '>=', startOfEtDay).whereNotNull('astro_pr_url')
-      .countDistinct('astro_pr_url as count').first();
-    return Number(row?.count || 0) >= maxPerDay ? { hold: 'daily_publish_cap_reached' } : null;
-  } catch (err) {
-    logger.warn(`[internal-link-pr-executor] publish-cap count failed (holding merge): ${err.message}`);
-    return { hold: 'publish_cap_unavailable' };
+// The autonomous publish caps — AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY and
+// _PER_WEEK, the same env and zero-inclusive semantics the runner's canary
+// guards and the blog lane's auto-merge use: 0 in either window is the ops
+// freeze. Link PRs count by distinct PR merged since the ET day / ET week
+// start. A count error fails closed (hold).
+const PUBLISH_CAP_WINDOWS = [
+  { env: 'AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK', reason: 'weekly_publish_cap_reached', start: (d) => `${etWeekStart(d)}T00:00` },
+  { env: 'AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY', reason: 'daily_publish_cap_reached', start: (d) => `${etDateString(d)}T00:00` },
+];
+
+async function publishCapGate(ctx) {
+  const now = new Date(ctx.now);
+  for (const window of PUBLISH_CAP_WINDOWS) {
+    const max = Number(process.env[window.env]);
+    if (process.env[window.env] == null || process.env[window.env] === '' || !Number.isFinite(max) || max < 0) continue;
+    if (max === 0) return { hold: 'publish_frozen' };
+    try {
+      const row = await db(TABLE).where('merged_at', '>=', parseETDateTime(window.start(now))).whereNotNull('astro_pr_url')
+        .countDistinct('astro_pr_url as count').first();
+      if (Number(row?.count || 0) >= max) return { hold: window.reason };
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] publish-cap count failed (holding merge): ${err.message}`);
+      return { hold: 'publish_cap_unavailable' };
+    }
   }
+  return null;
+}
+
+// Re-prove source protection at merge time: a page protected AFTER the PR
+// opened (while it waited on preview, Codex or a cap) must not be edited
+// unattended. A lookup error fails closed (hold).
+async function sourceProtectionMergeGate(ctx) {
+  for (const task of ctx.prTasks) {
+    const url = policy.normalizeInternalUrl(task.source_url || task.source_canonical_url || '');
+    if (!url) return { hold: 'source_url_unknown' };
+    const prot = await this._sourceProtection({ url }, task);
+    if (prot.error) return { hold: 'protection_check_unavailable' };
+    if (prot.protected) {
+      return {
+        reason: 'source_now_protected',
+        close: { status: 'skipped', skipReason: `source_protected_page:${prot.reason || 'protected'}`, note: `Source page ${url} is now protected; PR closed without merging.` },
+      };
+    }
+  }
+  return null;
 }
 
 // The poller's per-tick merge cap: checks still ran (and closed failures).
@@ -269,7 +296,7 @@ function mergeCapGate(ctx) {
   return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
 }
 
-const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, publishCapGate, mergeCapGate];
+const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, codexFindingsGate, linkOnlyDiffGate, previewBuildGate, codexGraceGate, sourceProtectionMergeGate, publishCapGate, mergeCapGate];
 
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {

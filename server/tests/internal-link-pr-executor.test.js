@@ -1266,7 +1266,7 @@ describe('internal-link PR auto-merge', () => {
   beforeEach(() => {
     for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
-    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.listPrFiles = jest.fn(async () => [{ filename: 'src/content/blog/a.md' }]);
     GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? headBody : baseBody }));
@@ -1297,7 +1297,7 @@ describe('internal-link PR auto-merge', () => {
   });
 
   test('never auto-merges a PR opened before the reader check existed', async () => {
-    openTasks([{ id: 't0', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v1', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    openTasks([{ id: 't0', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v1', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'pre_judge_pr' });
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
@@ -1406,7 +1406,7 @@ describe('internal-link PR auto-merge', () => {
   });
 
   test('a Codex rejection whose branch retirement failed stays a rejection on the retry', async () => {
-    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', skip_reason: 'codex_findings', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', skip_reason: 'codex_findings', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', merged: false, head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'pr_closed_unmerged' });
     expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'skipped', skipReason: 'codex_findings' }));
@@ -1420,7 +1420,7 @@ describe('internal-link PR auto-merge', () => {
   });
 
   test('a crash-recovered PR is held for a human, never auto-merged', async () => {
-    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-recovered', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-recovered', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'pre_judge_pr' });
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
@@ -1440,7 +1440,7 @@ describe('internal-link PR auto-merge', () => {
   test('link merges count against the daily publish cap', async () => {
     const saved = process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
     process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = '2';
-    const row = { id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' };
+    const row = { id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' };
     try {
       openTasks([row], { mergedToday: 2 });
       expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'daily_publish_cap_reached' });
@@ -1450,6 +1450,29 @@ describe('internal-link PR auto-merge', () => {
       if (saved === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY;
       else process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_DAY = saved;
     }
+  });
+
+  test('the weekly publish cap also holds link merges', async () => {
+    const saved = process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK;
+    process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK = '7';
+    try {
+      openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }], { mergedToday: 7 });
+      expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'weekly_publish_cap_reached' });
+      expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK;
+      else process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK = saved;
+    }
+  });
+
+  test('a source page protected after the PR opened blocks the merge; a lookup error holds', async () => {
+    const protectedPages = require('../services/content/protected-pages');
+    protectedPages.isProtected.mockResolvedValueOnce({ protected: true, reason: 'money_page' });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'source_now_protected' });
+    expect(protectedPages.isProtected).toHaveBeenCalledWith('/a/', expect.any(Object));
+    protectedPages.isProtected.mockResolvedValueOnce({ protected: true, reason: 'protected_check_error', source: 'error' });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'protection_check_unavailable' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
   test('kill switch and shadow mode disable it', async () => {
