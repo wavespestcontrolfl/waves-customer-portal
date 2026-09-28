@@ -5071,13 +5071,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       if (service.scheduled_service_id) {
         const reportSs = await knex('scheduled_services')
           .where({ id: service.scheduled_service_id })
-          .first('property_id', 'service_address_line1', 'service_address_city', 'service_address_zip')
+          .first('property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
           .catch(() => null);
         if (reportSs) {
           reportPropertyId = reportSs.property_id || null;
           if (reportSs.service_address_line1) {
+            // address_line2 (the unit) MUST ride every key: a condo/
+            // apartment building's units share a street address, and
+            // dropping the unit here would key this report against the
+            // whole BUILDING instead of the customer's own unit (P1
+            // privacy finding 2026-09-28).
             reportStampAddressKey = addressKey({
               address_line1: reportSs.service_address_line1,
+              address_line2: reportSs.service_address_line2,
               city: reportSs.service_address_city,
               zip: reportSs.service_address_zip,
             }) || null;
@@ -5086,6 +5092,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       const mirrorAddressKey = addressKey({
         address_line1: service.address_line1,
+        address_line2: service.address_line2,
         city: service.city,
         zip: service.zip,
       }) || null;
@@ -5118,7 +5125,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           .orderBy('window_start', 'asc')
           .limit(60)
           .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
-            'service_address_line1', 'service_address_city', 'service_address_zip')
+            'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
           .catch(() => null);
 
         if (Array.isArray(candidates) && candidates.length) {
@@ -5155,8 +5162,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             if (reportPropertyId && row.property_id) return row.property_id === reportPropertyId;
             let rowKey = null;
             if (row.service_address_line1) {
+              // address_line2 rides this key too — same unit-privacy rule
+              // as reportStampAddressKey/mirrorAddressKey above: a keyless
+              // unit comparison would let one condo unit's report see
+              // another unit's visits.
               rowKey = addressKey({
                 address_line1: row.service_address_line1,
+                address_line2: row.service_address_line2,
                 city: row.service_address_city,
                 zip: row.service_address_zip,
               }) || null;

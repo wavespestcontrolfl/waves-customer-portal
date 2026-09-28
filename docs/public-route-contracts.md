@@ -513,8 +513,13 @@ to prioritize without it) layers a priority on top of the existing
 `buildReportCrossSell`). On, the payload's existing `crossSell` object may
 additionally carry `reason` — one short, honest, reason-tied sentence
 rendered above the CTA button (e.g. "We noted roach activity inside today
-— our cockroach control program is a focused two-treatment cleanout.") —
-and `serviceKey` may resolve to two targets the ladder itself never picks:
+— our cockroach control program is a focused two-treatment cleanout.",
+or, when the evidence proves roach activity but not a location, "We
+noted roach activity today — …": the "inside" claim is made only when
+the finding text or the typed snapshot's own location values positively
+place it indoors — kitchen, bathroom, cabinet, interior, garage, etc. —
+never inferred from the mere presence of a roach signal) — and
+`serviceKey` may resolve to two targets the ladder itself never picks:
 `rodent_bait` and `mosquito`, priced through the SAME
 `buildCustomerPricingResponse` estimator path and per-application-only
 serialization rule as the existing ladder targets. Their prompts/labels

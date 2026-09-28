@@ -51,7 +51,25 @@ describe('detectReportFindingsSignal', () => {
     const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', category: 'observation', title: 'Active German roach activity in kitchen cabinets' }] });
     const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
     expect(signal.roachesIndoors).toBe(true);
+    // "kitchen cabinets" positively places it indoors — roachIndoorEvidence follows.
+    expect(signal.roachIndoorEvidence).toBe(true);
   });
+
+  test('roach signal without any location wording does NOT claim indoor evidence', async () => {
+    const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'German roach activity found' }] });
+    const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
+    expect(signal.roachesIndoors).toBe(true);
+    expect(signal.roachIndoorEvidence).toBe(false);
+  });
+
+  test.each(['bathroom', 'garage', 'interior', 'closet', 'pantry'])(
+    'roachIndoorEvidence also fires on "%s"',
+    async (word) => {
+      const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: `Roach activity noted in the ${word}` }] });
+      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
+      expect(signal.roachIndoorEvidence).toBe(true);
+    },
+  );
 
   test('roach companion-typed signal fires when a companion snapshot (not the primary) is cockroach', async () => {
     const db = fakeDb({ service_findings: [] });
@@ -64,6 +82,19 @@ describe('detectReportFindingsSignal', () => {
     };
     const signal = await detectReportFindingsSignal(service, db);
     expect(signal.roachesIndoors).toBe(true);
+  });
+
+  test('a companion snapshot\'s own typed location value ("Garage") also proves indoor evidence, with no text mention at all', async () => {
+    const db = fakeDb({ service_findings: [] });
+    const service = {
+      id: 'sr-1',
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'pest' },
+        companionReportSnapshots: [{ type: 'cockroach', values: { areas_treated: 'Garage, exterior perimeter' } }],
+      }),
+    };
+    const signal = await detectReportFindingsSignal(service, db);
+    expect(signal.roachIndoorEvidence).toBe(true);
   });
 
   test('a cockroach-PRIMARY report (already mid-program today) is NOT itself the roach signal without a text mention', async () => {
@@ -208,6 +239,27 @@ describe('buildCockroachFindingsOffer', () => {
     });
     const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
     expect(offer).not.toBeNull();
+  });
+
+  // P1 fix (2026-09-28): "inside" is a location claim and may only be made
+  // when the evidence positively places the activity indoors.
+  describe('the "inside" claim is opt-in on positive indoor evidence (P1 2026-09-28)', () => {
+    test('indoorEvidence: true says "inside"', async () => {
+      const db = fakeDb({ services: [ACTIVE_COCKROACH_ROW], scheduled_services: [] });
+      const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db, { indoorEvidence: true });
+      expect(offer.fullPayload.reason).toBe(
+        'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
+      );
+    });
+
+    test('indoorEvidence: false (or omitted) drops the location claim entirely', async () => {
+      const db = fakeDb({ services: [ACTIVE_COCKROACH_ROW], scheduled_services: [] });
+      const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
+      expect(offer.fullPayload.reason).toBe(
+        'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+      );
+      expect(offer.fullPayload.reason).not.toMatch(/inside/i);
+    });
   });
 });
 
@@ -485,8 +537,30 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     );
     expect(result.serviceKey).toBe('cockroach_control');
     expect(result.mode).toBe('quote_cta');
-    expect(result.reason).toMatch(/roach/i);
+    // "in the kitchen" is positive indoor evidence — the reason says "inside".
+    expect(result.reason).toBe(
+      'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
+    );
     expect(typeof result.fingerprint).toBe('string');
+  });
+
+  test('gate on: a roach finding with NO location wording picks cockroach_control WITHOUT claiming "inside" (P1 2026-09-28)', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    const result = await buildReportCrossSell(
+      SERVICE(),
+      dbFor({
+        serviceTypes: ['Pest Control'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+        serviceFindings: [{ title: 'German roach activity found' }],
+        catalogServices: [ACTIVE_COCKROACH_ROW],
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result.serviceKey).toBe('cockroach_control');
+    expect(result.reason).toBe(
+      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+    );
+    expect(result.reason).not.toMatch(/inside/i);
   });
 
   test('gate on, no findings/season signal: falls straight through to the unchanged ladder pick', async () => {

@@ -612,6 +612,25 @@ function parseJsonColumnLocal(value) {
   }
 }
 
+// Words that positively PLACE a finding indoors — the reason copy may only
+// claim "inside" when one of these appears; otherwise the signal proves
+// roach activity but not WHERE, and the copy must not invent a location
+// (P1 finding 2026-09-28: "We noted roach activity inside today" said more
+// than the evidence supported).
+const INDOOR_LOCATION_RE = /\b(?:kitchen|bathroom|cabinet(?:s)?|closet|pantry|bedroom|garage|attic|interior|inside|indoor(?:s)?)\b/i;
+
+// Flattens a typed snapshot's `values` object (string fields and string
+// array entries only) into one text blob — the same best-effort, structured-
+// data-only posture as the service_findings text above, extended to the
+// typed location fields a companion/primary snapshot may carry.
+function flattenTypedValuesText(values) {
+  if (!values || typeof values !== 'object') return '';
+  return Object.values(values)
+    .flatMap((v) => (Array.isArray(v) ? v : [v]))
+    .filter((v) => typeof v === 'string')
+    .join(' ');
+}
+
 async function detectReportFindingsSignal(service, database) {
   const serviceData = parseJsonColumnLocal(service.service_data);
   const primaryType = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
@@ -645,9 +664,21 @@ async function detectReportFindingsSignal(service, database) {
   // Negated mosquito mentions never count toward "heavy" — two "no
   // mosquitoes seen" findings must not out-count a single genuine one.
   const mosquitoMentions = (stripNegatedMentions(text, MOSQUITO_TERM).match(V2_MOSQUITO_RE) || []).length;
+  // Indoor evidence for the roach reason's "inside" claim: the same
+  // service_findings text, PLUS the typed snapshot's own location-bearing
+  // values (the primary if it's the roach evidence, else the companion
+  // that carries it) — never technician_notes, same posture as every
+  // other signal here.
+  const typedValuesText = [
+    roachCompanionTyped
+      ? serviceData.companionReportSnapshots.find((snap) => snap?.type === 'cockroach')?.values
+      : (primaryType === 'cockroach' ? serviceData.typedReportSnapshot?.values : null),
+  ].map(flattenTypedValuesText).join(' ').toLowerCase();
+  const roachIndoorEvidence = INDOOR_LOCATION_RE.test(text) || INDOOR_LOCATION_RE.test(typedValuesText);
 
   return {
     roachesIndoors: roachCompanionTyped || hasAffirmativeMention(text, ROACH_TERM, V2_ROACH_RE),
+    roachIndoorEvidence,
     rodentEvidence: hasAffirmativeMention(text, RODENT_TERM, V2_RODENT_RE),
     termiteActivity: hasAffirmativeMention(text, TERMITE_TERM, V2_TERMITE_RE),
     heavyMosquito: mosquitoMentions >= 2,
@@ -662,7 +693,7 @@ async function detectReportFindingsSignal(service, database) {
 // public-services-menu.js and call-booking-catalog.js gate on) and that the
 // customer does not already have one on the books before returning the
 // unpriced quote_cta card.
-async function buildCockroachFindingsOffer(service, database) {
+async function buildCockroachFindingsOffer(service, database, { indoorEvidence = false } = {}) {
   try {
     const catalogRow = await database('services')
       .where({ service_key: COCKROACH_SERVICE_KEY })
@@ -694,7 +725,12 @@ async function buildCockroachFindingsOffer(service, database) {
       mode: 'quote_cta',
       relationship: 'start',
       option: null,
-      reason: 'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
+      // "inside" is a location claim — only made when the evidence
+      // positively places it there (P1 finding 2026-09-28); otherwise the
+      // reason states only what the signal actually proves.
+      reason: indoorEvidence
+        ? 'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.'
+        : 'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
     };
     return { fullPayload: { ...payload, fingerprint: offerFingerprint(payload) } };
   } catch (err) {
@@ -726,7 +762,9 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
   const signal = await detectReportFindingsSignal(service, database).catch(() => null);
   if (signal) {
     if (signal.roachesIndoors) {
-      const cockroachOffer = await buildCockroachFindingsOffer(service, database);
+      const cockroachOffer = await buildCockroachFindingsOffer(service, database, {
+        indoorEvidence: signal.roachIndoorEvidence,
+      });
       if (cockroachOffer) return cockroachOffer;
       // Catalog unavailable, or already mid-program: fall through to the
       // next priority rather than dropping the card entirely.

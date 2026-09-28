@@ -251,6 +251,96 @@ describe('multi-property scoping', () => {
     );
     expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Pest Control at rental follow-up']);
   });
+
+  // P1 privacy fix (2026-09-28): every address-key comparison in the
+  // upcoming-visits scoping must include the normalized unit (address_line2,
+  // or a unit token embedded in line1) — dropping it let a condo/apartment
+  // building's units compare as the SAME property, so one unit's report
+  // could list another unit's visits. property_id equality (tested above)
+  // stays the primary rule; this covers the address-key fallback path a
+  // stamped-but-unlinked (or differently-linked) visit takes.
+  describe('unit-aware address scoping (condo/apartment privacy)', () => {
+    const UNIT_7 = { address_line1: '300 Condo Blvd', city: 'Sarasota', zip: '34236' };
+
+    test('same street, DIFFERENT unit → excluded', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', ...UNIT_7, service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          { id: 'scheduled-other-unit', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (different unit, same street)', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 8', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-diff', knex, LIVE);
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('same street, one side unit-less → excluded (fail closed)', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          // same street stamp, but NO unit at all — a different, unprovable premises
+          { id: 'scheduled-no-unit', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (no unit on this stamp)', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-oneless', knex, LIVE);
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('the report itself unit-less, candidate has a unit → also excluded (fail closed both directions)', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: UNIT_7.address_line1, service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          { id: 'scheduled-with-unit', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (report has no unit, candidate does)', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-report-less', knex, LIVE);
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('same street + SAME unit → included', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          { id: 'scheduled-same-unit', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-same', knex, LIVE);
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+
+    test('unit variants normalize equal: "Apt 4B" (report) vs "#4B" (candidate)', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Apt 4B', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          { id: 'scheduled-hash-unit', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_line2: '#4B', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-variant', knex, LIVE);
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+
+    test('unit embedded in line1 normalizes the same as a split address_line2', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: `${UNIT_7.address_line1} Unit 7`, service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+          { id: 'scheduled-split', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00', service_address_line1: UNIT_7.address_line1, service_address_line2: 'Unit 7', service_address_city: UNIT_7.city, service_address_zip: UNIT_7.zip },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-embedded', knex, LIVE);
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+  });
 });
 
 test('stripLiveOnlyScheduleFields removes upcomingVisitsCard for pdf/static renders', () => {
