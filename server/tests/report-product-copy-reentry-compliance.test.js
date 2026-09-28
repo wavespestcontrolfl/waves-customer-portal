@@ -6,11 +6,9 @@
 // those two pre-existing catalog fields go through. AGENTS.md bans a fixed
 // re-entry/drying MINUTE figure on any customer surface.
 
-const { stripFixedReentryTiming } = require('../services/social-media');
+const { stripFixedReentryTiming, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { REPORT_PRODUCT_COPY } = require('../config/report-product-copy');
 const { reportProductCopyForApplicationProduct } = require('../services/service-report/report-product-copy');
-
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
 describe('report_copy.pets_kids vs the fixed-reentry-timing compliance screen', () => {
   it('none of the 12 owner-approved pets_kids lines are altered by stripFixedReentryTiming', () => {

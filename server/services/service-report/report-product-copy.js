@@ -6,12 +6,7 @@
  */
 const { reportProductCopyFor } = require('../../config/report-product-copy');
 const { validateCustomerCopy } = require('./premium-experience');
-const { stripFixedReentryTiming } = require('../social-media');
-
-// Same replacement text reports-public.js and ServiceReportDocument.jsx
-// each define locally for the identical purpose (not a shared export in
-// this codebase — matched here rather than introducing one).
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
+const { stripFixedReentryTiming, REENTRY_SAFE_COPY } = require('../social-media');
 
 // Strict `=== 'true'` — repo gate convention (matches reportPhotoContentLive
 // / discountStackingLive in feature-gates.js). The `reportProductCopy`

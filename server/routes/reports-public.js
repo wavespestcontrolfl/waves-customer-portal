@@ -262,10 +262,8 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
-const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
+const { stripFixedReentryTiming, sanitizeProductTargets, REENTRY_SAFE_COPY } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
-// The approved idiom that replaces a stripped fixed-timing clause.
-const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
