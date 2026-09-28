@@ -639,6 +639,13 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   return template.suppression_group_key || template.send_stream || null;
 }
 
+// Suppression types that block EVERY stream regardless of which group_key
+// the row carries (a bounce/complaint/do-not-email is a fact about the
+// address, not a single mailing list) — the one classification other
+// suppression-aware callers (email-division/eligibility.js) must reuse
+// rather than re-derive, per AGENTS.md's "extend existing mechanisms".
+const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
+
 // ALL suppressions that would block this send. The schema permits several
 // active rows per address (a bounce AND a do_not_email), and which one
 // "the" suppression is depends on the caller: the send path only needs any
@@ -652,14 +659,13 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   const rows = await database('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
-  const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
-    return rows.filter((row) => globalTypes.has(String(row.suppression_type || '').toLowerCase()));
+    return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
   }
   return rows.filter((row) => (
     !row.group_key ||
     (groupKey && row.group_key === groupKey) ||
-    globalTypes.has(String(row.suppression_type || '').toLowerCase())
+    GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase())
   ));
 }
 
@@ -907,18 +913,6 @@ function dedupedResultForExistingMessage(message) {
       message,
     };
   }
-  // An operator cancel is terminal for this idempotency key — dedupe here,
-  // never fall through to shouldRetryExistingMessage's default "retryable"
-  // read of an unrecognized status (Codex round 1 on #5224, P1).
-  if (isOperatorCancelledMessage(message)) {
-    return {
-      sent: false,
-      cancelled: true,
-      deduped: true,
-      reason: message.error_message,
-      message,
-    };
-  }
   return {
     sent: ['sent', 'delivered', 'opened', 'clicked'].includes(status),
     deduped: true,
@@ -927,8 +921,7 @@ function dedupedResultForExistingMessage(message) {
 }
 
 function shouldRetryExistingMessage(message) {
-  return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase())
-    && !isOperatorCancelledMessage(message);
+  return !DEDUPE_STATUSES.has(String(message?.status || '').toLowerCase());
 }
 
 const PROVIDER_HANDOFF_PENDING = 'pending';
@@ -1154,60 +1147,6 @@ function clearedProviderRetryState(message) {
     provider_handoff_phase: null,
     provider_handoff_attempt_token: null,
   };
-}
-
-// error_message stamped on an operator cancel (cancelQueuedMessage below) —
-// the SOLE marker shouldRetryExistingMessage/dedupedResultForExistingMessage
-// read to tell an operator cancel apart from any other row that might one
-// day carry status 'cancelled' for a different reason (Codex round 1 on
-// #5224, P1: without this, a same-idempotency-key sendTemplate call saw a
-// 'cancelled' row as retryable — not in DEDUPE_STATUSES — and re-queued and
-// sent it, defeating the cancel).
-const OPERATOR_CANCELLED_MESSAGE = 'Cancelled by operator before it reached the provider';
-
-// True only for a row THIS function cancelled (status 'cancelled' AND the
-// exact marker above) — never for a hypothetical future 'cancelled' writer
-// with its own error_message, whose retry semantics this must not change.
-function isOperatorCancelledMessage(message) {
-  return String(message?.status || '').toLowerCase() === 'cancelled'
-    && message?.error_message === OPERATOR_CANCELLED_MESSAGE;
-}
-
-// Only a handoff that never started may be pinned into the CAS below. A
-// caller that somehow pins 'started' (or 'rejected' — already terminal via
-// a different path) must refuse outright rather than let the WHERE clause
-// below match it: 'started' is stamped the instant dispatchToProvider marks
-// the row, immediately before the actual SendGrid request, and status stays
-// 'queued' for the request's ENTIRE duration — that is the live-sending
-// window this whole CAS exists to protect (Codex round 1 on #5224, P1).
-const CANCELABLE_HANDOFF_PHASES = new Set([null, PROVIDER_HANDOFF_PENDING]);
-
-// Cancel a message an operator caught before it reached the provider — the
-// Intelligence Bar's cancel_queued_message tool (never called from inside a
-// send attempt itself). Eligible only while status is still 'queued' AND the
-// provider handoff has not started: the CAS below is scoped to the EXACT
-// send_attempt_token and provider_handoff_phase the caller pinned from its
-// own preview read (both null on a legacy pre-column row), so a message that
-// started sending, or was reclaimed by a retry (a fresh send_attempt_token —
-// see retryClaimQuery above), never matches this WHERE and is never
-// touched. `conn` defaults to the module connection but accepts a
-// transaction so a caller can hold the row lock across its own fresh
-// preview + this write.
-async function cancelQueuedMessage(id, pin = {}, conn = db) {
-  const pinnedPhase = pin.providerHandoffPhase ?? null;
-  if (!CANCELABLE_HANDOFF_PHASES.has(pinnedPhase)) return null;
-  const query = conn('email_messages').where({ id, status: 'queued' });
-  if (pin.sendAttemptToken == null) query.whereNull('send_attempt_token');
-  else query.where({ send_attempt_token: pin.sendAttemptToken });
-  if (pinnedPhase == null) query.whereNull('provider_handoff_phase');
-  else query.where({ provider_handoff_phase: pinnedPhase });
-  const [cancelled] = await query.update({
-    status: 'cancelled',
-    error_message: OPERATOR_CANCELLED_MESSAGE,
-    provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
-    updated_at: new Date(),
-  }).returning('*');
-  return cancelled || null;
 }
 
 function assertTemplateSendable(template, { test = false } = {}) {
@@ -1955,6 +1894,7 @@ module.exports = {
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
   activeSuppressionsFor,
+  GLOBAL_SUPPRESSION_TYPES,
   renderTemplate,
   renderVersion,
   loadTemplateByKey,
@@ -1963,9 +1903,6 @@ module.exports = {
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
   queuedRowInFlight,
-  cancelQueuedMessage,
-  OPERATOR_CANCELLED_MESSAGE,
-  PROVIDER_HANDOFF_STARTED,
   ABORTED_BEFORE_DISPATCH,
   QUEUED_IN_FLIGHT_MS,
   createDraftVersion,

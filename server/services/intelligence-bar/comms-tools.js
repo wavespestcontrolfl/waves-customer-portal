@@ -19,16 +19,17 @@ const {
   sendManualCustomerSms,
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
-const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
+const { excludeRecruitingSmsLog, isRecruitingMessageType } = require('../../utils/recruiting-thread-scope');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
-// cancel_queued_message reuses each store's own claim rule rather than
-// forking a copy of it: email-template-library.js owns the queued/
-// send_attempt_token/provider_handoff_phase contract for email_messages;
+// cancel_queued_message is SMS-only (owner ruling, dunning-unification-style
+// "simple only" sweep, 2026-09-28): an email_messages 'queued' row is never
+// a scheduled email — sendTemplate dispatches it to SendGrid within seconds
+// (QUEUED_IN_FLIGHT_MS = 2 min is an in-flight window, not a hold), so
+// cancelling it always races the sender at one producer site or another.
 // scheduled-sms-cancel.js owns the ONE writer for a scheduled sms_log row
 // (thread lock, review-ask-reservation-in-place, recruiting reconciliation,
 // agent_decision re-park/reopen — the same workflow the admin SMS inbox's
 // own cancel uses, so this tool can never bypass it with a bare status flip).
-const { cancelQueuedMessage: cancelQueuedEmailMessage, PROVIDER_HANDOFF_STARTED } = require('../email-template-library');
 const { cancelScheduledSmsRow } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
 
@@ -216,27 +217,27 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound email or text messages that are still QUEUED or SCHEDULED — not yet sent. Use before cancel_queued_message to resolve the exact message_id and channel; a cancel preview always names one message from this list.
-Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?", "any pending emails to this customer?"`,
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
       properties: {
         customer_id: { type: 'string', format: 'uuid', description: 'The customer to check' },
-        channel: { type: 'string', enum: ['email', 'sms'], description: 'Limit to one channel. Omit to check both.' },
+        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only — there is no scheduled-email store to check.' },
       },
       required: ['customer_id'],
     },
   },
   {
     name: 'cancel_queued_message',
-    description: `Cancel ONE customer email or text that is still QUEUED or SCHEDULED — before it reaches the delivery provider. Resolve message_id and channel with list_queued_messages first. A message that has already started sending, or was already sent, can never be recalled and this refuses it. Cancelling sends nothing to the customer — it only stops a message that has not gone out yet.
-Use for: "cancel that scheduled text", "don't send that queued email", "stop the reminder we just queued for them"`,
+    description: `Cancel ONE customer text that is still SCHEDULED — before it sends. Resolve message_id with list_queued_messages first. A text that has already started sending, was already sent, or is managed by another workflow (an invoice send, a recruiting reply, a completion report, …) can never be recalled here and this refuses it. Cancelling sends nothing to the customer — it only stops a text that has not gone out yet. EMAILS CANNOT BE CANCELLED THIS WAY OR ANY WAY: sendTemplate hands a queued email to the delivery provider within seconds, so by the time this tool could act, it has already sent.
+Use for: "cancel that scheduled text", "stop the reminder we just queued for them"`,
     input_schema: {
       type: 'object',
       properties: {
         message_id: { type: 'string', format: 'uuid', description: 'From list_queued_messages' },
         customer_id: { type: 'string', format: 'uuid', description: 'The customer this message belongs to, from list_queued_messages' },
-        channel: { type: 'string', enum: ['email', 'sms'], description: 'Which store the message lives in — email or sms, from list_queued_messages' },
+        channel: { type: 'string', enum: ['sms'], description: 'Scheduled texts only.' },
       },
       required: ['message_id', 'customer_id', 'channel'],
     },
@@ -366,24 +367,33 @@ async function resolveCustomer(input) {
 }
 
 // ─── cancel_queued_message / list_queued_messages ────────────────
+// SMS-ONLY (owner ruling, 2026-09-28 "simple only" sweep). An email_messages
+// 'queued' row is never a scheduled email to hold and maybe cancel — it is
+// an in-flight send: sendTemplate renders it and hands it to SendGrid
+// within seconds (QUEUED_IN_FLIGHT_MS = 2 min covers a crash-recovery
+// window, not a genuine hold), so a cancel always races the sender at one
+// producer site or another (the direct service-report sender, a claimed
+// provider retry, …) — that is structural, not a bug this tool's CAS can
+// close. Only a scheduled sms_log row (a genuine hold: quiet hours, an
+// uncertain-delivery retry) is ever listed or cancelable.
+//
 // Never a send — these two tools only read and, on confirmed cancel,
 // retire a row already queued by some OTHER sender. Masking mirrors the
-// route's own maskEmail (admin-intelligence-bar.js) and the phone_last4
-// convention used throughout this module (ambiguousCustomerMatch above).
+// phone_last4 convention used throughout this module (ambiguousCustomerMatch
+// above).
 //
-// The bar cancels only STANDALONE scheduled/queued messages (owner ruling
-// 2026-09-28, "simple only" for the bar's cancel surfaces). A sms_log row
-// whose metadata.entry_point registers an onTerminal hook in the
-// deferred-replay registry, or that already reached the provider
-// (finalize_only / review_delivery_uncertain_exhausted), belongs to a
-// workflow this tool must never bypass — neither tool touches it; the
-// operator is pointed at the Communications inbox instead.
-
-function maskEmailAddress(address) {
-  const [local, domain] = String(address || '').split('@');
-  if (!domain) return '***';
-  return `${local.slice(0, 1)}***@${domain}`;
-}
+// The bar cancels only STANDALONE scheduled messages (owner ruling
+// 2026-09-28, "simple only" for the bar's cancel surfaces). A row the
+// deferred-replay registry owns (any registered entry_point — some run an
+// onTerminal hook, others just hold state, e.g. invoice_send_deferred holds
+// its invoice's send claim), that already reached the provider
+// (finalize_only / review_delivery_uncertain_exhausted), or that belongs to
+// a recruiting applicant thread, is refused OUTRIGHT — never redirected to
+// the Communications inbox. That inbox's own cancel (DELETE
+// /admin/communications/scheduled/:id) calls this SAME cancelScheduledSmsRow
+// writer, which never runs the deferred-replay registry's terminal/finalize
+// handling either, so following a redirect there would strand the exact
+// same obligation a direct cancel here would.
 
 function maskPhoneLast4(phone) {
   const digits = String(phone || '').replace(/\D/g, '').slice(-4);
@@ -407,8 +417,24 @@ function parseSmsMetadata(value) {
   }
 }
 
+// Collapsed whitespace, capped at ~160 chars — enough for the operator to
+// confirm this is the RIGHT message, never the full body. No PII beyond
+// what the body already carries; the recipient itself stays masked
+// everywhere this rides (Codex round 2 on #5224, P2).
+function bodyPreview(text) {
+  if (!text) return null;
+  const collapsed = String(text).replace(/\s+/g, ' ').trim();
+  if (!collapsed) return null;
+  return collapsed.length > 160 ? `${collapsed.slice(0, 160)}…` : collapsed;
+}
+
 // Non-null only for a standalone-eligible sms_log row that is NOT actually
-// cancelable — the reason string is shown to the operator verbatim.
+// cancelable — the reason string is shown to the operator verbatim. NEVER
+// points at the Communications inbox: its own cancel (DELETE
+// /admin/communications/scheduled/:id) calls the SAME cancelScheduledSmsRow
+// writer, which does not run the deferred-replay registry's terminal/
+// finalize handling either, so a redirect there would strand the same
+// obligation a direct cancel here would (Codex round 2 on #5224, P1).
 function smsIneligibilityReason(row) {
   const meta = parseSmsMetadata(row.metadata);
   // Already reached the provider: finalize_only means the text itself
@@ -420,6 +446,12 @@ function smsIneligibilityReason(row) {
   if (meta.finalize_only === true || meta.review_delivery_uncertain_exhausted === true) {
     return 'This text has already reached the provider — it cannot be cancelled.';
   }
+  // Recruiting threads are answered from Recruiting only — message_type is
+  // the general, always-present signal (a recruiting send may carry no
+  // entry_point at all).
+  if (isRecruitingMessageType(row.message_type)) {
+    return "This text is managed by the Recruiting workflow and can't be cancelled here.";
+  }
   // Workflow-owned: ANY entry point the deferred-replay registry owns. Some
   // register an onTerminal hook the executor runs on every terminal outcome
   // (undoing a claim, arming a fallback sender, flipping a status back to an
@@ -428,95 +460,49 @@ function smsIneligibilityReason(row) {
   // cancels neither — the registry's own lookup decides, never a hand-kept
   // list of entry points.
   if (isDeferredReplayEntryPoint(meta.entry_point)) {
-    return `This text belongs to a workflow (${String(meta.entry_point).replace(/_/g, ' ')}) — cancel it from the Communications inbox.`;
+    return `This text is managed by the ${String(meta.entry_point).replace(/_/g, ' ')} workflow and can't be cancelled here.`;
   }
   return null;
 }
 
-// Non-null only for a 'queued' email_messages row that is NOT actually
-// cancelable: provider_handoff_phase flips to 'started' the instant
-// dispatchToProvider marks it, immediately before the real SendGrid
-// request — status stays 'queued' for that request's ENTIRE duration, so
-// status alone cannot tell a truly-idle queued row from one mid-send.
-function emailIneligibilityReason(row) {
-  if (row.provider_handoff_phase === PROVIDER_HANDOFF_STARTED) {
-    return 'This email is currently being sent — it cannot be cancelled.';
-  }
-  return null;
-}
-
-// Per-channel shape: how to load the pinned row, judge whether it belongs
-// to this customer, and build the fields a cancel card/list entry shows.
-// Table-driven so queuedMessagePreview is one small dispatcher instead of
-// two parallel branches (Codex round 1 on #5224, P2) — every difference
-// between the two stores lives here as data, once.
-const CHANNEL_STORE = {
-  sms: {
-    table: 'sms_log',
-    baseWhere: { direction: 'outbound' },
-    liveStatus: 'scheduled',
-    sentStatuses: ['sent', 'delivered'],
-    alreadySentError: 'This text has already been sent — it cannot be recalled.',
-    noLongerLiveError: 'This text is no longer scheduled — it may already be sending, sent, or resolved. Call list_queued_messages again.',
-    notLinkedError: 'This text is not linked to a customer.',
-    effect: 'Cancels this ONE scheduled text before it sends. No other queued message is touched, and nothing is sent to the customer.',
-    customerId: (row) => row.customer_id || null,
-    maskedRecipient: (row) => maskPhoneLast4(row.to_phone),
-    kind: (row) => row.message_type || 'sms',
-    scheduledIso: (row) => (row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null),
-    // Pinned claim state: the worker's own claim (claimDueScheduledSms,
-    // scheduler.js) flips status 'scheduled' -> 'sending' the instant it
-    // claims the row, so pinning scheduled_for here and re-checking it at
-    // commit refuses a message that started sending or was rescheduled.
-    version: (row, scheduledIso) => ({ scheduled_for: scheduledIso }),
-    ineligibilityReason: smsIneligibilityReason,
-    // "Recruiting threads are answered from Recruiting only" — the same
-    // guard every other sms_log reader in this file applies. The
-    // deferred-replay entry_point check above only catches ONE recruiting
-    // path (recruiting_comms_deferred); this is the general, message_type-
-    // keyed backstop for any recruiting send this tool must never surface,
-    // list, or cancel regardless of how it was queued (Claude fallback
-    // auditor P1 on #5224, round 2).
-    modify: (q) => q.modify((qb) => excludeRecruitingSmsLog(qb)),
-  },
-  email: {
-    table: 'email_messages',
-    baseWhere: {},
-    modify: (q) => q,
-    liveStatus: 'queued',
-    sentStatuses: ['sent', 'delivered', 'opened', 'clicked'],
-    alreadySentError: 'This email has already been sent — it cannot be recalled.',
-    noLongerLiveError: 'This email is no longer queued — it may already be sending, sent, blocked, or resolved. Call list_queued_messages again.',
-    notLinkedError: 'This email is not linked to a customer.',
-    effect: 'Cancels this ONE queued email before it reaches the delivery provider. No other queued message is touched, and nothing is sent to the customer.',
-    customerId: (row) => (String(row.recipient_type || '').toLowerCase() === 'customer' ? row.recipient_id : null),
-    maskedRecipient: (row) => maskEmailAddress(row.recipient_email_snapshot),
-    kind: (row) => row.template_key || 'email',
-    scheduledIso: (row) => (row.queued_at ? new Date(row.queued_at).toISOString() : null),
-    // Pinned claim state: provider_handoff_phase flips to 'started' the
-    // instant dispatchToProvider marks it, immediately before the actual
-    // SendGrid call — pinning both fields and re-checking at commit refuses
-    // a message that started sending, or was reclaimed by a retry (a fresh
-    // send_attempt_token), in between.
-    version: (row) => ({ send_attempt_token: row.send_attempt_token || null, provider_handoff_phase: row.provider_handoff_phase || null }),
-    ineligibilityReason: emailIneligibilityReason,
-  },
+// Load the pinned row, judge whether it belongs to this customer, and build
+// the fields a cancel card/list entry shows — the SMS store (the only one;
+// see the SMS-ONLY note above).
+const SMS_STORE = {
+  table: 'sms_log',
+  baseWhere: { direction: 'outbound' },
+  liveStatus: 'scheduled',
+  sentStatuses: ['sent', 'delivered'],
+  alreadySentError: 'This text has already been sent — it cannot be recalled.',
+  noLongerLiveError: 'This text is no longer scheduled — it may already be sending, sent, or resolved. Call list_queued_messages again.',
+  notLinkedError: 'This text is not linked to a customer.',
+  effect: 'Cancels this ONE scheduled text before it sends. No other queued message is touched, and nothing is sent to the customer.',
+  customerId: (row) => row.customer_id || null,
+  maskedRecipient: (row) => maskPhoneLast4(row.to_phone),
+  kind: (row) => row.message_type || 'sms',
+  scheduledIso: (row) => (row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null),
+  // Pinned claim state: the worker's own claim (claimDueScheduledSms,
+  // scheduler.js) flips status 'scheduled' -> 'sending' the instant it
+  // claims the row, so pinning scheduled_for here and re-checking it at
+  // commit refuses a message that started sending or was rescheduled.
+  // body_preview rides in the pin too (Codex round 2 P2) — a reviewer
+  // editing the queued body between the card and Confirm must also refuse,
+  // not silently cancel the wrong-worded message.
+  version: (row, scheduledIso, previewText) => ({ scheduled_for: scheduledIso, body_preview: previewText }),
+  ineligibilityReason: smsIneligibilityReason,
 };
 
 // Builds the ONE-message preview a cancel card shows, from a fresh read —
 // never a cached/guessed value. Throws a plain, operator-readable Error for
 // every ineligible state (not found, already sent, workflow-owned, not a
 // customer message); the caller turns that into { error } so a failed read
-// always REFUSES, never reads as "nothing queued". `forUpdate` holds the
-// row lock across the confirmed re-check + the CAS write below (email
-// only — the sms cancel workflow holds its own lock; see
-// scheduled-sms-cancel.js).
-async function queuedMessagePreview(conn, messageId, channel, { forUpdate = false } = {}) {
-  const store = CHANNEL_STORE[channel];
-  if (!store) throw new Error('channel must be "email" or "sms".');
-  let q = store.modify(conn(store.table).where({ id: messageId, ...store.baseWhere }));
-  if (forUpdate) q = q.forUpdate();
-  const row = await q.first();
+// always REFUSES, never reads as "nothing queued". `forUpdate` is accepted
+// for parity with other two-step previews but unused here — the sms cancel
+// workflow holds its own row lock (scheduled-sms-cancel.js).
+async function queuedMessagePreview(conn, messageId, channel) {
+  if (channel !== 'sms') throw new Error('channel must be "sms".');
+  const store = SMS_STORE;
+  const row = await conn(store.table).where({ id: messageId, ...store.baseWhere }).first();
   if (!row) throw new Error('That message could not be found.');
   if (row.status !== store.liveStatus) {
     throw new Error(store.sentStatuses.includes(row.status) ? store.alreadySentError : store.noLongerLiveError);
@@ -526,6 +512,7 @@ async function queuedMessagePreview(conn, messageId, channel, { forUpdate = fals
   const ineligible = store.ineligibilityReason(row);
   if (ineligible) throw new Error(ineligible);
   const scheduledIso = store.scheduledIso(row);
+  const previewText = bodyPreview(row.message_body);
   return {
     proposal: true,
     channel,
@@ -535,8 +522,9 @@ async function queuedMessagePreview(conn, messageId, channel, { forUpdate = fals
     masked_recipient: store.maskedRecipient(row),
     kind: store.kind(row),
     scheduled_time: scheduledIso,
+    body_preview: previewText,
     effect: store.effect,
-    _version: store.version(row, scheduledIso),
+    _version: store.version(row, scheduledIso, previewText),
   };
 }
 
@@ -544,36 +532,19 @@ async function listQueuedMessages(input) {
   const customer = await resolveCustomer(input);
   if (!customer) return { error: 'Customer not found.' };
   if (customer.error) return customer;
-  const channelFilter = input.channel ? String(input.channel).toLowerCase() : null;
+  const rows = await db('sms_log')
+    .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
+    .orderBy('scheduled_for', 'asc')
+    .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
   const messages = [];
-  if (!channelFilter || channelFilter === 'sms') {
-    const rows = await db('sms_log')
-      .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' })
-      .modify((qb) => excludeRecruitingSmsLog(qb))
-      .orderBy('scheduled_for', 'asc')
-      .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata');
-    for (const row of rows) {
-      if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
-      messages.push({
-        message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
-        kind: row.message_type || 'sms',
-        scheduled_time: row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null,
-      });
-    }
-  }
-  if (!channelFilter || channelFilter === 'email') {
-    const rows = await db('email_messages')
-      .where({ recipient_type: 'customer', recipient_id: String(customer.id), status: 'queued' })
-      .orderBy('queued_at', 'asc')
-      .select('id', 'recipient_email_snapshot', 'template_key', 'queued_at', 'provider_handoff_phase');
-    for (const row of rows) {
-      if (emailIneligibilityReason(row)) continue; // currently sending
-      messages.push({
-        message_id: row.id, channel: 'email', masked_recipient: maskEmailAddress(row.recipient_email_snapshot),
-        kind: row.template_key || 'email',
-        scheduled_time: row.queued_at ? new Date(row.queued_at).toISOString() : null,
-      });
-    }
+  for (const row of rows) {
+    if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
+    messages.push({
+      message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
+      kind: row.message_type || 'sms',
+      scheduled_time: row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null,
+      body_preview: bodyPreview(row.message_body),
+    });
   }
   return {
     customer_id: customer.id,
@@ -583,7 +554,7 @@ async function listQueuedMessages(input) {
 }
 
 // Deterministic — both call sites build `_version` from the same object
-// literal shape per channel, so a plain stable-key JSON compare is exact.
+// literal shape, so a plain stable-key JSON compare is exact.
 function sameVersion(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
@@ -626,55 +597,22 @@ async function commitCancelSms(input, preview) {
   };
 }
 
-async function commitCancelEmail(input, preview) {
-  return db.transaction(async (trx) => {
-    let fresh;
-    try {
-      fresh = await queuedMessagePreview(trx, input.message_id, 'email', { forUpdate: true });
-    } catch (err) {
-      return { error: `${err.message} Nothing was changed.`, preview_changed: true };
-    }
-    if (!sameVersion(fresh._version, input._verified_message_version)) {
-      return {
-        error: 'This message changed after the card was shown — nothing was changed. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-    const cancelled = await cancelQueuedEmailMessage(input.message_id, {
-      sendAttemptToken: fresh._version.send_attempt_token,
-      providerHandoffPhase: fresh._version.provider_handoff_phase,
-    }, trx);
-    if (!cancelled) {
-      // The CAS matched under queuedMessagePreview's own read a moment ago
-      // but missed on the actual write — the only way that happens is a
-      // send that started between the lock and this UPDATE. Refuse rather
-      // than report success on an outcome that was never verified.
-      return {
-        error: 'Could not verify this message as still queued right now — nothing was changed. It may have started sending. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-    return {
-      success: true, cancelled: true, channel: 'email', message_id: cancelled.id,
-      customer_id: preview.customer_id, customer_name: preview.customer_name,
-      masked_recipient: preview.masked_recipient, kind: preview.kind, messages_sent: false,
-    };
-  });
-}
-
 // Two-step write (issue #1568 / ib-write-tools skill): an unconfirmed call
 // returns only a preview (read-only, zero mutation — proven by the
 // write-gate behavioral contract). Only /confirm-action can ever set
 // input.confirmed; no model-facing schema declares it. Never a send: the
 // commit is a single status column write on a row some OTHER sender
-// already queued.
+// already queued. SMS only — see the SMS-ONLY note above the tool
+// definitions for why an email_messages row can never be safely cancelled.
 async function cancelQueuedMessage(input) {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!uuid.test(String(input.message_id || '')) || !uuid.test(String(input.customer_id || ''))) {
     return { error: 'Resolve the message and customer IDs first — call list_queued_messages.' };
   }
   const channel = String(input.channel || '').toLowerCase();
-  if (channel !== 'email' && channel !== 'sms') return { error: 'channel must be "email" or "sms".' };
+  if (channel !== 'sms') {
+    return { error: 'channel must be "sms". Scheduled texts are the only cancelable message — emails send within seconds and cannot be recalled.' };
+  }
 
   let preview;
   try {
@@ -690,7 +628,7 @@ async function cancelQueuedMessage(input) {
   if (!input._verified_message_version) {
     return { error: 'Use the confirmation card to approve this change.' };
   }
-  return channel === 'sms' ? commitCancelSms(input, preview) : commitCancelEmail(input, preview);
+  return commitCancelSms(input, preview);
 }
 
 async function getUnansweredThreads(input) {

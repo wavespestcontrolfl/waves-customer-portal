@@ -1,32 +1,30 @@
 // cancel_queued_message / list_queued_messages — fast, no-DB unit coverage.
-// Real end-to-end CAS behavior (list only queued, cancel exactly one,
-// refuse a sent/sending message, refuse a changed token/scheduled time,
+// SMS-ONLY (owner ruling 2026-09-28): an email_messages 'queued' row is an
+// in-flight send, not a scheduled email — cancelling it always races the
+// sender. Real end-to-end CAS behavior (list only scheduled, cancel exactly
+// one, refuse a sent/sending message, refuse a changed scheduled_for/body,
 // the shared SMS cancel workflow's own reconciliation) is covered against
 // real PostgreSQL in intelligence-bar-cancel-queued-message-postgres.test.js,
 // which skips cleanly without DATABASE_URL.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/email-template-library', () => ({
-  cancelQueuedMessage: jest.fn(),
-  PROVIDER_HANDOFF_STARTED: 'started',
-}));
 jest.mock('../services/scheduled-sms-cancel', () => ({ cancelScheduledSmsRow: jest.fn() }));
 
 const db = require('../models/db');
 const { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
-const { cancelQueuedMessage: cancelQueuedEmailMessage } = require('../services/email-template-library');
 const { cancelScheduledSmsRow } = require('../services/scheduled-sms-cancel');
-const { requiresTerminalHook } = require('../services/messaging/deferred-replay-registry');
+const { isDeferredReplayEntryPoint, TERMINAL_HOOK_ENTRY_POINTS, requiresTerminalHook } = require('../services/messaging/deferred-replay-registry');
 const { WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 
 const MESSAGE_ID = '11111111-1111-4111-8111-111111111111';
 const CUSTOMER_ID = '22222222-2222-4222-8222-222222222222';
+const CUSTOMER_ROW = { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' };
 
 beforeEach(() => {
   jest.clearAllMocks();
 });
 
-test('registration: cancel_queued_message is a two-step write, list_queued_messages is a read-only tool', () => {
+test('registration: cancel_queued_message is a two-step write, list_queued_messages is a read-only tool, and both are SMS-only', () => {
   expect(WRITE_TWO_STEP_TOOL_NAMES.has('cancel_queued_message')).toBe(true);
   const cancelTool = COMMS_TOOLS.find((t) => t.name === 'cancel_queued_message');
   expect(cancelTool).toBeDefined();
@@ -34,21 +32,29 @@ test('registration: cancel_queued_message is a two-step write, list_queued_messa
   expect(Object.keys(cancelTool.input_schema.properties)).not.toContain('confirmed');
   expect(cancelTool.input_schema.properties.message_id.format).toBe('uuid');
   expect(cancelTool.input_schema.properties.customer_id.format).toBe('uuid');
+  expect(cancelTool.input_schema.properties.channel.enum).toEqual(['sms']);
   expect(cancelTool.input_schema.required).toEqual(['message_id', 'customer_id', 'channel']);
 
   const listTool = COMMS_TOOLS.find((t) => t.name === 'list_queued_messages');
   expect(listTool).toBeDefined();
   expect(listTool.input_schema.properties.customer_id.format).toBe('uuid');
+  expect(listTool.input_schema.properties.channel.enum).toEqual(['sms']);
   expect(COMMS_READ_TOOLS.map((t) => t.name)).toContain('list_queued_messages');
   expect(COMMS_READ_TOOLS.map((t) => t.name)).not.toContain('cancel_queued_message');
 });
 
-test('rejects a malformed message_id/customer_id/channel before touching the database', async () => {
+test('rejects a malformed message_id/customer_id before touching the database, and rejects channel "email" as an unsupported channel', async () => {
   const badId = await executeCommsTool('cancel_queued_message', { message_id: 'not-a-uuid', customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(badId.error).toMatch(/resolve/i);
 
   const badChannel = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'fax' });
   expect(badChannel.error).toMatch(/channel/i);
+
+  // Codex round 2 on #5224: email is no longer a valid channel at all —
+  // the tool must reject it explicitly, not silently treat it as sms.
+  const emailChannel = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'email' });
+  expect(emailChannel.error).toMatch(/channel must be "sms"/i);
+  expect(emailChannel.error).toMatch(/emails send within seconds/i);
 
   expect(db).not.toHaveBeenCalled();
 });
@@ -60,27 +66,26 @@ test('a preview read failure refuses — it never falls through as "nothing queu
   expect(out.success).not.toBe(true);
   expect(out.proposal).not.toBe(true);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
-  expect(cancelQueuedEmailMessage).not.toHaveBeenCalled();
 });
 
-test('an unconfirmed call never reaches either store\'s cancel function', async () => {
+test('an unconfirmed call never reaches the cancel workflow', async () => {
   // Row not found is enough to prove the preview path never commits —
   // real "found and eligible" preview behavior is proven end to end
   // against Postgres.
-  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(undefined) };
+  const builder = { where: () => builder, first: () => Promise.resolve(undefined) };
   db.mockImplementation(() => builder);
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/could not be found/i);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
-  expect(cancelQueuedEmailMessage).not.toHaveBeenCalled();
 });
 
 test('confirmed:true with no pinned _verified_message_version refuses instead of committing', async () => {
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'manual', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
-  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
+  const builder = { where: () => builder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve(undefined) }) } : builder));
   const out = await executeCommsTool('cancel_queued_message', {
     message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
@@ -93,103 +98,115 @@ test('a message resolved for a different customer refuses before it ever reaches
   const otherCustomer = '33333333-3333-4333-8333-333333333333';
   const row = {
     id: MESSAGE_ID, customer_id: otherCustomer, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'manual', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
   };
-  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
+  const builder = { where: () => builder, first: () => Promise.resolve(row) };
   db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : builder));
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/does not belong to the named customer/i);
 });
 
 test('list_queued_messages refuses "customer not found" instead of an empty list for an unresolved customer', async () => {
-  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(undefined) };
+  const builder = { where: () => builder, first: () => Promise.resolve(undefined) };
   db.mockImplementation(() => builder);
   const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID });
   expect(out.error).toMatch(/customer not found/i);
 });
 
+// A db mock covering the two tables these tools ever touch: `customers`
+// (resolveCustomer/customerDisplayName) answers via `.first()`; `sms_log`
+// answers `.select()` (list) or `.first()` (preview) with `matchRows`.
+function makeSmsDbMock(matchRows) {
+  const customersQ = { where: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
+  const smsQ = {
+    where: () => smsQ, orderBy: () => smsQ,
+    select: () => Promise.resolve(matchRows), first: () => Promise.resolve(matchRows[0]),
+  };
+  return (table) => (table === 'customers' ? customersQ : smsQ);
+}
+
 // Owner ruling 2026-09-28: the bar cancels only STANDALONE scheduled
-// messages. A row whose entry_point owns an onTerminal hook in the
-// deferred-replay registry is workflow-owned and must never be listed or
-// previewed as cancelable through this tool.
-test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excluded from the list and refused in the preview', async () => {
-  const { TERMINAL_HOOK_ENTRY_POINTS } = require('../services/messaging/deferred-replay-registry');
+// messages, refused OUTRIGHT — never redirected to the Communications
+// inbox, since that inbox's own cancel calls the SAME shared writer and
+// would strand the same obligation (Codex round 2 on #5224, P1).
+test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excluded from the list and refused outright, with no inbox pointer', async () => {
   const workflowOwnedEntryPoint = TERMINAL_HOOK_ENTRY_POINTS[0];
   expect(workflowOwnedEntryPoint).toBeTruthy(); // sanity: the registry actually has terminal-hook entries
   expect(requiresTerminalHook(workflowOwnedEntryPoint)).toBe(true);
 
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'reminder', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { entry_point: workflowOwnedEntryPoint },
   };
 
-  // list_queued_messages excludes it entirely.
-  const listBuilder = {
-    where: () => listBuilder, orderBy: () => listBuilder, modify: () => listBuilder, select: () => Promise.resolve([row]),
-    first: () => Promise.resolve({ id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' }),
-  };
-  db.mockImplementation((table) => (table === 'email_messages' ? { ...listBuilder, select: () => Promise.resolve([]) } : listBuilder));
+  db.mockImplementation(makeSmsDbMock([row]));
   const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(listed.messages).toEqual([]);
 
-  // cancel_queued_message's preview refuses it by name, pointing at the inbox.
-  const previewBuilder = { where: () => previewBuilder, modify: () => previewBuilder, first: () => Promise.resolve(row) };
-  db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : previewBuilder));
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/managed by the/i);
   expect(out.error).toMatch(/workflow/i);
-  expect(out.error).toMatch(/communications inbox/i);
+  expect(out.error).not.toMatch(/communications inbox/i);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
-test('a registered deferred-replay row WITHOUT a terminal hook (invoice_send_deferred holds its invoice claim) is refused too', async () => {
-  const { requiresTerminalHook: hasHook, isDeferredReplayEntryPoint } = require('../services/messaging/deferred-replay-registry');
+test('a registered deferred-replay row WITHOUT a terminal hook (invoice_send_deferred holds its invoice claim) is refused too, with no inbox pointer', async () => {
   expect(isDeferredReplayEntryPoint('invoice_send_deferred')).toBe(true);
-  expect(hasHook('invoice_send_deferred')).toBe(false);
+  expect(requiresTerminalHook('invoice_send_deferred')).toBe(false);
   expect(isDeferredReplayEntryPoint('some_manual_send')).toBe(false);
 
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'invoice', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    to_phone: '+19415550100', message_type: 'invoice', message_body: 'Synthetic invoice text',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: { entry_point: 'invoice_send_deferred' },
   };
-  const previewBuilder = { where: () => previewBuilder, modify: () => previewBuilder, first: () => Promise.resolve(row) };
-  db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : previewBuilder));
+  db.mockImplementation(makeSmsDbMock([row]));
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
-  expect(out.error).toMatch(/communications inbox/i);
+  expect(out.error).toMatch(/managed by the invoice send deferred workflow/i);
+  expect(out.error).not.toMatch(/communications inbox/i);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
+// "Recruiting threads are answered from Recruiting only" — message_type is
+// the general, always-present signal; a recruiting send may carry no
+// entry_point at all, so this must be checked independently of the
+// deferred-replay registry (pre-push audit P1, round 2 on #5224).
+test('a recruiting-typed row (job_* message_type, no entry_point) is excluded from the list and refused outright, with no inbox pointer', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'job_application_received', message_body: 'Synthetic recruiting text',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(listed.messages).toEqual([]);
+
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/managed by the Recruiting workflow/i);
+  expect(out.error).not.toMatch(/communications inbox/i);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
 // scheduler.js/scheduled-sms-delivery.js: finalize_only and
 // review_delivery_uncertain_exhausted both mean the text already reached
 // the provider — the row only exists for post-delivery bookkeeping or a
-// terminal-hook safety hold, never "still queued."
-const CUSTOMER_ROW = { id: CUSTOMER_ID, first_name: 'Synthetic', last_name: 'Fixture' };
-
-// A db mock covering all three tables list_queued_messages/cancel_queued_message
-// ever touch: `customers` (resolveCustomer/customerDisplayName) answers via
-// `.first()`; the row's OWN table answers `.select()` (list) or `.first()`
-// (preview) with `matchRows`; the OTHER message table answers empty.
-function makeMessageDbMock(matchTable, matchRows) {
-  const customersQ = { where: () => customersQ, modify: () => customersQ, first: () => Promise.resolve(CUSTOMER_ROW) };
-  const matchQ = {
-    where: () => matchQ, orderBy: () => matchQ, modify: () => matchQ,
-    select: () => Promise.resolve(matchRows), first: () => Promise.resolve(matchRows[0]),
-  };
-  const emptyQ = { where: () => emptyQ, orderBy: () => emptyQ, modify: () => emptyQ, select: () => Promise.resolve([]), first: () => Promise.resolve(undefined) };
-  return (table) => (table === 'customers' ? customersQ : table === matchTable ? matchQ : emptyQ);
-}
-
+// terminal-hook safety hold, never "still queued." This message is
+// unchanged (never mentioned the inbox).
 test.each([
   ['finalize_only', { finalize_only: true }],
   ['review_delivery_uncertain_exhausted', { review_delivery_uncertain_exhausted: true }],
 ])('a %s sms_log row is excluded from the list and refused as already-delivered', async (_label, metaFlag) => {
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'reminder', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    to_phone: '+19415550100', message_type: 'reminder', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'),
     metadata: metaFlag,
   };
-  db.mockImplementation(makeMessageDbMock('sms_log', [row]));
+  db.mockImplementation(makeSmsDbMock([row]));
   const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(listed.messages).toEqual([]);
 
@@ -198,22 +215,53 @@ test.each([
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
-// An 'email_messages' row mid-provider-handoff (status still 'queued', but
-// provider_handoff_phase already flipped to 'started' immediately before
-// the real SendGrid call) must be refused, not treated as cancelable.
-test('a currently-sending email (provider_handoff_phase started) is excluded from the list and refused in the preview', async () => {
+// Codex round 2 on #5224, P2: a bounded body preview rides both the list
+// output and the cancel preview, and is pinned into `_version` so a body
+// edit between the card and Confirm refuses instead of silently cancelling
+// the wrong-worded message.
+test('a body preview (collapsed whitespace, capped ~160 chars) rides the list and the preview, masked recipient stays masked', async () => {
+  const longBody = `Hi there,\n\n   this   is a synthetic reminder body that runs well past one hundred and sixty characters so the preview truncation logic actually has something real to cut off before it reaches the end of the message.`;
   const row = {
-    id: MESSAGE_ID, status: 'queued', recipient_type: 'customer', recipient_id: CUSTOMER_ID,
-    recipient_email_snapshot: 'synthetic.fixture@example.com', template_key: 'synthetic.test',
-    queued_at: new Date(), provider_handoff_phase: 'started', send_attempt_token: 'tok-1',
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'reminder', message_body: longBody,
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
   };
-  db.mockImplementation(makeMessageDbMock('email_messages', [row]));
-  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'email' });
-  expect(listed.messages).toEqual([]);
+  db.mockImplementation(makeSmsDbMock([row]));
 
-  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'email' });
-  expect(out.error).toMatch(/currently being sent/i);
-  expect(cancelQueuedEmailMessage).not.toHaveBeenCalled();
+  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(listed.messages).toHaveLength(1);
+  const collapsed = longBody.replace(/\s+/g, ' ').trim();
+  expect(listed.messages[0].body_preview).toBe(`${collapsed.slice(0, 160)}…`);
+  expect(listed.messages[0].body_preview.length).toBe(161); // 160 chars + ellipsis
+  expect(listed.messages[0].masked_recipient).toBe('…0100');
+  expect(listed.messages[0].masked_recipient).not.toContain('9415550100');
+
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(preview.body_preview).toBe(`${collapsed.slice(0, 160)}…`);
+  expect(preview._version.body_preview).toBe(preview.body_preview);
+  expect(preview.masked_recipient).toBe('…0100');
+});
+
+test('a body change between the preview and confirm refuses — the pinned body_preview no longer matches', async () => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'reminder', message_body: 'Original synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata: {},
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(preview.body_preview).toBe('Original synthetic body');
+
+  // The row's body changed since the card was shown (a reviewer edited the
+  // draft) — the fresh re-read at commit time sees the new body.
+  row.message_body = 'Edited synthetic body — different wording entirely';
+  const confirmed = await executeCommsTool('cancel_queued_message', {
+    message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms', confirmed: true,
+    _verified_message_version: preview._version,
+  });
+  expect(confirmed.success).not.toBe(true);
+  expect(confirmed.preview_changed).toBe(true);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
 // The SMS commit delegates entirely to the shared inbox workflow rather
@@ -226,10 +274,10 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
   const scheduledFor = new Date('2099-01-01T12:00:00Z');
   const row = {
     id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
-    to_phone: '+19415550100', message_type: 'manual', scheduled_for: scheduledFor,
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic reminder body',
+    scheduled_for: scheduledFor, metadata: {},
   };
-  const builder = { where: () => builder, modify: () => builder, first: () => Promise.resolve(row) };
-  db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : builder));
+  db.mockImplementation(makeSmsDbMock([row]));
 
   const preview = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(preview.proposal).toBe(true);

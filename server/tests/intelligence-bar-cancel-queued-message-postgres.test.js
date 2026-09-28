@@ -2,6 +2,12 @@
 // rollback-only transaction on a private schema (same shape as
 // sms-reply-holding-recovery-postgres.test.js). Skips cleanly with no
 // DATABASE_URL. Synthetic customer only — no real names.
+//
+// SMS-ONLY (owner ruling 2026-09-28): an email_messages 'queued' row is an
+// in-flight send (sendTemplate hands it to SendGrid within seconds), not a
+// scheduled email to hold and cancel — cancelling it always races the
+// sender at one producer site or another. Only a genuinely held sms_log row
+// (quiet hours, an uncertain-delivery retry) is ever listed or cancelable.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
@@ -18,7 +24,7 @@ const db = require('../models/db');
 const { executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 jest.setTimeout(30000);
 
-postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () => {
+postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-only)', () => {
   let database;
   let trx;
   let schema;
@@ -36,7 +42,7 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     trx = await database.transaction();
     schema = `cancel_queued_msg_${randomUUID().replaceAll('-', '')}`;
     await trx.raw('CREATE SCHEMA ??', [schema]);
-    for (const table of ['sms_log', 'email_messages', 'customers']) {
+    for (const table of ['sms_log', 'customers']) {
       await trx.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
@@ -68,49 +74,35 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     return id;
   }
 
-  async function queuedEmail(customerId, overrides = {}) {
-    const id = randomUUID();
-    await trx('email_messages').insert({
-      id, provider: 'sendgrid', template_key: 'synthetic.test_template', recipient_type: 'customer',
-      recipient_id: String(customerId), recipient_email_snapshot: 'synthetic.fixture@example.com',
-      subject_snapshot: 'Synthetic subject', status: 'queued', queued_at: new Date(),
-      send_attempt_token: randomUUID(),
-      ...overrides,
-    });
-    return id;
-  }
-
-  test('lists only queued/scheduled messages, never sent or cancelled ones', async () => {
+  test('lists only scheduled texts, never sent or cancelled ones', async () => {
     const custId = await customer();
     const queuedSmsId = await scheduledSms(custId);
     await scheduledSms(custId, { status: 'sent', scheduled_for: null });
     await scheduledSms(custId, { status: 'cancelled' });
-    const queuedEmailId = await queuedEmail(custId);
-    await queuedEmail(custId, { status: 'sent', send_attempt_token: randomUUID() });
 
     const out = await executeCommsTool('list_queued_messages', { customer_id: custId });
     expect(out.error).toBeUndefined();
-    expect(out.total).toBe(2);
-    expect(out.messages.map((m) => m.message_id).sort()).toEqual([queuedSmsId, queuedEmailId].sort());
-    expect(out.messages.find((m) => m.channel === 'sms').masked_recipient).toBe('…0100');
-    expect(out.messages.find((m) => m.channel === 'email').masked_recipient).toBe('s***@example.com');
+    expect(out.total).toBe(1);
+    expect(out.messages[0].message_id).toBe(queuedSmsId);
+    expect(out.messages[0].channel).toBe('sms');
+    expect(out.messages[0].masked_recipient).toBe('…0100');
   });
 
-  test('channel filter narrows the list to one store', async () => {
+  test('a channel of "email" is rejected by the tool — there is no scheduled-email store to check', async () => {
     const custId = await customer();
     await scheduledSms(custId);
-    await queuedEmail(custId);
-    const out = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'email' });
-    expect(out.total).toBe(1);
-    expect(out.messages[0].channel).toBe('email');
+    const out = await executeCommsTool('cancel_queued_message', {
+      message_id: randomUUID(), customer_id: custId, channel: 'email',
+    });
+    expect(out.error).toMatch(/channel must be "sms"/i);
   });
 
-  // Owner ruling 2026-09-28: the bar cancels only STANDALONE messages. A
-  // deferred-replay entry point with an onTerminal hook is workflow-owned
-  // (a bare cancel would strand that workflow's obligation) — excluded from
-  // the list, refused by name in the preview, pointed at the Communications
-  // inbox instead.
-  test('a workflow-owned sms_log row is excluded from the list and refused in the preview, but an ordinary sibling still lists and cancels', async () => {
+  // Owner ruling 2026-09-28: the bar cancels only STANDALONE messages,
+  // refused OUTRIGHT — never redirected to the Communications inbox. A
+  // deferred-replay entry point (with or without an onTerminal hook) is
+  // workflow-owned; a bare cancel — including the inbox's own, which calls
+  // the SAME shared writer — would strand that workflow's obligation.
+  test('a workflow-owned sms_log row is excluded from the list and refused outright (no inbox pointer), but an ordinary sibling still lists and cancels', async () => {
     const { TERMINAL_HOOK_ENTRY_POINTS } = require('../services/messaging/deferred-replay-registry');
     const entryPoint = TERMINAL_HOOK_ENTRY_POINTS[0];
     const custId = await customer();
@@ -121,8 +113,8 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect(listed.messages.map((m) => m.message_id)).toEqual([ordinaryId]);
 
     const refused = await executeCommsTool('cancel_queued_message', { message_id: workflowOwnedId, customer_id: custId, channel: 'sms' });
-    expect(refused.error).toMatch(/workflow/i);
-    expect(refused.error).toMatch(/communications inbox/i);
+    expect(refused.error).toMatch(/managed by the/i);
+    expect(refused.error).not.toMatch(/communications inbox/i);
 
     const preview = await executeCommsTool('cancel_queued_message', { message_id: ordinaryId, customer_id: custId, channel: 'sms' });
     expect(preview.proposal).toBe(true);
@@ -134,13 +126,19 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect((await trx('sms_log').where({ id: workflowOwnedId }).first()).status).toBe('scheduled');
   });
 
-  // Claude fallback auditor P1 on #5224 (round 2): "Recruiting threads are
-  // answered from Recruiting only" — a recruiting-typed row with NO
-  // entry_point at all (so the deferred-replay terminal-hook check above
-  // never catches it) must still be excluded/refused, via the SAME
-  // message_type-keyed guard (excludeRecruitingSmsLog) every other sms_log
-  // reader in comms-tools.js already applies.
-  test('a recruiting-typed scheduled text (job_* message_type, no entry_point) is excluded from the list and refused in the preview', async () => {
+  test('a deferred-replay row WITHOUT a terminal hook (invoice_send_deferred holds its invoice claim) is refused too, with no inbox pointer', async () => {
+    const custId = await customer();
+    const id = await scheduledSms(custId, { message_type: 'invoice', metadata: { entry_point: 'invoice_send_deferred' } });
+    const out = await executeCommsTool('cancel_queued_message', { message_id: id, customer_id: custId, channel: 'sms' });
+    expect(out.error).toMatch(/managed by the invoice send deferred workflow/i);
+    expect(out.error).not.toMatch(/communications inbox/i);
+    expect((await trx('sms_log').where({ id }).first()).status).toBe('scheduled');
+  });
+
+  // "Recruiting threads are answered from Recruiting only" — a recruiting-
+  // typed row with NO entry_point at all (so the deferred-replay check
+  // never catches it) must still be excluded/refused, via message_type.
+  test('a recruiting-typed scheduled text (job_* message_type, no entry_point) is excluded from the list and refused outright, with no inbox pointer', async () => {
     const custId = await customer();
     const recruitingId = await scheduledSms(custId, { message_type: 'job_application_received', metadata: {} });
     const ordinaryId = await scheduledSms(custId);
@@ -149,8 +147,8 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect(listed.messages.map((m) => m.message_id)).toEqual([ordinaryId]);
 
     const refused = await executeCommsTool('cancel_queued_message', { message_id: recruitingId, customer_id: custId, channel: 'sms' });
-    expect(refused.proposal).not.toBe(true);
-    expect(refused.error).toBeTruthy();
+    expect(refused.error).toMatch(/managed by the Recruiting workflow/i);
+    expect(refused.error).not.toMatch(/communications inbox/i);
 
     // Completely untouched — not merely refused-but-mutated.
     expect((await trx('sms_log').where({ id: recruitingId }).first()).status).toBe('scheduled');
@@ -171,18 +169,31 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect((await trx('sms_log').where({ id: alreadyDeliveredId }).first()).status).toBe('scheduled'); // untouched
   });
 
-  // Codex round 1 on #5224 (P1): status alone cannot tell a truly-idle
-  // queued email from one whose SendGrid request is in flight RIGHT NOW —
-  // provider_handoff_phase is the real marker, and it must be checked at
-  // PREVIEW time too, not only inside the commit CAS.
-  test('an email whose provider handoff already started is refused at the preview, never proposable', async () => {
+  // Codex round 2 on #5224, P2: a bounded body preview rides both the list
+  // output and the cancel preview, and is pinned into `_version` so an
+  // edited body between the card and Confirm refuses.
+  test('a body preview rides the list and the preview, and is pinned — a body edit between preview and confirm refuses', async () => {
     const custId = await customer();
-    const sendingId = await queuedEmail(custId, { provider_handoff_phase: 'started' });
-    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'email' });
-    expect(listed.messages).toEqual([]);
-    const out = await executeCommsTool('cancel_queued_message', { message_id: sendingId, customer_id: custId, channel: 'email' });
-    expect(out.proposal).not.toBe(true);
-    expect(out.error).toMatch(/currently being sent/i);
+    const longBody = 'Hi there,    this   is a synthetic reminder body that runs well past one hundred and sixty characters so the preview truncation logic actually has something real to cut off before the end.';
+    const targetId = await scheduledSms(custId, { message_body: longBody });
+
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
+    const collapsed = longBody.replace(/\s+/g, ' ').trim();
+    expect(listed.messages[0].body_preview).toBe(`${collapsed.slice(0, 160)}…`);
+
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
+    expect(preview.body_preview).toBe(`${collapsed.slice(0, 160)}…`);
+    expect(preview._version.body_preview).toBe(preview.body_preview);
+
+    // The body changes (a reviewer edited the draft) after the card, before Confirm.
+    await trx('sms_log').where({ id: targetId }).update({ message_body: 'Completely different edited wording' });
+    const confirmed = await executeCommsTool('cancel_queued_message', {
+      message_id: targetId, customer_id: custId, channel: 'sms', confirmed: true,
+      _verified_message_version: preview._version,
+    });
+    expect(confirmed.preview_changed).toBe(true);
+    expect(confirmed.success).not.toBe(true);
+    expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('scheduled'); // untouched
   });
 
   test('cancels exactly one scheduled text (physically deleted, the shared inbox workflow\'s ordinary case) and leaves a sibling untouched', async () => {
@@ -233,24 +244,6 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect(row.metadata).toMatchObject({ review_ask_reservation: true, scheduled_sms_attempts: 3 });
   });
 
-  test('cancels exactly one queued email and leaves a sibling untouched', async () => {
-    const custId = await customer();
-    const targetId = await queuedEmail(custId);
-    const siblingId = await queuedEmail(custId);
-
-    const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'email' });
-    expect(preview.proposal).toBe(true);
-
-    const confirmed = await executeCommsTool('cancel_queued_message', {
-      message_id: targetId, customer_id: custId, channel: 'email', confirmed: true,
-      _verified_message_version: preview._version,
-    });
-    expect(confirmed).toMatchObject({ success: true, cancelled: true, channel: 'email', message_id: targetId });
-
-    expect((await trx('email_messages').where({ id: targetId }).first()).status).toBe('cancelled');
-    expect((await trx('email_messages').where({ id: siblingId }).first()).status).toBe('queued');
-  });
-
   test('refuses an sms already sent — it can never be recalled', async () => {
     const custId = await customer();
     const sentId = await scheduledSms(custId, { status: 'sent', scheduled_for: null });
@@ -263,13 +256,6 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     const sendingId = await scheduledSms(custId, { status: 'sending' });
     const out = await executeCommsTool('cancel_queued_message', { message_id: sendingId, customer_id: custId, channel: 'sms' });
     expect(out.error).toBeTruthy();
-  });
-
-  test('refuses an email already sent — it can never be recalled', async () => {
-    const custId = await customer();
-    const sentId = await queuedEmail(custId, { status: 'sent' });
-    const out = await executeCommsTool('cancel_queued_message', { message_id: sentId, customer_id: custId, channel: 'email' });
-    expect(out.error).toMatch(/already been sent/i);
   });
 
   test('refuses when the sms was claimed (started sending) after the preview — the CAS catches the race', async () => {
@@ -306,37 +292,6 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     const row = await trx('sms_log').where({ id: targetId }).first();
     expect(row.status).toBe('scheduled');
     expect(row.scheduled_for.getTime()).toBe(newTime.getTime());
-  });
-
-  test('refuses when the email started its provider handoff after the preview — the CAS catches the race', async () => {
-    const custId = await customer();
-    const targetId = await queuedEmail(custId);
-    const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'email' });
-
-    // dispatchToProvider's own marker (email-template-library.js), stamped
-    // immediately before the real SendGrid call.
-    await trx('email_messages').where({ id: targetId }).update({ provider_handoff_phase: 'started' });
-
-    const confirmed = await executeCommsTool('cancel_queued_message', {
-      message_id: targetId, customer_id: custId, channel: 'email', confirmed: true,
-      _verified_message_version: preview._version,
-    });
-    expect(confirmed.preview_changed).toBe(true);
-    expect((await trx('email_messages').where({ id: targetId }).first()).status).toBe('queued');
-  });
-
-  test('refuses when the email was reclaimed by a retry (a fresh send_attempt_token) after the preview', async () => {
-    const custId = await customer();
-    const targetId = await queuedEmail(custId);
-    const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'email' });
-
-    await trx('email_messages').where({ id: targetId }).update({ send_attempt_token: randomUUID() });
-
-    const confirmed = await executeCommsTool('cancel_queued_message', {
-      message_id: targetId, customer_id: custId, channel: 'email', confirmed: true,
-      _verified_message_version: preview._version,
-    });
-    expect(confirmed.preview_changed).toBe(true);
   });
 
   test('refuses when the message disappears between the preview and confirm — a failed re-check never reads as success', async () => {
