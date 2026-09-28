@@ -69,6 +69,35 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
+unless exactly `true`, read at startup). On, the LIVE service-report payload
+(`/api/reports/:token/data`, the only caller that opts in with
+`planSummary: true`, built with `mode: 'live'`; the `/ask` Q&A build and every
+other build neither read nor carry it) may carry `planSummary: { year, visitsThisYear,
+reservicesThisYear }` for the token's own customer, only when that customer
+is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
+with at least one performed visit this year; anyone else gets no field and no
+plan wording on the page. The plan is account-level, so the counts cover the
+account's visits, not only this property's. `visitsThisYear` counts PERFORMED
+visits in the current ET calendar year: completed, customer-visible service
+records whose outcome is not inspection-only, customer-declined or incomplete
+(the Pest Pressure prior-visit rule, `pest-pressure/first-visit.js`), never a
+schedule row's status alone, and one physical stop counts once (grouped
+services share the booking's `visit_id`, and a booking's sibling completion
+records — detailed form, recap rail — count as that one booking). `reservicesThisYear` counts how many
+of those stops were callbacks, decided by the record's frozen completion-time
+evidence only: its `is_callback`, or its `service_data.completedServiceKey` of
+`pest_re_service` / `lawn_re_service` — never the booking row (repointable
+after closeout) or a "Re-Service" display name; a rodent-program visit, such
+as the included trapping follow-up, never counts, by its key or its rodent
+line. Counts only: no
+price, no "at no charge" claim (a callback can be billed; see
+`reservice-report.js`), no upcoming visits, dates, address, technician, or
+token. `stripLiveOnlyScheduleFields` also
+deletes it from every non-live render (PDF, static, sms_preview), the same
+staleness rule as `nextAppointment`. No new route and no write; auth, headers
+and rate limits are unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may

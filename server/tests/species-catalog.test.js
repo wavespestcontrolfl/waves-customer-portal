@@ -30,8 +30,12 @@ const knownSlugs = new Set([...entriesBySlug.keys(), ...plannedSlugs]);
 // ── enums (mirrors validate.js) ──────────────────────────────────────────
 
 const ENUMS = {
-  kind: ['organism', 'sign'],
-  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex'],
+  // `turfgrass`, `weed`, `host_plant`, `disease`, `disorder` are the
+  // plant/condition kinds from the L1 loader PR (BRIEF-PLANTS.md "Kinds and
+  // sections"); no entry of any of these kinds exists yet — the content PR
+  // (L1b) adds them to `entries/*.json` once the owner reviews them.
+  kind: ['organism', 'sign', 'turfgrass', 'weed', 'host_plant', 'disease', 'disorder'],
+  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex', 'condition'],
   size: ['tiny', 'small', 'medium', 'large'],
   where: ['kitchen', 'bathroom', 'bedroom', 'living-areas', 'lanai-patio', 'lawn-garden', 'attic-walls', 'garage-storage', 'lights-windows', 'on-pets', 'trees-shrubs', 'pool-water'],
   looks: ['ant-like', 'roach-like', 'winged-swarmer', 'worm-caterpillar', 'spider', 'flying-biter', 'small-fly', 'crawler', 'lawn-damage', 'wasp-bee', 'beetle', 'true-bug', 'moth-butterfly', 'snail-slug-worm', 'lizard-frog', 'snake', 'mammal', 'bird', 'plant-damage', 'sign'],
@@ -373,6 +377,107 @@ describe('index.json — groups and subgroups', () => {
   });
 });
 
+describe('L1: plant and condition sections (index additions, no content)', () => {
+  const SECTIONS = new Set(['pest', 'plant', 'condition']);
+  const NEW_GROUP_IDS = [
+    'turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees',
+    'nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases',
+    'nutrient-disorders', 'water-and-site', 'cultural-and-chemical',
+  ];
+  const NEW_SUBGROUP_IDS = ['date-palms', 'fan-palms', 'turf-nutrient', 'palm-nutrient'];
+  const NEW_SITE_CATEGORIES = [
+    'Lawn grasses', 'Lawn weeds', 'Palms', 'Shrubs & trees',
+    'Lawn problems', 'Plant & palm problems', 'Lawn & plant problems',
+  ];
+
+  test('every category (old and new) declares a section in {pest, plant, condition}', () => {
+    for (const cat of Object.values(index.categories)) {
+      expect(SECTIONS.has(cat.section)).toBe(true);
+    }
+    expect(index.categories.plant.section).toBe('plant');
+    expect(index.categories.condition.section).toBe('condition');
+    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
+      expect(index.categories[id].section).toBe('pest');
+    }
+  });
+
+  test('every new group exists, names a real category, and resolves through the loader', () => {
+    for (const id of NEW_GROUP_IDS) {
+      expect(groupIds.has(id)).toBe(true);
+      const group = catalog.getGroup(id);
+      expect(group).toBeTruthy();
+      expect(index.categories[group.category]).toBeTruthy();
+    }
+    // All 13 new groups sit under `plant`/`condition` — including
+    // `nematodes` (Codex #5143 r1 P2: a nematode's `kind` stays `organism`,
+    // but it can never be a photo identity — a soil assay is the only
+    // confirmation — so it must not be visible to the pest engine at all;
+    // the loader doesn't tie `kind` to `section`, so this is a pure
+    // category move).
+    for (const id of ['turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees']) {
+      expect(catalog.getGroup(id).category).toBe('plant');
+    }
+    for (const id of ['nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases', 'nutrient-disorders', 'water-and-site', 'cultural-and-chemical']) {
+      expect(catalog.getGroup(id).category).toBe('condition');
+    }
+  });
+
+  test('every new subgroup exists and names a real (new) group', () => {
+    for (const id of NEW_SUBGROUP_IDS) {
+      expect(subgroupIds.has(id)).toBe(true);
+      const sg = catalog.getSubgroup(id);
+      expect(sg).toBeTruthy();
+      expect(groupIds.has(sg.group)).toBe(true);
+    }
+    expect(catalog.getSubgroup('date-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('fan-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('turf-nutrient').group).toBe('nutrient-disorders');
+    expect(catalog.getSubgroup('palm-nutrient').group).toBe('nutrient-disorders');
+  });
+
+  test('the 7 new site_categories are declared', () => {
+    for (const sc of NEW_SITE_CATEGORIES) expect(index.site_categories).toContain(sc);
+  });
+
+  test('sectionOf resolves category/group/subgroup nodes to the right section', () => {
+    expect(catalog.sectionOf(catalog.getCategory('plant'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getCategory('condition'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getCategory('insect'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getGroup('turfgrasses'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getGroup('turf-diseases'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('nematodes'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('ants'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getSubgroup('date-palms'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getSubgroup('turf-nutrient'))).toBe('condition');
+    // Bare id/slug form (not just a node object) resolves the same way.
+    expect(catalog.sectionOf('turfgrasses')).toBe('plant');
+    expect(catalog.sectionOf('fire-ant')).toBe('pest');
+    expect(catalog.sectionOf('not-a-real-node')).toBeNull();
+  });
+
+  test('listEntries({ section }) filters by section; the real catalog has no plant/condition entries yet', () => {
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'pest' })).toEqual(catalog.listEntries());
+    expect(catalog.listEntries({ section: 'plant' })).toEqual([]);
+    expect(catalog.listEntries({ section: 'condition' })).toEqual([]);
+  });
+
+  test('a group generic that would equal a section-defining category name (e.g. "a plant") does not collide with the category itself, but no group claims that exact generic today', () => {
+    // "plant" and "condition" resolve to their categories (Codex-style
+    // collision guard already handles category-vs-group generics keyed off
+    // the category's own id/label, not a hardcoded string — see
+    // buildNameIndices' `categoryNames`/`generic()`). No plant/condition
+    // group's generic literally equals "a plant" or the condition
+    // category's generic, so there is nothing to guard against yet; this
+    // pins that fact rather than adding unneeded collision-avoidance code
+    // ahead of any real entries.
+    const plantGroupGenerics = index.groups.filter((g) => g.category === 'plant').map((g) => g.generic);
+    expect(plantGroupGenerics).not.toContain('a plant');
+    expect(catalog.resolveName('plant')).toMatchObject({ node: { level: 'category', id: 'plant' } });
+    expect(catalog.resolveName('condition')).toMatchObject({ node: { level: 'category', id: 'condition' } });
+  });
+});
+
 describe('cross-worker slugs (planned_slugs contract)', () => {
   test('a look-alike target that is not yet a built entry must be in planned_slugs', () => {
     for (const e of allEntries) {
@@ -384,10 +489,28 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
     }
   });
 
-  test('the complete 239-entry catalog has no planned slugs left', () => {
+  // Through the pest catalog's own build, `planned_slugs` staged only pest
+  // placeholders and had to end empty once the 239-entry catalog was
+  // complete. The L1 loader PR (plant/condition sections) changes that
+  // contract: `planned_slugs` now ALSO stages the lawn/plant build's 119
+  // not-yet-built plant and condition slugs, so cross-worker look-alike and
+  // differential references validate before that content lands (L1b). A
+  // non-empty `planned_slugs` is no longer itself a defect — what still
+  // must never happen is a PEST placeholder going unbuilt, or a built pest
+  // entry staying listed as planned. (Which of today's planned slugs are
+  // `plant` vs `condition` isn't re-derivable from index.json alone — the
+  // shipped schema keeps `planned_slugs` a flat slug list, matching the
+  // brief; that split lives in the build folder's `slugs.tsv` until L1b
+  // copies each slug's entry — with its real `group` — into
+  // `entries/<group>.json`.)
+  test('the pest section is complete: no pest entry is missing, and no built pest entry is still "planned"', () => {
     expect(allEntries).toHaveLength(239);
-    expect(index.planned_slugs).toEqual([]);
     for (const slug of entriesBySlug.keys()) expect(plannedSlugs.has(slug)).toBe(false);
+  });
+
+  test('planned_slugs may be non-empty now (plant/condition placeholders), but every one is still unbuilt', () => {
+    expect(index.planned_slugs.length).toBeGreaterThan(0);
+    for (const slug of index.planned_slugs) expect(entriesBySlug.has(slug)).toBe(false);
   });
 });
 

@@ -552,6 +552,24 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
   });
 });
 
+describe('planSummary opt-in ("Your plan" card, GATE_REPORT_PLAN_SUMMARY)', () => {
+  // Same shape as composeOffers: the membership + year-history reads run
+  // only for the /data render, the one caller that shows the card. The Q&A
+  // endpoint builds in live mode for report context and never reads it.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF and is forwarded to the builder', () => {
+    expect(src).toMatch(/planSummary = false,/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary,\n/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/planSummary: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true,/);
+  });
+});
+
 describe('storedRevisionMatches (cross-sell resubmit no-op, PR r11 P2)', () => {
   const { storedRevisionMatches } = reportsRouter;
   const snapshot = {
