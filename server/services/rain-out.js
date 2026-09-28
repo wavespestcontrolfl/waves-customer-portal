@@ -135,21 +135,25 @@ function customLinkClause(rescheduleUrl) {
 // word, then "there" or up to three capitalized name words (any script:
 // "José", "Zoë"), ended by a comma / "!" / "." / ":" / dash — or the
 // greeting word and the customer's own first name with no punctuation
-// ("Hey Sam the tech is out…") — the name must end at a space, punctuation
-// or the end, so "Hey Sam's gate…" is a sentence, not a greeting — unless
-// the salutation goes on to someone else ("Hi Sam and Pat, …" is left as
-// typed rather than cut mid-address).
-// Anything else is left exactly as typed; a note that was only a greeting
-// falls back to the default line.
+// ("Hey Sam the tech is out…"; the name must end at a space, punctuation or
+// the end, so "Hey Sam's gate…" is a sentence, not a greeting).
+// One final check covers both forms: when what is left starts the way a
+// salutation continues ("and Pat, …", "& Pat …", "Pat, and Alex, …"), the
+// greeting addresses more than the customer and the note is sent exactly as
+// typed rather than cut mid-address. A note that was only a greeting falls
+// back to the default line.
 const NOTE_GREETING_WORD = '(?:[Hh]i|[Hh]ello|[Hh]ey|[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening))';
 const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+(?:there|\\p{Lu}[\\p{L}'.-]*)){0,3}\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)`, 'u');
+const NOTE_CONTINUED_SALUTATION_RE = /^(?:(?:and|or|&|\+)(?![\p{L}\p{N}])|\p{Lu}[\p{L}'.-]*\s*(?:[,&+]|(?:and|or)(?![\p{L}\p{N}])))/u;
 function withoutLeadingGreeting(note, firstName) {
   const text = String(note || '');
-  const stripped = text.replace(NOTE_LEADING_GREETING_RE, '');
-  if (stripped !== text || !firstName) return stripped;
-  const name = String(firstName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (!name) return text;
-  return text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}(?=[\\s,!.:\u2013\u2014-]|$)(?!\\s*(?:and|&|\\+|or)(?![\\p{L}\\p{N}]))[\\s,!.:\u2013\u2014-]*`, 'iu'), '');
+  let stripped = text.replace(NOTE_LEADING_GREETING_RE, '');
+  if (stripped === text && firstName) {
+    const name = String(firstName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (name) stripped = text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}(?=[\\s,!.:\u2013\u2014-]|$)[\\s,!.:\u2013\u2014-]*`, 'iu'), '');
+  }
+  if (stripped !== text && NOTE_CONTINUED_SALUTATION_RE.test(stripped)) return text;
+  return stripped;
 }
 
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {

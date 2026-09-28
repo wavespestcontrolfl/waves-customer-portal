@@ -3772,6 +3772,7 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     ['Hi there! Storms rolled in this afternoon.', 'Storms rolled in this afternoon.'],
     ['Good morning Mrs. Lee - the gate was locked.', 'the gate was locked.'],
     ['Hey Sam the tech is out sick today.', 'the tech is out sick today.'],
+    ['Hi Sam, Thursday works better for the crew.', 'Thursday works better for the crew.'],
   ])('drops the leading greeting: %s', async (typed, sent) => {
     expect(await noteAsSent(typed)).toBe(sent);
   });
@@ -3798,6 +3799,9 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
   test('a salutation that goes on to someone else is left as typed, never cut mid-address', async () => {
     expect(await noteAsSent('Hi Sam and Pat, the tech is out sick today.')).toBe('Hi Sam and Pat, the tech is out sick today.');
     expect(await noteAsSent('Hey Sam & Pat the gate was locked.')).toBe('Hey Sam & Pat the gate was locked.');
+    expect(await noteAsSent('Hi Sam, and Pat, the tech is out sick today.')).toBe('Hi Sam, and Pat, the tech is out sick today.');
+    expect(await noteAsSent('Hi Sam, Pat, and Alex, the tech is out sick today.')).toBe('Hi Sam, Pat, and Alex, the tech is out sick today.');
+    expect(await noteAsSent('Hello there, and welcome back.')).toBe('Hello there, and welcome back.');
   });
 
   test('a note that was only a greeting falls back to the default line', async () => {
