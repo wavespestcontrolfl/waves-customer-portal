@@ -10,7 +10,8 @@
  * Astro build FAILS on a key it does not know. So:
  *   - a post is a cost guide when its post_type is "cost" (the writer's
  *     binding post-type rubric: "cost" = pricing-focused; the Astro schema
- *     already enforces that type's required components);
+ *     already enforces that type's required components), and the card
+ *     prices the service its keyword/title names (table below);
  *   - the keys come from the table below only — the writer model never
  *     chooses them, and a model-emitted price_range never reaches the
  *     published frontmatter (the autonomous normalizer whitelists fields);
@@ -23,47 +24,46 @@
 const { computePublicPricingRanges } = require('../pricing-engine/public-ranges');
 const logger = require('../logger');
 
-const TERMITE = ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching'];
-const MOSQUITO = ['mosquito_program', 'one_time_mosquito'];
-const LAWN = ['lawn_care_program', 'one_time_lawn'];
-const TREE_SHRUB = ['tree_shrub_care'];
-const GENERAL_PEST = ['general_pest_quarterly', 'one_time_pest'];
-
-// Ordered most-specific first: a "termite" or "rodent" cost guide is filed
-// under pest-control, so the post's own keyword/title decides before the
-// category does, and an inspection guide matches its inspection row before
-// the treatment rows. Only the primary keyword and title are read.
+// The card prices ONLY the service the post names — its primary keyword or
+// title — so there is no category fallback (a German-roach guide filed under
+// pest-control must not show general pest plans). Rows run most specific
+// first: a product the feed prices on its own row (an inspection, a German
+// roach cleanout, dethatching) wins over its service family's plan rows. A
+// post that names no row here gets no card. Commercial work is custom-quoted
+// and the feed is residential list price, so a commercial topic gets none.
+const COMMERCIAL = /\b(?:commercial|business(?:es)?|restaurants?|offices?|warehouses?)\b/;
 const SERVICE_PRICE_KEYS = [
-  { pattern: /\b(?:wdo|wood[- ]destroying|termite inspections?)\b/, keys: ['wdo_inspection'] },
+  { pattern: /\b(?:wdo|wood[- ]destroying)\b/, keys: ['wdo_inspection'] },
+  // A standalone termite inspection is its own service (not the real-estate
+  // WDO report) and the feed has no row for it — no card, never bait prices.
+  { pattern: /\btermite inspections?\b/, keys: [] },
+  { pattern: /\btermite bonds?\b/, keys: ['termite_bond'] },
+  { pattern: /\bpre[- ]?(?:slab|construction)\b/, keys: ['pre_slab_termiticide'] },
+  { pattern: /\b(?:bora[- ]?care|borates?)\b/, keys: ['bora_care'] },
+  { pattern: /\btermites?\b/, keys: ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching'] },
   { pattern: /\b(?:rodents?|rats?|mice|mouse) inspections?\b/, keys: ['rodent_inspection'] },
-  { pattern: /\btermites?\b/, keys: TERMITE },
+  { pattern: /\b(?:rodents?|rats?|mice|mouse) (?:sanitation|clean-?up|droppings)\b/, keys: ['rodent_sanitation'] },
+  { pattern: /\b(?:rodents?|rats?|mice|mouse)\b/, keys: ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion'] },
+  { pattern: /\bgerman (?:cock)?roach(?:es)?\b/, keys: ['german_roach_cleanout', 'german_roach_initial'] },
+  { pattern: /\b(?:cock)?roach(?:es)?\b/, keys: ['cockroach_treatment'] },
   { pattern: /\bbed ?bugs?\b/, keys: ['bed_bug_treatment'] },
   { pattern: /\bfleas?\b/, keys: ['flea_elimination'] },
   { pattern: /\b(?:wasps?|hornets?|yellow ?jackets?)\b/, keys: ['wasp_hornet_removal'] },
-  { pattern: /\b(?:rodents?|rats?|mice|mouse)\b/, keys: ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion'] },
-  { pattern: /\bmosquito(?:e?s)?\b/, keys: MOSQUITO },
-  { pattern: /\b(?:lawns?|turf)\b/, keys: LAWN },
-  { pattern: /\b(?:trees?|shrubs?)\b/, keys: TREE_SHRUB },
-  { pattern: /\b(?:pests?|exterminat\w*)\b/, keys: GENERAL_PEST },
+  { pattern: /\bmosquito(?:e?s)?\b/, keys: ['mosquito_program', 'one_time_mosquito'] },
+  { pattern: /\b(?:chinch bugs?|sod webworms?|armyworms?|lawn pests?)\b/, keys: ['lawn_pest_knockdown'] },
+  { pattern: /\bdethatch\w*/, keys: ['dethatching'] },
+  { pattern: /\b(?:plugging|sod plugs?)\b/, keys: ['lawn_plugging'] },
+  { pattern: /\btop[- ]?dressing\b/, keys: ['top_dressing'] },
+  { pattern: /\b(?:lawns?|turf)\b/, keys: ['lawn_care_program', 'one_time_lawn'] },
+  { pattern: /\bpalms?\b/, keys: ['palm_injection'] },
+  { pattern: /\b(?:trees?|shrubs?)\b/, keys: ['tree_shrub_care'] },
+  { pattern: /\b(?:pest control|exterminat\w*)\b/, keys: ['general_pest_quarterly', 'one_time_pest'] },
 ];
 
-// Fallback when neither the keyword nor the title names a service.
-const CATEGORY_PRICE_KEYS = {
-  termite: TERMITE,
-  mosquito: MOSQUITO,
-  'lawn-care': LAWN,
-  'tree-shrub': TREE_SHRUB,
-  'pest-control': GENERAL_PEST,
-};
-
 function mappedKeys(frontmatter) {
-  for (const field of [frontmatter.primary_keyword, frontmatter.title]) {
-    const text = String(field || '').toLowerCase();
-    if (!text) continue;
-    const rule = SERVICE_PRICE_KEYS.find(({ pattern }) => pattern.test(text));
-    if (rule) return rule.keys;
-  }
-  return CATEGORY_PRICE_KEYS[String(frontmatter.category || '').trim()] || [];
+  const text = [frontmatter.primary_keyword, frontmatter.title].map((v) => String(v || '')).join(' ').toLowerCase();
+  if (COMMERCIAL.test(text)) return [];
+  return SERVICE_PRICE_KEYS.find(({ pattern }) => pattern.test(text))?.keys || [];
 }
 
 function publishedPriceKeys() {
@@ -90,4 +90,4 @@ function costGuidePriceRange(frontmatter = {}, { knownKeys } = {}) {
   return valid.length ? valid : null;
 }
 
-module.exports = { costGuidePriceRange, SERVICE_PRICE_KEYS, CATEGORY_PRICE_KEYS };
+module.exports = { costGuidePriceRange, SERVICE_PRICE_KEYS };

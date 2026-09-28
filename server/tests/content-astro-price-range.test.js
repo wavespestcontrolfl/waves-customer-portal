@@ -4,54 +4,64 @@
 // publishes, and anything else must fail closed to "no price_range".
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { costGuidePriceRange, SERVICE_PRICE_KEYS, CATEGORY_PRICE_KEYS } = require('../services/content-astro/price-range');
+const { costGuidePriceRange, SERVICE_PRICE_KEYS } = require('../services/content-astro/price-range');
 const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
 
 const cost = (overrides = {}) => ({ post_type: 'cost', category: 'pest-control', title: 'What It Costs', ...overrides });
 
 describe('costGuidePriceRange', () => {
   test('every mapped key is published by the portal pricing feed (a renamed key fails here, not in the hub build)', () => {
-    const published = new Set(computePublicPricingRanges({ refresh: true }).services.map((row) => row.key));
-    const mapped = new Set([
-      ...SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys),
-      ...Object.values(CATEGORY_PRICE_KEYS).flat(),
-    ]);
-    expect([...mapped].filter((key) => !published.has(key))).toEqual([]);
+    // termite_bond publishes only behind its purchase gate; with the gate off
+    // it is dropped at publish time like any other unpublished key.
+    const prior = process.env.GATE_TERMITE_BOND_OPTION;
+    process.env.GATE_TERMITE_BOND_OPTION = 'true';
+    try {
+      const published = new Set(computePublicPricingRanges({ refresh: true }).services.map((row) => row.key));
+      const mapped = new Set(SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys));
+      expect([...mapped].filter((key) => !published.has(key))).toEqual([]);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_TERMITE_BOND_OPTION;
+      else process.env.GATE_TERMITE_BOND_OPTION = prior;
+      computePublicPricingRanges({ refresh: true });
+    }
   });
 
   test.each([
-    ['termite treatment cost', 'termite', ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']],
-    ['rodent control cost', 'pest-control', ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion']],
-    ['bed bug treatment cost', 'pest-control', ['bed_bug_treatment']],
-    ['flea treatment cost', 'pest-control', ['flea_elimination']],
-    ['wasp nest removal cost', 'pest-control', ['wasp_hornet_removal']],
-    ['mosquito control cost', 'mosquito', ['mosquito_program', 'one_time_mosquito']],
-    ['lawn care cost', 'lawn-care', ['lawn_care_program', 'one_time_lawn']],
-    ['pest control cost', 'pest-control', ['general_pest_quarterly', 'one_time_pest']],
-    // An inspection guide prices the inspection, not the treatment.
-    ['wdo inspection cost', 'termite', ['wdo_inspection']],
-    ['termite inspection cost', 'termite', ['wdo_inspection']],
-    ['rodent inspection cost', 'pest-control', ['rodent_inspection']],
-  ])('a cost guide for "%s" gets its service keys from the live feed', (primary_keyword, category, expected) => {
-    expect(costGuidePriceRange(cost({ primary_keyword, category }))).toEqual(expected);
+    ['termite treatment cost', ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']],
+    ['how much do rats cost to remove', ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion']],
+    ['bed bug treatment cost', ['bed_bug_treatment']],
+    ['flea treatment cost', ['flea_elimination']],
+    ['wasp nest removal cost', ['wasp_hornet_removal']],
+    ['mosquito control cost', ['mosquito_program', 'one_time_mosquito']],
+    ['lawn care cost', ['lawn_care_program', 'one_time_lawn']],
+    ['pest control cost', ['general_pest_quarterly', 'one_time_pest']],
+    // A product the feed prices on its own row wins over its family's plans.
+    ['wdo inspection cost', ['wdo_inspection']],
+    ['rodent inspection cost', ['rodent_inspection']],
+    ['german cockroach treatment cost', ['german_roach_cleanout', 'german_roach_initial']],
+    ['chinch bug treatment cost', ['lawn_pest_knockdown']],
+    ['lawn dethatching cost', ['dethatching']],
+  ])('a cost guide for "%s" gets that service\'s keys from the live feed', (primary_keyword, expected) => {
+    expect(costGuidePriceRange(cost({ primary_keyword }))).toEqual(expected);
   });
 
-  test('the post keyword decides before its category, and the category is the fallback', () => {
-    // A rodent cost guide filed under pest-control is a rodent guide.
-    expect(costGuidePriceRange(cost({ primary_keyword: 'how much do rats cost to remove', category: 'pest-control' })))
+  test('the title names the service when the keyword does not; the category alone never does', () => {
+    expect(costGuidePriceRange(cost({ primary_keyword: 'cost guide venice', title: 'What Rodent Control Costs in Venice' })))
       .toEqual(['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion']);
-    // No service named in keyword or title → the category's keys.
+    // Named no service → no card, even filed under a priced category.
     expect(costGuidePriceRange(cost({ primary_keyword: 'price guide venice', title: 'Price Guide for Venice Homes', category: 'lawn-care' })))
-      .toEqual(['lawn_care_program', 'one_time_lawn']);
+      .toBeNull();
+  });
+
+  test('no card where the feed has no honest row: commercial work, standalone termite inspections', () => {
+    expect(costGuidePriceRange(cost({ primary_keyword: 'commercial pest control cost' }))).toBeNull();
+    expect(costGuidePriceRange(cost({ primary_keyword: 'restaurant pest control cost' }))).toBeNull();
+    expect(costGuidePriceRange(cost({ primary_keyword: 'termite inspection cost', category: 'termite' }))).toBeNull();
   });
 
   test('a non-cost post gets no price_range, whatever it is about', () => {
     expect(costGuidePriceRange({ post_type: 'diagnostic', category: 'termite', primary_keyword: 'termite treatment cost' })).toBeNull();
     expect(costGuidePriceRange({ category: 'termite', primary_keyword: 'termite treatment cost' })).toBeNull();
-  });
-
-  test('a cost guide with no mapped service gets no price_range', () => {
-    expect(costGuidePriceRange(cost({ category: 'seasonal', primary_keyword: 'price guide venice', title: 'Price Guide' }))).toBeNull();
   });
 
   test('fails closed: a mapped key the feed does not publish is dropped, and none left means no price_range', () => {
