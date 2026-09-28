@@ -559,6 +559,28 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
   });
 
+  test('getLiveRelatedPaths sees every host when two live rows share a pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Shared Path Post',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const database = fakeDb({ registryRows: rows });
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+    }
+  });
+
   test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
     // The selected hub post has since moved to a spoke: its path is still
     // live in the fleet, but not on the hub the draft publishes to.

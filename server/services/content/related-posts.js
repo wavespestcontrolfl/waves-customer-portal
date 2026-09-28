@@ -446,10 +446,17 @@ async function loadVerifiedCandidates(database) {
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
       && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
   const registryCandidatesByPath = new Map();
+  // Every qualifying registry row's domain+path keys, BEFORE rows that share
+  // a pathname on different fleet hosts collapse into one candidate by path
+  // (the publish-time recheck must see each host).
+  const qualifyingRegistryKeys = [];
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
-      if (candidate) registryCandidatesByPath.set(candidate.path, candidate);
+      if (candidate) {
+        registryCandidatesByPath.set(candidate.path, candidate);
+        qualifyingRegistryKeys.push(...candidateLiveKeys(candidate));
+      }
     } catch { /* malformed registry row: exclude it */ }
   }
   // A slug can be reused across fleet domains over time, so two different
@@ -497,11 +504,13 @@ async function loadVerifiedCandidates(database) {
   for (const candidate of registryCandidatesByPath.values()) {
     if (!autonomousPaths.has(candidate.path)) candidates.push(candidate);
   }
-  return candidates;
+  const liveKeys = new Set([...candidates.flatMap(candidateLiveKeys), ...qualifyingRegistryKeys]);
+  return { candidates, liveKeys };
 }
 
 async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
-  return rankRelatedPosts(target, await loadVerifiedCandidates(database), { limit });
+  const { candidates } = await loadVerifiedCandidates(database);
+  return rankRelatedPosts(target, candidates, { limit });
 }
 
 // Publish-time recheck: of the frozen related paths, the ones still verified
@@ -512,7 +521,7 @@ async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {
   const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
   if (!wanted.size) return new Set();
   const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
-  const liveKeys = new Set((await loadVerifiedCandidates(database)).flatMap(candidateLiveKeys));
+  const { liveKeys } = await loadVerifiedCandidates(database);
   return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
