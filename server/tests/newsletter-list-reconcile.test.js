@@ -16,10 +16,12 @@ const { CUSTOMER_STAGES } = require('../services/customer-stages');
 const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
 
 const PRIORITY = { active: 0, unsubscribed: 1, pending: 2, inactive: 3, waitlist: 3 };
-const isCandidate = (c) => !c.deleted_at && c.active === true && !c.churned_at
-  && (c.pipeline_stage === 'active_customer' || c.pipeline_stage === 'won' || c.pipeline_stage == null)
-  && !!(c.email && c.email.trim());
+// Canonical whereLiveCustomer/CUSTOMER_STAGES rule — the SAME "live
+// customer" check used everywhere in this file now (candidate scope, zone
+// fill, orphan link): active, not deleted, pipeline_stage IN CUSTOMER_STAGES.
+// A NULL pipeline_stage does NOT match (owner ruling 2026-09-28).
 const isLive = (c) => !c.deleted_at && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
+const isCandidate = (c) => isLive(c) && !!(c.email && c.email.trim());
 
 // Fake knex-like `conn`: table-call handlers for the plain reads/writes,
 // `.raw(sql, bindings)` dispatched on SQL shape for everything else.
@@ -120,13 +122,26 @@ function makeConn(state) {
 
 const cust = (o) => ({
   id: 'c1', email: 'a@example.com', first_name: 'F', last_name: 'L', city: 'Venice',
-  deleted_at: null, active: true, churned_at: null, pipeline_stage: 'active_customer', ...o,
+  deleted_at: null, active: true, pipeline_stage: 'active_customer', ...o,
 });
 
 beforeEach(() => {
   jest.clearAllMocks();
   activeSuppressionsFor.mockResolvedValue([]);
   linkToCustomer.mockResolvedValue();
+});
+
+// Candidate scope now reuses the canonical whereLiveCustomer/CUSTOMER_STAGES
+// rule verbatim (owner ruling 2026-09-28): active_customer/won/at_risk are
+// candidates, a NULL pipeline_stage is NOT (it used to count as
+// active_customer under this build's earlier, narrower definition).
+test.each([
+  ['active_customer', true], ['won', true], ['at_risk', true],
+  [null, false], ['new_lead', false], ['churned', false],
+])('pipeline_stage %s -> candidate: %s', async (stage, expected) => {
+  const state = { customers: [cust({ pipeline_stage: stage })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
+  const result = await reconcileCustomers({ conn: makeConn(state) });
+  expect(result.candidates).toBe(expected ? 1 : 0);
 });
 
 // Exclusion priority order: one case per reason, each ALSO carrying a

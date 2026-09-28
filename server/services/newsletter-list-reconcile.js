@@ -2,9 +2,10 @@
  * Newsletter list reconciliation — filtered customer import with a dry run.
  * Supersedes the old POST /subscribers/import-customers (every live customer
  * with an email, leads included, ignoring marketing consent/suppressions).
- * CANDIDATE: a live customer (deleted_at IS NULL, active, not churned,
- * pipeline_stage active_customer/won — NULL counts as active_customer) with
- * a non-empty email and no ACTIVE subscriber row (by customer_id or
+ * CANDIDATE: a live customer — the canonical whereLiveCustomer/CUSTOMER_STAGES
+ * rule from customer-stages.js (active, not deleted, pipeline_stage IN
+ * active_customer/won/at_risk; a NULL pipeline_stage is NOT a candidate) —
+ * with a non-empty email and no ACTIVE subscriber row (by customer_id or
  * lower(email)). Every exclusion is checked in ONE fixed priority order —
  * an existing subscriber-state row always outranks a preference/suppression
  * check, so a both-unsubscribed-AND-marketing-off customer counts once, under the higher reason:
@@ -41,13 +42,13 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 
 // The ONE canonical candidate-stage predicate, named and reused verbatim by
 // every query below that needs it, so they can never drift out of sync with
-// each other. Narrower than the canonical whereLiveCustomer
-// (customer-stages.js): this only ever ADDS candidates, so `at_risk` is left
-// out, and a NULL pipeline_stage (pre backfill) counts as active_customer
-// rather than being dropped the way whereLiveCustomer's whereIn would
-// silently drop it — a deliberate, documented divergence from
-// whereLiveCustomer, not an accidental duplicate of it.
-const candidateStageSql = (alias) => `(${alias}.pipeline_stage IN ('active_customer', 'won') OR ${alias}.pipeline_stage IS NULL)`;
+// each other. Derived directly from the canonical whereLiveCustomer /
+// CUSTOMER_STAGES rule (customer-stages.js) — no hand-rolled stage list, no
+// NULL-pipeline-stage special case: the SAME "is this a real, live
+// customer" definition the rest of the app uses (owner ruling 2026-09-28 —
+// the build's earlier narrower definition, active_customer/won only with
+// NULL counted in, was a build choice, not a ruling).
+const candidateStageSql = (alias) => `${alias}.pipeline_stage = ANY(?)`;
 
 async function fetchCandidateRows(conn) {
   const result = await conn.raw(`
@@ -55,7 +56,6 @@ async function fetchCandidateRows(conn) {
       FROM customers c
      WHERE c.deleted_at IS NULL
        AND c.active = true
-       AND c.churned_at IS NULL
        AND ${candidateStageSql('c')}
        AND c.email IS NOT NULL
        AND TRIM(c.email) <> ''
@@ -64,7 +64,7 @@ async function fetchCandidateRows(conn) {
               WHERE (ns.customer_id = c.id OR LOWER(ns.email) = LOWER(TRIM(c.email)))
                 AND ns.status = 'active'
            )
-  `);
+  `, [CUSTOMER_STAGES]);
   return result.rows || [];
 }
 
@@ -79,11 +79,10 @@ async function fetchLiveCandidateNow(conn, customerId) {
       WHERE c.id = ?
         AND c.deleted_at IS NULL
         AND c.active = true
-        AND c.churned_at IS NULL
         AND ${candidateStageSql('c')}
         AND c.email IS NOT NULL
         AND TRIM(c.email) <> ''`,
-    [customerId],
+    [customerId, CUSTOMER_STAGES],
   );
   return result.rows?.[0] || null;
 }

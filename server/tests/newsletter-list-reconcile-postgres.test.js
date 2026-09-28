@@ -88,7 +88,6 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       active: true,
       pipeline_stage: 'active_customer',
       deleted_at: null,
-      churned_at: null,
       ...overrides,
     };
   }
@@ -161,6 +160,21 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       await db('customers').where({ id: cust.id }).del();
     }
   });
+
+  test.each([
+    ['at_risk', true], // canonical CUSTOMER_STAGES member — a candidate
+    [null, false], // NULL pipeline_stage is no longer a candidate (owner ruling 2026-09-28)
+    ['new_lead', false],
+  ])('pipeline_stage %s -> candidate: %s (real Postgres, canonical whereLiveCustomer/CUSTOMER_STAGES)', (stage, expected) => rollbackTest(async (trx) => {
+    const cust = synthCustomer({ pipeline_stage: stage });
+    await trx('customers').insert(cust);
+    await trx('notification_prefs').insert({ customer_id: cust.id, marketing_offers: true, email_enabled: true });
+    const result = await reconcileCustomers({ conn: trx });
+    // Virginia (the seeded demo customer) already has an active subscriber
+    // row from beforeAll, so the only possible candidate in this rolled-back
+    // transaction is this test's own synthetic customer.
+    expect(result.candidates).toBe(expected ? 1 : 0);
+  }));
 
   test('an imported customer is not enrolled in any automation and no email is sent', () => rollbackTest(async (trx) => {
     const cust = await seedLiveConsentingCustomer(trx);
