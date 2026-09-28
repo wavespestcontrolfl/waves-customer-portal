@@ -132,4 +132,58 @@ async function confirmIrrigationFields(conn, customerId, fields) {
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
-module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };
+// JSON (jsonb array) sizing fields need array-aware comparison; everything
+// else in the sizing + rain-sensor set is a scalar (number or boolean).
+const JSON_ARRAY_COMPARE_FIELDS = ['watering_days', 'irrigation_system_type'];
+
+function normalizeForCompare(field, value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (JSON_ARRAY_COMPARE_FIELDS.includes(field)) {
+    let parsed = value;
+    if (typeof value === 'string') {
+      try { parsed = JSON.parse(value); } catch { parsed = value; }
+    }
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    return JSON.stringify(arr);
+  }
+  if (typeof value === 'boolean') return value ? '1' : '0';
+  const num = Number(value);
+  if (String(value).trim() !== '' && Number.isFinite(num)) return String(num);
+  return String(value);
+}
+
+/**
+ * Which of the sizing fields (+ rain_sensor) present in `updates` actually
+ * CHANGE the row's current value — for a non-customer writer (the admin
+ * route) to know which entries to strip from irrigation_confirmed_fields.
+ * An admin overwrite is not the CUSTOMER re-affirming the new figure is
+ * right for the current home, so a value that genuinely changes goes back
+ * to unconfirmed rather than silently inheriting a stale confirmation
+ * stamped for whatever value used to be there (codex P2 on the admin
+ * property-preferences route).
+ */
+function changedSizingFields(current = {}, updates = {}) {
+  const candidates = [...IRRIGATION_SIZING_FIELDS, RAIN_SENSOR_CONFIRMED_FIELD];
+  return candidates.filter((f) => Object.prototype.hasOwnProperty.call(updates, f)
+    && normalizeForCompare(f, current ? current[f] : null) !== normalizeForCompare(f, updates[f]));
+}
+
+/**
+ * Knex raw expression removing `fields` from the row's CURRENT
+ * irrigation_confirmed_fields jsonb array — the inverse of the union
+ * confirmIrrigationFields performs. Meant to be folded into the SAME
+ * `.update()` call as the rest of a writer's own changes rather than a
+ * separate statement/lock — the caller already holds the
+ * property-preferences advisory lock for its own write. Returns null when
+ * there is nothing to remove (caller should omit the column entirely).
+ */
+function unconfirmedFieldsRaw(knexLike, fields) {
+  const list = (Array.isArray(fields) ? fields : []).filter((f) => typeof f === 'string' && f);
+  if (!list.length) return null;
+  return knexLike.raw(
+    "(SELECT COALESCE(jsonb_agg(v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(irrigation_confirmed_fields, '[]'::jsonb)) AS t(v) WHERE v <> ALL(?::text[]))",
+    [list],
+  );
+}
+
+module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, changedSizingFields, unconfirmedFieldsRaw, parseConfirmedFields: parseConfirmed };

@@ -491,7 +491,33 @@ async function collectionsChannelPermitted(customerId, invoiceId, channel, now, 
 }
 
 const LatePaymentService = {
+  // Exposed so invoice-followups.js's orphan-adoption sweep can check for a
+  // pending (delivered-SMS, failed-email) legacy retry episode before
+  // arming a fresh sequence over it (Codex pre-push P0 B) — the SAME
+  // durable record and resolution rule this file's own retry logic reads,
+  // never a second implementation. Lazy-required there (this file already
+  // lazy-requires invoice-followups.js above to break the same cycle).
+  recoverPendingEmailEpisode,
   async checkAndNotify(daysOverdue = 7) {
+    // GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'):
+    // dunning unification PR 3 — once every overdue invoice carries a
+    // follow-up sequence row (the Day 90 ladder, plus the orphan-adoption
+    // sweep in invoice-followups.js), this account-level checker is
+    // redundant with, and can double-nag alongside, the per-invoice ladder.
+    // On, retire before any query — nothing else in this file changes. Off
+    // (unset or any other spelling): byte-identical to before this gate.
+    // Retirement needs the Day 90 ladder live: with the ladder off the
+    // follow-up cadence ends at Day 30 and this checker is the only sender
+    // of the 60- and 90-day reminders.
+    if (process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true') {
+      if (process.env.GATE_DUNNING_LADDER_90 === 'true') {
+        logger.info('[late-payment-checker] retired: GATE_LATE_PAYMENT_CHECKER_OFF, the invoice follow-up ladder owns overdue invoices');
+        return {
+          notified: 0, emailedFallback: 0, skipped: 0, retired: true,
+        };
+      }
+      logger.warn('[late-payment-checker] GATE_LATE_PAYMENT_CHECKER_OFF ignored: GATE_DUNNING_LADDER_90 is not live, so the ladder cannot own the 60- and 90-day reminders yet');
+    }
     const now = new Date();
     const cutoff = new Date(now.getTime() - daysOverdue * 86400000);
 

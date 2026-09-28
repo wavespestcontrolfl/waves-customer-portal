@@ -7139,6 +7139,164 @@ function assertPriceMatchesPricing({ expectedPrice, finalPrice }) {
   }
 }
 
+// Phone-agent double-booking guard (owner ruling 2026-09-28).
+//
+// The AI phone agent books visits straight from calls — inbound always, and
+// outbound too once GATE_CALL_OUTBOUND_BOOKING is on. Nothing stopped a
+// staff member from then booking the SAME visit again by hand on this
+// screen: the agent's booking and the office's hand-booking never checked
+// each other. The reverse order (office books first, the agent's call tries
+// to book the same visit) is already covered at call-processing time by
+// call-recording-processor's findAttachableCallAppointment, which attaches
+// to or holds the existing visit instead of creating a duplicate. This is
+// the uncovered direction — the agent books first, so it's the office's
+// manual create that needs the check.
+//
+// Same shape as the duplicate-series guard above: a fast preflight before
+// any pricing/tech/insert work, fail-open on a query error (protective, not
+// load-bearing), and an explicit, logged override
+// (allowCallBookingDuplicate: true) for the rare intentional second visit.
+function callBookingConflictBody(existingVisits) {
+  return {
+    code: 'duplicate_call_booking',
+    error: 'The phone agent already booked this visit for this customer.',
+    existingVisits: existingVisits.map((v) => ({
+      id: v.id,
+      serviceType: v.service_type,
+      // The line that matched — the visit's own service, or the add-on on
+      // it that shares a line with the request (codex #5183 r3 P2).
+      matchedService: v.matched_service || v.service_type,
+      scheduledDate: v.scheduled_date_label,
+      windowStart: v.window_start_label || null,
+      status: v.status,
+    })),
+  };
+}
+
+// Every service line this create books — the primary and each add-on,
+// which persist on the same visit (codex #5183 r1 P1): catalog ids, every
+// normalized name, and the names of lines that carry NO id (legacy / ad-hoc
+// lines, matched by name alone).
+function requestedServiceLines(serviceType, serviceId, serviceAddons) {
+  const lines = [{ id: serviceId, name: serviceType }, ...(Array.isArray(serviceAddons)
+    ? serviceAddons.map((a) => ({ id: a?.serviceId, name: a?.name || a?.serviceName }))
+    : [])];
+  const norm = (n) => String(n || '').trim().toLowerCase();
+  const uniq = (xs) => [...new Set(xs.filter(Boolean))];
+  return {
+    ids: uniq(lines.map((l) => (l.id ? String(l.id) : null))),
+    names: uniq(lines.map((l) => norm(l.name))),
+    idlessNames: uniq(lines.filter((l) => !l.id).map((l) => norm(l.name))),
+  };
+}
+
+// One side of the service-line match (a visit's own service or one add-on):
+// the same catalog id — a renamed service keeps its id (codex #5183 r2 P1) —
+// or, where either side has no id, the same normalized name.
+function sameServiceLine(qb, idCol, nameCol, lines) {
+  if (lines.ids.length) qb.orWhereRaw(`${idCol}::text = ANY(?)`, [lines.ids]);
+  if (lines.names.length) qb.orWhereRaw(`${idCol} IS NULL AND LOWER(TRIM(${nameCol})) = ANY(?)`, [lines.names]);
+  if (lines.idlessNames.length) qb.orWhereRaw(`LOWER(TRIM(${nameCol})) = ANY(?)`, [lines.idlessNames]);
+}
+
+// sameServiceLine's rule for one stored line, in JS: which line of a
+// matched visit (its own service or an add-on) the request collided with.
+function lineMatches(id, name, lines) {
+  const norm = String(name || '').trim().toLowerCase();
+  if (id && lines.ids.includes(String(id))) return true;
+  return (!id && lines.names.includes(norm)) || lines.idlessNames.includes(norm);
+}
+
+// Live, call-booked visits for this customer within ±1 day of ANY of the
+// dates the create will book — the anchor, and for a series every generated
+// occurrence and booster (codex #5183 r3 P1) — that share a service line
+// with the request by their own service or one of their add-ons. Parent
+// visits, plus the follow-up visit a call promised (a phone_call child of
+// the call's booking — ensureCallFollowUpVisit; codex #5183 r3 P1). `conn`
+// is the booking transaction for the locked re-check.
+async function findExistingCallBookings({ conn = db, customerId, lines, dates, propertyId }) {
+  const days = [...new Set((dates || []).filter(Boolean).map((d) => String(d).slice(0, 10)))];
+  if ((!lines.names.length && !lines.ids.length) || !days.length) return [];
+  const query = conn('scheduled_services as ss')
+    .where('ss.customer_id', customerId)
+    .where((qb) => qb.whereNull('ss.parent_service_id').orWhere('ss.booking_source', 'phone_call'))
+    // Live visits only (scheduled-service-statuses.js): a completed, skipped
+    // or no-show call booking is not a visit the office could double-book.
+    .whereIn('ss.status', require('../services/scheduled-service-statuses').NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .where((qb) => qb.where('ss.booking_source', 'phone_call').orWhereNotNull('ss.source_call_log_id'))
+    .where((qb) => {
+      sameServiceLine(qb, 'ss.service_id', 'ss.service_type', lines);
+      qb.orWhereExists(function sharedAddonLine() {
+        this.select(conn.raw('1')).from('scheduled_service_addons as a')
+          .whereRaw('a.scheduled_service_id = ss.id')
+          .where((aq) => sameServiceLine(aq, 'a.service_id', 'a.service_name', lines));
+      });
+    })
+    .whereRaw('EXISTS (SELECT 1 FROM unnest(?::date[]) AS d(day) WHERE ss.scheduled_date BETWEEN d.day - 1 AND d.day + 1)', [days]);
+  if (propertyId) {
+    query.where((qb) => qb.where('ss.property_id', propertyId).orWhereNull('ss.property_id'));
+  }
+  const rows = await query
+    .select(
+      'ss.id', 'ss.status', 'ss.service_type', 'ss.service_id',
+      conn.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_date_label"),
+      conn.raw("to_char(ss.window_start, 'HH24:MI') as window_start_label"),
+    )
+    .orderBy('ss.scheduled_date', 'asc')
+    .orderBy('ss.window_start', 'asc');
+  // A visit that matched only through an add-on reports that add-on's line.
+  const viaAddon = rows.filter((r) => !lineMatches(r.service_id, r.service_type, lines)).map((r) => r.id);
+  const addons = viaAddon.length
+    ? await conn('scheduled_service_addons').whereIn('scheduled_service_id', viaAddon).select('scheduled_service_id', 'service_id', 'service_name')
+    : [];
+  return rows.map((r) => ({
+    ...r,
+    matched_service: viaAddon.includes(r.id)
+      ? addons.find((a) => a.scheduled_service_id === r.id && lineMatches(a.service_id, a.service_name, lines))?.service_name || null
+      : null,
+  }));
+}
+
+// The property the guard scopes to: the operator's chosen address, else the
+// linked estimate's (a booking from a quote for another saved property is
+// not a duplicate of this one — codex #5183 r2 P2), else none.
+async function callBookingGuardPropertyId(conn, { bookingProperty, linkedEstimateId }) {
+  if (bookingProperty?.property_id) return bookingProperty.property_id;
+  if (!linkedEstimateId) return null;
+  const est = await conn('estimates').where({ id: linkedEstimateId }).first('property_id');
+  return est?.property_id || null;
+}
+
+// The guard's verdict for one create: the 409 body, or null to proceed (no
+// match, an override that covers every match, or — preflight only — a
+// failed lookup, which fails open). The override covers only the visits the
+// operator reviewed: a match that arrived after the box was shown is a new
+// conflict (codex #5183 r2 P2).
+async function callBookingDuplicateConflict({ conn = db, failOpen = true, override, reviewedIds, customerId, lines, dates, bookingProperty, linkedEstimateId }) {
+  try {
+    const propertyId = await callBookingGuardPropertyId(conn, { bookingProperty, linkedEstimateId });
+    const existing = await findExistingCallBookings({ conn, customerId, lines, dates, propertyId });
+    if (!existing.length) return null;
+    const reviewed = new Set(override === true && Array.isArray(reviewedIds) ? reviewedIds.map(String) : []);
+    if (!existing.every((v) => reviewed.has(String(v.id)))) return callBookingConflictBody(existing);
+    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again alongside reviewed phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
+    return null;
+  } catch (guardErr) {
+    if (!failOpen) throw guardErr;
+    logger.warn(`[schedule] call-booking duplicate guard failed (booking proceeds): ${guardErr.message}`);
+    return null;
+  }
+}
+
+// Throws the conflict for the route's catch to answer with its 409 — the
+// preflight (fails open on a lookup error) and the locked re-check inside the
+// booking transaction (passes the trx and `failOpen: false`: an error there
+// aborts the create, and a conflict rolls it back) share this one exit.
+async function assertNoCallBookingConflict(guard) {
+  const conflict = await callBookingDuplicateConflict(guard);
+  if (conflict) throw Object.assign(new Error('The phone agent already booked this visit for this customer.'), { callBookingConflict: conflict });
+}
+
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const {
@@ -7277,6 +7435,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
+    // Phone-agent double-booking guard. A fast preflight on the anchor date;
+    // the locked re-check inside the booking transaction (right after the
+    // customer lock) is the race-safe backstop and covers every date a
+    // series books. The
+    // override is "Book another anyway" for exactly the visits it listed.
+    const callBookingGuard = {
+      override: req.body.allowCallBookingDuplicate,
+      reviewedIds: req.body.callBookingReviewedIds,
+      customerId,
+      lines: requestedServiceLines(serviceType, serviceId, serviceAddons),
+      dates: [scheduledDate],
+      bookingProperty,
+      linkedEstimateId,
+    };
+    await assertNoCallBookingConflict(callBookingGuard);
     // Optional: accept the linked open quote as annual prepay on book (creates
     // the pending prepay invoice + renewal term in the same step as the
     // booking). Only 'prepay_annual' is honored; anything else falls through
@@ -8021,6 +8194,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // Phone-agent double-booking backstop: the call pipeline inserts its
+      // booking under this same customer lock, so re-checking here — not
+      // only in the preflight above, before the slow pricing reads — sees
+      // any booking it committed in between (codex #5183 r1 P1). An error
+      // here aborts the create rather than failing open.
+      await assertNoCallBookingConflict({
+        ...callBookingGuard, conn: trx, failOpen: false, dates: [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates],
+      });
       // Post-lock revalidation (r23): the pre-transaction snapshot loaded
       // the customer BEFORE this acquire — if a merge-undo held the lock
       // and cleared inherited address/service-contact fields while we
@@ -9219,6 +9400,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
     if (Array.isArray(err.duplicateRecurringSeries)) {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
+    // The phone-agent double-booking guard (preflight or locked re-check).
+    if (err.callBookingConflict) return res.status(409).json(err.callBookingConflict);
     if (err.isOperational && err.status) {
       return res.status(err.status).json({ error: err.message, code: err.code, ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
     }
