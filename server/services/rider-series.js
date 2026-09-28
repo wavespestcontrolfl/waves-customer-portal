@@ -53,6 +53,8 @@ const { transitionJobStatus } = require('./job-status');
 const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
 const { clearOfBlackout } = require('./scheduling/blackout-nudge');
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
+const { commitPromiseOf } = require('../utils/trx-commit-promise');
 
 const MIN_GAP_DAYS = 77;
 const TARGET_GAP_DAYS = 84;
@@ -545,9 +547,19 @@ async function buildRiderSyncPlan(trx, cols, riderParent, hostParent, riderParen
   // anchor is excluded from the movable set". is_recurring === true (P1
   // boosters) — a booster is never moved or cancelled by this sync; it
   // stays wherever the series' own booster machinery placed it.
+  // Movable set is an explicit ALLOWLIST (P1 fix #5, PR #5268 round 3):
+  // MOVABLE_ROW_STATUSES, the SAME set the write guards below already
+  // require. The previous exclusion-based check (JOIN_INELIGIBLE_STATUSES
+  // + a redundant 'completed' check) let a legacy row with a NULL status
+  // through as movable — MOVE/REFRESH's own write guard then rejected it
+  // (pending/confirmed only) while the cancel loop's TERMINAL_ROW_STATUSES
+  // check accepted a null fromStatus and could cancel it. A null-status
+  // future base row is a live row this codebase already treats as a real
+  // visit for other purposes (the recurring-plan counters) — never moved
+  // or cancelled here, but still eligible to anchor like any other live
+  // immovable row above.
   const movableRows = riderRows.filter((r) => (
-    !JOIN_INELIGIBLE_STATUSES.includes(r.status)
-    && r.status !== 'completed'
+    MOVABLE_ROW_STATUSES.includes(r.status)
     && !isImmovable(r)
     && dateOnly(r.scheduled_date) >= todayStr
     && dateOnly(r.scheduled_date) > lastRiderDate
@@ -709,9 +721,30 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
   // stop never had. Returns { unplaceable: true } (never writes) or
   // { technicianId, windowStart, windowEnd }.
   async function resolveHostJoinFields(hostRow, date) {
-    const technicianId = await assignableRecurringTemplateTechnicianId(
-      trx, { ...template, technician_id: hostRow.technician_id }, date,
-    );
+    // Host tech semantics (P1 fix #4, PR #5268 round 3): a pinned rider
+    // (recurring_technician_override true) keeps its OWN template tech,
+    // validated exactly as before — it never joins the host's tech. An
+    // unpinned rider joins the host stop instead. Spreading only
+    // `technician_id: hostRow.technician_id` onto `template` is not enough:
+    // recurringTemplateTechnicianId (admin-schedule.js) prefers
+    // `recurring_technician_id` over `technician_id` regardless of the
+    // override flag, so the rider's OWN recurring_technician_id would still
+    // win and the host tech would be silently ignored (or a host with no
+    // tech would leave the rider on its old assignment instead of going
+    // unassigned). Setting recurring_technician_id to the SAME host tech,
+    // with override forced false, closes that fallback so the resolved id
+    // can only be the host's. The underlying eligibility check (active,
+    // field-dispatchable, not absent that date) still runs unchanged, and
+    // an ineligible or unassigned host tech nulls the rider's own
+    // assignment exactly like any other writer's.
+    const pinned = !!template.recurring_technician_override;
+    const preferredTechParent = pinned ? template : {
+      ...template,
+      technician_id: hostRow.technician_id,
+      recurring_technician_id: hostRow.technician_id,
+      recurring_technician_override: false,
+    };
+    const technicianId = await assignableRecurringTemplateTechnicianId(trx, preferredTechParent, date);
     const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, hostRow.estimated_duration_minutes, hostRow.window_end);
     if (normalizedWindow?.unplaceable) return { unplaceable: true };
     return {
@@ -721,7 +754,42 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
     };
   }
 
+  // Combines the two "this row's dispatch/route state must never survive a
+  // rider MOVE or REFRESH unexamined" rules every other series move path
+  // already applies (P1 fix #1 + P2 fix #2, PR #5268 round 3) — building
+  // ONE helper both call sites share means they can't independently drift
+  // the way the hand-patched updates below already had:
+  //   - recurringDispatchDuePatch (scheduling/recurring-dispatch-due.js):
+  //     a moved/refreshed row keeps a STALE recurring_dispatch_due_date
+  //     otherwise, and auto-dispatch (auto-dispatch/candidate-slots.js)
+  //     then constrains placement to +/-3 days around that stale date. The
+  //     SAME helper rebooker.js:1354/3095, admin-schedule.js:10060 and
+  //     annual-prepay-renewals.js:1754 apply to their own move/refresh
+  //     writes.
+  //   - route_order: null on a DATE or TECHNICIAN change, never on a
+  //     window-only refresh — the same rule rebooker.js's own single-move
+  //     and series-sibling paths apply (rebooker.js:2824/2891/3099): a
+  //     day or tech change invalidates the stop's route sequence (every
+  //     consumer sorts COALESCE(route_order, 999), so a stale number
+  //     interleaves it into the OLD day/tech's order instead of appending
+  //     it); a same-day, same-tech window drift keeps its sequence.
+  // `row` is the PRE-write DB row (recurringDispatchDuePatch reads its
+  // current scheduled_date/window_start/recurring_dispatch_due_date;
+  // route_order compares against its current scheduled_date/technician_id).
+  function riderMovePatch(row, changes) {
+    const dateChanged = changes.scheduled_date !== undefined
+      && dateOnly(changes.scheduled_date) !== dateOnly(row?.scheduled_date);
+    const techChanged = changes.technician_id !== undefined
+      && String(changes.technician_id || '') !== String(row?.technician_id || '');
+    return {
+      ...changes,
+      ...recurringDispatchDuePatch(row || {}, changes),
+      ...((dateChanged || techChanged) ? { route_order: null } : {}),
+    };
+  }
+
   for (const { id, to } of move) {
+    const row = riderRows.find((r) => r.id === id) || template;
     const hostRow = hostByDate.get(to);
     const updates = { scheduled_date: to, updated_at: new Date() };
     if (hostRow) {
@@ -743,10 +811,9 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       // insert/move probes. On a clash, skip this ONE pairing: log and move
       // on, same posture the cancel loop below already takes on a race —
       // the row is left where it is and a later sync re-diffs and retries.
-      const movingRow = riderRows.find((r) => r.id === id) || template;
-      const standaloneTechId = await assignableRecurringTemplateTechnicianId(trx, movingRow, to);
-      if (standaloneTechId !== movingRow.technician_id) updates.technician_id = standaloneTechId;
-      const clashProbe = 'technician_id' in updates ? { ...movingRow, technician_id: updates.technician_id } : movingRow;
+      const standaloneTechId = await assignableRecurringTemplateTechnicianId(trx, row, to);
+      if (standaloneTechId !== row.technician_id) updates.technician_id = standaloneTechId;
+      const clashProbe = 'technician_id' in updates ? { ...row, technician_id: updates.technician_id } : row;
       if (await seriesCandidateDateClashes(trx, clashProbe, to)) {
         logger.warn(`[rider-series] parent=${riderParentId} standalone move of row ${id} to ${to} clashes with an existing visit — skipped this sync, retried next pass`);
         continue;
@@ -762,7 +829,7 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       .where({ id })
       .whereIn('status', MOVABLE_ROW_STATUSES)
       .whereNull('visit_id')
-      .update(updates);
+      .update(riderMovePatch(row, updates));
     if (!updated) {
       logger.warn(`[rider-series] parent=${riderParentId} row ${id} changed underneath this sync (status/visit_id) — move to ${to} skipped, retried next pass`);
       continue;
@@ -778,16 +845,17 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
       logger.warn(`[rider-series] parent=${riderParentId} refresh of row ${id} onto host date ${date} has an unplaceable window after normalization — skipped this sync, retried next pass`);
       continue;
     }
+    const row = riderRows.find((r) => r.id === id) || {};
     const updated = await trx('scheduled_services')
       .where({ id })
       .whereIn('status', MOVABLE_ROW_STATUSES)
       .whereNull('visit_id')
-      .update({
+      .update(riderMovePatch(row, {
         window_start: joined.windowStart,
         window_end: joined.windowEnd,
         technician_id: joined.technicianId,
         updated_at: new Date(),
-      });
+      }));
     if (!updated) {
       logger.warn(`[rider-series] parent=${riderParentId} row ${id} changed underneath this sync (status/visit_id) — refresh onto ${date} skipped, retried next pass`);
       continue;
@@ -853,6 +921,11 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
     }
   }
 
+  // Rows this call's own transitionJobStatus actually flipped to cancelled
+  // (never a raced/skipped id) — the caller runs the cancellation
+  // follow-through (P1 fix #3) against exactly this list, once this
+  // transaction has committed.
+  const cancelledIds = [];
   for (const { id } of cancelRows) {
     const fresh = await trx('scheduled_services').where({ id }).first('status');
     if (!fresh || TERMINAL_ROW_STATUSES.includes(fresh.status)) continue;
@@ -867,12 +940,13 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
         notifyCustomer: 'caller_suppress',
         suppressTechNotice: true,
       });
+      cancelledIds.push(id);
     } catch (err) {
       logger.warn(`[rider-series] cancel of surplus rider row ${id} skipped (race or guard mismatch): ${err.message}`);
     }
   }
 
-  return insertedRows;
+  return { insertedRows, cancelledIds };
 }
 
 /**
@@ -885,7 +959,12 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
  * (scheduled_services_sync_reminder) — the exact same mechanism every other
  * seeder-built or silently-moved row already relies on — never a fresh
  * confirmation text, and cancels go through transitionJobStatus with
- * notifyCustomer: 'caller_suppress'.
+ * notifyCustomer: 'caller_suppress'. A cancel also settles what the status
+ * flip alone never does — the tracker transition and card-fee/invoice
+ * money — through the SAME post-commit follow-through every other cancel
+ * surface shares (runVisitCancellationFollowThrough); still no customer
+ * message (see this function's own cancellation-follow-through comment
+ * below).
  *
  * @param {object} conn - a knex connection or an open transaction.
  * @param {string} riderParentId
@@ -894,7 +973,11 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
  *   convert_ongoing reviving a lapsed rider); every other gate still
  *   applies. See riderLivenessSkipReason's own comment.
  * @returns {Promise<{skipped?: string, keep: Array, move: Array,
- *   refresh: Array, insert: string[], cancel: Array, insertedRows?: Array}>}
+ *   refresh: Array, insert: string[], cancel: Array, insertedRows?: Array,
+ *   cancelledIds?: string[]}>} cancelledIds is the subset of `cancel`'s ids
+ *   this call's own transitionJobStatus actually flipped (never a raced or
+ *   guard-mismatched id) — what the post-commit cancellation follow-through
+ *   ran against.
  */
 async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = 'sync', revive = false } = {}) {
   const empty = () => ({
@@ -918,16 +1001,17 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     };
     if (dryRun) return result;
 
-    const insertedRows = await writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx, diff);
+    const { insertedRows, cancelledIds } = await writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx, diff);
 
     logger.info(
       `[rider-series] synced parent=${riderParentId} rides=${hostParent.id} source=${source} `
       + `keep=${diff.keep.length} move=${diff.move.length} refresh=${diff.refresh.length} `
       + `insert=${insertedRows.length} cancel=${diff.cancelRows.length}`,
     );
-    return { ...result, insertedRows };
+    return { ...result, insertedRows, cancelledIds };
   };
 
+  let result;
   try {
     // ALWAYS goes through .transaction() — when `conn` is already an open
     // transaction (every in-band hook: a rider's own completion/top-up/
@@ -939,11 +1023,86 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     // the host/rider write it rides behind" would otherwise be false the
     // moment any query in here threw. A plain (non-transaction) `conn`
     // opens a real transaction as usual.
-    return await conn.transaction(run);
+    result = await conn.transaction(run);
   } catch (err) {
     logger.error(`[rider-series] syncRiderSeries failed for parent=${riderParentId}: ${err.message}`);
     return { ...empty(), skipped: 'error' };
   }
+
+  // Cancellation follow-through (P1 fix #3, PR #5268 round 3): the surplus
+  // cancel above only flips scheduled_services.status — it never ran the
+  // customer-visible tracker transition or the money settlement (card fee
+  // rails, invoice void) every OTHER cancellation surface runs through
+  // runVisitCancellationFollowThrough (admin-dispatch.js:2451/2820,
+  // admin-schedule.js:15329, intelligence-bar/tools.js). That module's own
+  // header is explicit: it MUST run AFTER the cancelling transaction
+  // commits — every step reads the visit's committed state on ITS OWN
+  // connection (db, not this trx), so calling it before commit would read
+  // stale (pre-cancel) rows on every other connection. `conn` is often
+  // already an open transaction here (every in-band hook holds one before
+  // calling in) — `conn.transaction(run)` above then ran as a SAVEPOINT,
+  // which releases long before the CALLER's own outer commit, so awaiting
+  // that release is not "after commit" for this purpose. commitPromiseOf
+  // (utils/trx-commit-promise.js) walks to the OUTERMOST transaction and
+  // queues the follow-through on ITS settle instead — same idiom
+  // tech-visit-notifications.js#afterCommit uses for the identical hazard —
+  // rather than awaiting it inline here, which would deadlock: this code
+  // runs on the caller's own call stack, before they ever reach their own
+  // commit. When `conn` is NOT itself a transaction (the nightly reconcile,
+  // any bare caller), `conn.transaction(run)` already performed a REAL
+  // commit by the time this line runs, so the follow-through is awaited
+  // inline — no caller is waiting on an outer commit that hasn't happened
+  // yet. Never sends a customer message either way: invoice void, the card
+  // fee rails and trackTransitions.cancel (which sees the row already
+  // status='cancelled' from writeRiderPlan's own transitionJobStatus call,
+  // so it only advances track_state) have no send path of their own — the
+  // one internal admin alert (an unresolved fee) and the tracker's
+  // socket.io refresh are not customer sends.
+  if (result?.cancelledIds?.length) {
+    const doFollowThrough = async () => {
+      const { runVisitCancellationFollowThrough } = require('./visit-cancellation-followthrough');
+      try {
+        // Defense in depth against Knex's own doNotRejectOnRollback default
+        // (transaction.js: true unless a caller opts out) — a BARE
+        // `.rollback()` with no error ALSO resolves executionPromise, not
+        // only a real commit (annual-prepay-renewals.js's own
+        // fileCoverageExceptionAfterCommit comment names this exact hazard
+        // and works around it the other way, by forcing an explicit-error
+        // reject at ITS OWN dry-run rollback site). This module has no
+        // control over what a caller two levels up does with ITS outer
+        // transaction, so a resolved commitPromise alone is necessary but
+        // not sufficient proof these ids actually committed as cancelled —
+        // re-read their real, current status and settle only the ones that
+        // did. Never a partial illusion: a target that rolled back is
+        // silently skipped here (not an error — a discarded preview/aborted
+        // caller transaction is an ordinary, expected outcome), and
+        // whichever ids remain get the SAME follow-through every other
+        // cancel surface runs.
+        const db = require('../models/db');
+        const stillCancelled = await db('scheduled_services')
+          .whereIn('id', result.cancelledIds).where('status', 'cancelled').pluck('id');
+        if (!stillCancelled.length) return;
+        await runVisitCancellationFollowThrough({
+          targetIds: stillCancelled,
+          reason: 'rider_resync',
+          source: 'rider-series',
+        });
+      } catch (err) {
+        logger.error(`[rider-series] cancellation follow-through failed for parent=${riderParentId}: ${err.message}`);
+      }
+    };
+    const commitPromise = conn?.isTransaction ? commitPromiseOf(conn) : null;
+    if (commitPromise) {
+      // Fire-and-forget from THIS call's perspective (never blocks the
+      // caller's own commit); a rolled-back outer transaction has nothing
+      // to follow through on, so a rejection is swallowed rather than
+      // running against cancels that never actually committed.
+      commitPromise.then(doFollowThrough).catch(() => {});
+    } else {
+      await doFollowThrough();
+    }
+  }
+  return result;
 }
 
 /**

@@ -39,6 +39,13 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitCancelled:
 jest.mock('../services/invoice', () => ({
   voidOpenInvoicesForCancelledService: jest.fn(async () => {}),
   createFromService: jest.fn(async () => null),
+  // Real query-builder shape (services/invoice.js's own contract: "Returns
+  // a query builder") — the P1 fix #3 cancellation follow-through test
+  // exercises the REAL runVisitCancellationFollowThrough, which calls
+  // `.first('id')` on this return value directly.
+  unresolvedInvoicesForCancelledService: jest.fn((conn, scheduledServiceId) => (
+    conn('invoices').where({ scheduled_service_id: scheduledServiceId })
+  )),
 }));
 jest.mock('../services/typed-followup-obligation', () => ({
   handleFollowupChildCancellation: jest.fn(async () => {}),
@@ -133,8 +140,49 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     });
   });
 
-  afterEach(async () => { if (trx) await trx.rollback(); jest.clearAllMocks(); });
+  // isCompleted() guard: one test below (the P1 fix #3 cancellation
+  // follow-through test) deliberately COMMITS trx instead of rolling it
+  // back — the follow-through is deferred to the OUTER transaction's real
+  // commit (syncRiderSeries's own commitPromiseOf wiring), which a
+  // rollback-only harness can never observe within the test body. A
+  // second rollback() on an already-completed transaction throws.
+  //
+  // Explicit-error rollback (P1 fix #3's own commitPromiseOf wiring):
+  // Knex's doNotRejectOnRollback default (transaction.js) RESOLVES
+  // executionPromise on a bare rollback() with no error — same hazard
+  // annual-prepay-renewals.js's fileCoverageExceptionAfterCommit comment
+  // documents and works around the same way. Every OTHER test in this file
+  // rolls trx back (never commits), and several incidentally produce a
+  // real rider cancel in the course of proving something else — a bare
+  // rollback would let syncRiderSeries's commitPromiseOf-deferred
+  // cancellation follow-through believe THAT rollback was a commit and
+  // fire for real against this file's own shared, reassigned `db.connection`
+  // mock (whatever trx is live in a LATER test by the time the deferred
+  // callback's async chain actually runs) — cross-test interference this
+  // suite's per-test isolation must never allow. Passing an explicit error
+  // forces the rejection instead, so commitPromiseOf's own `.catch(() =>
+  // {})` in rider-series.js correctly treats every ordinary rollback here
+  // as "nothing to follow through on."
+  afterEach(async () => {
+    if (trx && !trx.isCompleted()) await trx.rollback(new Error('rider-series-sync-postgres.test.js: per-test rollback')).catch(() => {});
+    jest.clearAllMocks();
+  });
   afterAll(async () => { await database?.destroy(); });
+
+  // Polls until `fn` returns a truthy value or the budget expires — used
+  // only by the P1 fix #3 test, whose assertion depends on the
+  // post-commit-deferred cancellation follow-through actually running
+  // (a real async DB round trip triggered off trx's executionPromise,
+  // not something a single microtask tick guarantees has finished).
+  async function waitFor(fn, { timeoutMs = 5000, intervalMs = 25 } = {}) {
+    const start = Date.now();
+    for (;;) {
+      const result = await fn();
+      if (result) return result;
+      if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+      await new Promise((resolve) => { setTimeout(resolve, intervalMs); });
+    }
+  }
 
   // window_start/window_end in minutes — a real host row's own
   // estimated_duration_minutes always matches its stored window span (every
@@ -1477,12 +1525,24 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     await trx('scheduled_services').where({ id: hostRow.id }).update({
       window_start: '13:00', window_end: '15:00', technician_id: otherTechId,
     });
+    // P1 fix #1 / P2 fix #2 (PR #5268 round 3): a leftover route position
+    // and a stale windowless-dispatch-pending stamp on the KEPT row, same
+    // shape recurring-dispatch-due.js and rebooker.js's own route_order
+    // convention describe — a refresh that changes technician_id (this
+    // one does: otherTechId above) must clear both, exactly like a real
+    // move onto a different tech/day would.
+    await trx('scheduled_services').where({ id: kept.id }).update({
+      recurring_dispatch_due_date: PEST_START, route_order: 3,
+    });
 
     const dryRefresh = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
     expect(dryRefresh.refresh.some((r) => r.id === kept.id)).toBe(true);
-    const keptStillOld = await trx('scheduled_services').where({ id: kept.id }).first('window_start', 'window_end', 'technician_id');
+    const keptStillOld = await trx('scheduled_services').where({ id: kept.id })
+      .first('window_start', 'window_end', 'technician_id', 'recurring_dispatch_due_date', 'route_order');
     expect(String(keptStillOld.window_start)).toBe(String(keptBefore.window_start));
     expect(String(keptStillOld.technician_id)).toBe(String(keptBefore.technician_id));
+    expect(keptStillOld.recurring_dispatch_due_date).toBeTruthy(); // dry run wrote nothing
+    expect(keptStillOld.route_order).toBe(3);
 
     const refreshResult = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
     expect(refreshResult.refresh.some((r) => r.id === kept.id)).toBe(true);
@@ -1491,6 +1551,12 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(String(keptAfter.window_start)).toBe(String(hostRowAfter.window_start));
     expect(String(keptAfter.window_end)).toBe(String(hostRowAfter.window_end));
     expect(String(keptAfter.technician_id)).toBe(String(otherTechId));
+    // Fail-without-fix: before P1 fix #1, recurring_dispatch_due_date stays
+    // stale (PEST_START) here, and auto-dispatch then constrains placement
+    // to +/-3 days around that old date. Before P2 fix #2, route_order stays
+    // 3, interleaving this stop into the tech's OLD route position.
+    expect(keptAfter.recurring_dispatch_due_date).toBeNull();
+    expect(keptAfter.route_order).toBeNull();
 
     const second = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
     expect(second.refresh).toEqual([]);
@@ -1609,5 +1675,259 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
     expect(result.skipped).toBe('different_property');
     expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
+  // --- PR #5268 round 3 -----------------------------------------------------
+
+  test('a rider MOVE onto a host date clears a stale recurring_dispatch_due_date and route_order (P1 fix #1 / P2 fix #2, fail-without-fix evidence)', async () => {
+    const { syncRiderSeries } = require('../services/rider-series');
+    const { pestParent } = await linkedPair();
+
+    const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+    expect(dry.move.length).toBeGreaterThan(0);
+    const { id: movingId, to } = dry.move[0];
+
+    // A stale windowless-dispatch-pending stamp and a leftover route
+    // position from wherever this row sat before — the same shape
+    // recurring-dispatch-due.js and rebooker.js's own route_order
+    // convention describe.
+    await trx('scheduled_services').where({ id: movingId }).update({
+      recurring_dispatch_due_date: PEST_START, route_order: 7,
+    });
+
+    const applied = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(applied.move.some((m) => m.id === movingId)).toBe(true);
+
+    const after = await trx('scheduled_services').where({ id: movingId }).first();
+    expect(after.scheduled_date.toISOString().slice(0, 10)).toBe(to);
+    // Fail-without-fix: before P1 fix #1, recurring_dispatch_due_date stays
+    // the stale PEST_START stamp here, and auto-dispatch (auto-dispatch/
+    // candidate-slots.js) then constrains placement to +/-3 days around
+    // that old date instead of the row's real new date. Before P2 fix #2,
+    // route_order stays 7, interleaving the stop into the OLD day's order.
+    expect(after.recurring_dispatch_due_date).toBeNull();
+    expect(after.route_order).toBeNull();
+  });
+
+  test('a null-status future rider row is neither moved nor cancelled across two syncs (P1 fix #5, fail-without-fix evidence)', async () => {
+    const { syncRiderSeries } = require('../services/rider-series');
+    const { pestParent } = await linkedPair();
+
+    // A legacy base row with status NULL — the CHECK constraint
+    // (20260426000004) only restricts NON-NULL values, so a NULL status
+    // passes it; AGENTS.md documents this shape as real, historical data.
+    // Dated well short of MIN_GAP_DAYS (77) past the anchor, so it can
+    // never coincidentally BE a planned date (a false pass either way).
+    const legacyDate = addDays(PEST_START, 40);
+    const legacyId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: legacyId, customer_id: customerId, service_type: 'Pest Control', status: null,
+      scheduled_date: legacyDate, window_start: '08:00', window_end: '09:00',
+      is_recurring: true, recurring_pattern: 'quarterly', recurring_parent_id: pestParent.id,
+      recurring_ongoing: true, source: 'admin', estimated_duration_minutes: 60,
+    });
+    const before = await trx('scheduled_services').where({ id: legacyId }).first();
+
+    const first = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    // Fail-without-fix: before P1 fix #5, MOVABLE_ROW_STATUSES was not the
+    // filter — a NULL status passed the old exclusion-based check
+    // (JOIN_INELIGIBLE_STATUSES never lists null) and this row became a
+    // real move or cancel candidate here.
+    expect(first.move.some((m) => m.id === legacyId)).toBe(false);
+    expect(first.cancel.some((c) => c.id === legacyId)).toBe(false);
+    let after = await trx('scheduled_services').where({ id: legacyId }).first();
+    expect(after.status).toBeNull();
+    expect(after.scheduled_date.toISOString().slice(0, 10)).toBe(legacyDate);
+    expect(String(after.window_start)).toBe(String(before.window_start));
+
+    const second = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(second.move.some((m) => m.id === legacyId)).toBe(false);
+    expect(second.cancel.some((c) => c.id === legacyId)).toBe(false);
+    after = await trx('scheduled_services').where({ id: legacyId }).first();
+    expect(after.status).toBeNull();
+    expect(after.scheduled_date.toISOString().slice(0, 10)).toBe(legacyDate);
+  });
+
+  // --- P1 fix #4: host tech semantics ----------------------------------------
+  describe('host tech semantics (P1 fix #4)', () => {
+    test('an unpinned rider INSERT onto a host date joins the HOST tech, never the rider\'s own recurring_technician_id (fail-without-fix evidence)', async () => {
+      const hostTechId = randomUUID();
+      await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+      const riderOwnTechId = randomUUID();
+      await trx('technicians').insert({ id: riderOwnTechId, name: 'Synthetic Rider Own Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      // The rider's OWN template carries a recurring_technician_id with NO
+      // override flag — the bug: recurringTemplateTechnicianId
+      // (admin-schedule.js) prefers recurring_technician_id over
+      // technician_id REGARDLESS of the override flag, so a naive
+      // `{ ...template, technician_id: hostTech }` spread never actually
+      // reaches the host's tech.
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        recurring_technician_id: riderOwnTechId, recurring_technician_override: false, rides_parent_id: lawnParent.id,
+      });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      const lawnDates = (await seriesRows(lawnParent.id)).map((r) => r.scheduled_date.toISOString().slice(0, 10));
+      const hostDate = dry.insert.find((d) => lawnDates.includes(d));
+      expect(hostDate).toBeTruthy(); // fail-without-fix precondition: a genuine host-date insert
+
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const landed = (await seriesRows(pestParent.id))
+        .find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostDate);
+      expect(landed).toBeTruthy();
+      expect(landed.technician_id).toBe(hostTechId);
+    });
+
+    test('a host with NO tech gives an unassigned rider, even though the rider has its own unpinned recurring_technician_id (fail-without-fix evidence)', async () => {
+      const riderOwnTechId = randomUUID();
+      await trx('technicians').insert({ id: riderOwnTechId, name: 'Synthetic Rider Own Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: null });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        recurring_technician_id: riderOwnTechId, recurring_technician_override: false, rides_parent_id: lawnParent.id,
+      });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      const lawnDates = (await seriesRows(lawnParent.id)).map((r) => r.scheduled_date.toISOString().slice(0, 10));
+      const hostDate = dry.insert.find((d) => lawnDates.includes(d));
+      expect(hostDate).toBeTruthy();
+
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const landed = (await seriesRows(pestParent.id))
+        .find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostDate);
+      expect(landed).toBeTruthy();
+      // Fail-without-fix: the bug returns riderOwnTechId here (the host's
+      // null technician_id is silently ignored the same way).
+      expect(landed.technician_id).toBeNull();
+    });
+
+    test('a PINNED rider (recurring_technician_override true) keeps its own tech, never the host\'s (regression guard — the pre-fix code already handled this case)', async () => {
+      const hostTechId = randomUUID();
+      await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+      const riderOwnTechId = randomUUID();
+      await trx('technicians').insert({ id: riderOwnTechId, name: 'Synthetic Rider Own Tech', employment_status: 'active', field_dispatchable: true });
+      const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId });
+      await seedChildren(lawnParent, 'every_6_weeks', 9);
+      const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        recurring_technician_id: riderOwnTechId, recurring_technician_override: true, rides_parent_id: lawnParent.id,
+      });
+
+      const { syncRiderSeries } = require('../services/rider-series');
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      const lawnDates = (await seriesRows(lawnParent.id)).map((r) => r.scheduled_date.toISOString().slice(0, 10));
+      const hostDate = dry.insert.find((d) => lawnDates.includes(d));
+      expect(hostDate).toBeTruthy();
+
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const landed = (await seriesRows(pestParent.id))
+        .find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostDate);
+      expect(landed).toBeTruthy();
+      expect(landed.technician_id).toBe(riderOwnTechId);
+    });
+
+    test('a rider MOVE onto a host date also joins the HOST tech, never the rider\'s own unpinned recurring_technician_id (fail-without-fix evidence)', async () => {
+      const { syncRiderSeries } = require('../services/rider-series');
+      const { pestParent, lawnParent } = await linkedPair();
+      const riderOwnTechId = randomUUID();
+      await trx('technicians').insert({ id: riderOwnTechId, name: 'Synthetic Rider Own Tech', employment_status: 'active', field_dispatchable: true });
+      await trx('scheduled_services').where({ id: pestParent.id }).update({
+        recurring_technician_id: riderOwnTechId, recurring_technician_override: false,
+      });
+
+      const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+      const lawnDates = (await seriesRows(lawnParent.id)).map((r) => r.scheduled_date.toISOString().slice(0, 10));
+      const hostMove = dry.move.find((m) => lawnDates.includes(m.to));
+      expect(hostMove).toBeTruthy();
+
+      await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      const after = await trx('scheduled_services').where({ id: hostMove.id }).first();
+      expect(after.scheduled_date.toISOString().slice(0, 10)).toBe(hostMove.to);
+      expect(String(after.technician_id)).toBe(String(lawnParent.technician_id));
+      expect(String(after.technician_id)).not.toBe(String(riderOwnTechId));
+    });
+  });
+
+  // --- P1 fix #3: the cancellation follow-through -----------------------
+  test('a surplus rider cancel through the resync also runs the cancellation follow-through: the tracker transitions off scheduled (P1 fix #3, fail-without-fix evidence)', async () => {
+    const { syncRiderSeries } = require('../services/rider-series');
+    const { pestParent } = await linkedPair();
+    // Isolate from visit-group grouping (a separate, correct immovability
+    // rule tested elsewhere) — same technique the "two movable rider rows
+    // sharing one planned date" test uses, so the ORIGINAL row on the
+    // shared date stays a movable/keep candidate throughout rather than
+    // getting grouped onto its host's visit (visit_id) and dropping out of
+    // the movable set entirely, which would leave nothing for the
+    // duplicate below to conflict with.
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ property_id: null });
+    await disablePropertyAnchoring();
+
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false }); // aligns all 4 pest rows onto plan dates
+    const pestRowsAfterFirstSync = await seriesRows(pestParent.id);
+    const movableRow = pestRowsAfterFirstSync.find((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START);
+    const dupDate = movableRow.scheduled_date;
+
+    // A genuine duplicate on the SAME already-planned date — every OTHER
+    // planned date is already claimed by the other 3 aligned pest rows, so
+    // whichever of {movableRow, duplicateRow} loses the tie-break on this
+    // date has NO planned date left to pair with: a guaranteed surplus
+    // cancel, not a move (same fixture shape as the existing "two movable
+    // rider rows sharing one planned date" test).
+    const [duplicateRow] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status: 'pending',
+      scheduled_date: dupDate, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_parent_id: pestParent.id, recurring_ongoing: true, source: 'admin',
+      track_state: 'scheduled',
+    }).returning('*');
+    // Explicit tracker precondition, so a later default-value change can't
+    // silently make this test's own setup false.
+    expect(duplicateRow.track_state).toBe('scheduled');
+
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    const pairIds = [movableRow.id, duplicateRow.id];
+    const cancelledId = pairIds.find((id) => result.cancel.some((c) => c.id === id));
+    expect(cancelledId).toBeTruthy();
+    // The wiring: syncRiderSeries surfaces exactly the ids its own
+    // transitionJobStatus call actually cancelled — what the deferred
+    // follow-through below runs against. Fail-without-fix: before this
+    // fix, syncRiderSeries's return value has no cancelledIds field at all.
+    expect(result.cancelledIds).toContain(cancelledId);
+
+    // The follow-through (runVisitCancellationFollowThrough) MUST run
+    // AFTER the cancelling transaction commits — every step reads the
+    // visit's committed state on its own connection. `trx` here is the
+    // OUTERMOST transaction syncRiderSeries's own commitPromiseOf sees, so
+    // committing it (instead of the usual per-test rollback) is what lets
+    // the deferred follow-through actually run within this test's own
+    // observable window — a rollback-only harness can never observe it.
+    // Repoint the shared db mock to the plain root connection BEFORE
+    // committing (trx.commit() itself doesn't consult the mock — this
+    // ordering is what makes the deferred follow-through's OWN later DB
+    // calls land on a connection that is still usable once `trx` closes).
+    require('../models/db').connection = database;
+    await trx.commit();
+
+    // The status flip landed inside the (now-committed) sync transaction
+    // itself; the tracker transition is the deferred, post-commit part —
+    // poll rather than assume a fixed number of microtask ticks, since it
+    // is a real async DB round trip (trackTransitions.cancel's own nested
+    // transaction) triggered off trx.executionPromise settling.
+    const cancelledRow = await waitFor(async () => {
+      const row = await database('scheduled_services').where({ id: cancelledId }).first();
+      return row.track_state === 'cancelled' ? row : null;
+    });
+    expect(cancelledRow.status).toBe('cancelled');
+    // Fail-without-fix: before P1 fix #3, the surplus cancel only ever
+    // flipped scheduled_services.status — track_state stayed 'scheduled'
+    // forever (this row's own precondition, asserted above), because
+    // nothing called trackTransitions.cancel for a rider resync cancel.
+    expect(cancelledRow.cancelled_at).toBeTruthy();
   });
 });

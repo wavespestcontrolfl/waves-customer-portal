@@ -17869,13 +17869,22 @@ function normalizeTopUpWindow(windowStart, durationMinutes, windowEnd) {
 //                         own opts.normalizeOffHourStart posture (top-up
 //                         only) is unchanged by this extraction.
 //   preferredTechnicianId - when given (a host row's own tech, for a rider
-//                         joining its stop), validated for `date` through
+//                         joining its stop) AND `parent` carries no explicit
+//                         pin (recurring_technician_override falsy),
+//                         validated for `date` through
 //                         assignableRecurringTemplateTechnicianId's own
-//                         eligibility rules (called with
-//                         `{ ...parent, technician_id: preferredTechnicianId }`)
-//                         and nulled if ineligible/absent that day. Omitted
-//                         (undefined): technician_id resolves off `parent`
-//                         itself, byte-identical to before this extraction.
+//                         eligibility rules (called with `recurring_
+//                         technician_id`/`recurring_technician_override`
+//                         forced onto the preferred id/false, so `parent`'s
+//                         own recurring_technician_id can never win instead
+//                         — P1 fix #4, PR #5268 round 3) and nulled if
+//                         ineligible/absent that day. A pinned `parent`
+//                         (a rider with its own explicit tech pin) ignores
+//                         preferredTechnicianId and resolves off `parent`
+//                         itself — the same as when preferredTechnicianId is
+//                         omitted (undefined; every host's own auto-extend/
+//                         top-up call), byte-identical to before this
+//                         extraction.
 //   svcLike            - threaded to applyExtensionPrepayCoverage only.
 //   blackoutDates      - the {dates, weeklyDaysOff} layer used for the
 //                         add-on due-date filter (filterAddonLinesForDate)
@@ -17903,8 +17912,31 @@ async function insertSeriesOccurrenceLocked(conn, parent, parentId, cols, opts =
   } = opts;
 
   const childIdentity = await resolveSeriesChildIdentity(conn, parent);
-  const technicianId = preferredTechnicianId !== undefined
-    ? await assignableRecurringTemplateTechnicianId(conn, { ...parent, technician_id: preferredTechnicianId }, date)
+  // Host tech semantics (P1 fix #4, PR #5268 round 3): a `parent` with an
+  // explicit pin (recurring_technician_override true — a rider's own
+  // template) must keep ITS OWN tech even when a caller passes
+  // preferredTechnicianId (a rider joining its host's stop never overrides
+  // a pinned rider's tech) — resolve off `parent` unchanged, same as the
+  // no-preferred-tech path below. Otherwise, spreading only
+  // `technician_id: preferredTechnicianId` onto `parent` is not enough:
+  // recurringTemplateTechnicianId (above) prefers `recurring_technician_id`
+  // over `technician_id` regardless of the override flag, so `parent`'s OWN
+  // recurring_technician_id would still win and preferredTechnicianId would
+  // be silently ignored (or a null preferred tech would leave the child on
+  // the parent's old assignment instead of going unassigned). Setting
+  // recurring_technician_id to the SAME preferred id, with override forced
+  // false, closes that fallback so the resolved id can only be the
+  // preferred one — still run through this function's own eligibility
+  // check (active, field-dispatchable, not absent that date), nulled if
+  // ineligible. Omitting preferredTechnicianId (every host's own
+  // auto-extend/top-up call) takes neither branch and stays byte-identical.
+  const technicianId = (preferredTechnicianId !== undefined && !parent?.recurring_technician_override)
+    ? await assignableRecurringTemplateTechnicianId(conn, {
+      ...parent,
+      technician_id: preferredTechnicianId,
+      recurring_technician_id: preferredTechnicianId,
+      recurring_technician_override: false,
+    }, date)
     : await assignableRecurringTemplateTechnicianId(conn, parent, date);
   const nextData = {
     customer_id: parent.customer_id,

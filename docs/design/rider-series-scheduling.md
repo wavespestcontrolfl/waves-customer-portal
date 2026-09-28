@@ -194,7 +194,17 @@ vigilance.
    stable plan can take more than one sync, same as any other maintenance
    sweep that re-derives its state from scratch each time.
 6. `planRiderDates` computes the plan; it's diffed against the rider's
-   current **movable** future rows (live, non-immovable, `is_recurring`
+   current **movable** future rows (status in `MOVABLE_ROW_STATUSES`
+   — `pending`/`confirmed`, an explicit ALLOWLIST, not an exclusion of
+   terminal statuses (P1 fix #5, PR #5268 round 3): a legacy base row with
+   status NULL is a live row this codebase already treats as a real visit
+   elsewhere (the recurring-plan counters), and it may anchor like any
+   other live immovable row above, but it is never movable — the old
+   exclusion-based check (`!JOIN_INELIGIBLE_STATUSES.includes(status)`)
+   let a NULL status through as movable, which MOVE/REFRESH's own write
+   guard then rejected (pending/confirmed only) while the surplus-cancel
+   loop's `TERMINAL_ROW_STATUSES` check accepted a NULL `fromStatus` and
+   could actually cancel it — live, non-immovable, `is_recurring`
    true — a booster row is never a diff candidate, never anchors, and is
    never moved or cancelled, the same exclusion `latestLiveSeriesVisit`
    and the upcoming-visit counter apply — and dated strictly after the
@@ -225,18 +235,52 @@ vigilance.
      probe (`seriesCandidateDateClashes`) runs; a clash skips this ONE
      pairing for this sync (logged, row left where it is) rather than
      double-booking — a later sync re-diffs and retries.
+   - **Every MOVE and REFRESH runs through `riderMovePatch`** (P1 fix #1 /
+     P2 fix #2, PR #5268 round 3), one small helper both write sites share
+     so they can't independently drift: `recurringDispatchDuePatch`
+     (`services/scheduling/recurring-dispatch-due.js` — the SAME helper
+     `rebooker.js`, `admin-schedule.js` and `annual-prepay-renewals.js`
+     apply to their own move/refresh writes) clears a stale
+     `recurring_dispatch_due_date` whenever the date or window changes
+     (fail-without-fix: a moved row kept its OLD due-date stamp, and
+     auto-dispatch then constrained placement to +/-3 days around that
+     wrong date), and `route_order` is cleared to `null` whenever the date
+     OR the technician changes — never on a same-day, same-tech window-only
+     refresh — the same day-or-tech-invalidates-the-sequence rule
+     `rebooker.js`'s own move paths apply (every consumer sorts
+     `COALESCE(route_order, 999)`, so a stale number interleaves the stop
+     into the OLD day's/tech's order instead of appending it).
    - A planned date with no row left to pair: a new row is **inserted**.
    - **The host stop, validated, not copied verbatim.** When the target
      (a move's destination, a refresh, or an insert) is a host date, its
      `window_start` / `window_end` / `technician_id` come along so the
-     rider joins that stop — but neither field rides over raw. The
-     technician is re-validated for THAT date through the exact same
-     eligibility rules `assignableRecurringTemplateTechnicianId` applies
-     to every other writer (a host tech who is inactive, not field-
-     dispatchable, or absent that day nulls the RIDER's own assignment —
-     the host's own row is untouched); an absent/ineligible host tech
-     never rides onto the rider (fail-without-fix: rounds 1–2 blindly
-     copied `hostRow.technician_id`). The window is always run through
+     rider joins that stop — but neither field rides over raw. **Pin
+     semantics (P1 fix #4, PR #5268 round 3):** a rider with an explicit
+     pin (`recurring_technician_override` true) keeps its OWN template
+     tech, validated as always, and never joins the host's tech at all —
+     checked BEFORE any host-tech resolution runs. An unpinned rider joins
+     the host stop: the technician is re-validated for THAT date through
+     the exact same eligibility rules `assignableRecurringTemplateTechnicianId`
+     applies to every other writer (a host tech who is inactive, not
+     field-dispatchable, or absent that day nulls the RIDER's own
+     assignment — the host's own row is untouched, and a host with NO tech
+     at all leaves the rider unassigned too); an absent/ineligible/unset
+     host tech never rides onto the rider. Getting there needs more than
+     spreading `technician_id: hostTech` onto the rider's own template,
+     though: `recurringTemplateTechnicianId` (admin-schedule.js) prefers
+     `recurring_technician_id` over `technician_id` REGARDLESS of the
+     override flag, so an unpinned rider's own `recurring_technician_id`
+     would silently keep winning over the spread `technician_id` unless
+     `recurring_technician_id` is ALSO set to the host tech (with
+     `recurring_technician_override` forced `false`) before resolution
+     runs (fail-without-fix: rounds 1–3 spread only `technician_id`, so a
+     rider with its own `recurring_technician_id` set — pinned or not —
+     kept its old tech on a host date, and a host going unassigned could
+     not un-assign an unpinned rider either). `insertSeriesOccurrenceLocked`
+     (below) applies the identical pin-aware rule to its own
+     `preferredTechnicianId` handling, so a rider insert and a host's own
+     auto-extend/top-up insert (which passes no preferred tech at all,
+     taking neither branch) stay byte-identical. The window is always run through
      `normalizeTopUpWindow` (admin-schedule.js) — the SAME off-hour
      flooring the nightly top-up applies to its own template, but
      UNCONDITIONALLY here (never behind an opt-in flag): an off-hour host
@@ -283,7 +327,47 @@ vigilance.
      a standalone move does, described above, before the writer is called.
    - A movable row with no planned date left to pair: cancelled through
      `transitionJobStatus` (`notifyCustomer: 'caller_suppress'`, reason
-     `rider_resync`) — never hard-deleted.
+     `rider_resync`) — never hard-deleted. **The cancellation follow-through
+     (P1 fix #3, PR #5268 round 3):** `transitionJobStatus` alone only
+     flips `scheduled_services.status` — it never advances the
+     customer-visible tracker (`track_state` stayed `scheduled` forever,
+     fail-without-fix) or settles the card-fee/invoice money a cancellation
+     owes. `syncRiderSeries` runs the SAME post-commit follow-through every
+     other cancel surface shares, `runVisitCancellationFollowThrough`
+     (`services/visit-cancellation-followthrough.js`; callers:
+     `admin-dispatch.js`, `admin-schedule.js`'s Edit-appointment trim,
+     `intelligence-bar/tools.js`) — voids open invoices, runs the card-hold/
+     card-request fee rails, and transitions `track_state` off `scheduled`
+     via `track-transitions.js#cancel` (which sees the row already
+     `status='cancelled'` from the write above, so it only advances the
+     tracker). That module's own contract is explicit: it MUST run AFTER
+     the cancelling transaction commits — every step reads the visit's
+     committed state on its own connection, never the sync's own `trx`.
+     `conn` is usually already an open transaction here (every in-band hook
+     holds one before calling in), so `syncRiderSeries`'s own
+     `conn.transaction(run)` only ran as a SAVEPOINT, which releases long
+     before the caller's own outer commit — the follow-through is deferred
+     to that OUTER commit via `commitPromiseOf`
+     (`utils/trx-commit-promise.js`, the same idiom
+     `tech-visit-notifications.js#afterCommit` uses for the identical
+     hazard), fire-and-forget from `syncRiderSeries`'s own perspective so
+     it can never deadlock the caller. Before running, it re-reads each
+     target's CURRENT status and settles only the ones still genuinely
+     `cancelled` — defense against Knex's own `doNotRejectOnRollback`
+     default, under which a caller's bare (no-error) `.rollback()` on its
+     outer transaction ALSO resolves the same commit signal a real commit
+     would (`annual-prepay-renewals.js`'s own
+     `fileCoverageExceptionAfterCommit` names the identical hazard and
+     works around it the other way, by forcing an explicit-error reject at
+     its own dry-run rollback site). When `conn` is NOT itself a
+     transaction (the nightly reconcile, any bare caller),
+     `conn.transaction(run)` already performed a REAL commit by the time
+     `syncRiderSeries` reaches this point, so the follow-through runs
+     inline, awaited, before it returns. Never a customer message either
+     way: invoice void, the card fee rails, and `track-transitions.js`'s
+     own cancel path have no send of their own — the one internal admin
+     alert (an unresolved fee) and the tracker's socket.io refresh are not
+     customer sends.
    - Every insert/move/refresh calls `visit-groups.maybeGroupRow` so a
      rider lands in the same visit as its host stop.
 7. `dryRun: true` returns the same `{ keep, move, refresh, insert, cancel }`
@@ -407,6 +491,29 @@ drift from an un-hooked path is caught within 24 hours.
   `insertSeriesOccurrenceLocked` performs (a one-time add-on, a later-due
   add-on, `filterAddonLinesForDate` used as an independent oracle), and a
   renamed catalog service resolving to its CURRENT name on a fresh insert.
+  PR #5268 round-3 coverage (each with fail-without-fix evidence noted
+  where it applies): a MOVE onto a host date clears a stale
+  `recurring_dispatch_due_date` and `route_order` (P1 fix #1 / P2 fix #2);
+  the SAME two fields clear on a REFRESH that changes the host tech,
+  folded into the existing kept-row refresh test (P2 fix #6); a null-status
+  future rider row is neither moved nor cancelled across two syncs (P1 fix
+  #5); host tech semantics under `describe('host tech semantics (P1 fix
+  #4)')` — an unpinned rider's INSERT and MOVE onto a host date both join
+  the HOST's tech, never the rider's own unpinned `recurring_technician_id`;
+  a host with no tech gives an unassigned rider despite the rider's own
+  unpinned tech; a PINNED rider (`recurring_technician_override` true)
+  keeps its own tech (a regression guard, not fail-without-fix — the
+  pre-fix code already handled the pinned case correctly); and a surplus
+  cancel also runs the post-commit cancellation follow-through, ending
+  with `track_state = 'cancelled'` (P1 fix #3) — this last test
+  deliberately COMMITS its own `trx` (instead of the suite's usual
+  per-test rollback) so the commit-deferred follow-through can actually be
+  observed within the test, and the suite's shared `afterEach` passes an
+  explicit error to every OTHER test's own rollback so THEIR incidental
+  cancels can never be mistaken for a commit by the same deferred wiring
+  (Knex's `doNotRejectOnRollback` default resolves a bare rollback's
+  `executionPromise` too — see the cancellation follow-through's own
+  description above).
 - `server/tests/rider-series-lock-parity.test.js` — the shared advisory
   lock's key derivation stays byte-identical to
   `acquireRecurringSeriesMaintenanceLock`.
