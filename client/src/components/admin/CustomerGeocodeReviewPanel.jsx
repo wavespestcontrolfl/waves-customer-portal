@@ -87,7 +87,7 @@ function ReviewEvidence({ review }) {
   );
 }
 
-function ReviewSummary({ record, active, onSelectCustomer }) {
+function ReviewSummary({ record, draftActive, onSelectCustomer }) {
   const { status, label, help } = reviewStatus(record.review);
   return (
     <>
@@ -98,7 +98,7 @@ function ReviewSummary({ record, active, onSelectCustomer }) {
               type="button"
               className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring"
               onClick={() => {
-                if (active && !window.confirm("Opening this customer will discard the unsaved address review draft. Continue?")) return;
+                if (draftActive && !window.confirm("Opening this customer will discard the unsaved address review draft. Continue?")) return;
                 onSelectCustomer(record.customer.id);
               }}
             >
@@ -139,12 +139,12 @@ function ReviewActions({ record, disabled, saving, onEdit, onResolve }) {
   );
 }
 
-function ReviewRecord({ record, active, actionsDisabled, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
+function ReviewRecord({ record, active, draftActive, actionsDisabled, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
   return (
     <div className="py-3 border-t border-hairline border-zinc-200 first:border-t-0">
       {!unavailable && (
         <>
-          <ReviewSummary record={record} active={active} onSelectCustomer={onSelectCustomer} />
+          <ReviewSummary record={record} draftActive={draftActive} onSelectCustomer={onSelectCustomer} />
           {!active && <ReviewActions record={record} disabled={actionsDisabled} saving={saving} onEdit={onEdit} onResolve={onResolve} />}
         </>
       )}
@@ -177,6 +177,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
+  const [profileRefreshPending, setProfileRefreshPending] = useState(false);
   const requestRef = useRef(0);
   const abortRef = useRef(null);
   const saveAbortRef = useRef(null);
@@ -204,6 +205,11 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
       return true;
     }
     setState({ enabled: true, records, total });
+    // Sync immediately rather than waiting for this render to commit — a
+    // caller awaiting load() right after (e.g. the 409 handler checking
+    // whether its target is still queued) must see the refreshed records,
+    // not the stale ones from before this fetch.
+    recordsRef.current = records;
     setLoadError("");
     // editingId is captured when the request starts; if the admin canceled
     // the draft before this response arrived, activeIdRef no longer matches
@@ -272,6 +278,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     setSavingId(null);
     setError("");
     setLoadError("");
+    setProfileRefreshPending(false);
     return () => {
       scopeRef.current += 1;
       saveAbortRef.current?.abort();
@@ -325,6 +332,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
         refreshFailed = true;
       }
       if (!current()) return;
+      setProfileRefreshPending(refreshFailed);
       await load({ preserveDraft: refreshFailed });
       if (current() && refreshFailed) setError("Address review saved, but the customer profile could not refresh. Reload the profile to see the latest details.");
     } catch (saveError) {
@@ -337,6 +345,19 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
         const conflictMessage = saveError.message || "This review changed elsewhere.";
         await load({ preserveDraft: true });
         if (!current()) return;
+        // The refreshed queue can legitimately omit this customer (e.g. another
+        // admin's action just resolved it). With no row left, there is nothing
+        // to acknowledge or cancel a conflict on — clear the stale target and
+        // let the refreshed queue stand instead of pinning every row's actions
+        // disabled behind a conflict that can never be dismissed.
+        const stillQueued = recordsRef.current.some((queued) => queued.customer.id === record.customer.id);
+        if (!stillQueued) {
+          activeIdRef.current = null;
+          setActiveId(null);
+          setConflictId(null);
+          setError("");
+          return;
+        }
         if (activeIdRef.current !== record.customer.id) {
           activeIdRef.current = record.customer.id;
           setActiveId(record.customer.id);
@@ -349,6 +370,24 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     } finally {
       if (current()) setSavingId(null);
       if (saveAbortRef.current === controller) saveAbortRef.current = null;
+    }
+  };
+
+  // The one action offered while a resolve succeeded but the profile-scoped
+  // onResolved reload failed: retry that same reload rather than the
+  // geocode-review load() (which has already refreshed and would otherwise
+  // clear this warning without the customer profile ever having recovered).
+  const retryProfileRefresh = async () => {
+    const scope = scopeRef.current;
+    const current = () => mountedRef.current && scope === scopeRef.current;
+    try {
+      await onResolved?.();
+      if (!current()) return;
+      setProfileRefreshPending(false);
+      setError("");
+    } catch {
+      if (!current()) return;
+      setError("Address review saved, but the customer profile could not refresh. Reload the profile to see the latest details.");
     }
   };
 
@@ -366,11 +405,11 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     setActiveId((id) => id === customerId ? null : customerId);
     setError("");
   };
-  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, load, resolve, acknowledgeConflict, editRecord };
+  return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord };
 }
 
 function ReviewContents({ customerId, onSelectCustomer, model }) {
-  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, load, resolve, acknowledgeConflict, editRecord } = model;
+  const { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, profileRefreshPending, load, resolve, retryProfileRefresh, acknowledgeConflict, editRecord } = model;
   const recordsUnavailable = detailLoading || Boolean(loadError);
   const visibleRecords = recordsUnavailable
     ? state.records.filter((record) => record.customer.id === activeId)
@@ -384,6 +423,13 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <div role="alert" className="text-14 text-alert-fg">{panelError}</div>
           <Button variant="secondary" onClick={async () => {
+            // A pending profile refresh has nothing to do with the geocode
+            // queue itself — retry the failed profile reload so the warning
+            // clears only once the customer profile has actually recovered.
+            if (profileRefreshPending) {
+              await retryProfileRefresh();
+              return;
+            }
             await load({ preserveDraft: Boolean(activeId) });
           }}>Refresh</Button>
         </div>
@@ -394,6 +440,7 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
           key={record.customer.id}
           record={record}
           active={activeId === record.customer.id}
+          draftActive={Boolean(activeId)}
           actionsDisabled={Boolean(savingId) || Boolean(conflictId === record.customer.id) || Boolean(activeId && activeId !== record.customer.id)}
           saving={savingId === record.customer.id}
           error={activeId === record.customer.id ? error : ""}
