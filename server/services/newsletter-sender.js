@@ -585,14 +585,30 @@ async function sendCampaign(sendId, opts = {}) {
     // scheduler tick can both pick up the same row and double-send.
     // The race-loser is tagged so dispatch-side catch handlers can skip
     // the 'failed' flip because the row is actively sending under the winner.
-    const claimed = await db('newsletter_sends')
-      .where({ id: send.id })
-      .whereIn('status', ['draft', 'scheduled'])
+    let claim = db('newsletter_sends').where({ id: send.id });
+    if (opts.expect) {
+      // Version-bound claim (the scheduler tick): the row must still be the
+      // exact scheduled version the tick read and validated — same status,
+      // no later edit (updated_at), no later approval. A PATCH landing
+      // between the tick's read and this claim rewrites the content and
+      // moves updated_at (and returns the row to draft), so the claim finds
+      // nothing and edited, unapproved content is never broadcast. The +1ms
+      // absorbs sub-millisecond precision the driver drops on read.
+      const noLaterThan = (value) => new Date(new Date(value).getTime() + 1);
+      claim = claim.where({ status: opts.expect.status || 'scheduled' });
+      if (opts.expect.updatedAt) claim = claim.where('updated_at', '<', noLaterThan(opts.expect.updatedAt));
+      if (opts.expect.proofApprovedAt) {
+        claim = claim.whereNotNull('proof_approved_at').where('proof_approved_at', '<', noLaterThan(opts.expect.proofApprovedAt));
+      }
+    } else {
+      claim = claim.whereIn('status', ['draft', 'scheduled']);
+    }
+    const claimed = await claim
       .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
-      const err = new Error('already sent or in progress');
-      err.code = 'ALREADY_CLAIMED';
+      const err = new Error(opts.expect ? 'row changed since the scheduler validated it' : 'already sent or in progress');
+      err.code = opts.expect ? 'VERSION_CHANGED' : 'ALREADY_CLAIMED';
       throw err;
     }
   }
@@ -1292,7 +1308,12 @@ async function processScheduledSends() {
           continue;
         }
       }
-      await sendCampaign(row.id);
+      // The claim is bound to the version this tick read and validated: an
+      // edit (or re-approval) landing in between leaves the claim empty and
+      // the row is picked up again, re-validated, on a later tick.
+      await sendCampaign(row.id, {
+        expect: { status: 'scheduled', updatedAt: row.updated_at, proofApprovedAt: row.proof_approved_at },
+      });
       processed++;
     } catch (err) {
       // ALREADY_CLAIMED = another tick / manual send picked up this row
@@ -1300,6 +1321,10 @@ async function processScheduledSends() {
       // to failed or we'd overwrite an in-flight campaign.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
+        continue;
+      }
+      if (err.code === 'VERSION_CHANGED') {
+        logger.info(`[newsletter-scheduler] send ${row.id} changed after this tick validated it — not dispatching this version`);
         continue;
       }
       if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {

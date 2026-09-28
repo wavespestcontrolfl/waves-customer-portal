@@ -646,11 +646,20 @@ function vacuumClaimInSentence(sentence) {
 const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe\b/i;
 const SAFE_CLAIM = /\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\s+(?:\w+\s+)?safe\b(?!\s+(?:from|to\s+say))|\bsafe\s+(?:for|around|near|with|once|when|after|as\s+soon\s+as)\b|\bsafe\s+to\s+(?!say\b)\w+/i;
 const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+you\s+know|advise|say|give)|\b(?:confirm|tell|advise|check)\w*[^.]{0,40}\btechnicians?\b/i;
+// The technician idiom exempts ONLY dry-state re-entry guidance: "safe once
+// dry / when it has dried, and your technician confirms the timing". It
+// never exempts an absolute audience claim ("safe for children and pets")
+// or a fixed re-entry time ("safe after 15 minutes"), technician or not.
+const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|dries)\b|\b(?:has|have)\s+dried\b|\bdry\s+to\s+the\s+touch\b/i;
+const FIXED_REENTRY_TIME = /\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+const AUDIENCE_ABSOLUTE = /\bsafe\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pets?|kids?|children|babies|dogs?|cats?|people|humans?|(?:whole\s+|entire\s+)?family)\b/i;
 
 function safetyClaimInSentence(sentence) {
   if (SAFE_COMPOUND.test(sentence)) return sentence;
-  if (SAFE_CLAIM.test(sentence) && !TECHNICIAN_CONFIRMS.test(sentence)) return sentence;
-  return null;
+  if (!SAFE_CLAIM.test(sentence)) return null;
+  const dryStateWithTechnician = TECHNICIAN_CONFIRMS.test(sentence) && DRY_STATE.test(sentence)
+    && !FIXED_REENTRY_TIME.test(sentence) && !AUDIENCE_ABSOLUTE.test(sentence);
+  return dryStateWithTechnician ? null : sentence;
 }
 
 const CLAIM_RULES = [

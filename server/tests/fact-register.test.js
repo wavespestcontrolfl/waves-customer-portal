@@ -568,6 +568,10 @@ describe('findUnverifiedClaims', () => {
       'The lawn is safe once dry.',
       'Keep pets off the lawn until it is dry, then it is safe to let them back out.',
       'It is kid safe once dry.',
+      'Our technician confirms this pesticide is completely safe for children and pets.',
+      'The treatment is safe after 15 minutes, as your technician will confirm.',
+      'Your technician will confirm the product is safe for your family.',
+      'The lawn is safe to walk on after 30 minutes; ask your technician.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(true);
     });
@@ -576,6 +580,7 @@ describe('findUnverifiedClaims', () => {
       'Do not permit humans or pets to contact treated surfaces until the spray has dried.',
       'Do not allow people or pets on treated surfaces until spray has dried.',
       'Keep pets off the lawn until it is dry; your technician will confirm when it is safe to let them back out.',
+      'Once the treated areas have dried they are safe to use again — your technician confirms the timing at the visit.',
       'Keep your family safe from mosquitoes this summer.',
       'It is safe to say termites are active.',
       'Have a safe Labor Day weekend.',
