@@ -221,6 +221,113 @@ describe('AppointmentPage upcoming visit', () => {
   });
 });
 
+// GATE_VISIT_PREP_PHOTOS (customer-visit-photos-scope-20260928.md). The
+// form's own behavior (chips, disabled Send, error-code mapping) is unit
+// tested in components/visit-prep/VisitPrepPhotoForm.test.jsx — these cover
+// only the page-level wiring: whether the block mounts, and that a real
+// submit reaches the right multipart URL.
+describe('AppointmentPage visit prep photos block', () => {
+  it('renders nothing when the payload omits prepPhotos (gate off)', async () => {
+    stubFetch();
+    renderPage();
+    await screen.findByText(/is booked/);
+    expect(screen.queryByText('Anything you want your technician to look at?')).not.toBeInTheDocument();
+  });
+
+  it('renders nothing when prepPhotos.eligible is false', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: false, photoCount: 0, photosRemaining: 6 } })) });
+    renderPage();
+    await screen.findByText(/is booked/);
+    expect(screen.queryByText('Anything you want your technician to look at?')).not.toBeInTheDocument();
+  });
+
+  it('renders the block when prepPhotos.eligible is true, below Add to calendar and above Need a different time', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } })) });
+    renderPage();
+
+    expect(await screen.findByText('Anything you want your technician to look at?')).toBeInTheDocument();
+    const order = [...document.body.querySelectorAll('[data-glass="card"]')]
+      .map((el) => el.textContent);
+    const calIdx = order.findIndex((t) => t.includes('Add to calendar'));
+    const prepIdx = order.findIndex((t) => t.includes('Anything you want your technician'));
+    const needIdx = order.findIndex((t) => t.includes('Need a different time'));
+    expect(calIdx).toBeGreaterThanOrEqual(0);
+    expect(prepIdx).toBeGreaterThan(calIdx);
+    expect(needIdx).toBeGreaterThan(prepIdx);
+  });
+
+  it('sends a real POST to the token-scoped photos route and shows the acknowledgment on success', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } })),
+      post: jsonResponse({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } }, 201),
+    });
+    renderPage();
+
+    await screen.findByText('Anything you want your technician to look at?');
+    const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Got it.')).toBeInTheDocument();
+    expect(screen.getByText('1 photo sent')).toBeInTheDocument();
+
+    const posted = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
+    expect(String(posted[0])).toContain('/appointment/deadbeef/photos');
+    expect(posted[1].body).toBeInstanceOf(FormData);
+    // No manual Content-Type — the browser must set the multipart boundary.
+    expect(posted[1].headers).toBeUndefined();
+  });
+
+  it('a 404 on submit hides the form behind one neutral line', async () => {
+    stubFetch({
+      get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } })),
+      post: jsonResponse({ error: 'Not found' }, 404),
+    });
+    renderPage();
+
+    await screen.findByText('Anything you want your technician to look at?');
+    const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Photos can no longer be added to this visit.')).toBeInTheDocument();
+  });
+
+  it('a 409 cap response shows the photo-limit line', async () => {
+    stubFetch({
+      get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 6, photosRemaining: 3 } })),
+      post: jsonResponse({ error: "You've reached the photo limit for this visit.", code: 'PREP_CAP_REACHED' }, 409),
+    });
+    renderPage();
+
+    await screen.findByText('Anything you want your technician to look at?');
+    const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText("You've reached the photo limit for this visit.")).toBeInTheDocument();
+  });
+
+  it('a 503 response shows a short retry line', async () => {
+    stubFetch({
+      get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } })),
+      post: jsonResponse({ error: 'Photo storage is unavailable — try again shortly.', code: 'PREP_STORAGE_UNAVAILABLE' }, 503),
+    });
+    renderPage();
+
+    await screen.findByText('Anything you want your technician to look at?');
+    const file = new File(['photo'], 'bug.jpg', { type: 'image/jpeg' });
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Please try again in a moment.')).toBeInTheDocument();
+  });
+});
+
 describe('AppointmentPage non-upcoming states', () => {
   it('each terminal state gets its own copy and contact options, never the appointment card', async () => {
     const cases = [

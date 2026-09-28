@@ -14,6 +14,12 @@
  * the glass scene, and the same warm-surface inline palette. The owner
  * explicitly removed the app-download block from this family of pages —
  * do not re-add it.
+ *
+ * GATE_VISIT_PREP_PHOTOS (customer-visit-photos-scope-20260928.md): when
+ * the payload's `prepPhotos.eligible` is true, a quiet "Anything you want
+ * your technician to look at?" block renders between Add to calendar and
+ * "Need a different time?" (VisitPrepPhotoForm, owns its own submit/ack/
+ * error states). Gate off / field absent: no block, page unchanged.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
@@ -22,6 +28,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import VanScene from '../components/VanScene';
+import VisitPrepPhotoForm from '../components/visit-prep/VisitPrepPhotoForm';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -300,6 +307,25 @@ export default function AppointmentPage() {
     return () => loadAbortRef.current?.abort();
   }, [load]);
 
+  // Posts VisitPrepPhotoForm's FormData to this token's own upload route.
+  // No Content-Type header — the browser sets the multipart boundary for a
+  // FormData body, and the server's own pre-parser guard (visitPrepPreParser
+  // Guard) 404s anything that isn't multipart/form-data. Throws an Error
+  // carrying `.status`/`.code` (from the server's `{ error, code }` shape;
+  // a plain 404 carries no code) so the form can map it to a customer line.
+  const submitVisitPrepPhotos = useCallback(async (formData) => {
+    const res = await fetch(`${API_BASE}/public/appointment/${token}/photos`, {
+      method: 'POST',
+      body: formData,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body?.ok) return body;
+    const err = new Error(body?.error || "We couldn't send that just now.");
+    err.status = res.status;
+    err.code = body?.code || null;
+    throw err;
+  }, [token]);
+
   const confirm = async () => {
     if (confirming) return;
     setConfirming(true);
@@ -515,6 +541,17 @@ export default function AppointmentPage() {
           title={`${data.tech?.firstName || 'Your technician'} will be there ${formatDateLabel(appt.date)}`}
           stamp={appt.arrivalWindow || null}
         />
+      ) : null}
+
+      {/* GATE_VISIT_PREP_PHOTOS: key absent (gate off) or eligible:false
+          renders nothing — the page is byte-identical to before this lane. */}
+      {data.prepPhotos?.eligible ? (
+        <Card data-testid="visit-prep-card">
+          <VisitPrepPhotoForm
+            photosRemaining={data.prepPhotos.photosRemaining}
+            onSubmit={submitVisitPrepPhotos}
+          />
+        </Card>
       ) : null}
 
       {data.rescheduleToken ? (
