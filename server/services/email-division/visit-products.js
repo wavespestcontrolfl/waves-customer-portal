@@ -6,7 +6,7 @@ const db = require('../../models/db');
 
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.' }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.' }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true, sourceScope: { ai: ['hydroprene'], name: ['gentrol'] } },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', dryRule: null, notes: [], factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, verified: false },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', dryRule: null, notes: [], factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, verified: false },
@@ -43,11 +43,15 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
   const products = rows.map((row) => {
     const family = classifyProduct({ productName: row.product_name, activeIngredient: row.active_ingredient });
     const def = FAMILIES[family];
-    // sourceScope narrows notes/verified to the matching product (igr's 120-day claim is hydroprene-only).
+    // sourceScope narrows dryRule/notes/factSlugs/verified to the matching
+    // product — e.g. igr's 120-day claim is hydroprene-only, and
+    // contact_residual's "spray has dried" rain instruction is the Talstar
+    // P/bifenthrin liquid label, not Delta Dust (a dust, not a spray) or
+    // Demand CS (lambda-cyhalothrin).
     const inScope = !def.sourceScope || matchesAny(def.sourceScope, row.product_name, row.active_ingredient);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
-      phrase: def.phrase, dryRule: def.dryRule, notes: inScope ? def.notes : [],
+      phrase: def.phrase, dryRule: inScope ? def.dryRule : null, notes: inScope ? def.notes : [],
       factSlugs: inScope ? def.factSlugs : [], customerVisible: def.customerVisible, verified: inScope && def.verified,
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
@@ -121,9 +125,12 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
 
   let nextVisitDate = null;
   if (service.customer_id) {
+    // 'rescheduled' marks the OLD row a move abandoned, not a live booking
+    // (admin-schedule.js's live-visit convention: whereNotIn 'cancelled'/
+    // 'rescheduled'); a genuinely moved visit is a separate live row.
     const next = await conn('scheduled_services')
       .where({ customer_id: service.customer_id })
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      .whereNotIn('status', ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'])
       .where('scheduled_date', '>=', service.service_date || new Date())
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
@@ -144,21 +151,26 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   };
 }
 
-/** Average client_pest_rating per visit_number, rounded to one decimal.
- * A visit_number with fewer than 20 rated visits is omitted. */
+/** Average client_pest_rating per visit_number, partitioned by service_line
+ * (visit_number is assigned per line — a pest visit #2 and a mosquito visit
+ * #2 are different cohorts and must never be averaged together), rounded
+ * to one decimal. A (service_line, visit_number) cohort with fewer than 20
+ * rated visits is omitted. */
 async function getActivityRatingAverages({ conn = db } = {}) {
   const rows = await conn('service_records')
-    .whereNotNull('client_pest_rating').whereNotNull('visit_number')
-    .select('visit_number').avg('client_pest_rating as avg_rating').count('client_pest_rating as n')
-    .groupBy('visit_number');
+    .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line')
+    .select('service_line', 'visit_number').avg('client_pest_rating as avg_rating').count('client_pest_rating as n')
+    .groupBy('service_line', 'visit_number');
 
   const byVisit = {};
   const counts = {};
   for (const row of rows) {
     const n = Number(row.n);
     if (n < 20) continue;
-    byVisit[row.visit_number] = Math.round(Number(row.avg_rating) * 10) / 10;
-    counts[row.visit_number] = n;
+    byVisit[row.service_line] ??= {};
+    counts[row.service_line] ??= {};
+    byVisit[row.service_line][row.visit_number] = Math.round(Number(row.avg_rating) * 10) / 10;
+    counts[row.service_line][row.visit_number] = n;
   }
   return { byVisit, counts };
 }

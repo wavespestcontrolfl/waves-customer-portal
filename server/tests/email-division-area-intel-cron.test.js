@@ -46,3 +46,17 @@ test('gate on — recomputes the current month under runExclusive', async () => 
   expect(runExclusive).toHaveBeenCalledWith('email-area-intel-recompute', expect.any(Function));
   expect(computeAreaIntel).toHaveBeenCalled();
 });
+
+test('day 2 of the month still recomputes the previous month — a rolling catch-up window, not day-one-only', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-10-02T09:10:00Z')); // 5:10 AM ET, Oct 2
+  emailAreaIntelLive.mockReturnValue(true);
+  computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
+  await registeredTick()();
+  expect(computeAreaIntel).toHaveBeenCalledTimes(2);
+  const months = computeAreaIntel.mock.calls.map(([{ month: m }]) => m);
+  // "now minus 1 day" would still land on Oct 1 (still THIS month) on day 2
+  // — the fix resolves the true previous calendar month instead.
+  expect(months[0].getUTCMonth()).toBe(9); // October (0-indexed) — current month
+  expect(months[1].getUTCMonth()).toBe(8); // September — previous month
+  jest.useRealTimers();
+});

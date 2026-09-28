@@ -18,13 +18,23 @@ const MIN_CITY_VISITS = 5;
 async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   const monthStart = etMonthStart(month);
   const monthEnd = etMonthEnd(month);
+  // City = the booked visit address (scheduled_services.service_address_city,
+  // the immutable booking-time stamp), falling back to the customer's own
+  // city on an unstamped/unlinked row — the same COALESCE legacy fallback
+  // every other reader of this stamp uses. Never the account's CURRENT city:
+  // a rental or second property must not have its visits credited to the
+  // customer's primary address. Only performed visits count (status =
+  // 'completed'; 'incomplete' is an office-handoff closeout for a visit
+  // that did NOT happen).
   const rows = await conn('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .where('sr.status', 'completed')
     .whereNotNull('sr.technician_notes')
     .whereRaw("btrim(sr.technician_notes) <> ''")
     .where('sr.service_date', '>=', monthStart)
     .where('sr.service_date', '<=', monthEnd)
-    .select('sr.technician_notes', 'c.city');
+    .select('sr.technician_notes', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
 
   const byCity = new Map();
   for (const row of rows) {
@@ -69,8 +79,11 @@ async function getAreaIntelSentence({ city, month = new Date(), minVisits = 20, 
     .orderBy([{ column: 'visits_with_pest', order: 'desc' }, { column: 'pest_key', order: 'asc' }]);
   if (!rows.length || rows[0].visits < minVisits) return null;
   const [top] = rows;
-  const pct = Math.round((top.visits_with_pest / top.visits) * 100);
-  if (pct < 10) return null;
+  // Compare the unrounded ratio to the 10% floor first — 2/21 = 9.52%
+  // rounds to "10%" but must still fail the floor, not pass it.
+  const ratio = top.visits_with_pest / top.visits;
+  if (ratio < 0.10) return null;
+  const pct = Math.round(ratio * 100);
   const monthName = new Date(`${monthStart}T12:00:00Z`).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
   return `In ${monthName} our technicians treated ${top.pest_key} at ${pct}% of our ${top.visits} visits in ${String(city).trim()}.`;
 }

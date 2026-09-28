@@ -7622,21 +7622,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // DAILY 5:10 AM ET — Email division area-intel recompute (current month;
-  // also previous month on the 1st). Dark behind GATE_EMAIL_AREA_INTEL
-  // (emailAreaIntelLive) — unset returns immediately. No caller sends
-  // anything. See server/services/email-division/area-intel.js.
+  // also previous month through the first 3 days of the new month — a
+  // rolling catch-up window, not just day one, so a gate enabled after the
+  // 1st or a failed/missed day-one tick still gets the previous month's
+  // final aggregate; computeAreaIntel replaces the whole month atomically,
+  // so repeating it on days 2-3 is idempotent, not a double-count). Dark
+  // behind GATE_EMAIL_AREA_INTEL (emailAreaIntelLive) — unset returns
+  // immediately. No caller sends anything. See
+  // server/services/email-division/area-intel.js.
   cron.schedule('10 5 * * *', async () => {
     const { emailAreaIntelLive } = require('../config/feature-gates');
     if (!emailAreaIntelLive()) return;
     try {
       const { computeAreaIntel } = require('./email-division/area-intel');
-      const { etParts, addETDays } = require('../utils/datetime-et');
+      const { etParts, etMonthStart } = require('../utils/datetime-et');
       await runExclusive('email-area-intel-recompute', async () => {
         const now = new Date();
         const result = await computeAreaIntel({ month: now });
         logger.info(`[email-area-intel] recomputed ${result.month}: ${result.citiesProcessed} cities`);
-        if (etParts(now).day === 1) {
-          const prevResult = await computeAreaIntel({ month: addETDays(now, -1) });
+        if (etParts(now).day <= 3) {
+          // etMonthStart's offset resolves the TRUE previous calendar month
+          // regardless of which day in the 1-3 window this tick runs on
+          // (a plain "now minus 1 day" would still land inside the CURRENT
+          // month on day 2 or 3).
+          const prevMonth = new Date(`${etMonthStart(now, -1)}T12:00:00Z`);
+          const prevResult = await computeAreaIntel({ month: prevMonth });
           logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
         }
       });
