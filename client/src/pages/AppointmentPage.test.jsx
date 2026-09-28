@@ -270,7 +270,7 @@ describe('AppointmentPage visit prep photos block', () => {
   it('sends a real POST to the token-scoped photos route and shows the acknowledgment on success', async () => {
     const fetchMock = stubFetch({
       get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 0, photosRemaining: 6 } })),
-      post: jsonResponse({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } }, 201),
+      post: jsonResponse({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } }, 201),
     });
     renderPage();
 

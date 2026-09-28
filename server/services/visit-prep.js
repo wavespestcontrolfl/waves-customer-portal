@@ -335,7 +335,7 @@ async function persistLocked(trx, {
 
   if (toStore.length === 0) {
     await preserveResubmittedFields(trx, current, dropped[0], { topic, locationOnProperty, note });
-    return { created: false, dropped, current, summary: await visitPrepSummary(current, trx) };
+    return { created: false, stored: 0, dropped, current, summary: await visitPrepSummary(current, trx) };
   }
 
   const locked = await visitPrepSummary(current, trx);
@@ -371,7 +371,7 @@ async function persistLocked(trx, {
   // Counts come from THIS transaction (Codex r1 P2): a post-commit read
   // that failed would 500 a request whose photos were already durably
   // stored and invite a retry of a write that had succeeded.
-  return { created: true, dropped, current, summary: await visitPrepSummary(current, trx) };
+  return { created: true, stored: toStore.length, dropped, current, summary: await visitPrepSummary(current, trx) };
 }
 
 // A resubmit of already-stored photos carrying a corrected or newly added
@@ -436,7 +436,8 @@ async function withStopLock(svcId, fn) {
  *   `svc`, at least id/customer_id/property_id/visit_id) or null when the
  *   visit is no longer eligible. REQUIRED — the caller (appointment-public.js)
  *   owns the eligibility rule and must not let this service go stale.
- * @returns {Promise<{ created: boolean, summary: { photoCount, photosRemaining, submissionCount } }>}
+ * @returns {Promise<{ created: boolean, stored: number, summary: { photoCount, photosRemaining, submissionCount } }>}
+ *   `stored` = NEW photos this request stored (0 for an all-duplicate resubmit).
  */
 async function createVisitPrepSubmission({
   svc, files, note, topic, locationOnProperty, entry, recheck,
@@ -460,7 +461,7 @@ async function createVisitPrepSubmission({
   // their already-uploaded objects are cleaned up regardless of outcome.
   await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
-  return { created: result.created, summary: result.summary };
+  return { created: result.created, stored: result.stored, summary: result.summary };
 }
 
 module.exports = {

@@ -2909,8 +2909,10 @@ gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
 photos would push it past 6) and its uploaded object is deleted. `property_id`,
 `customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
 row, never the pre-lock read and never the request body. The response is
-`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201
-when a submission was created, 200 on the idempotent duplicate-only case —
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining, photosAdded } }`
+— 201 when a submission was created, 200 on the idempotent duplicate-only
+case (`photosAdded` is the number of NEW photos this request stored, 0 on
+that case; the other two counts are stop-wide) —
 and NEVER carries a photo URL, an S3 key, the note, or any customer
 identity: the token is shared with whoever received the visit text, so
 nothing submitted through it is ever shown back. The counts in the

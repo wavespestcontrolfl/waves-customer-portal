@@ -50,7 +50,7 @@ describe('VisitPrepPhotoForm', () => {
   });
 
   it('sends multipart form data with the right field names on submit', async () => {
-    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5, photosAdded: 1 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
     fireEvent.click(screen.getByText('Pest'));
@@ -71,6 +71,23 @@ describe('VisitPrepPhotoForm', () => {
     expect(formData.get('locationOnProperty')).toBe('back_yard');
   });
 
+  it('the instruction names the real remaining limit, and both chip groups are labelled', () => {
+    render(<VisitPrepPhotoForm photosRemaining={1} onSubmit={vi.fn()} />);
+    expect(screen.getByText('Add up to 1 photo and a short note.')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: "What it's about" })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Where on the property?' })).toBeInTheDocument();
+  });
+
+  it('meets the customer-surface floors: 48 px touch targets and 16 px text on every control', () => {
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
+    for (const name of ['Pest', 'Back yard', 'Add photos', 'Send']) {
+      const control = screen.getByRole('button', { name });
+      expect(control.style.minHeight).toBe('48px');
+      expect(control.style.fontSize).toBe('16px');
+    }
+    expect(screen.getByLabelText('A short note (optional)').style.fontSize).toBe('16px');
+  });
+
   it('caps the picker at min(3, photosRemaining)', async () => {
     render(<VisitPrepPhotoForm photosRemaining={2} onSubmit={vi.fn()} />);
 
@@ -82,7 +99,7 @@ describe('VisitPrepPhotoForm', () => {
   });
 
   it('shows the acknowledgment with a count of the photos just sent, never the photos themselves', async () => {
-    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 4 } });
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 4, photosAdded: 2 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
     fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
@@ -252,11 +269,11 @@ describe('VisitPrepPhotoForm', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
   });
 
-  it('the sent count comes from the response, not from how many files were attached — the server can dedupe', async () => {
-    // Two files attached, but the server only counted ONE new photo
-    // (photosRemaining moved from 6 to 5, not 4) — the customer's own
-    // pick duplicated one already on the visit.
-    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
+  it('the sent count is the server\'s photosAdded for THIS request, not the files attached or a stop-wide difference', async () => {
+    // Two files attached; the server stored ONE new photo (the other was
+    // already on the visit), while another holder's upload landed at the
+    // same time, so the stop-wide remaining count moved by three.
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 3, photosRemaining: 3, photosAdded: 1 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
     fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
@@ -269,7 +286,7 @@ describe('VisitPrepPhotoForm', () => {
   it('an all-duplicate resubmit (accepted count of zero) shows a truthful line instead of "0 photos sent"', async () => {
     // photosRemaining unchanged — every attached photo already existed on
     // the visit (the server's idempotent 200 case).
-    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 6 } });
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 4, photosAdded: 0 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
     fireEvent.change(fileInput(), { target: { files: [photoFile()] } });

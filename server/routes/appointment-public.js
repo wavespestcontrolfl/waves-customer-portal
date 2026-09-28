@@ -1378,6 +1378,10 @@ router.post(
           eligible: true,
           photoCount: result.summary.photoCount,
           photosRemaining: result.summary.photosRemaining,
+          // NEW photos THIS request stored (the stop-wide counts above can
+          // also include another holder's upload): the page's "N photos
+          // sent" line reads this, never a before/after difference.
+          photosAdded: result.stored,
         },
       });
     } catch (err) {

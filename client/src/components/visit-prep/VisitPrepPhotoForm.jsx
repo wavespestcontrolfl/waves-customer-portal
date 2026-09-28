@@ -83,6 +83,8 @@ export const LOCATION_OPTIONS = [
   { value: 'other', label: 'Something else' },
 ];
 
+const photoWord = (n) => (n === 1 ? 'photo' : 'photos');
+
 const GENERIC_ERROR = "We couldn't send that just now. Please try again, or text or call us.";
 const BUSY_ERROR = 'Please try again in a moment.';
 const FULL_MESSAGE = 'This visit already has the most photos it can take.';
@@ -158,9 +160,12 @@ function Chip({ label, active, onClick, disabled }) {
       disabled={disabled}
       aria-pressed={active}
       style={{
-        padding: '8px 14px',
+        minHeight: 48,
+        padding: '0 16px',
+        display: 'inline-flex',
+        alignItems: 'center',
         borderRadius: 9999,
-        fontSize: 14,
+        fontSize: 16,
         fontWeight: 600,
         border: `1px solid ${active ? COLORS.glassNavy : S.borderStrong}`,
         background: active ? COLORS.glassNavy : '#FFFFFF',
@@ -199,13 +204,6 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   const fileInputRef = useRef(null);
   const mountedRef = useRef(true);
   const ackHeadingRef = useRef(null);
-  // The prop's value when this form first mounted — never updated after,
-  // deliberately: the server can dedupe a submission (the same image
-  // picked twice, or one already on the visit from an earlier send), so
-  // the ack's count is computed as (this) minus the response's own
-  // photosRemaining, not naively as "how many files did we attach".
-  const initialPhotosRemainingRef = useRef(photosRemaining);
-
   // Explicitly set true on run, not just false on cleanup — React 18
   // StrictMode's dev-only mount/cleanup/remount cycle runs this cleanup
   // once immediately after the first mount, and a cleanup-only effect
@@ -299,13 +297,11 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       // photosRemaining is the source of truth for how many of THIS
       // pick actually landed, never `photos.length` (what was merely
       // attempted).
-      const responseRemaining = response?.prepPhotos?.photosRemaining;
-      const initialRemaining = initialPhotosRemainingRef.current;
-      setSentCount(
-        typeof responseRemaining === 'number' && typeof initialRemaining === 'number'
-          ? Math.max(0, initialRemaining - responseRemaining)
-          : photos.length, // malformed response — fall back to the naive count
-      );
+      // The server's count of NEW photos stored by THIS request (Codex
+      // #5243 r3 P2): it dedupes a repeated or already-attached image, and
+      // a stop-wide remaining count would also absorb another tab's upload.
+      const added = response?.prepPhotos?.photosAdded;
+      setSentCount(typeof added === 'number' ? added : null);
       setPhotos([]);
       setPhase('sent');
     } catch (err) {
@@ -365,13 +361,14 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
           This is attached to your visit so your technician sees it before starting.
         </div>
-        <div style={{ fontSize: 16, color: S.muted, marginTop: 8, fontWeight: 600 }}>
-          {/* The server can dedupe a submission down to zero NEW photos
-              (the same image twice, or one already on the visit) — sentCount
-              is the RESPONSE-derived accepted count (see send()), so this
-              never overclaims. */}
-          {sentCount > 0 ? `${sentCount} photo${sentCount === 1 ? '' : 's'} sent` : DUPLICATE_MESSAGE}
-        </div>
+        {/* sentCount is the server's count of NEW photos this request
+            stored (see send()), so this never overclaims; no count at all
+            when the response carried none. */}
+        {sentCount == null ? null : (
+          <div style={{ fontSize: 16, color: S.muted, marginTop: 8, fontWeight: 600 }}>
+            {sentCount > 0 ? `${sentCount} ${photoWord(sentCount)} sent` : DUPLICATE_MESSAGE}
+          </div>
+        )}
       </div>
     );
   }
@@ -391,10 +388,10 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         Anything you want your technician to look at?
       </div>
       <div style={{ fontSize: 16, color: S.body, lineHeight: 1.5, marginBottom: 14 }}>
-        Add up to 3 photos and a short note.
+        Add up to {maxPickable} {photoWord(maxPickable)} and a short note.
       </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+      <div role="group" aria-label="What it's about" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
         {TOPIC_OPTIONS.map((opt) => (
           <Chip
             key={opt.value}
@@ -406,8 +403,8 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         ))}
       </div>
 
-      <div style={{ fontSize: 14, fontWeight: 600, color: S.text, marginBottom: 8 }}>Where on the property?</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+      <div id="visit-prep-location-label" style={{ fontSize: 16, fontWeight: 600, color: S.text, marginBottom: 8 }}>Where on the property?</div>
+      <div role="group" aria-labelledby="visit-prep-location-label" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
         {LOCATION_OPTIONS.map((opt) => (
           <Chip
             key={opt.value}
@@ -419,7 +416,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         ))}
       </div>
 
-      <label htmlFor="visit-prep-note" style={{ fontSize: 14, fontWeight: 600, color: S.text, display: 'block', marginBottom: 6 }}>
+      <label htmlFor="visit-prep-note" style={{ fontSize: 16, fontWeight: 600, color: S.text, display: 'block', marginBottom: 6 }}>
         A short note (optional)
       </label>
       <textarea
@@ -436,7 +433,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           border: `1px solid ${S.borderStrong}`,
           borderRadius: 8,
           padding: 10,
-          fontSize: 15,
+          fontSize: 16,
           fontFamily: 'inherit',
           color: S.text,
           resize: 'vertical',
@@ -527,12 +524,13 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
             justifyContent: 'center',
             gap: 8,
             width: '100%',
-            padding: '10px 16px',
+            minHeight: 48,
+            padding: '0 16px',
             borderRadius: 8,
             border: `1px dashed ${S.borderStrong}`,
             background: S.soft,
             color: S.text,
-            fontSize: 15,
+            fontSize: 16,
             fontWeight: 600,
             cursor: pickerDisabled ? 'default' : 'pointer',
             opacity: pickerDisabled ? 0.6 : 1,
@@ -565,7 +563,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           alignItems: 'center',
           justifyContent: 'center',
           width: '100%',
-          minHeight: 44,
+          minHeight: 48,
           padding: '0 20px',
           background: COLORS.glassNavy,
           color: COLORS.white,
@@ -573,7 +571,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           borderRadius: 8,
           fontFamily: FONTS.ui,
           fontWeight: 700,
-          fontSize: 15,
+          fontSize: 16,
           cursor: sendDisabled ? 'default' : 'pointer',
           opacity: sendDisabled ? 0.5 : 1,
         }}
