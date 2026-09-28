@@ -1455,7 +1455,18 @@ sent only while the gate is on); the reviewed copy follows it, and a missing
 value falls back to the Spanish-word detector on the visitor's active message,
 then the reply.
 The provider-failure fallback is unchanged (there is no model topic). Gate off:
-prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
+prompt, schema and replies are unchanged.
+With `GATE_ASK_WAVES_EMERGENCY_CHECK` on (dark; `askWavesEmergencyCheckLive()`,
+#4899), every turn also runs a second opinion on `TEXT_POLICIES.fastStructured`,
+started alongside the answer: one question, "is anyone in medical danger?",
+over the whole visitor side of the conversation (`{ in_danger: boolean }`).
+A yes turns any answer whose intent is not `emergency` (including the
+provider-failure fallback) into the emergency script (`topicEmergencyScript`
+over the visitor side: Poison Control / veterinary lines as above; no quote
+CTA). It only ever adds the emergency script; a no, a failed or late check,
+or a malformed verdict leaves the answer unchanged (fails open to the
+answer, which keeps every guard above). Its accuracy is the classifier's —
+there is no regex on this path. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
