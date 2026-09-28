@@ -5243,7 +5243,7 @@ function isKnownGoodInternalRoute(dest) {
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = []) {
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true) {
   // Non-rendered content carries no live links: a fenced or commented
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
@@ -5291,8 +5291,18 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
       // A relative candidate renders on the current publish host. An absolute
       // candidate must name that same frozen host; a path match alone must not
       // turn a hub allowance into permission for a spoke URL (or vice versa).
-      if (!host || (safeOrigin && allowedRelatedHosts.has(host))) continue;
-      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`);
+      // relatedPostLinksLive=false means the publish target drifted after
+      // this list was frozen (e.g. SPOKE_BLOG_NETWORK_ENABLED flipped after
+      // compose) — the path was verified live on the FROZEN host only, so
+      // every reference to it, relative or absolute, is quarantined as
+      // denied here rather than falling through to the generic
+      // allowedInternalLinks check below, which does no host verification
+      // at all and could otherwise admit it via draft.checked_existing_routes
+      // as a dead hub link (Codex #4984 r6+ P1).
+      if (relatedPostLinksLive && (!host || (safeOrigin && allowedRelatedHosts.has(host)))) continue;
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', host
+        ? `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`
+        : `Draft links related-post path "${dest}", which is no longer a live target after the publish routing changed since this brief was composed.`);
     }
     if (allowed.has(norm)) continue;
     const seen = (seenCounts.get(norm) || 0) + 1;
@@ -6597,7 +6607,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6736,7 +6746,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts),
+    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive),
     // Owner hard rule (2026-07-16): service/location metaTitles — the
     // intentional long near-me titles — are NEVER edited by automation. A
     // refresh draft that proposes a DIFFERENT metaTitle than the live page is
