@@ -3918,6 +3918,41 @@ override (alongside the existing `opsKey`/`subject`/`kind`/`source`/
 `observedAt`). None of this changes the auth ordering, the FIX/ACT-only
 kind allowlist, the 404/401/409/400/503 status layering, or `/resolve`,
 which are unchanged from the paragraph above).
+Admin-alerts-ring scope (owner ruling 2026-09-28, "ring only when something
+changed"): the payload also accepts optional `count` and `newCount`, each a
+non-negative integer no larger than `Number.MAX_SAFE_INTEGER` (any other
+type, an explicit `null`, or a negative/oversized value → 400); both are optional and resolve
+INDEPENDENTLY — a caller-supplied value always wins for that field alone,
+and only a field the caller left out falls back. `count` falls back to the
+check-map's own `counts(subject)` for that check (data-hygiene: its parsed
+"N fixed, M exceptions (K new)" subject), then to the first LEADING integer
+in the subject; `newCount` falls back to the check-map's own `counts()`
+only — never to a bare number in the subject, whose meaning isn't safely
+guessable for an unconverted check. Effect: for an `owner`-audience row
+only, these feed the same ring-only-on-change test the in-process digests
+use — the bell rings again when `newCount` is greater than zero, when
+`count` is higher than the most recent matching row's own count (by alert
+class, ops-crons scoped, within its last 7-day ring), or when that row has
+no recorded count at all. An equal `count` also rings when the finding
+is about a different set of items: for a fresh row, the two ops-cron keys
+with their run dates removed differ (the key names the items — a mapped
+check with a stable class such as data-hygiene is compared by its counts
+only, since its key carries run counters); for any row, a stored
+`metadata.itemKeys` list (in-process senders) that gains an id. Otherwise
+an equal or lower `count` keeps the refresh quiet. A quiet NEW row is written to the
+Activity feed only (`metadata.quiet = true`, `metadata.feed = 'activity'`)
+— never the bell (unread count, list, mark-all-read) until something
+actually grows. A quiet REFRESH of a standing row updates its
+title/body/detail but keeps that row's current visibility and read state:
+a row already in the bell stays there (an unread alert the owner has not
+opened must not vanish because the list shrank), and a row already
+Activity-only stays there. Only a ring re-surfaces a row as unread. A non-`owner` audience is never gated by
+this test (`metadata.feed` is already `'activity'` unconditionally for
+those rows). Every ring also stamps `metadata.rungAt` (an ISO timestamp) —
+the 7-day comparison window is measured from a row's own last ring, not
+its `created_at`. `count`, `newCount`, `rungAt`, `itemKeys`, and
+`itemSetHash` (in-process item identity; this route never accepts them)
+join the reserved metadata keys above.
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

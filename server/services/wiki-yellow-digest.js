@@ -113,7 +113,16 @@ function composeYellowDigest(queue) {
   const summary = pending.length > 0
     ? `${yellow.length} more updated this week; review when you can.`
     : 'Review optional; nothing is blocked.';
-  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the pages already in
+  // scope — a count-only digest can't otherwise tell "same queue" from "a
+  // different set of pages" at a flat total.
+  // Queue-state prefixed: a page moving from optional review (yellow) to
+  // blocked (pending) is new news even though its id did not change.
+  const itemKeys = [
+    ...pending.filter((page) => page.id).map((page) => `pending:${page.id}`),
+    ...yellow.filter((page) => page.id).map((page) => `yellow:${page.id}`),
+  ];
+  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary, itemKeys };
 }
 
 // Daily cron entry point with a weekly guard (same self-healing pattern as
@@ -183,6 +192,8 @@ async function sendYellowDigestLocked(opts = {}) {
       text: composed.text,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.pendingCount + composed.yellowCount,
+      itemKeys: composed.itemKeys,
       link: '/admin/knowledge?area=base&kbTab=field',
       sendEmail: () => mailer.sendOne({
         to,

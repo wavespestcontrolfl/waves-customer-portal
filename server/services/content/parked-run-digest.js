@@ -459,7 +459,11 @@ function composeParkedRunDigest({ active = [], stale = [], newCount = 0 } = {}) 
   const summary = active.length > 0
     ? `${newCount} new since last check; ${stale.length} probably dismissible.`
     : `${newCount} new since last check.`;
-  return { subject, bodyHtml, total, activeCount: active.length, staleCount: stale.length, newCount, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the parked opportunity
+  // ids already in scope — a count-only digest can't otherwise tell "same
+  // backlog" from "a different set of parked runs" at a flat total.
+  const itemKeys = [...active, ...stale].map((item) => item.opportunity_id).filter(Boolean).map(String);
+  return { subject, bodyHtml, total, activeCount: active.length, staleCount: stale.length, newCount, headline, summary, itemKeys };
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +542,9 @@ async function runParkedRunDigest(opts = {}) {
       html: composed.bodyHtml,
       headline: composed.headline,
       summary: composed.summary,
+      count: composed.total,
+      newCount: composed.newCount,
+      itemKeys: composed.itemKeys,
       link: '/admin/blog?tab=autopilot',
       sendEmail: () => mailer.send({
         to,

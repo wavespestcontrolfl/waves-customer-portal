@@ -269,6 +269,13 @@ describe('sendYellowDigestIfDue — send path', () => {
 });
 
 describe('composeYellowDigest', () => {
+  test('itemKeys carry the queue state, so yellow -> pending for the same page is a new key', () => {
+    const asYellow = composeYellowDigest({ pending: [], blocked: [], recentYellow: [yellowPage({ id: 'p1' })] });
+    const asPending = composeYellowDigest({ pending: [yellowPage({ id: 'p1' })], blocked: [], recentYellow: [] });
+    expect(asYellow.itemKeys).toEqual(['yellow:p1']);
+    expect(asPending.itemKeys).toEqual(['pending:p1']);
+  });
+
   test('returns null when nothing needs judgment', () => {
     expect(composeYellowDigest({ pending: [], blocked: [], recentYellow: [] })).toBeNull();
   });

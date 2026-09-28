@@ -39,6 +39,13 @@ beforeEach(() => {
 });
 
 describe('composeRescheduleIntentDigest', () => {
+  test('itemKeys carry the visit outcome, so armed -> COMPLETED on the same flag is a new key', () => {
+    const armed = composeRescheduleIntentDigest([flag({ visit_status: 'confirmed', total_count: 1 })]);
+    const done = composeRescheduleIntentDigest([flag({ visit_status: 'completed', total_count: 1 })]);
+    expect(armed.itemKeys).toEqual(['f1:confirmed']);
+    expect(done.itemKeys).toEqual(['f1:completed']);
+  });
+
   test('no flags composes nothing', () => {
     expect(composeRescheduleIntentDigest([])).toBeNull();
   });

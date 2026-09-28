@@ -2,7 +2,7 @@
 // (admin-alerts-brevity scope, owner ruling 2026-09-28).
 
 const {
-  ACTIVITY_LINK, checkId, humanizeCheckId, resolveRoute, routeFor, dataHygieneHeadline,
+  ACTIVITY_LINK, checkId, humanizeCheckId, resolveRoute, routeFor, dataHygieneHeadline, dataHygieneCounts,
 } = require('../config/ops-alert-routes');
 
 describe('checkId', () => {
@@ -51,6 +51,23 @@ describe('routeFor — owner checks', () => {
     const r = routeFor('local:data-hygiene_sweep_2_fixed_66_exceptions_2_new_', 'ACT');
     expect(r).toMatchObject({ area: 'Data hygiene', link: ACTIVITY_LINK, audience: 'owner' });
     expect(typeof r.headline).toBe('function');
+    expect(typeof r.counts).toBe('function');
+  });
+});
+
+describe('dataHygieneCounts (admin-alerts-ring scope)', () => {
+  test('parses the open backlog and the new-issue count from the subject', () => {
+    expect(dataHygieneCounts('data-hygiene sweep — 3 fixed, 66 exceptions (2 new)')).toEqual({ count: 66, newCount: 2 });
+  });
+  test('"0 new" still parses — the ring test is what makes it go quiet', () => {
+    expect(dataHygieneCounts('data-hygiene sweep — 1 fixed, 63 exceptions (0 new)')).toEqual({ count: 63, newCount: 0 });
+  });
+  test('a non-matching subject returns null, same as dataHygieneHeadline', () => {
+    expect(dataHygieneCounts('something else entirely')).toBeNull();
+  });
+  test('routeFor exposes it on the data-hygiene entry, wired to the caller\'s subject', () => {
+    const r = routeFor('local:data-hygiene_sweep_x', 'ACT');
+    expect(r.counts('data-hygiene sweep — 1 fixed, 63 exceptions (0 new)')).toEqual({ count: 63, newCount: 0 });
   });
 });
 
@@ -68,7 +85,7 @@ describe('routeFor — engineering checks (Activity-only)', () => {
 describe('routeFor — unknown checks', () => {
   test('ACT -> owner, humanized area, Activity feed', () => {
     const r = routeFor('z99-brand-new-check:x', 'ACT');
-    expect(r).toEqual({ area: 'Brand new check', link: ACTIVITY_LINK, audience: 'owner', headline: null });
+    expect(r).toEqual({ area: 'Brand new check', link: ACTIVITY_LINK, audience: 'owner', headline: null, counts: null });
   });
   test('FIX -> engineering, humanized area, Activity feed', () => {
     const r = routeFor('z99-brand-new-check:x', 'FIX');

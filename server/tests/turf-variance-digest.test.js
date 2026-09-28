@@ -42,6 +42,13 @@ beforeEach(() => {
 });
 
 describe('composeTurfVarianceDigest', () => {
+  test('itemKeys cover EVERY sample, not only the displayed outliers', () => {
+    const rows = [20, 21, 22, 23, 24, 25, 26, 27].map((d) => row(d));
+    const composed = composeTurfVarianceDigest(rows);
+    expect(composed.itemKeys).toHaveLength(9); // 8 samples + the drift direction
+    expect(composed.itemKeys).toContain('direction:low');
+  });
+
   test('quiet window (within threshold) composes nothing', () => {
     expect(composeTurfVarianceDigest([row(5), row(-8), row(10)])).toBeNull();
   });

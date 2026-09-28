@@ -349,6 +349,98 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
+  // admin-alerts-ring scope (2026-09-28): this direct rewrite bypasses
+  // notifyAdmin entirely, so it applies the SAME ring-only-on-change test
+  // by hand (ringOnRefreshFrom) — a repeat same-signature failure that
+  // hasn't grown past the standing digest's own count keeps read_at AND
+  // feed/quiet exactly as they were, even though the content still
+  // rewrites (a later run's re-observed subject/detail).
+  test('a repeat same-signature failure with a flat or shrinking count keeps the digest quiet — read_at and feed/quiet stay as they were', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // A standing digest that already reported MORE findings (10) than this
+    // 4-location wipe will (4) — no growth, so the ring test says quiet.
+    const marker = {
+      id: 'n_quiet_repeat', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // Zero rows everywhere -> silent_empty at all 4 locations -> ACT (owner),
+    // same deterministic fixture as 'problems email contact@ FIRST...' above.
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite).not.toHaveProperty('read_at'); // kept as-is, not cleared
+    expect(rewrite.title).not.toMatch(/^(ACT|FIX):/); // content still rewrites
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('ACT');
+    expect(rewriteMeta.audience).toBe('owner');
+    expect(rewriteMeta.count).toBe(4); // still stamped, unconditionally
+    expect(rewriteMeta).not.toHaveProperty('feed'); // dropped — existing feed/quiet stand
+    expect(rewriteMeta).not.toHaveProperty('quiet');
+  });
+
+  test('an engineering-audience (FIX) repeat rewrite always rings — never gated, byte-identical to before this scope', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = {
+      id: 'n_fix_repeat', created_at: t1,
+      // A count far above anything this run could report — if this were
+      // owner-gated it would go quiet; FIX must ring anyway.
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 999 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // feed_down at one location -> FIX (engineering), same deterministic
+    // fixture as 'feed_down escalates the subject to FIX:' above.
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'none', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite).toMatchObject({ read_at: null });
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('FIX');
+    expect(rewriteMeta.audience).toBe('engineering');
+    expect(rewriteMeta.feed).toBe('activity');
+    expect(rewriteMeta.quiet).toBe(false);
+  });
+
+  // admin-alerts-ring-v2 follow-up: an audience flip changes which surface
+  // the row belongs to, not merely whether it rings — a FIX->ACT flip whose
+  // count hasn't grown (quiet by the plain ring test) must still land the
+  // owner's row visible, or it stays hidden behind a stale feed:'activity'.
+  test('a FIX->ACT flip rings into the owner bell even with a flat/shrinking count (the FIX row may have been read in Activity)', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // The standing row is CURRENTLY engineering/Activity-only, with a count
+    // well above anything this run's 4-location wipe reports (4) — the
+    // plain ring-only-on-change test alone would say quiet.
+    const marker = {
+      id: 'n_flip_quiet', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, audience: 'engineering', feed: 'activity', count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    // Zero rows everywhere -> silent_empty at all 4 locations -> ACT (owner).
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    expect(updates).toHaveLength(3);
+    const rewrite = updates[2];
+    expect(rewrite.read_at).toBeNull(); // entering the owner audience rings even though the count fell (10 -> 4)
+    const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
+    expect(rewriteMeta.kind).toBe('ACT');
+    expect(rewriteMeta.audience).toBe('owner');
+    // The flip still applies, despite the quiet refresh: the row is owner
+    // now, so it must not stay hidden behind the old engineering feed.
+    expect(rewriteMeta.feed).toBeNull();
+    expect(rewriteMeta.quiet).toBe(false);
+  });
+
   test('a delayed older failure cannot resurrect after the durable newer clean watermark', async () => {
     const t1 = new Date(NOW - 2 * 3600000).toISOString();
     const t2 = new Date(NOW - 3600000).toISOString();
