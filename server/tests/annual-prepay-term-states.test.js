@@ -740,12 +740,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     }
   });
 
-  test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_/payment_reminder_ names', () => {
+  test('sanctioned computed-key identifiers (*Col) can never be status: the column helpers return only notice_ names', () => {
     for (const days of [30, 15, 7, 3, 1, 0, 99, null]) {
-      for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut,
-        _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut]) {
+      for (const fn of [_private.noticeColumnForDaysOut, _private.noticeClaimColumnForDaysOut]) {
         const col = fn(days);
-        if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
+        if (col !== null) expect(col).toMatch(/^notice_/);
         expect(col).not.toBe('status');
       }
     }

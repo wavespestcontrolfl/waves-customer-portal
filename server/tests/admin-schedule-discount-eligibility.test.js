@@ -29,6 +29,7 @@ const {
 function discountQuery(discount) {
   return {
     where: jest.fn().mockReturnThis(),
+    forShare: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(discount),
   };
 }
@@ -69,7 +70,8 @@ describe('admin schedule appointment discount eligibility', () => {
         serviceKey: 'general_pest',
         serviceCategory: 'pest_control',
         recurringMembershipBooking: false,
-      }
+      },
+      db,
     );
   });
 
@@ -97,10 +99,52 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
       discount,
       expect.objectContaining({ id: 'customer-1' }),
-      expect.objectContaining({ recurringMembershipBooking: true })
+      expect.objectContaining({ recurringMembershipBooking: true }),
+      db,
     );
     expect(pricing.appointmentDiscount.discountDollars).toBe(22.5);
     expect(pricing.finalPrice).toBe(127.5);
+  });
+
+  // Codex r2 on #5093 (P2): the IB create_appointment executor's locked
+  // recheck calls buildAppointmentPricing with `conn: trx` so the discount
+  // it re-derives on commit reads the SAME locked snapshot as the customer
+  // row. Before this fix, resolveLineDiscount/loadInvoiceDiscount always
+  // read the module-level db regardless of `conn` — a discount deactivated
+  // or edited between the trx opening and this read would silently win.
+  test('a line discount resolves through the passed conn, not the global db', async () => {
+    // Deliberately NOT wiring `db` at all: this proves the read never
+    // reaches it. (A queued db.mockReturnValueOnce here would leak into
+    // later tests if this fix regressed and left it unconsumed — jest's
+    // clearAllMocks does not drain a mock's queued once-values — so the
+    // absence of any global-db wiring is itself part of the proof, not a
+    // gap in it.)
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+    const trxDiscount = { id: 'disc-trx', name: 'Locked (trx read)', discount_type: 'percentage', amount: 15 };
+    const queries = [];
+    const conn = jest.fn(() => { const q = discountQuery(trxDiscount); queries.push(q); return q; });
+
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'one_time_pest_control', category: 'pest', base_price: 250 },
+      primaryLinePrice: 250,
+      primaryLineDiscount: { discountId: 'disc-trx' },
+      customer: { id: 'customer-1' },
+      conn,
+    });
+
+    expect(conn).toHaveBeenCalledWith('discounts');
+    expect(db).not.toHaveBeenCalled();
+    // Share-locked on the transaction, so a concurrent edit or deactivation
+    // (FOR UPDATE in admin-discounts) either lands first or waits.
+    expect(queries[0].forShare).toHaveBeenCalled();
+    expect(pricing.primaryDiscount).toMatchObject({ discountId: 'disc-trx', discountName: 'Locked (trx read)', discountAmount: 15 });
+    expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
+      trxDiscount,
+      expect.objectContaining({ id: 'customer-1' }),
+      expect.any(Object),
+      conn,
+    );
   });
 
   test('recognizes which bookings create WaveGuard plan coverage', () => {
@@ -224,7 +268,8 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
       discount,
       expect.objectContaining({ id: 'customer-1' }),
-      expect.objectContaining({ subtotal: 50 })
+      expect.objectContaining({ subtotal: 50 }),
+      db,
     );
   });
 

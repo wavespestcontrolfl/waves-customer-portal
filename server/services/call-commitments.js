@@ -2068,6 +2068,13 @@ async function listSlotKeptCallIds(conn) {
           OR ss.customer_id IS DISTINCT FROM cl.customer_id
           OR cc.due_at IS NULL
           OR ss.created_at >= cc.due_at
+          -- The call's end as callEndedAt reads it now: a booking made while
+          -- the call was still going (its duration posted after the proof)
+          -- is not evidence of the promise (codex #5081 r8 P2).
+          OR ss.created_at <= CASE
+               WHEN cl.bridged_at IS NOT NULL THEN cl.bridged_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               WHEN cl.direction = 'inbound' THEN cl.created_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               ELSE cl.created_at END
           OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
           OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI')
           OR cc.kind IS DISTINCT FROM 'schedule_visit'

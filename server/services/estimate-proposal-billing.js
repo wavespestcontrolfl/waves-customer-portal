@@ -34,6 +34,92 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 
+// Every proposal document asks the public estimate route's one service-mix
+// policy. Classify the NORMALIZED rows the document actually prints, rather
+// than the estimate page's pricing rows: a disabled proposal can remain stored
+// as revision history and normalizeProposal deliberately renders its
+// itemization, even though the ordinary page correctly ignores it. Passing a
+// synthetic active proposal lets the canonical policy read those exact row
+// containers without inventing a second termite/service taxonomy here.
+// Unknown policy context fails closed to neutral copy.
+function proposalMakesNoGuaranteeClaim(proposal, estimateId = null) {
+  try {
+    const { estimateMakesNoGuaranteeClaim } = require('../routes/estimate-public');
+    if (typeof estimateMakesNoGuaranteeClaim !== 'function') return true;
+    return estimateMakesNoGuaranteeClaim({
+      proposal: {
+        enabled: true,
+        buildings: Array.isArray(proposal?.buildings) ? proposal.buildings : [],
+        programs: Array.isArray(proposal?.programs) ? proposal.programs : [],
+        correctiveWork: Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [],
+      },
+    });
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] guarantee-policy lookup failed for estimate ${estimateId || 'unknown'}: ${err.message}`);
+    return true;
+  }
+}
+
+function proposalRows(proposal) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  return [
+    ...list(proposal?.buildings).flatMap((building) => list(building?.lineItems)),
+    ...list(proposal?.correctiveWork),
+    ...list(proposal?.programs),
+  ];
+}
+
+function proposalRowLanes(row) {
+  const { serviceKeysFromText } = require('./estimate-service-lines');
+  return serviceKeysFromText(row?.service, row?.serviceKey, row?.description, row?.label, row?.name);
+}
+
+// Whether a guarantee line may cover the whole proposal document: a
+// residential proposal (never an authored, enabled one, which is commercial)
+// whose every printed row is in a recurring residential lane (pest, lawn,
+// mosquito, tree & shrub, palm). Rodent, commercial, mixed-with-neutral,
+// termite and unknown scope stay terms-neutral (AGENTS.md estimate truth
+// scope).
+function proposalCarriesPlanTerms(proposal, estimateId = null) {
+  if (!proposal || typeof proposal !== 'object' || proposal.enabled === true) return false;
+  if (proposalMakesNoGuaranteeClaim(proposal, estimateId)) return false;
+  const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+  const rows = proposalRows(proposal);
+  return rows.length > 0 && rows.every((row) => {
+    const lanes = proposalRowLanes(row);
+    return lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]);
+  });
+}
+
+// The terms one printed row states on its own (owner ruling 2026-09-27: each
+// service carries its own terms): 'all' for a row in one recurring
+// residential lane (pest, lawn, mosquito, tree & shrub, palm) on a
+// residential proposal, 'satisfaction' for any other row and every row of an
+// authored (commercial) proposal, 'none' on a document that makes no
+// guarantee claim (the caller's proposalMakesNoGuaranteeClaim result).
+function proposalRowTermsScope(proposal, row, noGuaranteeClaims = false) {
+  if (noGuaranteeClaims === true) return 'none';
+  if (proposal?.enabled === true) return 'satisfaction';
+  const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+  const lanes = proposalRowLanes(row);
+  return lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]) ? 'all' : 'satisfaction';
+}
+
+// Whether the PDF may print its canned IPM/callback sentence, a recurring
+// residential PEST term: the proposal carries the plan terms, every row is
+// pest work, and at least one line is a scheduled recurring visit.
+function proposalCallbackTermsEligible(proposal, estimateId = null) {
+  if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
+  const rows = proposalRows(proposal);
+  const recurringVisit = (Array.isArray(proposal.buildings) ? proposal.buildings : [])
+    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
+    .some((item) => item?.frequency && item.frequency !== 'one_time');
+  return recurringVisit && rows.every((row) => {
+    const lanes = proposalRowLanes(row);
+    return lanes.length === 1 && lanes[0] === 'pest';
+  });
+}
+
 // An estimate with no customer_id still links at accept through the SAME
 // phone matcher the accept path uses, so an existing member can be on the
 // other end of an unlinked estimate. Mirrors estimateCustomerPreservesMonthly
@@ -226,6 +312,10 @@ module.exports = {
   estimateBillsPerApplication,
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
+  proposalCallbackTermsEligible,
+  proposalCarriesPlanTerms,
+  proposalMakesNoGuaranteeClaim,
+  proposalRowTermsScope,
   resolveLivePricing,
   resolveProposalBillingContext,
 };

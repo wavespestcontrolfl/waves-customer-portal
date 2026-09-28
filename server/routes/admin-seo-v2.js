@@ -656,7 +656,17 @@ router.post('/backlinks/llm-mentions', requireAdmin, async (req, res, next) => {
 router.get('/llm-mentions', async (req, res, next) => {
   try {
     const prober = require('../services/seo/llm-mention-prober');
-    res.json(await prober.getDashboard());
+    const dashboard = await prober.getDashboard();
+    // Owned cited-URL health is a separate signal (are the pages engines
+    // cite still there?) — additive, never blocks the rest of the payload.
+    try {
+      const { getCitedUrlHealthDashboard } = require('../services/seo/owned-url-health');
+      dashboard.citedUrlHealth = await getCitedUrlHealthDashboard();
+    } catch (err) {
+      logger.warn(`[llm-mentions] cited-URL health block failed: ${err.message}`);
+      dashboard.citedUrlHealth = null;
+    }
+    res.json(dashboard);
   } catch (err) { next(err); }
 });
 

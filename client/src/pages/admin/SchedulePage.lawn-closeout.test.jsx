@@ -94,7 +94,7 @@ it.each([false, true])('requires visit facts beyond a typed treatment target: co
   const schema = { type: 'one_time_pest_treatment', fields: [
     { key: targetKey, label: 'Target pest', type: 'text', placeholder: 'Synthetic target' },
     { key: 'work_completed', label: 'Work completed', type: 'text', placeholder: 'Synthetic work' },
-  ], nextStepChips: [] };
+  ] };
   render(<CompletionPanel service={{ ...service, serviceType: 'One-Time Pest Treatment', waveguardTier: null,
     completionProfile: { serviceKey: 'one_time_pest_treatment', requiresProducts: false, ...(!companion && { findingsType: schema.type }) },
     ...(companion ? { companionSchemas: [schema] } : { findingsSchema: schema }),

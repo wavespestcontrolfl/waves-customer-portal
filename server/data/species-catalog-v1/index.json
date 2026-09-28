@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026-09-26.1",
+  "catalog_version": "2026-09-27.1",
   "section": "pest",
   "site_categories": [
     "Ants",
@@ -16,33 +16,57 @@
     "Plant pests",
     "Flies & gnats",
     "Beetles & bugs",
-    "Pantry & fabric pests"
+    "Pantry & fabric pests",
+    "Lawn grasses",
+    "Lawn weeds",
+    "Palms",
+    "Shrubs & trees",
+    "Lawn problems",
+    "Plant & palm problems",
+    "Lawn & plant problems"
   ],
   "categories": {
     "insect": {
       "id": "insect",
       "label": "Insect",
-      "generic": "an insect"
+      "generic": "an insect",
+      "section": "pest"
     },
     "arachnid": {
       "id": "arachnid",
       "label": "Arachnid",
-      "generic": "a spider or other arachnid"
+      "generic": "a spider or other arachnid",
+      "section": "pest"
     },
     "rodent": {
       "id": "rodent",
       "label": "Rodent",
-      "generic": "a rat, mouse, or other rodent"
+      "generic": "a rat, mouse, or other rodent",
+      "section": "pest"
     },
     "wildlife": {
       "id": "wildlife",
       "label": "Wildlife",
-      "generic": "a wildlife visitor"
+      "generic": "a wildlife visitor",
+      "section": "pest"
     },
     "other": {
       "id": "other",
       "label": "Other",
-      "generic": "something we want a closer look at"
+      "generic": "something we want a closer look at",
+      "section": "pest"
+    },
+    "plant": {
+      "id": "plant",
+      "label": "Plant",
+      "generic": "a plant",
+      "section": "plant"
+    },
+    "condition": {
+      "id": "condition",
+      "label": "Condition",
+      "generic": "a lawn or plant problem we want a closer look at",
+      "section": "condition"
     }
   },
   "groups": [
@@ -257,6 +281,97 @@
       "label": "Birds",
       "generic": "a bird",
       "category": "wildlife"
+    },
+    {
+      "id": "turfgrasses",
+      "label": "Lawn grasses",
+      "generic": "a lawn grass",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "broadleaf-weeds",
+      "label": "Broadleaf weeds",
+      "generic": "a broadleaf weed",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "grassy-weeds",
+      "label": "Grassy weeds",
+      "generic": "a grassy weed",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "sedges",
+      "label": "Sedges & kyllingas",
+      "generic": "a sedge",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "palms",
+      "label": "Palms",
+      "generic": "a palm",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "shrubs-trees",
+      "label": "Shrubs & trees",
+      "generic": "a landscape plant",
+      "aliases": [],
+      "category": "plant"
+    },
+    {
+      "id": "nematodes",
+      "label": "Lawn nematodes",
+      "generic": "a soil nematode (never visible in a photo)",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "turf-diseases",
+      "label": "Lawn diseases",
+      "generic": "a lawn disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "ornamental-diseases",
+      "label": "Shrub & tree diseases",
+      "generic": "a plant disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "palm-diseases",
+      "label": "Palm diseases",
+      "generic": "a palm disease",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "nutrient-disorders",
+      "label": "Nutrient problems",
+      "generic": "a nutrient problem",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "water-and-site",
+      "label": "Water, shade & site stress",
+      "generic": "a water or site problem",
+      "aliases": [],
+      "category": "condition"
+    },
+    {
+      "id": "cultural-and-chemical",
+      "label": "Mowing, chemical & physical damage",
+      "generic": "damage from care or chemicals",
+      "aliases": [],
+      "category": "condition"
     }
   ],
   "subgroups": [
@@ -920,6 +1035,34 @@
       ],
       "scientific": "Centruroides",
       "rank": "genus"
+    },
+    {
+      "id": "date-palms",
+      "group": "palms",
+      "label": "Date palms",
+      "generic": "a date palm",
+      "scientific": "Phoenix",
+      "rank": "genus"
+    },
+    {
+      "id": "fan-palms",
+      "group": "palms",
+      "label": "Fan palms",
+      "generic": "a fan palm",
+      "scientific": null,
+      "rank": "group"
+    },
+    {
+      "id": "turf-nutrient",
+      "group": "nutrient-disorders",
+      "label": "Lawn nutrient problems",
+      "generic": "a lawn nutrient problem"
+    },
+    {
+      "id": "palm-nutrient",
+      "group": "nutrient-disorders",
+      "label": "Palm nutrient problems",
+      "generic": "a palm nutrient problem"
     }
   ],
   "look_alike_groups": [
@@ -1097,5 +1240,125 @@
       "note": "v1 lumped many unrelated beneficial species (lady beetle, lacewing, dragonfly, mantis, earthworm, anole, gecko, frog, toad) under one slug. No single catalog node covers all of them without over-claiming, so this resolves to null; the caller should keep its own generic beneficial fallback copy until each species is looked up individually."
     }
   },
-  "planned_slugs": []
+  "planned_slugs": [
+    "st-augustinegrass",
+    "bahiagrass",
+    "zoysiagrass",
+    "bermudagrass",
+    "centipedegrass",
+    "seashore-paspalum",
+    "dollarweed",
+    "florida-pusley",
+    "spotted-spurge",
+    "chamberbitter",
+    "matchweed",
+    "virginia-buttonweed",
+    "yellow-woodsorrel",
+    "old-world-diamond-flower",
+    "asiatic-hawksbeard",
+    "creeping-beggarweed",
+    "common-lespedeza",
+    "spanish-needles",
+    "artilleryweed",
+    "sensitive-plant",
+    "cudweed",
+    "dayflower",
+    "doveweed",
+    "crabgrass",
+    "goosegrass",
+    "torpedograss",
+    "alexandergrass",
+    "crowfootgrass",
+    "thin-paspalum",
+    "smutgrass",
+    "tropical-signalgrass",
+    "purple-nutsedge",
+    "yellow-nutsedge",
+    "globe-sedge",
+    "green-kyllinga",
+    "queen-palm",
+    "foxtail-palm",
+    "royal-palm",
+    "cabbage-palm",
+    "coconut-palm",
+    "areca-palm",
+    "christmas-palm",
+    "pygmy-date-palm",
+    "canary-island-date-palm",
+    "sylvester-date-palm",
+    "chinese-fan-palm",
+    "mexican-fan-palm",
+    "hibiscus",
+    "ixora",
+    "croton",
+    "bougainvillea",
+    "sweet-viburnum",
+    "ficus-hedge",
+    "podocarpus",
+    "sea-grape",
+    "cocoplum",
+    "crape-myrtle",
+    "gardenia",
+    "oleander",
+    "plumbago",
+    "confederate-jasmine",
+    "arboricola",
+    "copperleaf",
+    "firebush",
+    "clusia",
+    "ligustrum",
+    "live-oak",
+    "citrus",
+    "mango",
+    "sago-palm",
+    "bird-of-paradise",
+    "southern-magnolia",
+    "sting-nematode",
+    "large-patch",
+    "gray-leaf-spot",
+    "take-all-root-rot",
+    "fairy-ring",
+    "pythium-root-rot",
+    "turf-rust",
+    "leaf-spot-melting-out",
+    "slime-mold",
+    "dollar-spot",
+    "powdery-mildew",
+    "viburnum-downy-mildew",
+    "anthracnose",
+    "leaf-spot-fungi",
+    "phytophthora-root-rot",
+    "citrus-greening",
+    "citrus-canker",
+    "oleander-leaf-scorch",
+    "ganoderma-butt-rot",
+    "lethal-bronzing",
+    "lethal-yellowing",
+    "fusarium-wilt-of-palms",
+    "palm-bud-rot",
+    "graphiola-false-smut",
+    "palm-leaf-spots",
+    "nitrogen-deficiency-turf",
+    "iron-deficiency-turf",
+    "magnesium-deficiency-turf",
+    "potassium-deficiency-palm",
+    "magnesium-deficiency-palm",
+    "manganese-deficiency-palm",
+    "boron-deficiency-palm",
+    "iron-deficiency-palm",
+    "drought-irrigation-stress",
+    "overwatering",
+    "shade-thinning",
+    "compaction-traffic-wear",
+    "salt-injury",
+    "cold-damage",
+    "transplant-shock",
+    "deep-planting-mulch-volcano",
+    "mower-scalping",
+    "dull-blade-shredding",
+    "herbicide-injury",
+    "fertilizer-burn",
+    "dog-urine-spots",
+    "trimmer-bark-damage"
+  ]
 }

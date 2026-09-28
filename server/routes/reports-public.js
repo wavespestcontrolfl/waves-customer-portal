@@ -267,6 +267,7 @@ const {
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 
 const PDF_NAVY = '#1B2C5B';
@@ -455,6 +456,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // under the general report limiter, repeatedly. Defaulting to off means a
   // future caller cannot inherit that cost by accident either.
   composeOffers = false,
+  // OPT-IN on the same terms: only the /data render shows the "Your plan"
+  // card, so only it pays for the membership + year-history reads
+  // (GATE_REPORT_PLAN_SUMMARY). The Q&A endpoint never reads the field.
+  planSummary = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -471,7 +476,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   const expectationFactsOut = {};
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2482,7 +2487,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2674,6 +2679,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
   doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
+  // Owner ask 2026-09-28: every report, legacy ones included, links to the
+  // public Products & Safety page. The URL prints in full for paper copies.
+  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();

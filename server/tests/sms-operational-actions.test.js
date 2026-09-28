@@ -1293,7 +1293,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
   });
 
-  test('rule 6: a property-scoped ask needs the payment tied to that property; an unscoped ask admits any of the customer\'s own payments', () => {
+  test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
     const scopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: { ...ctx, property_id: 'home' } };
     const unscopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: ctx };
     const invoiceAtHome = { ...invoicePaid, property_id: 'home' };
@@ -1301,9 +1301,10 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     const invoiceUnlinked = { ...invoicePaid, property_id: null };
     expect(admissibleWitness(invoiceAtHome, scopedAsk)).toBe(true);
     expect(admissibleWitness(invoiceElsewhere, scopedAsk)).toBe(false);
-    // An unlinked ledger prepayment (no property at all) can never vouch for a scoped ask.
-    expect(admissibleWitness(invoiceUnlinked, scopedAsk)).toBe(false);
-    expect(admissibleWitness(ledgerPaid, scopedAsk)).toBe(false);
+    // A payment nothing ties to any property still counts for a scoped ask
+    // (owner ruling 2026-09-27): only another property's payment is refused.
+    expect(admissibleWitness(invoiceUnlinked, scopedAsk)).toBe(true);
+    expect(admissibleWitness(ledgerPaid, scopedAsk)).toBe(true);
     // Unscoped: every leg, linked or not, is admitted.
     expect(admissibleWitness(invoiceUnlinked, unscopedAsk)).toBe(true);
     expect(admissibleWitness(ledgerPaid, unscopedAsk)).toBe(true);

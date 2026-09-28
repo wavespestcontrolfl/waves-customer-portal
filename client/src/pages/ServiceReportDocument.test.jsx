@@ -65,6 +65,20 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('10 g/gal')).toBeInTheDocument();
   });
 
+  // Owner ask 2026-09-28: every record of service links to the public Products
+  // & Safety page from its footer, product rows or not. The URL prints in full.
+  it.each([
+    ['with product rows', BASE_DATA],
+    ['with no product rows', { ...BASE_DATA, applications: [] }],
+  ])('links to the public Products & Safety page (%s)', (_label, data) => {
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Every product we use and our safety protocol:/)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'https://www.wavespestcontrol.com/products-and-safety/' });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');
