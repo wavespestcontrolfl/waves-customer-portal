@@ -132,12 +132,12 @@ async function currentStepLedgerIds(row, step, channels) {
 // partial success must exclude THESE keys too, or the policy consult can
 // see the earlier partial attempt's own contact and deny the retry
 // (Codex pre-push r2).
-async function currentCombinedStepLedgerIds(customerId, step, etDay, channels) {
+async function currentCombinedStepLedgerIds(customerId, step, etDay, includedIdsKey, channels) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
   if (!channels.length) return [];
   const rows = await db('collections_contact_ledger')
     .where({ source: 'invoice_followups' })
-    .whereIn('idempotency_key', channels.map((channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`));
+    .whereIn('idempotency_key', channels.map((channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${includedIdsKey}:${channel}`));
   return (rows || []).map((entry) => entry.id);
 }
 
@@ -1201,9 +1201,17 @@ async function fireCombinedTouchClaimed(rows) {
   // Per-invoice guards fireTouch applies before rendering: a live Bill-To
   // re-read, a fresh paid/prepaid re-check, and micro-deposit-pending
   // diversion. The combined message has no verification-nudge variant, so
-  // an mdPending invoice drops out here and is picked up by its own
-  // per-invoice touch on a later run, same as any other excluded row.
+  // an mdPending invoice drops out of the combined set — but it is still
+  // CLAIMED right now (claimTouchRow, above), and its next_touch_at is not
+  // touched by exclusion alone, so leaving it to "a later run" can leave it
+  // stuck: if every row in this group is mdPending, `included` ends up
+  // empty and next_touch_at never advances, and the SAME group re-forms
+  // and re-excludes on every subsequent run until the stale-touch grace
+  // silently skips it past its verification reminder (Codex pre-push r3).
+  // Fire it through fireTouch NOW instead — the same immediate handling
+  // the other exclusions above already give their row (pause, stop).
   const included = [];
+  const mdPendingRows = [];
   for (const row of rows) {
     const liveInvoice = await db('invoices').where({ id: row.invoice_id })
       .first('payer_id', 'scheduled_send_error', 'total', 'credit_applied', 'status', 'title',
@@ -1234,10 +1242,15 @@ async function fireCombinedTouchClaimed(rows) {
         id: row.invoice_id, stripe_payment_intent_id: liveInvoice.stripe_payment_intent_id,
       }).catch(() => false);
     if (mdPending) {
-      logger.info(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch — awaiting micro-deposit verification`);
+      logger.info(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch — awaiting micro-deposit verification; dispatching its own verification reminder now`);
+      mdPendingRows.push(row);
       continue;
     }
     included.push({ ...row, ...liveInvoice, invoice_id: row.invoice_id, sequence_id: row.id });
+  }
+  for (const row of mdPendingRows) {
+    // Sequential: each fireTouch owns its own DB writes for its invoice.
+    await fireTouch(row, {});
   }
 
   if (!included.length) return;
@@ -1305,27 +1318,29 @@ async function fireCombinedTouchClaimed(rows) {
   const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
 
   const etDay = etDateString(new Date());
-  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`;
   const ContactLedger = require('./collections/contact-ledger');
   // A stable identity for THIS combined touch's included set — the same
-  // step id recurs for a customer as new invoices reach it later, so the
-  // email template's own provider-level idempotency key must be scoped to
-  // which invoices it is quoting THIS time, or a later different pair
-  // reaching the same step dedupes against a stale prior send (pre-push
-  // audit P1).
+  // step id recurs for a customer as new invoices reach it later, and the
+  // included set itself can differ between two attempts at the same step
+  // on the same day (an invoice drops out, another joins). Both the
+  // contact-ledger reservation's own idempotency key AND the email
+  // template's provider-level key are scoped to it, so a regrouped retry
+  // never reuses — and silently "delivers" — a reservation that only ever
+  // quoted a DIFFERENT set of invoices (Codex pre-push r1 + r3).
   const includedIdsKey = includedIds.map(String).sort().join(',');
+  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${includedIdsKey}:${channel}`;
 
   // excludeLedgerIds: THIS touch's own reservations must not count against
   // itself on a same-day retry — both the per-invoice-keyed rows a legacy
   // single touch at this step might have left, AND this lane's own
-  // combined-keyed rows (a partial success earlier today already wrote
-  // one), which currentStepLedgerIds' per-invoice key format never matches
-  // (Codex pre-push r2).
+  // combined-keyed rows for this SAME included set (a partial success
+  // earlier today already wrote one), which currentStepLedgerIds' per-
+  // invoice key format never matches (Codex pre-push r2).
   const ownLedgerIdsPerRow = await Promise.all(included.map((inv) => {
     const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
     return currentStepLedgerIds(originalRow, step, policyChannels).catch(() => []);
   }));
-  const ownCombinedLedgerIds = await currentCombinedStepLedgerIds(customerId, step, etDay, policyChannels).catch(() => []);
+  const ownCombinedLedgerIds = await currentCombinedStepLedgerIds(customerId, step, etDay, includedIdsKey, policyChannels).catch(() => []);
   const excludeLedgerIds = [...new Set([...ownLedgerIdsPerRow.flat(), ...ownCombinedLedgerIds])];
 
   const policyResults = await Promise.all(policyChannels.map((channel) =>
@@ -1413,9 +1428,13 @@ async function fireCombinedTouchClaimed(rows) {
               await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
             }
           } else if (result?.deliveryOutcome === 'not_sent' || (result?.deliveryOutcome == null && result?.blocked === true)) {
-            // A DEFINITE provider rejection — settled as failed, never
-            // retried against this reservation.
-            await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' });
+            // A DEFINITE provider rejection — but still hold when the
+            // stamp itself didn't land, or the rejection is one fireTouch
+            // treats as retryable/deferred rather than final (a consent
+            // lookup failure, a send-window defer): mirrors fireTouch's own
+            // holdStep calls on this exact branch (Codex pre-push r3).
+            if (!await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' })) smsHold = true;
+            if (result?.retryable || result?.deferred || result?.code === 'CONSENT_LOOKUP_FAILED') smsHold = true;
           } else {
             // Uncertain / retryable (a thrown send, a deferred window): the
             // provider may still have accepted it — do NOT stamp

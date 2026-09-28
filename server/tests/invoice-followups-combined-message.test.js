@@ -55,6 +55,9 @@ const { collectionsChannelPermitted } = require('../services/collections/rail-gu
 const ContactLedger = require('../services/collections/contact-ledger');
 const { buildPayBalanceLink } = require('../services/composer-customer-links');
 const { billingEmailRecipient, billingEmailSendOutcome } = require('../services/billing-email-sender');
+const { gates } = require('../config/feature-gates');
+const StripeService = require('../services/stripe');
+const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 const { runPending } = require('../services/invoice-followups');
 
 // Wednesday 2026-08-05 10:16 AM ET, inside the Tue–Fri send window.
@@ -68,6 +71,9 @@ beforeEach(() => {
   delete process.env.GATE_DUNNING_COMBINED_MESSAGE;
   delete process.env.GATE_DUNNING_LADDER_90;
   delete process.env.GATE_COLLECTIONS_POLICY;
+  gates.divertMicrodepositDunning = false;
+  StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(false);
+  sendMicrodepositVerificationEmail.mockResolvedValue({ ok: true });
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
   ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({ id: `ledger-${idempotencyKey}` }));
   // Covers every invoice id used anywhere in this file by default — the one
@@ -270,10 +276,10 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     const smsCall = ContactLedger.recordContact.mock.calls.find((c) => c[0].channel === 'sms')[0];
     const emailCall = ContactLedger.recordContact.mock.calls.find((c) => c[0].channel === 'email')[0];
     expect(smsCall.invoiceIds.sort()).toEqual(['inv-A', 'inv-B']);
-    expect(smsCall.idempotencyKey).toBe(`invoice_followups:combined:cust-1:d3_friendly:${etDay}:sms`);
+    expect(smsCall.idempotencyKey).toBe(`invoice_followups:combined:cust-1:d3_friendly:${etDay}:inv-A,inv-B:sms`);
     expect(smsCall.metadata).toMatchObject({ combined: true, step_id: 'd3_friendly' });
     expect(emailCall.invoiceIds.sort()).toEqual(['inv-A', 'inv-B']);
-    expect(emailCall.idempotencyKey).toBe(`invoice_followups:combined:cust-1:d3_friendly:${etDay}:email`);
+    expect(emailCall.idempotencyKey).toBe(`invoice_followups:combined:cust-1:d3_friendly:${etDay}:inv-A,inv-B:email`);
 
     // SMS vars: invoice_count/total_due/pay_url. total_due = (150) + (80.5-0.5) = 230.00
     const smsVars = smsTemplatesRouter.getTemplate.mock.calls[0][1];
@@ -372,7 +378,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     const etDay = '2026-08-05';
     const priorLedgerRow = {
       id: 'ledger-99', source: 'invoice_followups',
-      idempotency_key: `invoice_followups:combined:cust-1:d3_friendly:${etDay}:sms`,
+      idempotency_key: `invoice_followups:combined:cust-1:d3_friendly:${etDay}:inv-A,inv-B:sms`,
     };
     twoInvoiceSetup({ ledgerRows: [priorLedgerRow] });
     await runPending();
@@ -393,6 +399,34 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // SMS attempted and delivered
     expect(seqTable.rows.get('seq-A').step_index).toBe(0); // held anyway — email still pending
     expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+  });
+
+  test('an SMS deferred/retryable rejection holds the touch, even though it is a "definite" not_sent outcome', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', deferred: true, code: 'QUIET_HOURS_HOLD' });
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(seqTable.rows.get('seq-A').step_index).toBe(0); // held, not advanced
+    expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+  });
+
+  test('every included row awaiting micro-deposit verification is dispatched through its own diversion reminder, not silently dropped', async () => {
+    gates.divertMicrodepositDunning = true;
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    twoInvoiceSetup();
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    // Both excluded from the combined message (no combined send at all)...
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
+    // ...but each still gets its own micro-deposit verification reminder,
+    // not left to rot until the group re-forms and excludes them again.
+    expect(sendMicrodepositVerificationEmail).toHaveBeenCalledTimes(2);
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'inv-A' }),
+    );
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'inv-B' }),
+    );
   });
 
   test('a send failure (both legs fail) advances neither sequence', async () => {
