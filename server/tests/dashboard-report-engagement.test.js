@@ -171,10 +171,14 @@ describe('get_report_engagement', () => {
     // value.
     const expectedCutoff = etDateString(addETDays(new Date(), -15));
     // The performed-visit rule's outcomes lead (pest-pressure/first-visit.js).
-    expect(rawCalls[1].bindings).toEqual(['inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
-    // Both sides of the window use the canonical record's frozen service_date.
-    expect(rawCalls[1].sql).toMatch(/r\.service_date > v\.service_date/);
-    expect(rawCalls[1].sql).toMatch(/r\.service_date <= v\.service_date \+ INTERVAL '14 days'/);
+    // Candidate window first (from, to, cutoff), then the performed-visit
+    // outcomes (pest-pressure/first-visit.js), then the visit period.
+    expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, 'inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
+    // Both sides of the window use the canonical record's frozen service_date,
+    // and each re-service is attributed to one nearest earlier visit.
+    expect(rawCalls[1].sql).toMatch(/r\.service_date > pv\.service_date/);
+    expect(rawCalls[1].sql).toMatch(/r\.service_date <= pv\.service_date \+ INTERVAL '14 days'/);
+    expect(rawCalls[1].sql).toMatch(/DISTINCT ON \(r\.id\)/);
     // The cutoff bounds the VISIT's own service date, not the [from, to]
     // window — it rides in the same LEAST(...) as `to`, so a visit inside
     // the last 14 days is excluded from the visits CTE entirely.

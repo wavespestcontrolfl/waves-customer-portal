@@ -243,6 +243,24 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
   });
 
+  test('one re-service credits only the nearest earlier visit, never two visits close together', async () => {
+    const cust = await customer();
+    await sentVisit({ customerId: cust, date: '2026-08-03', line: 'pest' });
+    await sentVisit({ customerId: cust, date: '2026-08-08', line: 'pest' });
+    await completedVisit({ customerId: cust, date: '2026-08-10', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 2, reserviced: 1, rate_pct: 50 });
+  });
+
+  test('a re-service nearest to a visit after the period does not credit the in-period visit', async () => {
+    const cust = await customer();
+    await sentVisit({ customerId: cust, date: '2026-08-30', line: 'pest' }); // in the period
+    await sentVisit({ customerId: cust, date: '2026-09-02', line: 'pest' }); // after it, nearer
+    await completedVisit({ customerId: cust, date: '2026-09-05', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
+  });
+
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
     const cust = await customer();
     // Visit A: 5 days ago — its 14-day follow-up window hasn't closed yet,

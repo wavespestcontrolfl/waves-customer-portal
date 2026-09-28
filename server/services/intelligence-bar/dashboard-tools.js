@@ -942,7 +942,8 @@ const REPORT_ACTION_EVENTS = [
 // completed canonical record, outcome not incomplete / declined /
 // inspection-only (the Pest Pressure prior-visit rule,
 // pest-pressure/first-visit.js). A re-service counts whatever its outcome or
-// record status (an incomplete callback is still a callback).
+// record status (an incomplete callback is still a callback), and credits
+// only ONE visit: the nearest performed visit before it on that line.
 //
 // Right-censoring: a visit from the last 14 days hasn't had its full 14-day
 // follow-up window pass yet, so counting it as a "no re-service" visit
@@ -955,8 +956,20 @@ const REPORT_ACTION_EVENTS = [
 const RESERVICE_LINES = ['pest', 'lawn'];
 
 async function getReserviceWithin14Days(from, to, cutoff) {
+  // Every date that can matter: visits in [from, LEAST(to, cutoff)] and the
+  // re-services (and nearer later visits) up to 14 days past that end.
   const { rows } = await db.raw(`
-    WITH completed AS (
+    WITH candidates AS (
+      -- Bound the canonical-record resolution to bookings with a completion
+      -- record dated in the window. The canonical record is always one of a
+      -- booking's own records, so a booking whose canonical date is in the
+      -- window is never dropped here; the exact date checks come after.
+      SELECT DISTINCT s.scheduled_service_id AS id
+      FROM service_records s
+      WHERE s.scheduled_service_id IS NOT NULL
+        AND s.service_date >= ?::date AND s.service_date <= LEAST(?::date, ?::date) + 14
+    ),
+    completed AS (
       SELECT ss.id, ss.customer_id, srec.service_date,
              srec.status AS record_status,
              NULLIF(srec.service_line, '') AS record_line,
@@ -967,19 +980,24 @@ async function getReserviceWithin14Days(from, to, cutoff) {
               OR COALESCE(srec.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
              COALESCE(srec.structured_notes->>'visitOutcome', '') AS visit_outcome,
              (${customerVisibleServiceRecordPredicate('srec')}) AS customer_visible
-      FROM scheduled_services ss
+      FROM candidates c
+      JOIN scheduled_services ss ON ss.id = c.id
       CROSS JOIN LATERAL (${CANONICAL_SIBLING}) canonical
       JOIN service_records srec ON srec.id = canonical.id
       WHERE ss.status = 'completed'
     ),
-    visits AS (
+    performed AS (
       SELECT id, customer_id, service_date, record_line AS service_line
       FROM completed
       WHERE NOT is_reservice
         AND record_status = 'completed'
         AND customer_visible
         AND visit_outcome NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
-        AND service_date >= ? AND service_date <= LEAST(?::date, ?::date)
+    ),
+    visits AS (
+      SELECT id, customer_id, service_date, service_line
+      FROM performed
+      WHERE service_date >= ?::date AND service_date <= LEAST(?::date, ?::date)
     ),
     reservices AS (
       SELECT id, customer_id, service_date,
@@ -990,19 +1008,29 @@ async function getReserviceWithin14Days(from, to, cutoff) {
              END AS service_line
       FROM completed
       WHERE is_reservice
+    ),
+    attributed AS (
+      -- Each re-service credits ONE visit: the nearest performed visit before
+      -- it on the same line (1-14 days), so two visits close together never
+      -- both claim one callback. A nearer visit after the period wins too, so
+      -- an in-period visit is never credited with someone else's callback.
+      SELECT DISTINCT ON (r.id) r.id AS reservice_id, pv.id AS visit_id
+      FROM reservices r
+      JOIN performed pv
+        ON pv.customer_id = r.customer_id
+       AND pv.service_line = r.service_line
+       AND r.service_date > pv.service_date
+       AND r.service_date <= pv.service_date + INTERVAL '14 days'
+      ORDER BY r.id, pv.service_date DESC, pv.id DESC
     )
     SELECT v.service_line,
            COUNT(DISTINCT v.id)::int AS visits,
-           (COUNT(DISTINCT v.id) FILTER (WHERE r.id IS NOT NULL))::int AS reserviced
+           COUNT(DISTINCT att.visit_id)::int AS reserviced
     FROM visits v
-    LEFT JOIN reservices r
-      ON r.customer_id = v.customer_id
-     AND r.service_line = v.service_line
-     AND r.service_date > v.service_date
-     AND r.service_date <= v.service_date + INTERVAL '14 days'
+    LEFT JOIN attributed att ON att.visit_id = v.id
     WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
     GROUP BY v.service_line
-  `, [...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
+  `, [from, to, cutoff, ...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
 
   const byLine = {};
   for (const row of rows) {
@@ -1156,7 +1184,7 @@ async function getReportEngagement(input = {}) {
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
-      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts performed, customer-visible, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later, classified from each service record as completed (not the editable booking); rate_pct is a percent (0-100), null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
+      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts performed, customer-visible, non-re-service visits in the period that got a same-customer same-line re-service 1-14 days later (each re-service credits only its nearest earlier visit), classified from the canonical completion record of each visit (not the editable booking); rate_pct is a percent (0-100), null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
     ],
   };
 }
