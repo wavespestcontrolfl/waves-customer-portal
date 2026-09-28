@@ -1387,24 +1387,42 @@ class SmartRebooker {
     // any lock is taken.
     const keptTechId = Object.prototype.hasOwnProperty.call(updates, 'technician_id')
       ? updates.technician_id : service.technician_id;
+    // A same-day, same-tech WINDOW change also moves this stop's place in
+    // the route (Codex round 1 P1 on the mid-route insertion lane, PR
+    // #5267): routeOrderInvalidated above only covers a day/tech change, so
+    // a picker offer that moved the stop earlier or later in the SAME day
+    // (e.g. first-thing -> afternoon) kept the stored route_order untouched
+    // — the stop stayed numbered first even though the route it was
+    // actually offered at (and will be verified against below) has it
+    // somewhere else. Only the START matters for placement; window_end is
+    // derived from duration and never itself moves a stop's position.
+    const placementWindowChanged = routeOrderInvalidated
+      || hhmm(updates.window_start) !== hhmm(service.window_start);
 
     // Mid-route insertion certification — single-visit public reschedule
     // ONLY (owner 2026-09-28; docs/public-route-contracts.md). Without this,
-    // a day/tech move that just invalidated route_order above commits the
-    // stop unnumbered at the end of its new day (every consumer sorts
-    // COALESCE(route_order, 999)), even when the picker offered — and the
-    // customer picked — a slot BETWEEN two existing stops
-    // (reschedule-public.js's own capacityPlacement on its offer build).
-    // options.capacityPlacement scopes this to that ONE caller (admin
-    // dispatch, auto-dispatch, rain-out and SMS-reply reschedule never set
-    // it, so they are byte-identical either way); the live policy itself is
-    // re-read HERE from the same canonical reader createSelfBooking's own
-    // commit uses (routes/booking.js's bookInsertionOffersLive) rather than
-    // trusted from the caller or anything client-supplied — this surface
-    // verifies no slot_sig at all (see buildAvailabilityForService).
-    // Mirrors createSelfBooking exactly: prepared (traffic spent) BEFORE
-    // any lock, verified under the SAME tech-day lock rung 3 already takes
-    // below, persisted only after the row's own CAS write lands.
+    // a move that changed this stop's place in the route (day, tech, OR
+    // window — placementWindowChanged above) either nulls route_order
+    // (day/tech) or silently keeps the OLD stored number (window-only) —
+    // wrong either way when the picker offered, and the customer picked, a
+    // slot BETWEEN two existing stops (reschedule-public.js's own
+    // capacityPlacement on its offer build). options.capacityPlacement
+    // scopes this to that ONE caller (admin dispatch, auto-dispatch,
+    // rain-out and SMS-reply reschedule never set it, so they are
+    // byte-identical either way); the live policy itself is re-read HERE
+    // from the same canonical reader createSelfBooking's own commit uses
+    // (routes/booking.js's bookInsertionOffersLive) rather than trusted
+    // from the caller or anything client-supplied — this surface verifies
+    // no slot_sig at all (see buildAvailabilityForService). Mirrors
+    // createSelfBooking exactly: prepared (traffic spent) BEFORE any lock,
+    // verified under the SAME tech-day lock rung 3 already takes below,
+    // persisted only after the row's own CAS write lands.
+    // prepareArrivalCapacity({serviceId, ...}) — not `prospective` — reads
+    // the row's OWN current stored state and applies `date`/`technicianId`
+    // as changes on top (loadArrivalRouteContext), so it already handles a
+    // row staying on its own current route (a window-only move never
+    // touches `date`/`technicianId` here) exactly like a day/tech move —
+    // nothing extra needed for that case.
     //
     // !service.visit_id: a grouped visit's own move never reaches here
     // (moveVisitAsUnit forwards options — including capacityPlacement —
@@ -1417,7 +1435,7 @@ class SmartRebooker {
     // stale visit_id at this pre-read) is a deliberate skip too — it falls
     // back to the append-only clear above like every grouped-adjacent case.
     let preparedCapacity = null;
-    if (options.capacityPlacement === true && routeOrderInvalidated && keptTechId
+    if (options.capacityPlacement === true && placementWindowChanged && keptTechId
       && updates.window_start && occupancyGateEnd && !service.visit_id
       && require('../routes/booking')._internals.bookInsertionOffersLive()) {
       preparedCapacity = await prepareArrivalCapacity({
@@ -1696,6 +1714,26 @@ class SmartRebooker {
           trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start },
         });
       }
+      // Row lock on the moving stop itself, immediately before verify
+      // (Codex round 1 P1 on PR #5267, PRRT_kwDOR3YQi86mzgqH):
+      // verifyArrivalCapacity's own row lock only covers the DESTINATION
+      // day/tech (prepared.options.date) — this row is still on its OLD
+      // date at this point, so nothing above locks it, and the CAS
+      // predicate below never pins duration/address/service_type. Without
+      // this, a concurrent edit to any of those (an admin schedule save
+      // landing between the outer pre-read and this verify) could commit a
+      // route order certified against data that was already stale. Same
+      // relative position — right before a guard/verify step, after the
+      // tech-day fence — rescheduleSeries's own moveGuard lock takes
+      // (`.forUpdate().first()` a few hundred lines below). Locking (not
+      // re-reading its columns) is enough: verifyArrivalCapacity's own
+      // loadArrivalRouteContext call re-reads this row fresh a few lines
+      // below, on the SAME trx, so it sees whatever this lock is holding
+      // steady — a concurrent editor now blocks behind it instead of
+      // racing it.
+      if (preparedCapacity) {
+        await trx('scheduled_services').where({ id: serviceId }).forUpdate().first('id');
+      }
       // Re-verify the prepared insertion under the SAME tech-day lock rung 3
       // already took above — same relative position createSelfBooking
       // verifies at (right before the write that depends on it). A changed
@@ -1705,7 +1743,8 @@ class SmartRebooker {
       // committing an unnumbered stop. serviceTypes omitted: unlike
       // createSelfBooking (a funnel label with no catalog row yet), this
       // row already carries its own service_type, and assertCapacityEligibility
-      // falls back to [context.target] when serviceTypes is undefined.
+      // falls back to [context.target] when serviceTypes is undefined —
+      // both read fresh off the row lock above via loadArrivalRouteContext.
       const capacityCommitFit = preparedCapacity
         ? await verifyArrivalCapacity(preparedCapacity, {
           conn: trx,

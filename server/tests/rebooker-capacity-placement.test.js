@@ -103,6 +103,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     forShare: jest.fn().mockReturnThis(),
+    forUpdate: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
     update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
@@ -256,7 +257,21 @@ describe('rescheduleOnce — mid-route insertion certification (options.capacity
     expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({ route_order: null }));
   });
 
-  test('a same-day, same-tech window-only edit never attempts certification — route_order is not invalidated, so there is nothing to certify', async () => {
+  test('a genuine no-op (same day, same tech, same window) never attempts certification — nothing about this stop\'s placement changed', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service());
+
+    const result = await SmartRebooker.reschedule(
+      'svc-1', BASE, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+      { technicianId: TECH, capacityPlacement: true, travelGap: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(prepareArrivalCapacity).not.toHaveBeenCalled();
+    // route_order is simply absent from the update — never invalidated.
+    expect(trxScheduled.update).toHaveBeenCalledWith(expect.not.objectContaining({ route_order: null }));
+  });
+
+  test('a same-day, same-tech WINDOW change DOES attempt certification (Codex round 1 P1, PR #5267) — the picker can offer a mid-route slot on the same day, and the stored route_order must not silently survive a move that changed this stop\'s place in the route', async () => {
     const { trxScheduled } = wireRescheduleMocks(service());
 
     const result = await SmartRebooker.reschedule(
@@ -265,9 +280,32 @@ describe('rescheduleOnce — mid-route insertion certification (options.capacity
     );
 
     expect(result.success).toBe(true);
-    expect(prepareArrivalCapacity).not.toHaveBeenCalled();
-    // route_order is simply absent from the update — never invalidated.
+    expect(prepareArrivalCapacity).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'svc-1', date: BASE, technicianId: TECH, windowStart: '13:00', windowEnd: '15:00',
+    }));
+    expect(verifyArrivalCapacity).toHaveBeenCalled();
+    expect(persistArrivalOrder).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ feasible: true }), 'svc-1');
+    // route_order is untouched by the CAS write itself (routeOrderInvalidated
+    // is still false — no day/tech change) — persistArrivalOrder is what
+    // corrects it afterward.
     expect(trxScheduled.update).toHaveBeenCalledWith(expect.not.objectContaining({ route_order: null }));
+  });
+
+  test('the row itself is locked (FOR UPDATE) before verify — Codex round 1 P1, PR #5267: closes the race against a concurrent edit to this row\'s own duration/address/service_type', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service());
+    let sawLockBeforeVerify = false;
+    const originalForUpdate = trxScheduled.forUpdate;
+    trxScheduled.forUpdate = jest.fn(() => {
+      // At the moment the lock is taken, verify must not have run yet.
+      sawLockBeforeVerify = verifyArrivalCapacity.mock.calls.length === 0;
+      return originalForUpdate.call(trxScheduled);
+    });
+
+    await SmartRebooker.reschedule(...MOVE_ARGS, { technicianId: TECH, capacityPlacement: true, travelGap: true });
+
+    expect(trxScheduled.forUpdate).toHaveBeenCalled();
+    expect(sawLockBeforeVerify).toBe(true);
+    expect(verifyArrivalCapacity).toHaveBeenCalled();
   });
 });
 
