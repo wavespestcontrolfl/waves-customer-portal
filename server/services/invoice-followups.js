@@ -137,21 +137,40 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, invoiceIds = null) {
+// A bank-verification re-nudge (mdPending) is written as purpose
+// payment_verification, not an overdue reminder, so it names no source and
+// the spacing shadow never observes it (Codex #5189 r5); its policy verdict
+// is unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, verification = false, invoiceIds = null) {
   return railGuardPermitted({
     customerId,
     invoiceId,
     // A combined touch's aggregate re-check (Codex round-2 P1) passes the
     // FULL covered set here; rail-guard's own includesQuotedInvoices reads
     // invoiceIds over invoiceId when both are given, so the single-invoice
-    // callers above are unaffected by this parameter's mere existence.
+    // callers are unaffected by this parameter's mere existence.
     ...(invoiceIds ? { invoiceIds } : {}),
-    channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
+    channel, purpose: 'late_payment', excludeLedgerIds,
+    ...(verification ? {} : { source: 'invoice_followups' }), logTag: 'invoice-followups', detail,
   });
 }
 
 function followupLedgerKey(row, step, channel) {
   return `invoice_followups:${row.id}:${step.id}:${channel}`;
+}
+
+// Same shape as the notificationEventKey already stamped on the actual send
+// (sendCustomerMessage's metadata, below) — but stamped on the ledger row
+// ITSELF too, so a step that fires through multiple explicitly selected
+// channels writes ledger siblings collapseDunningReminderEvents (dunning
+// spacing shadow/replay) can group as one customer contact instead of
+// counting each channel's leg as an independent reminder (codex r2 P2).
+// One event per sequence + step, the same identity as the ledger's own
+// reservation key (followupLedgerKey minus the channel; Codex #5189 r4): a
+// step fires once per sequence — revival resumes at the step that had
+// not yet fired — so a repeat of the key is a retry of the same touch.
+function followupEventKey(row, step) {
+  return `invoice-followup:${row.id}:${step.id}`;
 }
 
 async function currentStepLedgerIds(row, step, channels) {
@@ -1930,7 +1949,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true)));
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true, mdPending)));
   const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
   const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
   const smsPermitted = channelPolicy.sms === true;
@@ -2035,7 +2054,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   if (combinedVariant) {
     const aggregateResults = await Promise.all(policyChannels.map((channel) => (
       collectionsChannelPermitted(
-        row.customer_id, null, channel, ownLedgerIds, true, combinedVariant.coveredInvoiceIds,
+        row.customer_id, null, channel, ownLedgerIds, true, false, combinedVariant.coveredInvoiceIds,
       )
     )));
     if (aggregateResults.some((result) => !verdictAllows(result))) {
@@ -2107,7 +2126,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
         purpose: mdPending ? 'payment_verification' : 'invoice_followup',
         invoiceIds: [row.invoice_id],
         source: 'invoice_followups',
-        metadata: { step_id: step.id },
+        metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
         ...(selectedChannels !== null ? { idempotencyKey: followupLedgerKey(row, step, 'email') } : {}),
       });
     } catch (ledgerErr) {
@@ -2190,7 +2209,8 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
           customerId: customer.id, channel,
           purpose: mdPending ? 'payment_verification' : 'invoice_followup',
           invoiceIds: [row.invoice_id], source: 'invoice_followups',
-          metadata: { step_id: step.id }, idempotencyKey: followupLedgerKey(row, step, channel),
+          metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
+          idempotencyKey: followupLedgerKey(row, step, channel),
         });
       } catch (err) {
         smsSkipReason = 'ledger_unavailable';
@@ -2271,7 +2291,7 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
           purpose: mdPending ? 'payment_verification' : 'invoice_followup',
           invoiceIds: [row.invoice_id],
           source: 'invoice_followups',
-          metadata: { step_id: step.id },
+          metadata: { step_id: step.id, notificationEventKey: followupEventKey(row, step) },
         });
       } catch (ledgerErr) {
         smsSkipReason = 'ledger_unavailable';

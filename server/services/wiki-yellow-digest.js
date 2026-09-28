@@ -101,7 +101,19 @@ function composeYellowDigest(queue) {
   ].filter(Boolean).join('\n\n');
 
   const subject = `ACT: brain review — ${pending.length} blocked, ${yellow.length} yellow this week`;
-  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length };
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  // composeYellowDigest only runs past its null-return when pending OR
+  // yellow is nonzero — never assume it's `pending`, or a week with zero
+  // blocked pages but fresh yellow ones would read "Knowledge — 0 pages
+  // blocked for review".
+  const headline = pending.length > 0
+    ? `Knowledge — ${pending.length} page${pending.length === 1 ? '' : 's'} blocked for review`
+    : `Knowledge — ${yellow.length} page${yellow.length === 1 ? '' : 's'} updated this week`;
+  const summary = pending.length > 0
+    ? `${yellow.length} more updated this week; review when you can.`
+    : 'Review optional; nothing is blocked.';
+  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary };
 }
 
 // Daily cron entry point with a weekly guard (same self-healing pattern as
@@ -169,6 +181,8 @@ async function sendYellowDigestLocked(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
       link: '/admin/knowledge?area=base&kbTab=field',
       sendEmail: () => mailer.sendOne({
         to,

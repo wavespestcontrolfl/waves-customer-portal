@@ -623,8 +623,44 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     followUps: bTotal,
     unanswered: cTotal,
     requests: dTotal,
-    ...(failures.length ? { failedLanes: failures.map((f) => f.lane) } : {}),
+    ...(failures.length
+      // A lane failure needs an engineer, not the owner's comms triage —
+      // no headline/summary here; the ops-digest.js default (FIX -> engineering,
+      // Activity-only) applies.
+      ? { failedLanes: failures.map((f) => f.lane) }
+      // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy,
+      // the full digest still lands in `detail`.
+      : unworkedCommsHeadlineAndSummary({ callbacks: aTotal, unanswered: cTotal, followUps: bTotal, requests: dTotal })),
   };
+}
+
+// Lead the headline with the first NONZERO bucket in this priority order —
+// callbacks, unanswered texts, follow-ups, open requests — so a day with
+// zero callbacks but 93 unanswered texts reads "Comms — 93 unanswered
+// texts", never "Comms — 0 callbacks waiting". The summary lists whatever
+// nonzero buckets are left, or is omitted entirely when there are none.
+// (total > 0 is guaranteed by the caller — composeUnworkedCommsDigest
+// returns null before this runs when every bucket is zero.)
+function unworkedCommsHeadlineAndSummary({ callbacks, unanswered, followUps, requests }) {
+  const phrase = (count, kind) => {
+    if (kind === 'callback') return `${count} callback${count === 1 ? '' : 's'} waiting`;
+    if (kind === 'unanswered') return `${count} unanswered text${count === 1 ? '' : 's'}`;
+    if (kind === 'followup') return `${count} follow-up${count === 1 ? '' : 's'} due`;
+    return `${count} open request${count === 1 ? '' : 's'}`;
+  };
+  const buckets = [
+    { count: callbacks, kind: 'callback' },
+    { count: unanswered, kind: 'unanswered' },
+    { count: followUps, kind: 'followup' },
+    { count: requests, kind: 'request' },
+  ].filter((b) => b.count > 0);
+  const [lead, ...rest] = buckets;
+  const headline = `Comms — ${phrase(lead.count, lead.kind)}`;
+  if (!rest.length) return { headline, summary: null };
+  const restPhrases = rest.map((b) => phrase(b.count, b.kind));
+  const restText = restPhrases.length === 1 ? restPhrases[0]
+    : `${restPhrases.slice(0, -1).join(', ')} and ${restPhrases[restPhrases.length - 1]}`;
+  return { headline, summary: `Plus ${restText}.` };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -730,6 +766,8 @@ async function runUnworkedCommsWatcher(opts = {}) {
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
+      headline: composed.headline,
+      summary: composed.summary,
       link: '/admin/communications',
       // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
       // drop callbacks, follow-ups and texts older than 30 days, so a
@@ -759,6 +797,7 @@ module.exports = {
   runUnworkedCommsWatcher,
   _private: {
     composeUnworkedCommsDigest,
+    unworkedCommsHeadlineAndSummary,
     loadCallbackCalls,
     loadDroppedFollowUps,
     loadUnansweredThreads,

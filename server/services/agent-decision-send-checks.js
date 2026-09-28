@@ -43,13 +43,15 @@ async function openTimesBlock({ decision, outgoingBody }) {
 // still match the current ET window, and an edit may not turn it into
 // timing copy the phrase list does not know.
 function followupBlock({ decision, outgoingBody }) {
-  const { followupPromiseBlockReason } = require('./sms-followup-sla');
+  const { followupPromiseBlockReason, slaDraftedAt } = require('./sms-followup-sla');
   const reason = followupPromiseBlockReason({
     inputSnapshot: decision.input_snapshot,
     promptVersion: decision.prompt_version,
     originalBody: decision.suggested_message,
     body: outgoingBody,
-    draftedAt: decision.created_at ?? null,
+    // Codex #5194 P2: the drafter's own facts-generated instant when the
+    // decision carries one, else the row's created_at (slaDraftedAt).
+    draftedAt: slaDraftedAt(decision),
   });
   return reason ? `follow-up promise unsendable (${reason})` : null;
 }

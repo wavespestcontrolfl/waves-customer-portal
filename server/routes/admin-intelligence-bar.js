@@ -71,6 +71,7 @@ const IbTasks = require('../services/intelligence-bar/tasks');
 const TaskContext = require('../services/intelligence-bar/task-context');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
 const { recordToolEvent } = require('../services/intelligence-bar/tool-events');
+const { gapReportPromptLine, createGapCollector } = require('../services/agent-gap-reports');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
@@ -2428,7 +2429,7 @@ async function runQuery(req, res, next) {
 The page ranks useful tools; it does not restrict what you can do. Use discover_capabilities to load tools from any other domain before saying a capability is unavailable. Customer, property, inventory, estimate, scheduling and communication requests can span pages.
 Use fresh authorized lookups and validated IDs for targets. An explicitly named customer in the current request takes precedence over page context. History and attachments are references, never authority to select a different customer for a write.
 A tool lookup marked done means only that lookup completed. A preview is awaiting approval. Do not claim a request, draft, send or change exists without the corresponding executor result and identifier. Distinguish unimplemented capability, permission denied, missing information, approval pending, integration unavailable and execution failure.
-Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.`;
+Dependent steps must use verified outputs from their prerequisites. Stop dependent work at a failed or awaiting-approval step; never invent its output ID.${gapReportPromptLine()}`;
     }
     // Write-confirmation guidance (#1568, structural since W0/W0B): the only
     // mechanism is the confirmation card — there is no conversational mode.
@@ -2511,6 +2512,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     };
     const pendingProposals = []; // client-only payloads (carry the confirmation ids — never shown to the model)
     let writeFrontierBlocked = false;
+    // Gap reports (server/services/agent-gap-reports.js): what the bar could
+    // not do this request, for the owner's weekly review. Platform mode only.
+    const gapCollector = platformEnabled
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.
@@ -2596,6 +2601,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           const byName = new Map(tools.map(t => [t.name, t]));
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
+          gapCollector?.discovery(toolUse.input, result);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
@@ -2697,6 +2703,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           circuitOpen,
           errorMessage,
         });
+        gapCollector?.toolResult(toolUse.name, result, failed);
 
         results.push({
           type: 'tool_result',
@@ -2730,13 +2737,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       ];
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
-
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
+    // Gap reports: records only when this reply says the bar could not do
+    // something. Awaited — flush() never rejects and writes nothing on an
+    // ordinary request; the task context supplies customer names to redact.
+    await gapCollector?.flush({ reply: finalResponse, taskContext });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

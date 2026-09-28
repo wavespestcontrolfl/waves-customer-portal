@@ -47,6 +47,20 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+// Most Wayback snapshot requests one intercept run starts (the same bound as
+// intercept-brief-seeder's body sweep).
+const SNAPSHOT_SOURCE_LIMIT = 10;
+
+const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
+
+function pageEditSuperseded(rowOrMetadata) {
+  let metadata = rowOrMetadata?.signal_metadata ?? rowOrMetadata;
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch { return false; }
+  }
+  return Boolean(metadata && typeof metadata === 'object' && metadata.page_edit_superseded);
+}
+
 // Keep a transient gate outage from consuming both bounded attempts in the
 // same batch. The normal daily runner will pick the row up after this floor.
 const INFRASTRUCTURE_RETRY_BACKOFF_MS = 60 * 60 * 1000;
@@ -86,6 +100,16 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
+
+async function releasePageEditLockConnection(lockConn, unlockError) {
+  // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
+  // close it now so the session lock clears, then release the checkout so
+  // Tarn removes it from `used`.
+  if (!unlockError) return db.client.releaseConnection(lockConn);
+  lockConn.__knex__disposed = `page-edit advisory unlock failed: ${unlockError.message}`;
+  try { await db.client.destroyRawConnection(lockConn); }
+  finally { await db.client.releaseConnection(lockConn); }
+}
 
 // Bucket for operator-authored intercept briefs (intercept-brief-seeder),
 // single-sourced with the sync guardrail-option derivation (the writer's
@@ -194,11 +218,12 @@ class AutonomousRunner {
     run.claim_ms = Date.now() - t1;
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
+    const claimToken = opp.claimed_at;
     run.opportunity_id = opp.id;
     run.queue_claim_id = opp.claim_id || null;
+    run.queue_claimed_at = claimToken;
     run.action_type = opp.effective_action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
-    const claimToken = opp.claimed_at;
 
     // 1a. Protected-page guard. Money pages, high-traffic pages, and manually
     // protected URLs are never auto-optimized — regardless of facts. This runs
@@ -213,7 +238,7 @@ class AutonomousRunner {
       // is exceptions-only). A protected-check ERROR is an engine fault and
       // still parks for a human.
       if (initialProtected.is_error) {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken }, run.action_type, run);
       } else {
         await this._skipClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
       }
@@ -234,7 +259,7 @@ class AutonomousRunner {
           skip_reason: `bucket_paused:${opp.bucket}`,
           reviewer_notes: `Bucket "${opp.bucket}" auto-paused after repeated regressions — review impact verdicts before resuming.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken }, run.action_type, run);
         return finalized;
       }
     }
@@ -280,7 +305,7 @@ class AutonomousRunner {
       // Same exceptions-only rule as the initial check: by-design protection
       // skips silently; only a protected-check ERROR parks for a human.
       if (finalProtected.is_error) {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken }, run.action_type, run);
       } else {
         await this._skipClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
       }
@@ -310,7 +335,7 @@ class AutonomousRunner {
           skip_reason: factsCheck.reason || 'facts_insufficient',
           reviewer_notes: factsCheck.notes,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken }, run.action_type, run);
         return finalized;
       }
     } else if (FACTS_GATED_ACTIONS.has(brief.action_type) && !run.shadow_mode) {
@@ -324,7 +349,7 @@ class AutonomousRunner {
         skip_reason: 'facts_sufficiency_unavailable',
         reviewer_notes: 'Facts-sufficiency module failed to load; live facts-gated action held to avoid publishing unverified content.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'facts_sufficiency_unavailable', { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'facts_sufficiency_unavailable', { claimToken }, run.action_type, run);
       return finalized;
     }
 
@@ -422,7 +447,7 @@ class AutonomousRunner {
           skip_reason: 'topic_targeting_unavailable',
           reviewer_notes: `Topic-targeting gate could not run (${topicResult.error}); new blog held rather than drafted unchecked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type, run);
         return finalized;
       }
       if (!topicResult.ok) {
@@ -454,9 +479,9 @@ class AutonomousRunner {
       } else if (result.claim === 'skip') {
         await this._skipClaimOrThrow(queue, opp.id, result.patch.skip_reason, { claimToken });
       } else if (result.patch.outcome === 'skipped_shadow_mode') {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken }, run.action_type, run);
       } else {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken }, run.action_type, run);
       }
       return finalized;
     }
@@ -492,7 +517,7 @@ class AutonomousRunner {
         return finalized;
       }
       const finalized = await finalize(run, t0, result.patch);
-      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken }, run.action_type, run);
       return finalized;
     }
 
@@ -640,7 +665,7 @@ class AutonomousRunner {
           skip_reason: 'operator_slug_mismatch',
           reviewer_notes: `Writer slug "${slugRepair.mismatch.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugRepair.mismatch.expected_slug}" and the drift is not auto-repairable (${slugRepair.reason}) — publishing blocked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken }, run.action_type, run);
         return finalized;
       }
       if (slugRepair && slugRepair.ok) {
@@ -670,7 +695,7 @@ class AutonomousRunner {
             failure_message: err.message,
             reviewer_notes: `Metadata publish validation failed before creating an Astro PR: ${err.message}`,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_publish_validation_failed', { claimToken }, run.action_type);
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_publish_validation_failed', { claimToken }, run.action_type, run);
           return finalized;
         }
         await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
@@ -680,7 +705,7 @@ class AutonomousRunner {
       if (result.queue === 'complete') {
         await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
       } else {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken }, run.action_type, run);
       }
       return finalized;
     }
@@ -705,7 +730,7 @@ class AutonomousRunner {
           skip_reason: 'claims_ledger_unavailable',
           reviewer_notes: 'Claims-ledger validator module failed to load — failing closed; draft routed to review instead of publishing unvalidated local claims.',
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken }, run.action_type, run);
         return finalized;
       }
       if (claimsValidator) {
@@ -734,7 +759,7 @@ class AutonomousRunner {
             skip_reason: 'claims_ledger_failed',
             reviewer_notes: notes,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken }, run.action_type);
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken }, run.action_type, run);
           return finalized;
         }
       }
@@ -755,7 +780,7 @@ class AutonomousRunner {
         skip_reason: 'content_guardrails_unavailable',
         reviewer_notes: 'Content-guardrails module failed to load — failing closed; draft routed to review instead of publishing without the price/brand/FAQ/link P0 checks.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken }, run.action_type, run);
       return finalized;
     }
     // Topic targeting on the EMITTED draft is judged BEFORE the guardrail
@@ -792,7 +817,7 @@ class AutonomousRunner {
           skip_reason: 'topic_targeting_unavailable',
           reviewer_notes: `Post-draft topic-targeting gate could not run (${engineFailure.message}); draft held for review rather than published unchecked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type, run);
         return finalized;
       }
     }
@@ -815,7 +840,7 @@ class AutonomousRunner {
           skip_reason: skipReason,
           reviewer_notes: `${err.message} — routed to review (fail-closed, infra load failure not a writer mistake).`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken }, run.action_type, run);
         return finalized;
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
@@ -879,7 +904,7 @@ class AutonomousRunner {
         skip_reason: 'comparison_table_unavailable',
         reviewer_notes: 'Comparison-table gate module failed to load — failing closed; draft routed to review instead of publishing without the disparagement/competitor checks.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken }, run.action_type, run);
       return finalized;
     }
     if (comparisonGate && draft) {
@@ -922,7 +947,7 @@ class AutonomousRunner {
             skip_reason: 'comparison_table_failed',
             reviewer_notes: `${notes} — ${parkNote}`,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken }, run.action_type);
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken }, run.action_type, run);
           return finalized;
         }
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
@@ -1215,7 +1240,7 @@ class AutonomousRunner {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, finalized.skip_reason, { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, finalized.skip_reason, { claimToken }, run.action_type, run);
       return finalized;
     }
 
@@ -1291,7 +1316,7 @@ class AutonomousRunner {
         skip_reason: reason,
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), affiliateNote, trustBuildNote].filter(Boolean).join(' | '),
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type, run);
       // Owner email-approval loop (2026-07-28): approvable kinds notify the
       // owner's inbox; the emailed reply executes the decision. Fire-and-
       // forget — a notification failure never affects the run outcome (the
@@ -1317,7 +1342,7 @@ class AutonomousRunner {
         skip_reason: 'publisher_adapter_unavailable',
         reviewer_notes: 'Astro draft/brief publisher adapter is unavailable; nothing was published.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'publisher_adapter_unavailable', { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'publisher_adapter_unavailable', { claimToken }, run.action_type, run);
       return finalized;
     }
 
@@ -1346,7 +1371,7 @@ class AutonomousRunner {
         skip_reason: publishingGuards.reason,
         reviewer_notes: publishingGuards.notes,
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken }, run.action_type);
+      await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken }, run.action_type, run);
       return finalized;
     }
 
@@ -1366,6 +1391,23 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (err.code === 'PAGE_EDIT_OWNERSHIP_LOST') {
+        await this._releaseClaimAfterOwnershipLoss(queue, opp.id, { claimToken });
+        return finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'page_edit_ownership_lost',
+          reviewer_notes: err.message,
+        });
+      }
+      if (err.code === 'PAGE_EDIT_SUPERSEDED') {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          reviewer_notes: err.message,
+        });
+        await this._skipClaimOrThrow(queue, opp.id, 'superseded_by_ordinary_page_edit', { claimToken });
+        return finalized;
+      }
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
@@ -1381,7 +1423,7 @@ class AutonomousRunner {
           failure_message: err.message,
           reviewer_notes: `Astro publish validation failed before publishing: ${err.message}`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'publish_validation_failed', { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'publish_validation_failed', { claimToken }, run.action_type, run);
         return finalized;
       }
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
@@ -1444,13 +1486,13 @@ class AutonomousRunner {
           reviewer_notes: notes,
         });
       } catch (err) {
-        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_audit_failed', { claimToken }, err);
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_audit_failed', { claimToken }, err, run);
         throw err;
       }
       try {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
+        await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type, run);
       } catch (err) {
-        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err);
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err, run);
       }
       return finalized;
     }
@@ -1611,6 +1653,44 @@ class AutonomousRunner {
       try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
       catch (err) { logger.warn(`[autonomous-runner] ${label}: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
       try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
+  }
+
+  /**
+   * Hold the shared page-edit lock across an external publisher call without
+   * keeping a database transaction open. A successful GitHub branch/commit/PR
+   * must not be converted into an ordinary retry by a later COMMIT failure.
+   * This lock fails closed: proceeding without page ownership proof could
+   * publish over an ordinary edit.
+   */
+  async _withPageEditLock(fn) {
+    let lockConn = null;
+    let acquired = false;
+    let unlockError = null;
+    try {
+      lockConn = await db.client.acquireConnection();
+      await lockConn.query("SELECT pg_advisory_lock(hashtext($1))", ['opportunity_page_edit']);
+      acquired = true;
+      return await fn(lockConn);
+    } catch (err) {
+      if (!acquired) {
+        const unavailable = new Error(`Page-edit ownership lock unavailable: ${err.message}`);
+        unavailable.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+        throw unavailable;
+      }
+      throw err;
+    } finally {
+      if (lockConn && acquired) {
+        try { await lockConn.query("SELECT pg_advisory_unlock(hashtext($1))", ['opportunity_page_edit']); }
+        catch (err) {
+          unlockError = err;
+          logger.warn(`[autonomous-runner] page-edit advisory unlock failed (${err.message}); destroying the locked session`);
+        }
+      }
+      if (lockConn) {
+        try { await releasePageEditLockConnection(lockConn, unlockError); }
+        catch { /* pool reaps */ }
+      }
     }
   }
 
@@ -1943,7 +2023,43 @@ class AutonomousRunner {
     if (!ok) throw new Error('queue_skip_failed_or_stale_claim');
   }
 
-  async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, actionType) {
+  async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, actionType, run = null) {
+    if (actionType === 'refresh_existing_page' && run && typeof queue.getById === 'function') {
+      const snapshot = await queue.getById(opportunityId);
+      if (snapshot?.bucket === 'citability_backfill') {
+        const handled = await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+          const row = await trx('opportunity_queue').where('id', opportunityId).forUpdate()
+            .first('id', 'bucket', 'status', 'claimed_at', 'claim_id', 'signal_metadata');
+          const sameClaim = row && (row.claim_id ?? null) === (run.queue_claim_id ?? null);
+          if (!row || row.bucket !== 'citability_backfill' || row.status !== 'claimed'
+            || !sameClaim || new Date(row.claimed_at).getTime() !== new Date(payload.claimToken).getTime()) return false;
+          const hasCurrentPr = ['astro_pr_pending_merge', 'metadata_pr_pending_merge'].includes(reason)
+            && Boolean(run.astro_pr_url);
+          const now = new Date();
+          if (pageEditSuperseded(row) && !hasCurrentPr) {
+            const queueRows = await trx('opportunity_queue').where('id', opportunityId)
+              .where('status', 'claimed').where('claimed_at', payload.claimToken)
+              .update({ status: 'skipped', skip_reason: PAGE_EDIT_SUPERSEDED_REASON, completed_at: now, updated_at: now });
+            if (Number(queueRows) !== 1) throw new Error('superseded pre-review queue retirement CAS lost');
+            if (run.id) {
+              const runRows = await trx('autonomous_runs').where('id', run.id)
+                .where('opportunity_id', opportunityId)
+                .update({ outcome: 'skipped_gate_fail', skip_reason: PAGE_EDIT_SUPERSEDED_REASON, completed_at: now, updated_at: now });
+              if (Number(runRows) !== 1) throw new Error('superseded pre-review run retirement CAS lost');
+            }
+            Object.assign(run, { outcome: 'skipped_gate_fail', skip_reason: PAGE_EDIT_SUPERSEDED_REASON, completed_at: now });
+            return true;
+          }
+          const queueRows = await trx('opportunity_queue').where('id', opportunityId)
+            .where('status', 'claimed').where('claimed_at', payload.claimToken)
+            .update({ status: 'pending_review', skip_reason: reason, completed_at: now, updated_at: now });
+          if (Number(queueRows) !== 1) throw new Error('queue pending-review CAS lost');
+          return true;
+        });
+        if (handled) return;
+      }
+    }
     const skip = actionType === 'new_supporting_blog' && reason !== 'astro_pr_pending_merge';
     const ok = skip
       ? await queue.skip(opportunityId, reason, payload)
@@ -2077,7 +2193,7 @@ class AutonomousRunner {
       return finalized;
     }
     const finalized = await finalize(run, t0, { outcome: 'completed_pending_review', skip_reason: reason, reviewer_notes: `${notes}${exhausted}` });
-    await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
+    await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type, run);
     return finalized;
   }
 
@@ -2089,6 +2205,10 @@ class AutonomousRunner {
       .where('id', opp.id)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
+      // A superseded citability claim never spends a retry (same fence as
+      // _recordRetryMarker); jsonb_set writes only this key into CURRENT
+      // metadata, so a marker written while drafting survives.
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
       .update({
         signal_metadata: db.raw(
           'jsonb_set(COALESCE(signal_metadata, \'{}\'::jsonb), ARRAY[\'company_check_retries\']::text[], to_jsonb(?::int), true)',
@@ -2123,6 +2243,15 @@ class AutonomousRunner {
   async _releaseClaimOrThrow(queue, opportunityId, payload) {
     const ok = await queue.release(opportunityId, payload);
     if (!ok) throw new Error('queue_release_failed_or_stale_claim');
+  }
+
+  async _releaseClaimAfterOwnershipLoss(queue, opportunityId, payload) {
+    try {
+      const released = await queue.release(opportunityId, payload);
+      if (!released) logger.warn(`[autonomous-runner] ownership-lost release CAS already moved for ${opportunityId}`);
+    } catch (err) {
+      logger.warn(`[autonomous-runner] ownership-lost release failed for ${opportunityId}: ${err.message}`);
+    }
   }
 
   async _checkProtectedPage(opp = {}, brief = null) {
@@ -2206,10 +2335,30 @@ class AutonomousRunner {
       const citedUrls = typeof seeder.externalUrlsFromMarkdown === 'function'
         ? seeder.externalUrlsFromMarkdown(draft?.body || '')
         : [];
+      // Owner ruling 2026-09-28: a post never links a competitor's own site,
+      // so a competitor page the writer relied on is listed in
+      // notes_for_reviewer instead (editorial-evidence.evidenceUrlsFor) —
+      // otherwise it would vanish from both the sources list AND the archive
+      // audit. A Wayback snapshot is archival evidence, not a published link.
+      // Normalized to https like the review's copy (a protocol-relative,
+      // www. or escaped destination would otherwise be dropped or sent to
+      // Wayback malformed — Codex r4).
+      const evidenceUrls = require('./editorial-evidence').evidenceUrlsFor(draft);
+      // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
+      // itself, but manifest sources and the notes' evidence add to it, and
+      // the outer timeout below cannot cancel snapshots already started.
+      // The notes' evidence goes FIRST, up to half the cap (Codex r10): it is
+      // on no published page, so this snapshot is its only publish-day
+      // audit, and appended last it was the first thing the cap dropped.
+      // Half, not all: the writer controls the notes, and a long list there
+      // must not crowd out the operator's own sources.
+      const reservedEvidence = evidenceUrls.slice(0, Math.floor(SNAPSHOT_SOURCE_LIMIT / 2));
       const sources = Array.from(new Set([
+        ...reservedEvidence,
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
-      ]));
+        ...evidenceUrls,
+      ])).filter((s) => /^https?:\/\//i.test(String(s || '').trim())).slice(0, SNAPSHOT_SOURCE_LIMIT);
       if (sources.length === 0) return;
 
       const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);
@@ -2226,26 +2375,90 @@ class AutonomousRunner {
       }
       // Persist on the opportunity row so the snapshots survive even if the
       // run insert later fails. Best-effort.
-      await db('opportunity_queue')
-        .where('id', opp.id)
-        .update({
-          signal_metadata: JSON.stringify({
-            ...(opp.signal_metadata || {}),
+      // Snapshotting can take up to 90 seconds. A stale worker must not
+      // overwrite the replacement claim's evidence after that wait: fence
+      // the write to the exact claim that started this snapshot attempt.
+      if (!run?.queue_claimed_at) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: claim timestamp unavailable`);
+        return;
+      }
+      let ownership = db('opportunity_queue')
+        .where({ id: opp.id, status: 'claimed' })
+        .where('claimed_at', run.queue_claimed_at);
+      ownership = run.queue_claim_id == null
+        ? ownership.whereNull('claim_id')
+        : ownership.where('claim_id', run.queue_claim_id);
+      const updated = await ownership.update({
+          // Merge only the snapshot fields into the current row; the claimed
+          // opportunity object may predate concurrent queue metadata writes.
+          signal_metadata: db.raw("COALESCE(signal_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
             intercept_snapshots: result?.snapshots || [],
             intercept_snapshot_at: new Date().toISOString(),
-          }),
+          })]),
           updated_at: new Date(),
         });
+      if (!updated) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: queue claim changed during capture`);
+        return;
+      }
       logger.info(`[autonomous-runner] intercept snapshots captured for ${opp.id}: ${result?.ok || 0}/${result?.attempted || 0}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] intercept source snapshot failed (non-blocking): ${err.message}`);
     }
   }
 
-  async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
+  async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause, run = null) {
     logger.error(`[autonomous-runner] published ${opportunityId} but ${reason}: ${cause.message}`);
+    // A refresh PR exists externally even when its normal audit insert fails.
+    // Persist minimal current-claim evidence first so supersession logic and
+    // the PR poller can retire that PR instead of terminalizing an apparently
+    // PR-less queue row. Retrying the small insert can succeed when the full
+    // audit failed on a payload/column value. If that also fails, fall back
+    // to the ordinary reconciliation park below: leaving the row claimed would
+    // let stale-claim recovery re-pend it (a second PR) or skip it (orphaning
+    // the first), while the park keeps it visible for a person.
+    // Set once a run row carrying this PR as astro_pr_pending_merge is known
+    // to exist. The fallback park must then use the same reason: the poller
+    // only keeps a run whose queue reason matches it, and would otherwise
+    // supersede the run and stop polling a still-open refresh PR.
+    let prRunRecorded = false;
+    if (run?.action_type === 'refresh_existing_page' && run.astro_pr_url
+      && typeof queue.getById === 'function') {
+      try {
+        const snapshot = await queue.getById(opportunityId);
+        if (snapshot?.bucket === 'citability_backfill') {
+          prRunRecorded = Boolean(run.id);
+          let recoveryRun = run;
+          if (!recoveryRun.id) {
+            const now = new Date();
+            const [saved] = await db('autonomous_runs').insert({
+              opportunity_id: opportunityId,
+              queue_claim_id: run.queue_claim_id || null,
+              action_type: run.action_type,
+              page_type: run.page_type || null,
+              shadow_mode: run.shadow_mode === undefined ? false : !!run.shadow_mode,
+              outcome: 'completed_pending_review',
+              skip_reason: 'astro_pr_pending_merge',
+              astro_pr_url: run.astro_pr_url,
+              draft_payload: JSON.stringify(run.draft_payload || {}),
+              reviewer_notes: `Recovered PR evidence after ${reason}: ${cause.message}`.slice(0, 4000),
+              claimed_at: run.claimed_at || now,
+              completed_at: now,
+            }).returning('id');
+            recoveryRun = { ...run, id: saved?.id || saved };
+            prRunRecorded = true;
+          }
+          await this._pendingReviewClaimOrThrow(
+            queue, opportunityId, 'astro_pr_pending_merge', payload, run.action_type, recoveryRun,
+          );
+          return;
+        }
+      } catch (err) {
+        logger.error(`[autonomous-runner] failed to persist refresh PR reconciliation evidence for ${opportunityId}: ${err.message}`);
+      }
+    }
     try {
-      await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, null);
+      await this._pendingReviewClaimOrThrow(queue, opportunityId, prRunRecorded ? 'astro_pr_pending_merge' : reason, payload, null);
     } catch (err) {
       logger.error(`[autonomous-runner] failed to park published ${opportunityId} for reconciliation: ${err.message}`);
     }
@@ -3183,6 +3396,99 @@ class AutonomousRunner {
   // affiliate post (owner ruling 2026-08-31). Approval stamps
   // trust_build_approved_by/at — the marker the PR poller's affiliate belt
   // requires before auto-merging a head that carries <AffiliateLink>.
+  async _retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, message) {
+    return db.transaction(async (trx) => {
+      const now = new Date();
+      const queueRows = await trx('opportunity_queue')
+        .where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
+        .whereRaw("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+        .update({
+          status: 'skipped',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          completed_at: now,
+          updated_at: now,
+        });
+      if (Number(queueRows) !== 1) throw new Error('superseded approval queue retirement CAS lost');
+      const current = await trx('autonomous_runs').where({ id: run.id }).first('reviewer_notes');
+      const runRows = await trx('autonomous_runs')
+        .where({ id: run.id, outcome: 'publishing_named_competitor' })
+        .update({
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          reviewer_notes: [current?.reviewer_notes ?? run.reviewer_notes, message].filter(Boolean).join(' | ').slice(0, 4000),
+          completed_at: now,
+          updated_at: now,
+        });
+      if (Number(runRows) !== 1) throw new Error('superseded approval run retirement CAS lost');
+      return true;
+    });
+  }
+
+  async _retireSupersededStuckApprovals(stuckOpps, _note) {
+    const superseded = (stuckOpps || []).filter((row) => row.bucket === 'citability_backfill' && pageEditSuperseded(row));
+    const ids = [];
+    let runs = 0;
+    let opps = 0;
+    for (const row of superseded) {
+      let query = db('autonomous_runs')
+        .where({ opportunity_id: row.id, outcome: 'publishing_named_competitor' });
+      query = row.claim_id == null ? query.whereNull('queue_claim_id') : query.where('queue_claim_id', row.claim_id);
+      const run = await query.first('id', 'reviewer_notes');
+      if (run) {
+        // Outcome is still publishing_named_competitor, so the crash may
+        // have happened after an external PR/live write but before its URL
+        // was persisted. The generic interrupted-publication path below
+        // parks both records for GitHub/live reconciliation; terminalizing
+        // here would erase the only visible obligation to find that side
+        // effect and retire it.
+        continue;
+      } else {
+        // The publish may have persisted its PR-bearing terminal run before
+        // both opportunity park writes failed. That is durable current-claim
+        // evidence, so restore the exact poller park instead of skipping the
+        // queue row and orphaning the PR/branch.
+        let pendingPrQuery = db('autonomous_runs')
+          .where({ opportunity_id: row.id, outcome: 'completed_pending_review' })
+          .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+          .whereNotNull('astro_pr_url');
+        pendingPrQuery = row.claim_id == null
+          ? pendingPrQuery.whereNull('queue_claim_id')
+          : pendingPrQuery.where('queue_claim_id', row.claim_id);
+        const pendingPr = await pendingPrQuery.first('id', 'skip_reason', 'astro_pr_url');
+        if (pendingPr) {
+          const restored = await db('opportunity_queue')
+            .where({ id: row.id, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+            .where('claimed_at', row.claimed_at)
+            .where('claim_id', row.claim_id ?? null)
+            .whereRaw("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+            .update({
+              status: 'pending_review', skip_reason: pendingPr.skip_reason,
+              updated_at: new Date(),
+            });
+          if (Number(restored) > 0) {
+            ids.push(row.id);
+            opps += 1;
+          }
+          continue;
+        }
+        const retired = await db('opportunity_queue')
+          .where({ id: row.id, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+          .where('claimed_at', row.claimed_at)
+          .whereRaw("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+          .update({
+            status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
+            completed_at: new Date(), updated_at: new Date(),
+          });
+        if (Number(retired) > 0) {
+          ids.push(row.id);
+          opps += 1;
+        }
+      }
+    }
+    return { ids, runs, opps };
+  }
+
   async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
@@ -3358,6 +3664,7 @@ class AutonomousRunner {
       .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
     if (!runClaimed) {
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
         .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       const e = new Error(`This ${parkedKind} run is already being published`); e.statusCode = 409; throw e;
     }
@@ -3366,22 +3673,36 @@ class AutonomousRunner {
       await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
         .update({ outcome: 'completed_pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
         .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
     };
 
     // Operator-intercept posts must capture the publish-day Wayband/source
     // snapshot BEFORE publishing (same as the autonomous path) so competitor
     // claims stay verifiable. Fail-soft inside the helper.
-    try { await this._snapshotInterceptSources(opp, draft, run); }
+    try {
+      await this._snapshotInterceptSources(opp, draft, {
+        ...run,
+        queue_claimed_at: approvalClaimedAt,
+      });
+    }
     catch (err) { logger.warn(`[autonomous-runner] named-competitor source snapshot failed (non-blocking): ${err.message}`); }
 
     let patch;
     try {
       // A human approved this exact draft: the publisher's owner-list
       // chokepoint defers to that decision.
-      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId }, { humanApproved: true });
+      patch = await this._publishAndDistribute(draft, brief, {
+        ...run,
+        opportunity_id: opportunityId,
+        queue_claimed_at: approvalClaimedAt,
+      }, { humanApproved: true });
     } catch (err) {
-      await revertClaims(); // let the operator retry
+      if (err.code === 'PAGE_EDIT_SUPERSEDED') {
+        await this._retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, err.message);
+      } else {
+        await revertClaims(); // let the operator retry
+      }
       throw err;
     }
 
@@ -3528,15 +3849,22 @@ class AutonomousRunner {
       const cutoff = new Date(Date.now() - staleMinutes * 60000);
       const REASON = 'named_competitor_publish_interrupted';
       const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
-      const runs = await db('autonomous_runs')
+      const stuckOpps = await db('opportunity_queue')
+        .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', '<', cutoff)
+        .select('id', 'bucket', 'claim_id', 'claimed_at', 'signal_metadata');
+      const retired = await this._retireSupersededStuckApprovals(stuckOpps, note);
+      let runsQuery = db('autonomous_runs')
         .where('outcome', 'publishing_named_competitor')
-        .where('updated_at', '<', cutoff)
-        .update({
-          outcome: 'completed_pending_review',
-          skip_reason: REASON,
-          reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
-          updated_at: new Date(),
-        });
+        .where('updated_at', '<', cutoff);
+      if (retired.ids.length) runsQuery = runsQuery.whereNotIn('opportunity_id', retired.ids);
+      const parkedRuns = await runsQuery.update({
+        outcome: 'completed_pending_review',
+        skip_reason: REASON,
+        reviewer_notes: db.raw(`COALESCE(NULLIF(reviewer_notes, '') || E'\\n', '') || ?`, [note]),
+        updated_at: new Date(),
+      });
+      const runs = Number(parkedRuns) + retired.runs;
       // Ids first (we hold the engine lock, so nothing claims or approves
       // between the read and the writes): the parked opportunities' runs
       // that are STILL at named_competitor_review must be parked too — a
@@ -3545,22 +3873,19 @@ class AutonomousRunner {
       // review model derives the approve button from the run alone, so the
       // interrupted item would keep an approve action whose path 409s on
       // the parked opportunity.
-      const stuckOpps = await db('opportunity_queue')
-        .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
-        .where('claimed_at', '<', cutoff)
-        .select('id');
-      const stuckOppIds = stuckOpps.map((r) => r.id);
-      let opps = 0;
+      const retiredIds = new Set(retired.ids);
+      const stuckOppIds = stuckOpps.filter((row) => !retiredIds.has(row.id)).map((row) => row.id);
+      let opps = retired.opps;
       let reviewRuns = 0;
       if (stuckOppIds.length) {
-        opps = await db('opportunity_queue')
+        opps += Number(await db('opportunity_queue')
           .whereIn('id', stuckOppIds)
           .update({
             status: 'pending_review',
             skip_reason: REASON,
             completed_at: new Date(),
             updated_at: new Date(),
-          });
+          }));
         reviewRuns = await db('autonomous_runs')
           .whereIn('opportunity_id', stuckOppIds)
           .where('outcome', 'completed_pending_review')
@@ -3738,6 +4063,21 @@ class AutonomousRunner {
     const indexNow = getIndexNow();
     const planner = getLinkPlanner();
 
+    // A gate-off backfill can lose its page reservation to an ordinary
+    // refresh while this worker is drafting. Re-read durable ownership at the
+    // irreversible publisher boundary so the stale worker cannot create a
+    // branch/commit/PR after the ordinary producer has taken the page.
+    let latestOpportunity = null;
+    if (run?.opportunity_id) {
+      const queue = getQueue();
+      latestOpportunity = typeof queue?.getById === 'function' ? await queue.getById(run.opportunity_id) : null;
+      if (latestOpportunity?.bucket === 'citability_backfill' && pageEditSuperseded(latestOpportunity)) {
+        const err = new Error('Citability backfill was superseded by an ordinary page edit before publishing');
+        err.code = 'PAGE_EDIT_SUPERSEDED';
+        throw err;
+      }
+    }
+
     // Publish via existing astro-publisher. We pass the draft + brief;
     // the publisher decides whether to open a PR or commit directly to
     // main based on its own configuration. The astro-publisher service
@@ -3750,7 +4090,36 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const r = await usePublish(draft, brief, { humanApproved });
+      const publish = () => usePublish(draft, brief, { humanApproved });
+      // Serialize the last ownership read with ordinary page-edit producers.
+      // If an ordinary enqueue won while the lane was off, its marker is
+      // visible here before any branch/commit/PR side effect. If this worker
+      // wins while the lane is open, producers re-read the active reservation
+      // after the lock and yield to it.
+      const r = latestOpportunity?.bucket === 'citability_backfill'
+        ? await this._withPageEditLock(async (lockConn) => {
+          let ownership = db('opportunity_queue')
+            .connection(lockConn)
+            .where('id', run.opportunity_id)
+            .where('status', 'claimed')
+            .where('claimed_at', run.queue_claimed_at);
+          ownership = run.queue_claim_id == null
+            ? ownership.whereNull('claim_id')
+            : ownership.where('claim_id', run.queue_claim_id);
+          const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+          if (!locked || locked.bucket !== 'citability_backfill') {
+            const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
+            err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+            throw err;
+          }
+          if (pageEditSuperseded(locked)) {
+            const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
+            err.code = 'PAGE_EDIT_SUPERSEDED';
+            throw err;
+          }
+          return publish();
+        })
+        : await publish();
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact
@@ -4356,6 +4725,13 @@ function isDeterministicPublishError(err) {
   // the Astro build), not transient — park for review instead of releasing the
   // claim and re-running the same token-laden draft.
   if (err?.code === 'BLOG_MDX_TOKEN_LEAK') return true;
+  // A competitor link in the page to be committed (astro-publisher
+  // competitorFreeMarkdown) is edit-required too. On a metadata rewrite or
+  // refresh it can sit in the LIVE page, outside anything the run edits, so
+  // a retry regenerates the same refusal forever — park it for a human to
+  // remove the link (owner ruling 2026-09-28: refuse, don't rewrite; Codex
+  // r10 on #5191).
+  if (err?.code === 'COMPETITOR_LINK') return true;
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,

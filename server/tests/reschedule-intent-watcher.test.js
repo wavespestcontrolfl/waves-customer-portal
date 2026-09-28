@@ -60,6 +60,14 @@ describe('composeRescheduleIntentDigest', () => {
     const composed = composeRescheduleIntentDigest([flag({ input_snapshot: '{broken' })]);
     expect(composed.count).toBe(1);
   });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composeRescheduleIntentDigest([flag(), flag({ id: 'f2' })]);
+    expect(composed.headline).toBe('Schedule — 2 reschedule texts not applied');
+    expect(composed.summary).toBe('Reply or move each visit — automation runs them as booked.');
+  });
 });
 
 describe('runRescheduleIntentWatcher', () => {

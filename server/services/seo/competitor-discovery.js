@@ -74,6 +74,9 @@ const NATIONAL_CHAINS = new Set([
   'mosquitosquad.com', 'lawndoctor.com', 'crittercontrol.com', 'trutechinc.com',
   'westernexterminator.com', 'pestbear.com', 'arrowservices.com', 'aaanimalcontrol.com',
   'uslawns.com', 'masseyservices.com', 'trulynolen.com', 'crittercontrolsarasota.com',
+  // National DIY pest-control subscription — a competitor (owner ruling
+  // 2026-09-28); national press profile, same harvest trade-off as above.
+  'pestie.com',
 ]);
 
 // Our own properties — the hub + the canonical Astro spoke fleet (bradentonfl-

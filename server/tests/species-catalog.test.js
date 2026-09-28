@@ -396,16 +396,14 @@ describe('owner approval content binding', () => {
   // Owner approved every fact-check-clean pest entry 2026-09-27 (after
   // #5106) and house-centipede 2026-09-28 once its range fact-check closed
   // (#5114). The L1b lawn/plant content (119 entries: 72 plant + 47
-  // condition) lands owner-approved nowhere yet — every one stays
-  // `review.status: "draft"` until the owner's review pass, so none of it is
-  // nameable by any engine (Codex #5143's whole reason for existing).
-  test('every pest entry is owner-approved; every plant/condition entry is still draft', () => {
-    const approved = allEntries.filter((entry) => entry.review.status === 'owner_approved');
-    const draft = allEntries.filter((entry) => entry.review.status === 'draft');
-    expect(approved).toHaveLength(239);
-    expect(draft).toHaveLength(119);
-    expect(approved.every((entry) => catalog.sectionOf(entry) === 'pest')).toBe(true);
-    expect(draft.every((entry) => catalog.sectionOf(entry) !== 'pest')).toBe(true);
+  // condition) was approved by owner decision 2026-09-28, so every entry in
+  // every section is nameable — and any later edit to an entry's content
+  // fails here until it is approved again.
+  test('every entry, pest, plant and condition, is owner-approved against its current content', () => {
+    const approved = allEntries.filter((entry) => catalog.isApproved(entry));
+    expect(approved).toHaveLength(358);
+    expect(allEntries.filter((entry) => catalog.sectionOf(entry) === 'pest')).toHaveLength(239);
+    expect(allEntries.filter((entry) => catalog.sectionOf(entry) !== 'pest')).toHaveLength(119);
   });
 });
 

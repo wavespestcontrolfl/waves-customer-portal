@@ -83,6 +83,21 @@ describe('composeTurfVarianceDigest', () => {
     expect(composed.text).toContain('2,500 sq ft');
   });
 
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`. No count in the headline, so
+  // no zero-guard is needed here.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composeTurfVarianceDigest([row(20), row(30), row(25)]);
+    expect(composed.headline).toBe('Estimates — turf estimates running low');
+    expect(composed.summary).toBe('Avg 25% off across 3 services.');
+  });
+
+  test('a "high" (overpriced) direction reads the same way, magnitude only (no minus sign)', () => {
+    const composed = composeTurfVarianceDigest([row(-20), row(-25), row(-30)]);
+    expect(composed.headline).toBe('Estimates — turf estimates running high');
+    expect(composed.summary).toBe('Avg 25% off across 3 services.');
+  });
+
   test('thresholds come from env', () => {
     process.env.TURF_VARIANCE_ALERT_PCT = '40';
     expect(composeTurfVarianceDigest([row(30), row(30), row(30)])).toBeNull();

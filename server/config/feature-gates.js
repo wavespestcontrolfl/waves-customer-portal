@@ -83,6 +83,7 @@
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
+ *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -513,6 +514,18 @@ const gates = {
   // static/sms_preview never carry it at any setting. Kill switch: unset or
   // any non-'true' value.
   reportNearYou: process.env.GATE_REPORT_NEAR_YOU === 'true',
+
+  // Product-copy lines on the service report (owner-approved 2026-09-28) —
+  // "How it works" / "Also labeled for" / "Pets & kids" per applied product,
+  // matched against the static reviewed config in
+  // server/config/report-product-copy.js. Live view only, like
+  // planSummary/nearYou above — PDF/static/sms_preview never carry it at any
+  // setting (stripLiveOnlyReportProductCopy), and termite-line reports never
+  // get it. This map entry is for logGateStatus only — the
+  // canonical CALL-TIME reader is reportProductCopyGateOn() in
+  // server/services/service-report/report-product-copy.js, same posture as
+  // pestReportExpectationsGateOn().
+  reportProductCopy: process.env.GATE_REPORT_PRODUCT_COPY === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
@@ -1986,6 +1999,18 @@ const gates = {
   // returns [].
   answerGapMining: isProd ? process.env.GATE_ANSWER_GAP_MINING === 'true' : true,
 
+  // citability_backfill seeding — operator-triggered scan of the live blog
+  // corpus (server/scripts/seed-citability-backfill.js) that queues
+  // refresh_existing_page rows for posts missing the citability traits the
+  // quality gate nudges on (named sources / concrete specifics / comparison
+  // / how-to-choose). Default OFF in prod: the seeder's --dry-run scan
+  // always works, but writes need GATE_CITABILITY_BACKFILL=true so the
+  // first batch is eyeballed before the refresh lane starts consuming it.
+  // The same gate fences CONSUMPTION (opportunity-queue
+  // citabilityBackfillLaneOpen: claimNext/peek skip the bucket while off),
+  // so flipping it back off is a real kill switch for rows already queued.
+  citabilityBackfill: isProd ? process.env.GATE_CITABILITY_BACKFILL === 'true' : true,
+
   // Listicle brief overlay — when a supporting-blog brief's query is
   // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
   // citable-listicle architecture (count-in-title, numbered H2 per item,
@@ -3268,6 +3293,15 @@ const gates = {
   // for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
+
+  // Seven-day overdue-reminder spacing rule, SHADOW ONLY (dunning
+  // unification PR 1, re-sequenced narrow 2026-09-28 — see #5108's wide
+  // version for what this deliberately leaves out). Ships DARK: off unless
+  // exactly 'true'. This entry is for logGateStatus only:
+  // services/collections/contact-policy.js reads GATE_DUNNING_SPACING_SHADOW
+  // at call time and only LOGS what the rule would have held — it never
+  // holds, denies, or changes a send.
+  dunningSpacingShadow: process.env.GATE_DUNNING_SPACING_SHADOW === 'true',
 
   // Retire the legacy account-level late-payment checker (dunning
   // unification, PR 3a): with the Day 90 ladder owning every overdue

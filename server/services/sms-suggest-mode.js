@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -618,6 +618,16 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
 
       const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
       const sanitizedIntendedActions = sanitizeIntendedActions(intendedActions);
+      // Codex #5194 P2: the instant the drafter rendered the SLA phrase into
+      // factsBlock (sms-shadow-drafter's generateGroundedDraft), not this
+      // publish's own timestamp — a card can sit in the composer a while
+      // before a human sends it, but the promise's deadline is anchored to
+      // when the facts were generated, read back by slaDraftedAt
+      // (sms-followup-sla.js). null on a caller that predates this field or
+      // passed something unusable — the read side falls back to created_at.
+      const factsGeneratedAtIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime())
+        ? factsGeneratedAt.toISOString()
+        : null;
       const [row] = await trx('agent_decisions')
         .insert({
           workflow: SUGGEST_WORKFLOW,
@@ -655,6 +665,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // caller) omits the key so the snapshot shape is unchanged for
             // callers that predate this field.
             ...(sanitizedIntendedActions !== null ? { intended_actions: sanitizedIntendedActions } : {}),
+            ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
           }),
           suggested_message: reply,
           reasoning_summary: 'House-voice suggested reply (brand-voice loop Phase D). Review, edit if needed, and send.',

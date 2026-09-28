@@ -298,6 +298,7 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     customerId: visit.customer_id,
     purpose: 'balance_reminder',
     offLedgerBalanceCents: duesCents,
+    source: 'previsit_balance_reminder',
     logTag: 'previsit-balance',
   };
   const episode = channels ? (await reminderProgress(visit.customer_id, 'previsit_balance_reminder', channels))
@@ -513,7 +514,7 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
           const duesCents = await currentDuesCents({ ...locked.customer, id: visit.customer_id }, savepoint, now);
           const policies = await previsitPolicySnapshots(replayContext?.selected_channels || [channel], {
             customerId: visit.customer_id, purpose: 'balance_reminder', offLedgerBalanceCents: duesCents,
-            excludeLedgerIds, logTag: 'previsit-balance', database: savepoint, now,
+            excludeLedgerIds, source: 'previsit_balance_reminder', logTag: 'previsit-balance', database: savepoint, now,
           });
           const incomplete = policies.find((policy) => policy.balanceIncomplete);
           if (incomplete) return { ...PREVISIT_AUTHORITY_BUSY,
