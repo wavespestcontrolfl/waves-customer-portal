@@ -555,6 +555,7 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     const f = revivalResetFields();
     const curated = f.curated_at.toSQL().sql.toLowerCase();
     expect(curated).toMatch(/events_raw\.admin_status = 'pending'/);
+    expect(curated).toMatch(/events_raw\.approved_via is null/);
     expect(curated).toMatch(/\(events_raw\.start_at at time zone 'america\/new_york'\)::date is distinct from \(excluded\.start_at at time zone 'america\/new_york'\)::date/);
     expect(f.score_breakdown.toSQL().sql.toLowerCase()).toMatch(/is distinct from/);
     expect(f.normalized_at.toSQL().sql.toLowerCase()).not.toMatch(/is distinct from/);

@@ -1632,8 +1632,10 @@ router.patch('/events/:id', async (req, res, next) => {
       updates.admin_status = adminStatus;
       if (adminStatus === 'pending') {
         // An operator's return-to-pending is a decision to review it by hand:
-        // mark it examined so auto-curation never picks it up and re-approves.
+        // mark it examined, with durable provenance, so auto-curation never
+        // picks it up and re-approves it.
         updates.curated_at = db.raw('COALESCE(curated_at, now())');
+        updates.approved_via = 'operator_reset';
       }
       // Featuring is an editorial STAR for the upcoming issue — not ship
       // history. times_featured/last_featured_at advance only in
@@ -1732,9 +1734,10 @@ router.post('/events/bulk-action', async (req, res, next) => {
       updates.suppression_reason = null;
     }
     if (action === 'reset') {
-      // Marked examined so auto-curation never re-approves what the operator
-      // reset for manual review.
+      // Marked examined, with durable provenance, so auto-curation never
+      // re-approves what the operator reset for manual review.
       updates.curated_at = db.raw('COALESCE(curated_at, now())');
+      updates.approved_via = 'operator_reset';
     }
     // Featuring is an editorial star, not ship history — counters advance
     // only in markEventsFeatured when an issue actually sends (Codex r3 P1).

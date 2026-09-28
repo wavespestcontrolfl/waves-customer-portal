@@ -72,6 +72,7 @@ describe('operator return-to-pending marks the event examined', () => {
     });
     expect(updates[0].admin_status).toBe('pending');
     expect(updates[0].curated_at).toEqual({ __raw: 'COALESCE(curated_at, now())' });
+    expect(updates[0].approved_via).toBe('operator_reset');
   });
 
   test('bulk approve does not touch curated_at', async () => {
@@ -84,6 +85,7 @@ describe('operator return-to-pending marks the event examined', () => {
       });
     });
     expect(updates[0].curated_at).toBeUndefined();
+    expect(updates[0].approved_via).toBeUndefined();
   });
 
   test('PATCH to adminStatus pending stamps curated_at', async () => {
@@ -97,5 +99,6 @@ describe('operator return-to-pending marks the event examined', () => {
     });
     const statusWrite = updates.find((u) => u.admin_status === 'pending');
     expect(statusWrite.curated_at).toEqual({ __raw: 'COALESCE(curated_at, now())' });
+    expect(statusWrite.approved_via).toBe('operator_reset');
   });
 });

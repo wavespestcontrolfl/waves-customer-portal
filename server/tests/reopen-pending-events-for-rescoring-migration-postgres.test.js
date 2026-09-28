@@ -24,6 +24,7 @@ const DAY = 24 * 60 * 60 * 1000;
       t.string('title');
       t.string('admin_status').notNullable().defaultTo('pending');
       t.integer('merged_into');
+      t.string('approved_via', 20);
       t.timestamp('start_at');
       t.timestamp('curated_at');
       t.text('curation_note');
@@ -56,13 +57,15 @@ const DAY = 24 * 60 * 60 * 1000;
     return row.id ?? row;
   }
 
-  test('re-opens upcoming pending scored rows; leaves policy rejections, decided, merged, past and unscored rows alone', async () => {
+  test('re-opens upcoming pending scored rows; leaves policy rejections, decided, merged and past rows alone', async () => {
     const reopened = await insert('scored pending');
     const policy = await insert('policy rejection', { rejection_codes: JSON.stringify(['business_open_house']) });
     const approved = await insert('approved', { admin_status: 'approved' });
     const merged = await insert('merged', { merged_into: reopened });
     const past = await insert('past', { start_at: new Date(Date.now() - 3 * DAY) });
-    const reset = await insert('operator reset', { score_breakdown: null, editorial_score: null });
+    // Operator resets made with this code carry approved_via 'operator_reset'
+    // and happen after this one-time migration runs at deploy; prod had no
+    // pending scored row with approved_via set when it shipped.
 
     await migration.up(db);
 
@@ -70,7 +73,7 @@ const DAY = 24 * 60 * 60 * 1000;
     expect(byId.get(reopened).curated_at).toBeNull();
     expect(byId.get(reopened).score_breakdown).toBeNull();
     expect(byId.get(reopened).editorial_score).toBeNull();
-    for (const id of [policy, approved, merged, past, reset]) {
+    for (const id of [policy, approved, merged, past]) {
       expect(byId.get(id).curated_at).not.toBeNull();
     }
     expect(byId.get(policy).score_breakdown).not.toBeNull();
