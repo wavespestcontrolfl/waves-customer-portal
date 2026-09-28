@@ -493,21 +493,6 @@ function providerFor(model) {
   return (meta && meta.provider) || 'anthropic';
 }
 
-// Anthropic requires a `thinking` (or `redacted_thinking`) content block to
-// stay the FIRST block of an assistant message — a thinking-always-on model
-// (Opus 5.5+) 400s on the next request if a history rewrite below moved a
-// synthesized text block ahead of one. Every site that reconstructs history
-// funnels its content array through this first. A no-op for every other
-// model: `msg.content` never carries a thinking block when this session sent
-// `thinking: { type: 'disabled' }` (see this._thinkingAlwaysOn), so this
-// never changes their existing history shape.
-function withThinkingFirst(blocks) {
-  const isThinking = (b) => b && (b.type === 'thinking' || b.type === 'redacted_thinking');
-  const thinking = blocks.filter(isThinking);
-  if (!thinking.length) return blocks;
-  return [...thinking, ...blocks.filter((b) => !isThinking(b))];
-}
-
 /**
  * The effort this session's model requests actually carry, for the version
  * and per-turn stamps: the Anthropic `output_config` effort (voiceEffortFor)
@@ -970,6 +955,10 @@ class RelayConversation {
     this._interruptFollowupTimer = null;
     // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
     this._pendingInterruptNote = null;
+    // A thinking-always-on model's signed assistant response is immutable on
+    // replay. When delivery differs from that response, carry the truth
+    // forward as a new user-side note instead of editing the signed prefix.
+    this._pendingDeliveryNote = null;
     // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
     // the one-per-call transfer latch.
     this._toolOutcomes = [];
@@ -1924,12 +1913,18 @@ class RelayConversation {
     const thinkingBlocks = toolUseBlocks.length && msg
       ? msg.content.filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking')
       : [];
-    const assistantMessage = {
-      role: 'assistant',
-      content: sentText
-        ? [...thinkingBlocks, { type: 'text', text: sentText }, ...toolUseBlocks]
-        : [...thinkingBlocks, ...toolUseBlocks],
-    };
+    // A completed thinking response is a signed replay prefix: preserve every
+    // block byte-for-byte and in provider order, even when only part of its
+    // text reached the caller. With no `msg` (abort before finalMessage), no
+    // signed response exists and the synthesized sent prefix remains valid.
+    const assistantMessage = this._thinkingAlwaysOn && msg
+      ? { role: 'assistant', content: msg.content }
+      : {
+          role: 'assistant',
+          content: sentText
+            ? [...thinkingBlocks, { type: 'text', text: sentText }, ...toolUseBlocks]
+            : [...thinkingBlocks, ...toolUseBlocks],
+        };
     if (assistantMessage.content.length) {
       // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
       // (finalize-time, or the pre-existing paths), `interrupt()` already ran
@@ -1940,9 +1935,13 @@ class RelayConversation {
       // identical rewrite here. Gate off, or this entry was never
       // interrupted (e.g. a failed send): the sent prefix (`sentText`,
       // already `entry.planned`) stands as-is.
-      if (streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
+      if (!this._thinkingAlwaysOn && streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
         const kept = assistantMessage.content.filter((b) => b.type !== 'text');
-        assistantMessage.content = withThinkingFirst([{ type: 'text', text: streamState.entry.text }, ...kept]);
+        assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
+      }
+      if (this._thinkingAlwaysOn && msg
+        && (reason === 'failed' || (reason === 'interrupted' && !this._pendingInterruptNote))) {
+        this._queueDeliveryNote(sentText);
       }
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
@@ -1951,7 +1950,7 @@ class RelayConversation {
       const why = reason === 'failed' ? 'speech to the caller failed' : 'the current turn was interrupted';
       this.messages.push({
         role: 'user',
-        content: toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` })),
+        content: this._appendDeliveryNote(toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` }))),
       });
     }
     return reason === 'failed' ? { failed: true } : { aborted: true };
@@ -2010,24 +2009,25 @@ class RelayConversation {
   }
 
   /**
-   * Phase 2 — write-turn close: history holds ONLY the sent prefix (never
-   * the model's full `msg.content`), on either of the two shapes that need
-   * exactly this — a write-tool turn (P2-c: suppress the held tail so a
-   * pending write is never spoken as already-said) or a genuine text
-   * mismatch (same sent-only shape; nothing to suppress, there IS no
-   * unspoken tail worth mentioning). The write-tool turn additionally logs
-   * a suppressed-tail note; a mismatch does not, since there was never a
-   * pending write to suppress.
+   * Phase 2 — write-turn close: thinking-disabled history holds only the sent
+   * prefix. A thinking-always-on response instead stays byte-for-byte intact
+   * for signed replay, with an append-only user note carrying what was sent.
+   * These are the two shapes that need it: a write-tool turn (suppress the
+   * held tail until the write result is known) or a genuine text mismatch.
    */
   _closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite) {
     const label = hasPendingWrite ? 'close failed on a write-tool turn' : 'close failed on a text mismatch';
     const failure = this._runStreamSendOrFail(streamState, msg, label, () => this._closeStreamEntry(streamState));
     if (failure) return failure;
     const keep = msg.content.filter((b) => b.type !== 'text');
-    const assistantMessage = {
-      role: 'assistant',
-      content: withThinkingFirst(sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep),
-    };
+    const assistantMessage = this._thinkingAlwaysOn
+      ? { role: 'assistant', content: msg.content }
+      : {
+          role: 'assistant',
+          content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
+        };
+    const providerText = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    if (this._thinkingAlwaysOn && providerText !== sent.trim()) this._queueDeliveryNote(sent);
     if (hasPendingWrite && tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
     this.messages.push(assistantMessage);
     if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
@@ -2097,10 +2097,11 @@ class RelayConversation {
     // turns keep their filler text — there is nothing to falsely promise.
     const assistantMessage = {
       role: 'assistant',
-      content: hasPendingWrite
+      content: hasPendingWrite && !this._thinkingAlwaysOn
         ? msg.content.filter((b) => b.type !== 'text')
         : msg.content,
     };
+    if (hasPendingWrite && this._thinkingAlwaysOn && text) this._queueDeliveryNote('');
     this.messages.push(assistantMessage);
     // ⭐ RE-PROVEN IMMEDIATELY BEFORE SPEAKING. The turn-entry check is
     // check-then-act — a reconnect can take the claim during the model
@@ -2284,23 +2285,22 @@ class RelayConversation {
    * `entry.text` the transcript stores ("<heard> [interrupted]",
    * "[not played — caller interrupted]", "[interrupted — played text
    * unknown]") — so the rewrite reads played text by construction, never
-   * `planned`. Tool-use blocks on that message are kept (their tool_result
-   * must still pair) — and so is any thinking block (a thinking-always-on
-   * model, sandbox/eval only), kept FIRST via withThinkingFirst since
-   * Anthropic requires it precede text and this rewrite would otherwise put
-   * the replacement text ahead of it. The next caller message then carries
-   * what the caller heard, so the model resumes from there instead of
-   * repeating the clause the caller never heard. Utterances with no history
-   * message (copy() fallbacks) get the note only. Gate off ⇒ nothing here
-   * runs.
+   * `planned`. Thinking-disabled sessions keep that historical rewrite.
+   * Thinking-always-on responses are signed replay prefixes, so their blocks
+   * remain untouched and the next caller message alone carries what was
+   * heard. That append-only note still lets the model resume instead of
+   * repeating the unheard clause. Utterances with no history message (copy()
+   * fallbacks) get the note only. Gate off ⇒ nothing here runs.
    */
   _noteInterruptForModel(cut, laters) {
     if (!isInterruptContextEnabled()) return;
-    for (const entry of [cut, ...laters]) {
-      const msg = entry.historyMessage;
-      if (!msg || !Array.isArray(msg.content)) continue;
-      const kept = msg.content.filter((b) => b && b.type !== 'text');
-      msg.content = withThinkingFirst([{ type: 'text', text: entry.text }, ...kept]);
+    if (!this._thinkingAlwaysOn) {
+      for (const entry of [cut, ...laters]) {
+        const msg = entry.historyMessage;
+        if (!msg || !Array.isArray(msg.content)) continue;
+        const kept = msg.content.filter((b) => b && b.type !== 'text');
+        msg.content = [{ type: 'text', text: entry.text }, ...kept];
+      }
     }
     const heard = cut.playedUnknown ? null : String(cut.played || '').trim();
     this._pendingInterruptNote = { heard: heard || null };
@@ -2314,6 +2314,31 @@ class RelayConversation {
     return note.heard
       ? `[Caller interrupted you after: "${note.heard}"] `
       : '[Caller interrupted you before your reply finished; what they heard is unknown] ';
+  }
+
+  /**
+   * Preserve a signed thinking response verbatim while telling the next model
+   * round which prefix actually reached the caller. The note is appended to a
+   * tool-result turn when one immediately follows, otherwise to the caller's
+   * next turn.
+   */
+  _queueDeliveryNote(sent) {
+    if (!this._thinkingAlwaysOn) return;
+    const prefix = String(sent || '').trim();
+    this._pendingDeliveryNote = prefix
+      ? `[Delivery note: Only this text from your preceding reply was sent to the caller: ${JSON.stringify(prefix)}. Treat the remaining text as unsaid.]`
+      : '[Delivery note: None of the text in your preceding reply was sent to the caller. Treat it as unsaid.]';
+  }
+
+  _consumeDeliveryNote() {
+    const note = this._pendingDeliveryNote;
+    this._pendingDeliveryNote = null;
+    return note ? `${note} ` : '';
+  }
+
+  _appendDeliveryNote(blocks) {
+    const note = this._consumeDeliveryNote().trim();
+    return note ? [...blocks, { type: 'text', text: note }] : blocks;
   }
 
   /**
@@ -2909,7 +2934,7 @@ class RelayConversation {
     if (!roundSignal || !roundSignal.aborted) return false;
     const remaining = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
     results.push(...remaining.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })));
-    this.messages.push({ role: 'user', content: results });
+    this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
     return true;
   }
 
@@ -2964,7 +2989,7 @@ class RelayConversation {
       if (failureHandoff || this._ending || this.ended) {
         const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
         results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current tool round has stopped.' })));
-        this.messages.push({ role: 'user', content: results });
+        this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
         if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
         return { done: true };
       }
@@ -2985,7 +3010,7 @@ class RelayConversation {
     // abort check's pairing is a no-op here, and the normal-path push below
     // only runs when it didn't already push on an abort.
     if (this._abortStreamToolLoop(roundSignal, msg, results)) return { done: true };
-    this.messages.push({ role: 'user', content: results });
+    this.messages.push({ role: 'user', content: this._appendDeliveryNote(results) });
     return { done: false };
   }
 
@@ -3141,7 +3166,7 @@ class RelayConversation {
       const clockBlock = contextEnabled ? renderClockBlock(this._officeHours) : null;
       // PR 1B: the model — not the transcript — is told what the caller heard
       // before they cut in. Set only under its gate (see interrupt()).
-      const turnText = `${this._consumeInterruptNote()}${callerText}`;
+      const turnText = `${this._consumeInterruptNote()}${this._consumeDeliveryNote()}${callerText}`;
       this.messages.push({
         role: 'user',
         content: clockBlock
@@ -3269,12 +3294,11 @@ class RelayConversation {
       // turns keep their filler text — there is nothing to falsely promise.
       const hasPendingWrite = msg.stop_reason === 'tool_use'
         && msg.content.some((b) => b.type === 'tool_use' && WRITE_TOOLS.has(b.name));
-      // ⭐ AND THE HISTORY MUST AGREE WITH THE AIR. Storing the full assistant
-      // message while suppressing its speech left the model believing the
-      // caller already HEARD that text — its post-result turn could then be an
-      // empty end_turn, ending the exchange with no confirmation spoken at
-      // all. Suppressed turns are stored tool-use-only, so the follow-up round
-      // knows nothing has been said yet and states the outcome itself.
+      // ⭐ AND THE HISTORY MUST AGREE WITH THE AIR. Thinking-disabled sessions
+      // store a suppressed turn tool-use-only. A thinking-always-on response
+      // cannot be edited without invalidating its signed replay prefix, so it
+      // stays intact and an append-only delivery note tells the follow-up round
+      // that the text was not spoken.
       const result = streamState
         ? await this._finalizeStreamedRound(streamState, msg, text, hasPendingWrite, stat)
         : await this._finalizeBlockRound(msg, text, hasPendingWrite);
@@ -4041,4 +4065,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, withThinkingFirst, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
