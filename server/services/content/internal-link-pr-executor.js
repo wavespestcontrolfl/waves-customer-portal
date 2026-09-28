@@ -51,8 +51,6 @@ const DEFAULT_LIMIT = 10;
 const STALE_PR_RESERVED_MS = 2 * 60 * 60 * 1000;
 
 const MISSING_FILE_RE = /^(source_file_not_found|target_file_not_found|target_file_unresolved):/;
-const LINK_RUN_PENDING_REASON = 'internal_links_pr_pending_merge';
-const LINK_RUN_CLOSED_REASON = 'internal_links_pr_closed_unmerged';
 // Reviewer verdicts (the LLM reader check, Codex findings) are terminal: a
 // replan must not re-queue them, or an unchanged link would be retried until
 // a later nondeterministic verdict — or Codex silence — let it through.
@@ -283,7 +281,7 @@ class InternalLinkPrExecutor {
     return evaluateDryRunTask(task, { sourcePage: source, targetPage: target });
   }
 
-  // Every PR-opening caller (runner, candidate sweep) goes through here, so
+  // The only PR-opening path (the candidate sweep; review tooling too), so
   // the one-open-link-PR rule lives here, serialized by an advisory lock so
   // two callers can't both see "none open" and open two PRs.
   async runPrBatch(opts = {}) {
@@ -509,48 +507,9 @@ class InternalLinkPrExecutor {
     for (const task of prTasks) {
       await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
     }
-    await this._finalizeOriginatingRuns(ctx.prUrl, { merged: true });
     logger.info(`[internal-link-pr-executor] auto-merged link PR #${prNumber} (${prTasks.length} link(s), codex ${codex.clean ? 'clean' : 'silent'})`);
     return { status: 'merged', pr_number: prNumber, count: prTasks.length, codex: codex.clean ? 'clean' : 'silent' };
   }
-
-  // A runner-opened link PR parks its autonomous_runs row and opportunity at
-  // internal_links_pr_pending_merge (_handleInternalLinksAction); nothing in
-  // the blog poller selects that reason, so the link lane closes them out
-  // once the PR is settled. Idempotent (guarded on the parked state) and
-  // fail-soft — a bookkeeping error never undoes a merge.
-  async _finalizeOriginatingRuns(prUrl, { merged }) {
-    if (!prUrl) return;
-    const now = new Date();
-    // Run + opportunity move together in one transaction: a half-applied
-    // finalize would leave the opportunity parked with no run left to retry
-    // it (retries select only still-parked runs).
-    const finalize = async (k) => {
-      const runs = await k('autonomous_runs')
-        .where({ outcome: 'completed_pending_review', skip_reason: LINK_RUN_PENDING_REASON, astro_pr_url: prUrl })
-        .select('id', 'opportunity_id', 'queue_claim_id');
-      for (const run of runs) {
-        await k('autonomous_runs').where({ id: run.id, skip_reason: LINK_RUN_PENDING_REASON }).update(merged
-          ? { outcome: 'completed_published', skip_reason: null, updated_at: now }
-          : { outcome: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, updated_at: now });
-        if (!run.opportunity_id) continue;
-        await k('opportunity_queue')
-          .where({ id: run.opportunity_id, status: 'pending_review', skip_reason: LINK_RUN_PENDING_REASON })
-          .where('claim_id', run.queue_claim_id || null)
-          .update(merged
-            ? { status: 'done', completed_at: now, updated_at: now }
-            : { status: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, completed_at: now, updated_at: now });
-      }
-    };
-    try {
-      if (typeof db.transaction === 'function') await db.transaction(finalize);
-      else await finalize(db);
-    } catch (err) {
-      // Nothing committed; the next settle pass (verification / poller) retries.
-      logger.warn(`[internal-link-pr-executor] originating-run finalize failed for ${prUrl}: ${err.message}`);
-    }
-  }
-
 
   async _checkLinkOnlyDiff(pr, prTasks, baseSha) {
     const files = await GitHubClient.listPrFiles(pr.number);
@@ -650,7 +609,6 @@ class InternalLinkPrExecutor {
         updated_at: new Date(),
       });
     }
-    await this._finalizeOriginatingRuns(prTasks[0]?.astro_pr_url || pr.html_url, { merged: false });
     logger.info(`[internal-link-pr-executor] closed link PR #${pr.number}: ${note}`);
     return true;
   }
@@ -787,7 +745,6 @@ class InternalLinkPrExecutor {
         // _failAbandonedPrTask keeps skip_reason, so a recorded reviewer
         // rejection (codex_findings) stays terminal through this path.
         await this._failAbandonedPrTask(task.id, reason);
-        await this._finalizeOriginatingRuns(task.astro_pr_url, { merged: false });
         return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
       }
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };
@@ -798,7 +755,6 @@ class InternalLinkPrExecutor {
       mergedAt,
       commitSha: prInfo.merge_commit_sha || task.pr_commit_sha || null,
     });
-    await this._finalizeOriginatingRuns(task.astro_pr_url, { merged: true });
 
     const liveUrl = liveUrlForTask(task);
     if (!liveUrl) {

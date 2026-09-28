@@ -2254,6 +2254,7 @@ describe('runNext Astro corpus loading', () => {
           claimed_at: claimedAt,
         }),
         pendingReview: jest.fn().mockResolvedValue(true),
+        skip: jest.fn().mockResolvedValue(true),
         release: jest.fn().mockResolvedValue(true),
       };
       const briefBuilder = {
@@ -2273,14 +2274,16 @@ describe('runNext Astro corpus loading', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_dry_run');
+      // Nothing to ship is a plain skip, not a review-queue item.
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('internal_links_no_candidates');
       expect(result.link_tasks_queued).toBe(0);
       expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
         expect.objectContaining({ url: '/blog/ghost-ants/' }),
         { corpus: [], opportunityId: 'opp_links_optional_1' }
       );
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_dry_run', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_no_candidates', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
@@ -2410,7 +2413,7 @@ describe('runNext internal-link shadow behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('opens review-only internal-link PRs when the lane is unshadowed', async () => {
+  test('an unshadowed run plans candidates and completes; it never opens or waits on a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     try {
@@ -2460,13 +2463,13 @@ describe('runNext internal-link shadow behavior', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_pr_pending_merge');
-      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88');
+      // Shipping is the candidate sweep's job alone (one PR path).
+      expect(result.outcome).toBe('completed_published');
+      expect(result.astro_pr_url).toBeUndefined();
       expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
-      expect(internalLinkExecutor.runPrBatch).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 3 });
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_live_1', 'internal_links_pr_pending_merge', { claimToken: claimedAt });
-      expect(queue.complete).not.toHaveBeenCalled();
+      expect(internalLinkExecutor.runPrBatch).not.toHaveBeenCalled();
+      expect(queue.complete).toHaveBeenCalledWith('opp_links_live_1', expect.objectContaining({ claimToken: claimedAt }));
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;

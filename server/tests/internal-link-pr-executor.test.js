@@ -1273,7 +1273,6 @@ describe('internal-link PR auto-merge', () => {
     instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn();
     instance._closeLinkPr = jest.fn(async () => true);
-    instance._finalizeOriginatingRuns = jest.fn();
     jest.spyOn(require('../services/content-astro/pages-poll'), 'latestDeploymentForBranch')
       .mockResolvedValue({ latest_stage: { status: 'success' }, deployment_trigger: { metadata: { branch: 'content/internal-link-x', commit_hash: HEAD } } });
   });
@@ -1385,10 +1384,6 @@ describe('internal-link PR auto-merge', () => {
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'pr_closed_unmerged' });
   });
 
-  test('a merge closes out the runner run that opened the PR', async () => {
-    await instance.runAutoMerge();
-    expect(instance._finalizeOriginatingRuns).toHaveBeenCalledWith(prUrl, { merged: true });
-  });
 
   test('a PR retargeted away from production main is closed, never merged', async () => {
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', created_at: new Date(0).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'staging' } });
@@ -1467,27 +1462,6 @@ describe('internal-link stale reservation recovery', () => {
   });
 });
 
-describe('internal-link originating run finalize', () => {
-  test('closes out the parked runner run and its opportunity after a merge', async () => {
-    const instance = new InternalLinkPrExecutor();
-    const calls = [];
-    db.mockImplementation((table) => {
-      const q = {
-        where: jest.fn(() => q),
-        select: jest.fn(async () => (table === 'autonomous_runs' ? [{ id: 'run1', opportunity_id: 'opp1', queue_claim_id: 'c1' }] : [])),
-        update: jest.fn(async (patch) => { calls.push({ table, patch }); return 1; }),
-      };
-      return q;
-    });
-    db.transaction = jest.fn(async (fn) => fn(db));
-    await instance._finalizeOriginatingRuns('https://github.com/x/y/pull/9', { merged: true });
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual([
-      { table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'completed_published', skip_reason: null }) },
-      { table: 'opportunity_queue', patch: expect.objectContaining({ status: 'done' }) },
-    ]);
-  });
-});
 
 describe('internal-link close records the rejection before cleanup', () => {
   test('skip_reason is written while the task is still pr_open, even if retirement then fails', async () => {
@@ -1507,15 +1481,3 @@ describe('internal-link close records the rejection before cleanup', () => {
   });
 });
 
-describe('internal-link verification settles a closed PR run', () => {
-  test('finalizes the originating run as closed-unmerged', async () => {
-    const instance = new InternalLinkPrExecutor();
-    instance._failAbandonedPrTask = jest.fn();
-    instance._finalizeOriginatingRuns = jest.fn();
-    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed', head: { ref: 'b' } });
-    GitHubClient.retireBranch = jest.fn(async () => true);
-    const url = 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178';
-    await instance.verifyMergedTask({ id: 't', status: 'pr_open', astro_pr_url: url });
-    expect(instance._finalizeOriginatingRuns).toHaveBeenCalledWith(url, { merged: false });
-  });
-});

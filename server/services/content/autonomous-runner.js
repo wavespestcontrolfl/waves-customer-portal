@@ -469,7 +469,11 @@ class AutonomousRunner {
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
       const finalized = await finalize(run, t0, result.patch);
-      if (result.patch.outcome === 'skipped_shadow_mode') {
+      if (result.claim === 'complete') {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
+      } else if (result.claim === 'skip') {
+        await this._skipClaimOrThrow(queue, opp.id, result.patch.skip_reason, { claimToken });
+      } else if (result.patch.outcome === 'skipped_shadow_mode') {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken }, run.action_type);
       } else {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken }, run.action_type);
@@ -2513,31 +2517,37 @@ class AutonomousRunner {
     const candidates = Number((dryRunResult?.results || []).filter((result) => result.status === 'patch_candidate').length);
     const skipped = Number((dryRunResult?.results || []).filter((result) => result.status === 'skipped').length);
     const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
-    let prResult = null;
-    if (!run.shadow_mode && candidates > 0 && executor?.runPrBatch) {
-      const t3 = Date.now();
-      prResult = await executor.runPrBatch({
-        taskIds,
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3),
-      });
-      run.publish_ms = Date.now() - t3;
-    }
-    const reason = run.shadow_mode ? 'internal_links_dry_run_shadow' : 'internal_links_dry_run';
-    if (prResult?.status === 'pr_open') {
+    const summary = `queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`;
+    // Live mode: the run's job ends at planning. Shipping belongs to ONE
+    // path — the daily candidate sweep opens the PR and the autonomous PR
+    // poller merges it (InternalLinkPrExecutor) — so a run never waits on a
+    // PR and nothing has to tie a run to the PR that ships its links.
+    if (!run.shadow_mode) {
+      if (candidates > 0) {
+        return {
+          claim: 'complete',
+          notes: `internal_links_planned:${summary}`,
+          patch: {
+            outcome: 'completed_published',
+            link_tasks_queued: taskIds.length,
+            reviewer_notes: `Planned ${candidates} internal-link candidate(s); the daily sweep ships them through the auto-merge checks.`,
+          },
+        };
+      }
       return {
-        notes: `internal_links_pr_pending_merge:queued=${taskIds.length}:pr_links=${prResult.count}`,
+        claim: 'skip',
+        notes: `internal_links_no_candidates:${summary}`,
         patch: {
-          outcome: 'completed_pending_review',
-          skip_reason: 'internal_links_pr_pending_merge',
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'internal_links_no_candidates',
           link_tasks_queued: taskIds.length,
-          publish_status: 'pr_open',
-          astro_pr_url: prResult.pr_url || null,
-          reviewer_notes: `Astro internal-link PR opened with ${prResult.count} link(s): ${prResult.pr_url}. Merge only after Codex, editorial review, and preview verification.`,
+          reviewer_notes: `No shippable internal-link candidate: ${summary}.`,
         },
       };
     }
+    const reason = 'internal_links_dry_run_shadow';
     return {
-      notes: `${reason}:queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
+      notes: `${reason}:${summary}`,
       patch: {
         outcome: 'completed_pending_review',
         skip_reason: reason,
