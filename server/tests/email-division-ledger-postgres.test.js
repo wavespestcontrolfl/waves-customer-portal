@@ -129,4 +129,48 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(rows).toHaveLength(1); // the racing attempt never inserted
     expect(rows[0].status).toBe('sent');
   });
+
+  test('finding 1 (codex round 1): a stale reservation no longer blocks and is settled as abandoned', async () => {
+    const [staleRow] = await db('marketing_email_ledger').insert({
+      customer_id: customerId, stream: 'broadcast', marketing_class: 'marketing',
+      email_key: 'mkt.broadcast.weekly', idempotency_key: `stale-${randomUUID()}`,
+      recipient_email: customerEmail, status: 'reserved',
+      reserved_at: new Date(Date.now() - 31 * 60 * 1000), // 31 minutes ago — past the 30-minute lifetime
+    }).returning('*');
+
+    const result = await attempt('fresh-after-stale');
+    expect(result.ok).toBe(true);
+    expect(result.row.id).not.toBe(staleRow.id);
+
+    const settled = await db('marketing_email_ledger').where({ id: staleRow.id }).first();
+    expect(settled.status).toBe('failed');
+    expect(settled.reason).toBe('abandoned_reservation');
+  });
+
+  test('finding 2 (codex round 1): retrying an already-sent idempotency key returns duplicate:true, not a cap denial', async () => {
+    const first = await attempt('sent-then-retried');
+    expect(first.ok).toBe(true);
+    await Ledger.markSent(first.row.id, { emailMessageId: null });
+
+    const retry = await attempt('sent-then-retried');
+    expect(retry).toMatchObject({ ok: true, duplicate: true });
+    expect(retry.row.id).toBe(first.row.id);
+    expect(retry.row.status).toBe('sent');
+
+    const rows = await db('marketing_email_ledger').where({ customer_id: customerId });
+    expect(rows).toHaveLength(1); // the retry never inserted a second row
+  });
+
+  test('finding 3 (codex round 1): markFailed after markSent leaves the row sent, never demoted', async () => {
+    const first = await attempt('sent-then-late-fail');
+    expect(first.ok).toBe(true);
+    await Ledger.markSent(first.row.id, { emailMessageId: null });
+
+    const changed = await Ledger.markFailed(first.row.id, 'late_failure');
+    expect(changed).toBe(false);
+
+    const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+    expect(row.status).toBe('sent');
+    expect(row.reason).toBeNull(); // the rejected markFailed never wrote its reason either
+  });
 });

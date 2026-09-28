@@ -12,6 +12,21 @@
 const db = require('../../models/db');
 const { eligibleForEmail, REASONS } = require('./eligibility');
 
+// A 'reserved' row a worker never resolved (crashed, deployed over, timed
+// out) must not block this customer's marketing email forever — codex
+// round-1 P1. Settled to 'failed'/'abandoned_reservation' the next time
+// ANY reservation attempt takes this customer's lock, so it stays visible
+// in the ledger and is never counted again.
+const RESERVATION_LIFETIME_MS = 30 * 60 * 1000; // 30 minutes
+
+async function settleAbandonedReservations(trx, customerId, now) {
+  const staleCutoff = new Date(now.getTime() - RESERVATION_LIFETIME_MS);
+  await trx('marketing_email_ledger')
+    .where({ customer_id: customerId, status: 'reserved' })
+    .where('reserved_at', '<=', staleCutoff)
+    .update({ status: 'failed', reason: 'abandoned_reservation', updated_at: trx.fn.now() });
+}
+
 async function reserve({
   customerId, stream, marketingClass, emailKey, idempotencyKey, recipientEmail, pestKey = null, conn,
 } = {}) {
@@ -64,18 +79,32 @@ async function markSent(id, { emailMessageId = null } = {}, { conn } = {}) {
   });
 }
 
-async function markSkipped(id, reason, { conn } = {}) {
-  const database = conn || db;
-  return database('marketing_email_ledger').where({ id }).update({
-    status: 'skipped', reason, updated_at: database.fn.now(),
+// Only a still-`reserved` row may move to `skipped`/`failed` (codex round-1
+// P1): an unconditional update could demote an already-`sent` row (two
+// completion paths racing the same reservation — an acceptance path's
+// markSent against a timed-out path's markFailed), and eligibility's caps
+// would then stop counting a send that actually went out. Same per-customer
+// lock as markSent, so this transition is serialized against a concurrent
+// reserveWithCap the same way markSent is. Returns whether a row changed.
+async function settleReservedOnly(id, status, reason, conn) {
+  const runner = conn || db;
+  return runner.transaction(async (trx) => {
+    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id');
+    if (!existing) return false;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
+    const changed = await trx('marketing_email_ledger')
+      .where({ id, status: 'reserved' })
+      .update({ status, reason, updated_at: trx.fn.now() });
+    return changed > 0;
   });
 }
 
+async function markSkipped(id, reason, { conn } = {}) {
+  return settleReservedOnly(id, 'skipped', reason, conn);
+}
+
 async function markFailed(id, reason, { conn } = {}) {
-  const database = conn || db;
-  return database('marketing_email_ledger').where({ id }).update({
-    status: 'failed', reason, updated_at: database.fn.now(),
-  });
+  return settleReservedOnly(id, 'failed', reason, conn);
 }
 
 /**
@@ -85,15 +114,25 @@ async function markFailed(id, reason, { conn } = {}) {
  * on an `ok` verdict inserts the reservation. Returns `{ ok, reason, row,
  * duplicate }` — `row` is null on a denial.
  *
- * Two hardenings beyond a bare eligibility check + insert (codex pre-push
- * r1, both P1):
+ * Under the SAME lock, before anything else:
+ *   - any of this customer's `reserved` rows older than
+ *     RESERVATION_LIFETIME_MS is settled to `failed`/`abandoned_reservation`
+ *     (codex round-1 P1) — never counted as outstanding again.
+ *   - a retry of an idempotency key that already exists returns
+ *     `{ ok: true, duplicate: true, row }` for WHATEVER status that row
+ *     holds, without ever re-running eligibility (codex round-1 P2): a
+ *     retry of an already-`sent` key must read back as the duplicate it is,
+ *     not an indistinguishable cap denial.
+ *
+ * Two more hardenings beyond a bare eligibility check + insert (codex
+ * pre-push r1, both P1):
  *   - eligibleForEmail's caps only read `sent` rows, so two concurrent
  *     attempts under DIFFERENT idempotency keys could both pass eligibility
  *     and both reserve before either is marked sent, blowing past the
  *     weekly/daily caps. While still holding this customer's advisory lock,
  *     a marketing-class attempt also denies on any OTHER still-`reserved`
- *     (not yet sent/skipped/failed) row for this customer, reusing the
- *     stream-appropriate cap reason.
+ *     (not yet sent/skipped/failed, and not yet abandoned) row for this
+ *     customer, reusing the stream-appropriate cap reason.
  *   - the recipient actually stored is always the SAME email address
  *     eligibleForEmail just read and cleared against suppression (carried
  *     through in its `checks.customerEmail`, never a caller-supplied
@@ -106,6 +145,13 @@ async function reserveWithCap({
 } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${customerId}`]);
+    await settleAbandonedReservations(trx, customerId, now);
+
+    const existingByKey = await trx('marketing_email_ledger')
+      .where({ idempotency_key: idempotencyKey })
+      .first();
+    if (existingByKey) return { ok: true, reason: null, row: existingByKey, duplicate: true };
+
     const verdict = await eligibleForEmail({
       customerId, stream, marketingClass, emailKey, pestKey, now, conn: trx,
     });
