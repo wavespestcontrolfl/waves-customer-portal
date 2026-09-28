@@ -1,16 +1,13 @@
 /**
- * Glass default flag on the report /data payload. Glass is the unconditional
- * report theme now (the GATE_REPORT_GLASS release gate was retired):
- * - live mode → glassDefault: true rides the payload, so the React viewer
- *   renders the liquid-glass experience;
- * - pdf / static / sms_preview modes NEVER carry it — the Playwright print
- *   pipeline and cached artifacts stay untouched.
+ * GATE_REPORT_PHOTO_CONTENT readout on the report /data payload (owner spec
+ * 2026-09-27). `reportPhotoContentEnabled` is a gate readout only — it must
+ * never carry captions, URLs, or any photo content itself, and the existing
+ * `photos` array (already public, already ungated) must be unaffected by
+ * the gate either way. Mirrors reports-public-glass-default.test.js.
  */
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
-  // The /data loader selects db.raw(...) stamped-address expressions —
-  // mirror knex's raw so building the select can't throw.
   mock.raw = (sql) => ({ toString: () => sql });
   return mock;
 });
@@ -45,9 +42,6 @@ jest.mock('../services/pest-pressure/store', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   buildReportV1Data: jest.fn(),
-  // #2866 routed print modes through the shared schedule-field strip; keep
-  // the REAL implementation (pdf-cache-config precedent) so this suite keeps
-  // exercising the route's actual print path instead of stubbing it out.
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
@@ -56,6 +50,7 @@ jest.mock('../services/service-report/dynamic-context', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+const { reportPhotoContentLive } = require('../config/feature-gates');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const reportsRouter = require('../routes/reports-public');
 
@@ -94,6 +89,7 @@ async function withServer(fn) {
 }
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
+const PHOTOS = [{ id: 'photo-1', url: 'https://cdn.example/photo-1.jpg', caption: 'Ants at the baseboard.' }];
 
 function mockDb() {
   const fullRecord = {
@@ -104,7 +100,6 @@ function mockDb() {
     first_name: 'Pat',
     last_name: 'Tester',
   };
-  // The param gate's lookup fires first, the /data route's join query second.
   const serviceRead = chain({
     first: jest.fn()
       .mockResolvedValueOnce({ id: 'service-1', structured_notes: null })
@@ -112,45 +107,61 @@ function mockDb() {
   });
   db.mockImplementation((table) => {
     if (table === 'service_records') return serviceRead;
-    if (table === 'service_products') return chain({
-      where: jest.fn().mockResolvedValue([]),
-    });
+    if (table === 'service_products') return chain({ where: jest.fn().mockResolvedValue([]) });
     if (table === 'activity_log') return chain();
     throw new Error(`Unexpected table query: ${table}`);
   });
   return { serviceRead };
 }
 
-describe('GET /reports/:token/data glass default flag', () => {
+describe('GET /reports/:token/data reportPhotoContentEnabled', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     buildReportV1Data.mockResolvedValue({
       typedReport: { headline: 'Perimeter looked quiet today.' },
       pestPressure: null,
       pdfUrl: `/api/reports/${VALID_TOKEN}`,
+      photos: PHOTOS,
     });
   });
 
-  test('live mode → payload carries glassDefault: true', async () => {
+  test.each(['live', 'pdf', 'static', 'sms_preview'])(
+    'mode=%s → reflects the gate true',
+    async (mode) => {
+      reportPhotoContentLive.mockReturnValue(true);
+      mockDb();
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data${mode === 'live' ? '' : `?mode=${mode}`}`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.reportPhotoContentEnabled).toBe(true);
+      });
+    },
+  );
+
+  test.each(['live', 'pdf', 'static', 'sms_preview'])(
+    'mode=%s → reflects the gate off',
+    async (mode) => {
+      reportPhotoContentLive.mockReturnValue(false);
+      mockDb();
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data${mode === 'live' ? '' : `?mode=${mode}`}`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.reportPhotoContentEnabled).toBe(false);
+      });
+    },
+  );
+
+  test('the flag never carries photo content itself, and the existing photos array is unaffected by the gate either way', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
     mockDb();
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data`);
       const body = await res.json();
-      expect(res.status).toBe(200);
-      expect(body.glassDefault).toBe(true);
+      expect(typeof body.reportPhotoContentEnabled).toBe('boolean');
+      // Pre-existing, ungated behavior: the gallery is served either way.
+      expect(body.photos).toEqual(PHOTOS);
     });
   });
-
-  test.each(['pdf', 'static', 'sms_preview'])(
-    'mode=%s → never carries glassDefault (print pipeline untouched)',
-    async (mode) => {
-      mockDb();
-      await withServer(async (baseUrl) => {
-        const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/data?mode=${mode}`);
-        const body = await res.json();
-        expect(res.status).toBe(200);
-        expect('glassDefault' in body).toBe(false);
-      });
-    },
-  );
 });

@@ -80,6 +80,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
+ *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer, the PDF renders up to 2 visit photos with captions, and the public preview image gets a photo thumbnail; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -3148,6 +3149,18 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_REPORT_PHOTO_CONTENT read at CALL time — off unless exactly 'true'
+// (repo gate convention, matching discountStackingLive above). On, the AI
+// report writer's grounding may include the technician's own tech-reviewed
+// photo captions / photo summary (generate-report), the PDF renders up to 2
+// visit photos with their captions (ServiceReportDocument), and the public
+// preview image includes one photo thumbnail when available. Off, every one
+// of those surfaces is byte-identical to before this lane: no captions reach
+// the model, no photos render in the PDF, no thumbnail in the preview.
+function reportPhotoContentLive() {
+  return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
+}
+
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
 // point into a non-Anthropic voice-relay session model must use: the session
 // allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
@@ -3332,5 +3345,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
 // gates 1775330914

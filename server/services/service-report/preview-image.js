@@ -6,7 +6,10 @@ const logger = require('../logger');
 const { launchBrowser, serviceReportViewerUrl } = require('./pdf');
 const { stableStringify } = require('./ai-summary');
 
-const RENDER_VERSION = 'sms_preview_v1';
+// v2: GATE_REPORT_PHOTO_CONTENT can composite a photo thumbnail into the
+// card and grow the viewport to fit it — bump so a preview cached under v1
+// (no photo, fixed viewport) re-renders instead of serving stale bytes.
+const RENDER_VERSION = 'sms_preview_v2';
 const ASSET_TYPE = 'sms_preview_image';
 const MAX_BYTES = 4_500_000;
 const DEFAULT_WIDTH = 1200;
@@ -45,10 +48,16 @@ async function screenshotPreview(page, quality) {
     quality,
     fullPage: false,
   });
+  // Reflect the ACTUAL viewport the screenshot was taken at (see the
+  // height-growth step in renderServiceReportSmsPreviewImage below) — a
+  // GATE_REPORT_PHOTO_CONTENT thumbnail can make the card taller than the
+  // default, and stamping the stale DEFAULT_HEIGHT here would desync the
+  // stored metadata from the actual JPEG.
+  const viewport = page.viewportSize() || { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
   return {
     buffer,
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
+    width: viewport.width,
+    height: viewport.height,
     contentType: 'image/jpeg',
     byteSize: buffer.length,
   };
@@ -72,6 +81,25 @@ async function renderServiceReportSmsPreviewImage({
     });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForSelector('.sms-preview-card', { timeout: 10000 });
+
+    // The card is a fixed-viewport, fullPage:false screenshot — content taller
+    // than DEFAULT_HEIGHT is silently clipped, never reflowed. Ordinarily the
+    // card's own min-height is tuned to fit; GATE_REPORT_PHOTO_CONTENT's photo
+    // thumbnail can push a report past that budget, so grow the viewport to
+    // the card's actual rendered height before shooting. Only ever GROWS —
+    // every report that already fit gets today's exact framing and dimensions.
+    // globalThis === window in the page context; spelled this way so the
+    // server-side lint (no browser globals) accepts the in-page function
+    // (same convention as pdf-puppeteer.js's imageFailures read).
+    const cardHeight = await page.evaluate(() => {
+      const card = globalThis.document.querySelector('.sms-preview-card');
+      return card ? Math.ceil(card.getBoundingClientRect().height) : 0;
+    }).catch(() => 0);
+    const PAGE_VERTICAL_PADDING = 144; // .sms-preview-page's 72px top + bottom
+    const neededHeight = cardHeight ? cardHeight + PAGE_VERTICAL_PADDING : 0;
+    if (neededHeight > DEFAULT_HEIGHT) {
+      await page.setViewportSize({ width: DEFAULT_WIDTH, height: neededHeight });
+    }
 
     let quality = 82;
     let result = await screenshotPreview(page, quality);

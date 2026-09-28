@@ -15895,6 +15895,16 @@ export function CompletionPanel({
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
+    // Tech-reviewed photo captions/summary for the AI writer (owner spec
+    // 2026-09-27, GATE_REPORT_PHOTO_CONTENT). Captions read straight off the
+    // CURRENT servicePhotos array, so a photo the tech deleted before
+    // Generate never contributes a caption here.
+    const reportPhotoCaptions = (Array.isArray(servicePhotos) ? servicePhotos : [])
+      .map((p) => String(p?.caption || "").trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((c) => c.slice(0, 200));
+    const reportPhotoSummary = String(typedPhotoSummary || "").trim().slice(0, 600);
     const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
     // Free text is the input surface now; restored older drafts can still
     // carry chip-label selections, so both merge into the same arrays.
@@ -16103,6 +16113,13 @@ export function CompletionPanel({
       // activity (codex r2).
       pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
+      // Tech-reviewed photo captions (GATE_REPORT_PHOTO_CONTENT, owner spec
+      // 2026-09-27): captions live ON the servicePhotos entries, so a photo
+      // the tech deleted before Generate is already gone from this array —
+      // its caption is never sent. Capped defensively; the server re-caps
+      // from scratch and never trusts this client-side cap.
+      ...(reportPhotoCaptions.length ? { photoCaptions: reportPhotoCaptions } : {}),
+      ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
       ...typedFindingsPayload,
     };
@@ -16119,6 +16136,11 @@ export function CompletionPanel({
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
       Boolean(payload.lawnAssessmentId) ||
+      // Reviewed photo captions are real, tech-vetted text describing what a
+      // photo shows — substantive on their own, same as the assessment rule
+      // above (mirrors the server's cappedPhotoCaptions gate; the summary
+      // alone never opens this).
+      reportPhotoCaptions.length > 0 ||
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.

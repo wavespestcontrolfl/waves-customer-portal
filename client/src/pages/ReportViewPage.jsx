@@ -5409,6 +5409,15 @@ function SmsReportPreview({ data }) {
     ? (data.lawnAssessment.customerSummary || 'Lawn assessment is complete.')
     : (aiSummary?.headline || 'Service is complete.');
   const body = isLawn ? lawnAssessmentBody(data.lawnAssessment) : aiSummary?.body;
+  // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): the flag is server-set
+  // (v1Data.reportPhotoContentEnabled) — data.photos itself is ungated and
+  // already served on every mode, so gate reads decide only whether this one
+  // additive thumbnail composites into the MMS preview image. First/primary
+  // photo only (list order matches the report's own gallery); one whose URL
+  // failed to resolve is skipped rather than rendering a broken image.
+  const previewPhoto = data.reportPhotoContentEnabled
+    ? (data.photos || []).find((p) => p && p.url) || null
+    : null;
   return (
     <div className="sms-preview-page">
       <style>{`
@@ -5488,6 +5497,21 @@ function SmsReportPreview({ data }) {
           color: #525252;
           font-size: 24px;
         }
+        .sms-preview-photo img {
+          width: 100%;
+          height: 420px;
+          object-fit: cover;
+          border-radius: 8px;
+          display: block;
+          border: .5px solid #d4d4d4;
+          box-sizing: border-box;
+        }
+        .sms-preview-photo p {
+          margin: 12px 0 0;
+          color: #525252;
+          font-size: 26px;
+          line-height: 1.35;
+        }
         .sms-preview-footer {
           margin-top: auto;
           border-top: .5px solid #d4d4d4;
@@ -5528,6 +5552,12 @@ function SmsReportPreview({ data }) {
           <div className="sms-preview-action">
             <div className="sms-preview-eyebrow">Recommended next step</div>
             <p>{actionText}</p>
+          </div>
+        )}
+        {previewPhoto && (
+          <div className="sms-preview-photo">
+            <img src={previewPhoto.url} alt="" />
+            {previewPhoto.caption && <p>{previewPhoto.caption}</p>}
           </div>
         )}
         <div className="sms-preview-footer">View full report from the link in this text.</div>

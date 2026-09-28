@@ -2332,6 +2332,12 @@ router.get('/:token/data', async (req, res, next) => {
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
       });
+      // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): the sms_preview
+      // renderer (SmsReportPreview) reads this to decide whether to composite
+      // a photo thumbnail into the MMS preview image — v1Data.photos itself is
+      // ungated and already served on every mode, so the flag only controls
+      // that one additive render, never the existing gallery/PDF photos.
+      v1Data.reportPhotoContentEnabled = require('../config/feature-gates').reportPhotoContentLive();
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports

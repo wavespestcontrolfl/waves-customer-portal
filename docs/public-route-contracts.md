@@ -520,6 +520,25 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
 older cached PDFs to match this evidence rule),
+`reportPhotoContentEnabled` (boolean; `GATE_REPORT_PHOTO_CONTENT`, owner
+spec 2026-09-27 — off unless exactly `true`, read via `reportPhotoContentLive()`)
+is a gate readout only, served on every mode (`live`/`pdf`/`static`/`sms_preview`)
+so the client knows whether it may use the tech's reviewed photo captions.
+It does NOT gate the existing `photos` array itself — that array (S3-presigned
+URLs plus each photo's own `service_photos.caption`, already the tech's
+reviewed/final text, never an unreviewed or deleted photo's caption) is
+unchanged, ungated, pre-existing behavior served on every mode regardless of
+this flag. The one thing the flag controls is additive: the token-gated MMS
+preview image (`GET /api/reports/:token/preview.jpg`, serving a stored
+`service_report_notification_assets` row built by the `sms_preview` render)
+composites the FIRST available entry of that same `photos` array — its
+already-public URL and caption — into the preview card only when this flag
+is `true`; the screenshot's fixed viewport grows to fit the added photo
+(server/services/service-report/preview-image.js, capped to only ever grow,
+never shrink below the pre-existing default) and the asset's render version
+was bumped so no pre-feature cached preview is ever served as current. No
+new fields, captions, or images reach `preview.jpg` beyond what `/data`
+already exposes for the SAME token,
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +
