@@ -3,7 +3,7 @@
  * count/sample adapter. The SQL itself is exercised against the local
  * schema by the syntax check in the PR (psql), not here (no DB in jest).
  */
-const { PREDICATES, PREDICATE_KEYS, runPredicate, _private } = require('../services/completion-record-invariants');
+const { PREDICATES, PREDICATE_KEYS, runPredicate, CANONICAL_SIBLING, _private } = require('../services/completion-record-invariants');
 
 const KEYS = [
   'completed_visit_without_record',
@@ -64,7 +64,7 @@ describe('PREDICATES registry', () => {
     // newest completed) is the ONE row eligibility, grace, and the closeout
     // rule are read from: frozen snapshot first, live catalog when the
     // snapshot is absent or malformed — never "absent = owed".
-    const sibling = _private.CANONICAL_SIBLING;
+    const sibling = CANONICAL_SIBLING;
     // Selected from siblings of ANY status (loadCloseoutInputs' selection);
     // the consumer then requires the canonical row to be completed.
     expect(sibling).toMatch(/FROM service_records fr\s+WHERE fr\.scheduled_service_id = ss\.id\s+ORDER BY/);
@@ -110,7 +110,7 @@ describe('PREDICATES registry', () => {
     expect(comms).toContain("completionSmsStatus' IN ('sent', 'skipped_recap_sms_already_sent', 'blocked')");
     expect(comms).not.toMatch(/'sending'|'deferred'/);
     // Same canonical-sibling read for the notice: eligibility, grace, rule.
-    expect(comms).toContain(`SELECT 1 FROM (${_private.CANONICAL_SIBLING}) canonical`);
+    expect(comms).toContain(`SELECT 1 FROM (${CANONICAL_SIBLING}) canonical`);
     expect(comms).toContain(`AND (${_private.CANONICAL_NOT_OWED('requiresCustomerNotice')}) IS NOT TRUE)`);
     expect(comms).not.toMatch(/FROM service_records sr\b/);
     // A delivered video recap (provider-confirmed sent_at) is a completion notice.
