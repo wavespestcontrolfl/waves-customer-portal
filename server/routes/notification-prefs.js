@@ -79,7 +79,10 @@ router.put('/', async (req, res, next) => {
       referralNudge: 'referral_nudge',
       marketingOffers: 'marketing_offers',
       weatherAlerts: 'weather_alerts',
-      paymentReceipt: 'payment_receipt',
+      // No paymentReceipt: customers cannot turn payment receipts off (owner
+      // ruling 2026-09-26, payment emails always send). payment_receipt=false
+      // still stops receipts wherever it is read, so nothing may write it.
+      // paymentReceiptChannel (below) still routes delivery.
       serviceReminderChannel: 'service_reminder_channel',
       enRouteChannel: 'en_route_channel',
       serviceCompleteChannel: 'service_complete_channel',
