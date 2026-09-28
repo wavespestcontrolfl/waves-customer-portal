@@ -817,7 +817,17 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
 describe('Owner ruling 2026-09-28: a same-day-only ask about TODAY gets an end-of-day deadline instead of staying undated', () => {
   const wavesItem = (quote, overrides = {}) => ({ party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null, quote, ...overrides });
 
-  test.each(['Did you come today or not?', 'Can you call or text me today?', 'Can you come this afternoon or tonight?'])(
+  test.each(["Can you call about tonight's visit?", "Confirm this afternoon's appointment please"])(
+    // Codex #5170 r3 P2: a possessive same-day form names the topic, never the deadline.
+    '"%s" names the visit, not the timing, so it never takes the same-day path', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      const item = { ...wavesItem(quote), due_text: quote.match(/(tonight|this afternoon)'s/)[0] };
+      expect(resolveDueDeadline(item, at).due_at).not.toBe(parseETDateTime('2040-03-12T20:00').toISOString());
+    });
+
+  test.each(['Did you come today or not?', 'Can you call or text me today?', 'Can you come this afternoon or tonight?',
+    // Codex #5170 r3 P2: a qualifier bound to the same-day form stays same-day.
+    'Can you call later tonight?', 'Can you come any time today?', 'Stop by sometime this afternoon', 'Can you come later today?'])(
     // Codex #5170 r2 P2: a bare "or" with only same-day timing is still same-day.
     '"%s" offers no later option, so it gets the 8 PM ET same-day deadline', (quote) => {
       const at = parseETDateTime('2040-03-12T10:00');

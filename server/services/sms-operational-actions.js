@@ -202,16 +202,20 @@ function withoutTopics(quote) {
 // "later today", "eod", "end of (the) day") — the subset of STATED_TIMING's
 // own vocabulary that names TODAY specifically, never a longer span ("this
 // week/month" stay out on purpose: those keep the legacy undated behavior).
-// NOT_POSSESSIVE mirrors STATED_TIMING so "today's appointment" is left to
-// the existing topic/possessive handling rather than double-covered here.
+// NOT_POSSESSIVE follows every form, as in STATED_TIMING, so "today's
+// appointment" or "tonight's visit" names the topic and is left to the
+// existing per-kind handling (Codex #5170 r3 P2). A qualifier bound to the
+// same-day form ("later tonight", "any time today", "sometime this
+// afternoon") is part of it, so stripping takes it too and it never reads
+// as a later option below (r3 P2).
+const SAME_DAY_QUALIFIER = String.raw`(?:(?:later|any ?time|some ?time|early|late) )?`;
 const SAME_DAY_TIMING = new RegExp([
   String.raw`\btoday\b${NOT_POSSESSIVE}`,
-  String.raw`\btonight\b`,
-  String.raw`\bthis (?:morning|afternoon|evening)\b`,
-  String.raw`\blater today\b`,
-  String.raw`\beod\b`,
-  String.raw`\bend of (?:the )?day\b`,
-].join('|'), 'i');
+  String.raw`\btonight\b${NOT_POSSESSIVE}`,
+  String.raw`\bthis (?:morning|afternoon|evening)\b${NOT_POSSESSIVE}`,
+  String.raw`\beod\b${NOT_POSSESSIVE}`,
+  String.raw`\bend of (?:the )?day\b${NOT_POSSESSIVE}`,
+].map((form) => String.raw`\b${SAME_DAY_QUALIFIER}${form.slice(2)}`).join('|'), 'i');
 // Global twin used only to strip every same-day occurrence before re-testing
 // STATED_TIMING on what is left (Codex conventions keep the stateful global
 // regex out of resolveDueDeadline's own module-level .test() calls).
@@ -485,7 +489,8 @@ function resolveDueDeadline(item, messageCreatedAt) {
     const sameDayRemainderClear = (text) => !STATED_TIMING.test(String(text || '').replace(SAME_DAY_TIMING_STRIP, ' '));
     const sameDayOnly = !unresolvedClock
       && SAME_DAY_TIMING.test(strippedQuote) && sameDayRemainderClear(strippedQuote)
-      && !SAME_DAY_ALTERNATIVE.test(strippedQuote) && !SAME_DAY_ALTERNATIVE.test(String(item.due_text || ''))
+      && !SAME_DAY_ALTERNATIVE.test(strippedQuote.replace(SAME_DAY_TIMING_STRIP, ' '))
+      && !SAME_DAY_ALTERNATIVE.test(String(item.due_text || '').replace(SAME_DAY_TIMING_STRIP, ' '))
       && sameDayRemainderClear(item.due_text);
     if (!sameDayOnly) return { due_at: null, due_basis: null };
     const messageDate = new Date(messageCreatedAt);
