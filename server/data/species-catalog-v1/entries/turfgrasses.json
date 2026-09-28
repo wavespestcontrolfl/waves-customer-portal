@@ -454,7 +454,7 @@
       {
         "slug": "torpedograss",
         "difference": "Bermudagrass has fine, soft blades throughout; torpedograss has stiffer, coarser blades and sharply pointed rhizome tips that can pierce bare skin.",
-        "next_photo": "A close-up of a dug-up rhizome tip \u2014 a hard, sharp point (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip \u2014 a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
         "photo_can_confirm": true
       },
       {
@@ -533,7 +533,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "6ff0767cd09c86e1b2094299856fe2b541a24e7cc0fdaa710476900b42681a9e"
+      "approval_hash": "c3bff8fd46c6622d0ce7a3fad6c4b32e6d5a01d81adade9e9aac6707106db6e4"
     },
     "role": "lawn_grass",
     "risk": "low",

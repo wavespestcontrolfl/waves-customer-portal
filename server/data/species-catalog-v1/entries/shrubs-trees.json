@@ -36,7 +36,7 @@
       {
         "slug": "bougainvillea",
         "difference": "Hibiscus has one large true flower with no thorns; bougainvillea's color is papery bracts around a tiny flower, on thorny stems.",
-        "next_photo": "A close-up of the stem for thorns and of the colorful part to see if it's one flower or several papery bracts.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several papery bracts.",
         "photo_can_confirm": true
       }
     ],
@@ -101,7 +101,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "Chilli thrips is well documented as a hibiscus pest in UF/IFAS entomology literature, though the specific host-plant line wasn't confirmed on the fetched gardening-solutions hibiscus page (which named only aphids, whiteflies and mealybugs).",
-      "approval_hash": "e530283de2c937c83c7f88f07b32d6b8070aa00cfa3f96b9570c5703284247fc"
+      "approval_hash": "c667c3019f47edb38c6670a350faa2a3a6f971c7fd3bfa28b67691c44027a8af"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -404,7 +404,7 @@
       {
         "slug": "hibiscus",
         "difference": "Bougainvillea's color is papery bracts around a tiny true flower, on thorny climbing stems; hibiscus has one large true flower on a thornless shrub.",
-        "next_photo": "A close-up of the stem for thorns and of the colorful part to see if it's one flower or several bracts.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the colorful part: one flower or several bracts.",
         "photo_can_confirm": true
       }
     ],
@@ -469,7 +469,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "Bougainvillea looper caterpillar is a well-known defoliator in Florida but has no matching catalog slug, so it isn't listed in common_problems.",
-      "approval_hash": "1c576cf541d188364ef23765483134b7c4464708c310197be9d597137e5f3b7d"
+      "approval_hash": "5c088b096ec3dfe51f4b8c2d839e7fed3f42c10fec20848dd3c232c3b68c5e79"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1507,7 +1507,7 @@
       {
         "slug": "bougainvillea",
         "difference": "Plumbago has soft oval leaves and no thorns, with small tubular blue or white flower clusters; bougainvillea has thorny stems and large papery colorful bracts.",
-        "next_photo": "A close-up of the stem for thorns and of the flower structure.",
+        "next_photo": "A close-up of the stem for thorns (photograph them, don't handle the stem) and of the flower structure.",
         "photo_can_confirm": true
       }
     ],
@@ -1572,7 +1572,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "Cotton cushion scale is named by UF/IFAS as an occasional plumbago pest but has no matching catalog slug.; Unverified (not asserted in customer copy): Plumbago sap causing skin irritation or contact dermatitis (plumbagin) — Reported by non-UF/IFAS, non-ASPCA sources (e.g. a state poison information center); could not be confirmed against this catalog's approved source list, so no irritant flag is set here.",
-      "approval_hash": "e1f076c0e29c5c0e696c968482bd001624bcc2a8231bfe09981fcc13388612f8"
+      "approval_hash": "ae5124187d0b3ec40f513e3c6300cf67607a14fa8164f42f8e4a1cf6b619ab91"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -1750,7 +1750,7 @@
       {
         "slug": "ficus-hedge",
         "difference": "Arboricola has glossy palmate leaves, 5-9 leaflets like fingers; ficus hedge has simple oval leaves, milky sap (umbrella tree looks similar, larger leaflets).",
-        "next_photo": "A close-up of a single leaf to count leaflets and, wearing gloves, check for a milky sap when broken.",
+        "next_photo": "A close-up of a single leaf to count leaflets and, wearing gloves, check for a milky sap when broken; keep any sap away from your eyes.",
         "photo_can_confirm": true
       }
     ],
@@ -1816,7 +1816,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "Scale, mealybug, aphid and spider mite susceptibility is common knowledge for this plant family, but the UF/IFAS fact sheets fetched for arboricola either redirected or were no longer available, so the pest list is general knowledge rather than a page-specific citation.; Hedged in customer copy, not asserted as settled: ASPCA toxicity listing applies specifically to Schefflera arboricola vs. S. actinophylla — The ASPCA page is titled generically 'Schefflera' and does not distinguish between the two commonly planted species; both share the same calcium-oxalate mechanism, but the exact page covers the genus rather than naming arboricola specifically.",
-      "approval_hash": "c475d54e629942e194cd0dd6cb59676ab640dbe5bf60473e518d2da7e6a06228"
+      "approval_hash": "cf0764d41986f7ba8fb362f6ed67139e5275f37a63eb4ac87a77e60ff59b9b04"
     },
     "role": "landscape_plant",
     "risk": "irritant",
@@ -2498,7 +2498,7 @@
       {
         "slug": "mango",
         "difference": "Citrus has smaller glossy oval leaves, often on a winged stalk, and round citrus fruit; mango has long narrow leaves and large single-seeded oval fruit.",
-        "next_photo": "A close-up of a single leaf shape and, if present, any fruit for size and shape.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
         "photo_can_confirm": true
       }
     ],
@@ -2572,7 +2572,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "72dccf7ba3a81cd804e7cbbe5f55456bbd505ecc17a7b217b3cd9ca86eed332a"
+      "approval_hash": "2b71e38f3d71317ea20b003bd058119785afe87000813cd117c5c2dbf8a6a1e1"
     },
     "role": "landscape_plant",
     "risk": "low",
@@ -2626,7 +2626,7 @@
       {
         "slug": "citrus",
         "difference": "Mango has long narrow leaves and large single-seeded fruit on a much bigger tree; citrus has smaller glossy oval leaves and round citrus fruit.",
-        "next_photo": "A close-up of a single leaf shape and, if present, any fruit for size and shape.",
+        "next_photo": "A close-up of a single leaf and any fruit (size and shape), taken without handling the plant: mango can irritate skin and citrus can have thorns.",
         "photo_can_confirm": true
       }
     ],
@@ -2697,7 +2697,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "UF/IFAS EP220 confirms that mango is a poison-ivy relative that may cause allergic reactions. Set safety.allergen and safety.irritant true, changed risk to irritant, and added a contact precaution; the source does not specifically attribute the reaction to sap or peel, so those unsupported details were removed.",
-      "approval_hash": "8685554856d1f108b1ea084c2c1fe691f7c0bf766359240eb5c76bf82cfc632f"
+      "approval_hash": "a32d597f171fbe2cee4d6379ddada8090e7d7ff636a2f9b173dafc9dd6cf522c"
     },
     "role": "landscape_plant",
     "risk": "irritant",
@@ -2755,7 +2755,7 @@
       {
         "slug": "pygmy-date-palm",
         "difference": "Sago palm has stiff, glossy leaflets on a shaggy trunk; pygmy date palm has drooping, spiny fronds on a slender trunk (cardboard palm looks similar, no trunk).",
-        "next_photo": "A close-up of the leaflet texture and a wide shot of the base showing a trunk (sago) or none (cardboard palm).",
+        "next_photo": "From a safe distance (zoom in rather than reaching toward any spines), the leaflet texture plus a wide shot of the base: a trunk (sago) or none (cardboard palm).",
         "photo_can_confirm": true
       }
     ],
@@ -2820,7 +2820,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "2d058a689b79d5f9d04ab963830ed7225389b1daa914d19476dc9f5bf504e981"
+      "approval_hash": "845a5972ab04451ea91bed9ae7980f852c82b8b8b73ef79f2dde060cb1573ba8"
     },
     "role": "landscape_plant",
     "risk": "medical",

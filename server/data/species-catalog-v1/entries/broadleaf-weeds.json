@@ -415,7 +415,7 @@
       {
         "slug": "sensitive-plant",
         "difference": "Chamberbitter has tiny bead-like fruits under the leaflets and doesn't fold when touched; sensitive plant folds at a touch and has pink powderpuff flowers.",
-        "next_photo": "Touch the leaves gently and photograph the reaction (folds vs. no reaction), plus a close-up of the underside of a leaf branch for beaded fruit.",
+        "next_photo": "Gently touch a leaflet, avoiding the prickly stems, and photograph the reaction (folds vs. no reaction), plus a close-up of a leaf branch underside for beaded fruit.",
         "photo_can_confirm": true
       }
     ],
@@ -482,7 +482,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "d049bd584ca9e7c9157131301d2486e32d64266d83423892701b6c69a257f2fd"
+      "approval_hash": "4dc59f3320c6431caf564cdfad86140f461405fc51208114ff73c90b0cf0d1aa"
     },
     "role": "weed",
     "risk": "low",
@@ -1686,7 +1686,7 @@
       {
         "slug": "chamberbitter",
         "difference": "Sensitive plant folds up when touched and has pink powderpuff flowers; chamberbitter doesn't react to touch, with tiny bead-like fruits under its leaf branches.",
-        "next_photo": "Touch the leaves gently and photograph the reaction (folds vs. no reaction), plus a wide shot of the flower if present.",
+        "next_photo": "Gently touch a leaflet, avoiding the prickly stems, and photograph the reaction (folds vs. no reaction), plus a wide shot of the flower if present.",
         "photo_can_confirm": true
       }
     ],
@@ -1753,7 +1753,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "Whether a given Mimosa specimen is the thornless native M. strigillosa or the thorned M. pudica is a per-photo call, not a fact this entry can settle generically \u2014 thorns indicate M. pudica, a thornless mat indicates M. strigillosa.",
-      "approval_hash": "57eff17d09c740ae213ccd9759267e4b35b252b442802b08ee67cbcb9f3558ee"
+      "approval_hash": "e1aba049c24a8ad480bc267371d76fb722eb8f0c77c125acc7802b642abd29ae"
     },
     "role": "weed",
     "risk": "low",

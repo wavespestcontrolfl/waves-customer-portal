@@ -274,13 +274,13 @@
       {
         "slug": "st-augustinegrass",
         "difference": "Torpedograss has coarser, grayish-green blades and hard, sharp rhizome tips; St. Augustine has wide, blunt blades on soft surface runners, no sharp points.",
-        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point.",
+        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point; wear sturdy gloves, since the tip can pierce skin.",
         "photo_can_confirm": true
       },
       {
         "slug": "bermudagrass",
         "difference": "Torpedograss has stiffer blades and sharply pointed rhizome tips that can pierce skin; bermudagrass has fine, soft blades and blunt, thin rhizomes throughout.",
-        "next_photo": "A close-up of a dug-up rhizome tip — a hard, sharp point (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip — a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
         "photo_can_confirm": true
       }
     ],
@@ -348,7 +348,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "e36b7d7bbcc8da41f482b9ec751ad290656e7ba66b060d710a9d41ac4ef39baa"
+      "approval_hash": "982f6356b025c9793cb998f4435e50620c11bb18bbc6f6aa12f178ff4280d833"
     },
     "role": "weed",
     "risk": "low",
