@@ -142,6 +142,24 @@ test('a workflow-owned sms_log row (entry_point with an onTerminal hook) is excl
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
 
+test('a registered deferred-replay row WITHOUT a terminal hook (invoice_send_deferred holds its invoice claim) is refused too', async () => {
+  const { requiresTerminalHook: hasHook, isDeferredReplayEntryPoint } = require('../services/messaging/deferred-replay-registry');
+  expect(isDeferredReplayEntryPoint('invoice_send_deferred')).toBe(true);
+  expect(hasHook('invoice_send_deferred')).toBe(false);
+  expect(isDeferredReplayEntryPoint('some_manual_send')).toBe(false);
+
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'invoice', scheduled_for: new Date('2099-01-01T12:00:00Z'),
+    metadata: { entry_point: 'invoice_send_deferred' },
+  };
+  const previewBuilder = { where: () => previewBuilder, modify: () => previewBuilder, first: () => Promise.resolve(row) };
+  db.mockImplementation((table) => (table === 'customers' ? { where: () => ({ first: () => Promise.resolve({ first_name: 'Synthetic', last_name: 'Fixture' }) }) } : previewBuilder));
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(/communications inbox/i);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
 // scheduler.js/scheduled-sms-delivery.js: finalize_only and
 // review_delivery_uncertain_exhausted both mean the text already reached
 // the provider — the row only exists for post-delivery bookkeeping or a

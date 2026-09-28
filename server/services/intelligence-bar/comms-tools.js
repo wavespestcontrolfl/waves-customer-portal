@@ -30,7 +30,7 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // own cancel uses, so this tool can never bypass it with a bare status flip).
 const { cancelQueuedMessage: cancelQueuedEmailMessage, PROVIDER_HANDOFF_STARTED } = require('../email-template-library');
 const { cancelScheduledSmsRow } = require('../scheduled-sms-cancel');
-const { requiresTerminalHook } = require('../messaging/deferred-replay-registry');
+const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -420,12 +420,14 @@ function smsIneligibilityReason(row) {
   if (meta.finalize_only === true || meta.review_delivery_uncertain_exhausted === true) {
     return 'This text has already reached the provider — it cannot be cancelled.';
   }
-  // Workflow-owned: the entry point registers an onTerminal hook the
-  // deferred-replay executor runs on every terminal outcome (undoing a
-  // claim, arming a fallback sender, flipping a status back to an admin
-  // retry lane). A bare cancel here never runs it — the registry's own
-  // lookup decides, never a hand-kept list of entry points.
-  if (requiresTerminalHook(meta.entry_point)) {
+  // Workflow-owned: ANY entry point the deferred-replay registry owns. Some
+  // register an onTerminal hook the executor runs on every terminal outcome
+  // (undoing a claim, arming a fallback sender, flipping a status back to an
+  // admin retry lane); others hold state without one (an
+  // invoice_send_deferred row keeps its invoice's send claim). The bar
+  // cancels neither — the registry's own lookup decides, never a hand-kept
+  // list of entry points.
+  if (isDeferredReplayEntryPoint(meta.entry_point)) {
     return `This text belongs to a workflow (${String(meta.entry_point).replace(/_/g, ' ')}) — cancel it from the Communications inbox.`;
   }
   return null;
