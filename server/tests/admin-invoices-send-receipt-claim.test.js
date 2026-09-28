@@ -35,6 +35,7 @@ const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
 const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 const router = require('../routes/admin-invoices');
 
 const INVOICE_ID = 'bbbbbbbb-2222-4222-8222-222222222222';
@@ -81,6 +82,8 @@ describe('POST /:id/send-receipt', () => {
     expect(r.body).toMatchObject({ ok: true, email: { ok: true }, sms: { ok: true } });
     expect(claimReceiptJobForOperatorSend).toHaveBeenCalledWith(INVOICE_ID);
     const claimAt = claimReceiptJobForOperatorSend.mock.invocationCallOrder[0];
+    // Claimed before the closeout too: a queued receipt cannot deliver during it.
+    expect(claimAt).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);
     expect(claimAt).toBeLessThan(sendReceiptEmail.mock.invocationCallOrder[0]);
     expect(claimAt).toBeLessThan(InvoiceService.sendReceipt.mock.invocationCallOrder[0]);
     expect(invoiceUpdates).toContainEqual({ table: 'invoices', patch: expect.objectContaining({ receipt_sent_at: 'now()' }) });
@@ -118,6 +121,7 @@ describe('POST /:id/send-receipt', () => {
     const r = await withServer((base) => post(base, `/${INVOICE_ID}/send-receipt`, { via: 'both' }));
     expect(r.status).toBe(409);
     expect(r.body.code).toBe('receipt_delivery_in_flight');
+    expect(closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
     expect(invoiceUpdates).toEqual([]);
@@ -138,6 +142,8 @@ describe('POST /batch/send-receipts', () => {
     expect(r.body.skipped).toEqual([{ invoiceId: ids[1], reason: 'receipt_delivery_in_flight' }]);
     expect(r.body.failed).toEqual([{ invoiceId: ids[2], error: 'receipt claim failed: db blip' }]);
     expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
+    expect(claimReceiptJobForOperatorSend.mock.invocationCallOrder[0]).toBeLessThan(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0]);
     expect(releaseOperatorReceiptClaim).toHaveBeenCalledTimes(1);
     expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith({ id: 'job-1', token: 't1', prior: null }, expect.objectContaining({ emailDelivered: true }));
   });

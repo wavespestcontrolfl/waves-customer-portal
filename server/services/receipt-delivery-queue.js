@@ -73,17 +73,23 @@ async function enqueueReceiptDelivery({
 }
 
 async function recoverStaleLocks() {
-  // A stale operator claim (claimReceiptJobForOperatorSend) whose own email
-  // already went out (recordOperatorReceiptEmail stamped this claim's token
-  // on the row) was never handed back — a failed release, or a process that
-  // died after the send. Requeueing it would email the receipt again, so it
-  // is closed instead. Without that claim-specific evidence it is requeued
-  // below like any stale job: the email may still be owed.
-  await db('receipt_delivery_jobs')
+  // Stale operator claims (claimReceiptJobForOperatorSend) were never handed
+  // back — a failed release, or a process that died mid-send — and are
+  // settled before the generic requeue below:
+  const staleOperatorClaims = () => db('receipt_delivery_jobs')
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
-    .where('locked_by', 'like', 'operator:%')
-    .whereRaw("email_result->>'operator_claim' = locked_by")
+    .where('locked_by', 'like', 'operator:%');
+  const ownEmailSent = "email_result->>'operator_claim' = locked_by";
+  // 1. The claim's own email went out (recordOperatorReceiptEmail): the
+  //    invoice is stamped receipted (it may have died before its own stamp)
+  //    and the job closed — requeueing would email the receipt again.
+  await db('invoices')
+    .whereNull('receipt_sent_at')
+    .whereIn('id', staleOperatorClaims().whereRaw(ownEmailSent).select('invoice_id'))
+    .update({ receipt_sent_at: db.fn.now() });
+  await staleOperatorClaims()
+    .whereRaw(ownEmailSent)
     .update({
       status: 'completed',
       completed_at: db.fn.now(),
@@ -92,6 +98,12 @@ async function recoverStaleLocks() {
       locked_by: null,
       updated_at: db.fn.now(),
     });
+  // 2. A row the claim itself created, which no enqueue took over: no
+  //    automatic receipt was ever owed, so it goes away rather than becoming
+  //    one (the operator's failed request is theirs to retry).
+  await staleOperatorClaims().where({ source: 'operator_send' }).del();
+  // Everything else stale — a drain worker's job, or a queued job an
+  // operator held — may still owe its email and is requeued.
   return db('receipt_delivery_jobs')
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
@@ -378,10 +390,10 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // (releaseOperatorReceiptClaim). A job the drain is delivering right now
 // refuses the operator send ({ inFlight: true }) rather than racing it.
 // A short transaction only: never held across the sends. A process that dies
-// holding the claim leaves a `running` row, which recoverStaleLocks hands to
-// the drain after STALE_LOCK_MINUTES — the receipt still goes out — unless
-// the claim's own email was recorded as sent (recordOperatorReceiptEmail),
-// which closes it instead.
+// holding the claim is settled by recoverStaleLocks after
+// STALE_LOCK_MINUTES: closed when its own email was recorded as sent
+// (recordOperatorReceiptEmail), removed when the claim created the row, and
+// otherwise handed back to the drain.
 async function claimReceiptJobForOperatorSend(invoiceId) {
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {

@@ -1518,15 +1518,8 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
         continue;
       }
 
-      // The same paid-closeout retry as the single resend below (GitHub r7
-      // P2 #4127): a payment-triggered closeout that committed but left its
-      // post-commit work pending is finished here too, ahead of both legs.
-      {
-        const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-        await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
-      }
-
-      // The same queued-job claim as the single resend below.
+      // The same queued-job claim as the single resend below, taken before
+      // the closeout so a queued receipt cannot deliver during it.
       let claim;
       try {
         claim = await claimReceiptJobForOperatorSend(invoiceId);
@@ -1545,6 +1538,14 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       const errs = [];
 
       try {
+        // The same paid-closeout retry as the single resend below (GitHub r7
+        // P2 #4127): a payment-triggered closeout that committed but left its
+        // post-commit work pending is finished here too, ahead of both legs.
+        {
+          const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+          await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+        }
+
         try {
           const r = await sendReceiptEmail(invoiceId);
           emailRes = r || null;
@@ -2511,21 +2512,11 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid invoices' });
     }
 
-    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-    // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
-    // the reachable retry for a payment-triggered closeout that did not
-    // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
-    // email-only resend retries too; a completed visit refuses quietly.
-    {
-      const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-      await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: req.technicianId || null });
-    }
-
     const { sendReceiptEmail } = require('../services/invoice-email');
     const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 
-    // The invoice's queued receipt job (if any) is claimed first so it
-    // cannot deliver a second receipt around this send.
+    // The invoice's queued receipt job (if any) is claimed before anything
+    // else runs, so it cannot deliver a second receipt around this send.
     const claim = await claimReceiptJobForOperatorSend(id);
     if (claim.inFlight) {
       return res.status(409).json({
@@ -2538,6 +2529,16 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
     let smsResult = { ok: false, skipped: true };
 
     try {
+      // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+      // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
+      // the reachable retry for a payment-triggered closeout that did not
+      // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
+      // email-only resend retries too; a completed visit refuses quietly.
+      {
+        const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+        await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+      }
+
       if (via === 'email' || via === 'both') {
         emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
         if (emailResult.ok) await recordOperatorReceiptEmail(claim);
