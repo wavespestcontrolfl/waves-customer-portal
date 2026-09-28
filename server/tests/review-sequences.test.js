@@ -2854,6 +2854,24 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(JSON.parse(row.decision)).not.toHaveProperty('context');
   });
 
+  test('GATE_REVIEW_DAY0_CONTEXT: an enrollment refused by a guard never classifies (no evidence leaves for a model)', async () => {
+    mockGates.reviewSequences = true;
+    mockResolveReviewTopic.mockResolvedValue({ topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', confidence: 0.9, version: 'review-day0-context-v2' });
+    const mock = makeMock({
+      customers: [{ id: 'rc-ctx-3', first_name: 'Sam', last_name: 'H', phone: '+19410000052', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rc-ctx-3', customer_id: 'rc-ctx-3', scheduled_service_id: 'ss-rc-ctx-3', service_type: 'Quarterly Pest Control Service' }],
+      scheduled_services: [{ id: 'ss-rc-ctx-3', customer_id: 'rc-ctx-3', is_recurring: true, status: 'completed', scheduled_date: '2026-08-01' }],
+      // This visit already enrolled (e.g. its paid-invoice webhook after the completion).
+      review_sequences: [{ id: 'seq-prior', customer_id: 'rc-ctx-3', status: 'completed', service_record_id: 'sr-rc-ctx-3', plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]), current_step: 1, touches_sent: 1 }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-3', serviceRecordId: 'sr-rc-ctx-3', completedAt: new Date() });
+
+    expect(result).toMatchObject({ started: false, reason: 'service_record_enrolled' });
+    expect(mockResolveReviewTopic).not.toHaveBeenCalled();
+  });
+
   test('GATE_REVIEW_DAY0_CONTEXT: no topic leaves the sequence insert unchanged (no ask_context key)', async () => {
     mockGates.reviewSequences = true;
     mockResolveReviewTopic.mockResolvedValue(null);

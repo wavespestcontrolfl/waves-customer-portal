@@ -1775,17 +1775,6 @@ const ReviewService = {
           completedAt ? new Date(completedAt) : new Date(),
           svcType,
         ).at;
-      // GATE_REVIEW_DAY0_CONTEXT (dark): resolves to null off-gate, off the
-      // recurring plan, or on any lookup/model failure — never blocks or
-      // changes this enrollment (review-ask-topic.js). The visit's own
-      // completed_at anchors its evidence window; completedAt is the fallback.
-      const askContext = await resolveReviewTopicForEnrollment({
-        customerId,
-        serviceRecordId,
-        scheduledServiceId,
-        completedAt: completedAt ? new Date(completedAt) : null,
-        plan: resolved.plan,
-      });
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -1797,7 +1786,18 @@ const ReviewService = {
         plan: resolved.plan,
         seriesFinal: resolved.seriesFinal === true,
         customerRequested: customerRequested || null,
-        askContext,
+        // GATE_REVIEW_DAY0_CONTEXT (dark): run by startReviewSequence only once
+        // its refusals have passed. Null off-gate, off the recurring plan, or on
+        // any lookup/model failure — never blocks or changes this enrollment
+        // (review-ask-topic.js). The visit's own completed_at anchors the
+        // evidence window; completedAt is the fallback.
+        resolveAskContext: () => resolveReviewTopicForEnrollment({
+          customerId,
+          serviceRecordId,
+          scheduledServiceId,
+          completedAt: completedAt ? new Date(completedAt) : null,
+          plan: resolved.plan,
+        }),
         decision: sequenceDecision({
           reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
           plannedAt: firstTouchAt,
@@ -5827,7 +5827,7 @@ const ReviewService = {
 
 
   async startReviewSequence(options, captureRetries = 1) {
-    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, askContext = null, decision = null } = options;
+    const { customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, resolveAskContext = null, decision = null } = options;
     const retryEnrollment = () => {
       // Re-run caps and visit dedupe too: the settled winner may have sent.
       // Persistent contention must fail visibly, never claim a lost capture.
@@ -5970,6 +5970,12 @@ const ReviewService = {
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
       return { started: false, reason: "cooldown" };
     }
+
+    // GATE_REVIEW_DAY0_CONTEXT: classify only now that every refusal above has
+    // passed, so an enrollment about to be refused never sends evidence to a
+    // model, and before the insert's transaction, which a model call must
+    // never hold open.
+    const askContext = typeof resolveAskContext === "function" ? await resolveAskContext() : null;
 
     // Supersede any already-queued ASK (post-service auto, or a deferred
     // retry): otherwise processScheduled() would fire it AND the cadence's

@@ -15,7 +15,9 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], 
 
 const db = require('../models/db');
 const {
+  readTopicEvidence,
   collectTopicEvidence,
+  classifyTopic,
   extractReviewTopic,
   resolveReviewTopicForEnrollment,
   TOPIC_VERSION,
@@ -37,8 +39,10 @@ function toComparable(x) {
 function makeDb(tables) {
   return jest.fn((name) => {
     const table = String(name).split(/\s+as\s+/i)[0];
-    const state = { equals: [], ops: [], order: null };
+    const state = { equals: [], ops: [], ins: [], notIns: [], order: null };
     const builder = {
+      whereIn(col, vals) { state.ins.push([col, vals]); return builder; },
+      whereNotIn(col, vals) { state.notIns.push([col, vals]); return builder; },
       where(a, b, c) {
         if (a && typeof a === 'object') { Object.entries(a).forEach(([k, v]) => state.equals.push([k, v])); return builder; }
         if (arguments.length === 3) { state.ops.push([a, b, c]); return builder; }
@@ -54,6 +58,8 @@ function makeDb(tables) {
     function filtered() {
       let rows = [...(tables[table] || [])];
       rows = rows.filter((r) => state.equals.every(([k, v]) => toComparable(r[k]) === toComparable(v)));
+      rows = rows.filter((r) => state.ins.every(([k, vals]) => vals.includes(r[k])));
+      rows = rows.filter((r) => state.notIns.every(([k, vals]) => !vals.includes(r[k])));
       rows = rows.filter((r) => state.ops.every(([k, op, v]) => {
         const l = r[k] == null ? null : toComparable(r[k]);
         const rv = toComparable(v);
@@ -128,13 +134,13 @@ describe('collectTopicEvidence', () => {
     expect(floor.getTime()).toBeLessThan(new Date(NOW.getTime() - 10 * 86400000).getTime() + 1);
   });
 
-  test('anchors on the visit\'s own completion: a live enrollment (after markComplete) still reads pre-visit texts, and a same-stop sibling is not the previous visit', async () => {
+  test('anchors on the visit itself: a live enrollment (after markComplete) still reads pre-visit texts, and a grouped sibling at the same stop is not the previous visit', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [
         { id: 'ss-prev', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 10 * 86400000) },
-        { id: 'ss-sibling', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 30 * 60000) },
+        { id: 'ss-sibling', customer_id: 'c1', status: 'completed', visit_id: 'v-stop', completed_at: new Date(NOW.getTime() - 30 * 60000) },
         // markComplete stamped THIS visit two minutes before enrollment ran.
-        { id: 'ss-now', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 2 * 60000) },
+        { id: 'ss-now', customer_id: 'c1', status: 'completed', visit_id: 'v-stop', completed_at: new Date(NOW.getTime() - 2 * 60000) },
       ],
       service_records: [],
       sms_log: [
@@ -144,6 +150,57 @@ describe('collectTopicEvidence', () => {
 
     const evidence = await collectTopicEvidence({ customerId: 'c1', scheduledServiceId: 'ss-now', completedAt: NOW });
     expect(evidence.texts.map((t) => t.id)).toEqual(['s-pre']);
+  });
+
+  test('an independent visit earlier the same day bounds the window — its concern is not the later visit\'s topic', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-prev', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 20 * 86400000) },
+        { id: 'ss-morning', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 4 * 3600000) },
+        { id: 'ss-now', customer_id: 'c1', status: 'completed', completed_at: NOW },
+      ],
+      service_records: [],
+      sms_log: [
+        { id: 's-before-morning', customer_id: 'c1', direction: 'inbound', message_body: 'Ants all over the kitchen again', created_at: new Date(NOW.getTime() - 86400000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', scheduledServiceId: 'ss-now' });
+    expect(evidence.texts).toEqual([]);
+  });
+
+  test('the window ends at the visit\'s real start — a text after arrival (a closeout submitted hours later) is not a pre-visit topic', async () => {
+    const arrivedAt = new Date(NOW.getTime() - 8 * 3600000);
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-late', customer_id: 'c1', status: 'completed', arrived_at: arrivedAt, completed_at: NOW },
+      ],
+      service_records: [],
+      sms_log: [
+        { id: 's-before', customer_id: 'c1', direction: 'inbound', message_body: 'Wasps under the back eave again', created_at: new Date(arrivedAt.getTime() - 3600000) },
+        { id: 's-after-visit', customer_id: 'c1', direction: 'inbound', message_body: 'Still seeing ants in the kitchen after this morning', created_at: new Date(arrivedAt.getTime() + 3 * 3600000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', scheduledServiceId: 'ss-late' });
+    expect(evidence.texts.map((t) => t.id)).toEqual(['s-before']);
+  });
+
+  test('a grouped visit reads the concern from every member\'s completion, not just the one enrollment names', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-pest', customer_id: 'c1', status: 'completed', visit_id: 'v-1', completed_at: NOW },
+        { id: 'ss-lawn', customer_id: 'c1', status: 'completed', visit_id: 'v-1', completed_at: NOW },
+      ],
+      service_records: [
+        { id: 'sr-pest', scheduled_service_id: 'ss-pest', structured_notes: { customerConcernText: '' } },
+        { id: 'sr-lawn', scheduled_service_id: 'ss-lawn', structured_notes: { customerConcernText: 'brown patch by the driveway' } },
+      ],
+      sms_log: [],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-pest', scheduledServiceId: 'ss-pest' });
+    expect(evidence.completion.concernText).toBe('brown patch by the driveway');
   });
 
   test('texts after the visit\'s own completion are never evidence (paid-invoice enrollment days later, visit found through its service record)', async () => {
@@ -233,10 +290,11 @@ describe('collectTopicEvidence', () => {
     expect(evidence.completion.concernText).toContain('[redacted]');
   });
 
-  test('never throws — a lookup failure returns fully empty evidence', async () => {
+  test('never throws — a lookup failure returns fully empty evidence (readTopicEvidence, the replay\'s variant, throws it instead)', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
     const evidence = await collectTopicEvidence({ customerId: 'c1', completedAt: NOW });
     expect(evidence).toEqual({ completion: { concernText: null }, texts: [] });
+    await expect(readTopicEvidence({ customerId: 'c1', completedAt: NOW })).rejects.toThrow('pool exhausted');
   });
 });
 
@@ -290,6 +348,24 @@ describe('extractReviewTopic', () => {
       json: { topic: 'rat', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
     });
     const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: "I'd rather move the visit to Friday" }] };
+    expect(await extractReviewTopic(evidence)).toBeNull();
+  });
+
+  test('an invented short pest never rides along with grounded longer words ("rat noise in attic")', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'rat noise in attic', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There is a noise in the attic at night' }] };
+    expect(await extractReviewTopic(evidence)).toBeNull();
+  });
+
+  test('a topic longer than six words is rejected even when every word is grounded', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'ants all over the kitchen counter again', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.95 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There are ants all over the kitchen counter again' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
@@ -354,6 +430,27 @@ describe('extractReviewTopic', () => {
 
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     await expect(extractReviewTopic(evidence)).resolves.toBeNull();
+  });
+});
+
+describe('classifyTopic (the replay\'s raw outcome)', () => {
+  const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
+
+  test('keeps the model\'s own kind when the topic is refused, so the replay can count logistics/praise/none', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', confidence: 0.9 } });
+    await expect(classifyTopic(evidence)).resolves.toMatchObject({ status: 'classified', raw: { kind: 'logistics' }, topic: null });
+  });
+
+  test('a provider failure is "failed", never a quiet no-topic, and a throw propagates', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
+    await expect(classifyTopic(evidence)).resolves.toMatchObject({ status: 'failed', reason: 'all_providers_failed', topic: null });
+    mockDispatch.mockRejectedValue(new Error('provider timeout'));
+    await expect(classifyTopic(evidence)).rejects.toThrow('provider timeout');
+  });
+
+  test('empty evidence is "no_evidence" with no model call', async () => {
+    await expect(classifyTopic({ completion: { concernText: null }, texts: [] })).resolves.toMatchObject({ status: 'no_evidence' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 

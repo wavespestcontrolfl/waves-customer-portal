@@ -36,7 +36,8 @@ if (!process.env.DATABASE_URL && !process.env.DATABASE_PUBLIC_URL) {
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
-const { collectTopicEvidence, extractReviewTopic } = require('../services/review-ask-topic');
+const { readTopicEvidence, classifyTopic } = require('../services/review-ask-topic');
+const { runAsReplay } = require('../services/llm-dispatch-metrics');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { formatETDate } = require('../utils/datetime-et');
 
@@ -95,45 +96,57 @@ async function fetchCompletedRecurringVisits(since, now) {
 }
 
 // One visit -> one evidence-gather + classification, guarded so a single bad
-// row (a lookup blip, a malformed structured_notes row) never aborts the run.
+// row never aborts the run. Uses the throwing variants (not the live path's
+// fail-soft ones) so a lookup or provider failure is reported as an error,
+// never counted as "no topic".
 async function classifyVisit(visit) {
   const completedAt = new Date(visit.completed_at);
-  let evidence;
-  let topic = null;
+  let evidence = null;
+  let outcome = null;
   let error = null;
   try {
-    evidence = await collectTopicEvidence({
+    evidence = await readTopicEvidence({
       customerId: visit.customer_id,
       serviceRecordId: visit.service_record_id,
       scheduledServiceId: visit.visit_id,
       completedAt,
     });
-    topic = await extractReviewTopic(evidence);
+    outcome = await classifyTopic(evidence);
+    if (outcome.status === 'failed') error = `classifier_failed:${outcome.reason}`;
   } catch (err) {
     error = err.message;
-    evidence = evidence || { completion: { concernText: null }, texts: [] };
   }
+  const topic = outcome?.topic || null;
   return {
     visitId: visit.visit_id,
     customerId: visit.customer_id,
     completedAt: completedAt.toISOString(),
     serviceType: visit.service_type || null,
-    evidence,
+    evidence: evidence || { completion: { concernText: null }, texts: [] },
+    evidenceRead: !!evidence,
+    // The model's own answer before the confidence/grounding checks.
+    rawKind: outcome?.raw?.kind || null,
     topic,
     wouldFire: !!topic,
     error,
   };
 }
 
+// `summary` counts the model's own kinds (before the checks); `rejected` is a
+// service_concern/question the confidence or grounding check refused;
+// `no_evidence` never reached the model; `failed` is a lookup or provider
+// error, kept out of every other count.
 function summarize(results) {
-  const summary = { service_concern: 0, question: 0, logistics: 0, praise: 0, none: 0, no_topic: 0 };
+  const summary = { service_concern: 0, question: 0, logistics: 0, praise: 0, none: 0, rejected: 0, no_evidence: 0, failed: 0 };
   let wouldFireCount = 0;
   let withTextsCount = 0;
   let withTextsFiredCount = 0;
   for (const r of results) {
+    if (r.error) { summary.failed += 1; continue; }
     if (r.wouldFire) wouldFireCount += 1;
-    if (r.topic) summary[r.topic.kind] = (summary[r.topic.kind] || 0) + 1;
-    else summary.no_topic += 1;
+    if (!r.rawKind) summary.no_evidence += 1;
+    else summary[r.rawKind] = (summary[r.rawKind] || 0) + 1;
+    if (!r.topic && (r.rawKind === 'service_concern' || r.rawKind === 'question')) summary.rejected += 1;
     if (hasCustomerTexts(r.evidence)) {
       withTextsCount += 1;
       if (r.wouldFire) withTextsFiredCount += 1;
@@ -147,7 +160,7 @@ function renderMarkdownRow(result, customerFirstName) {
     mdEscape(formatETDate(new Date(result.completedAt))),
     mdEscape(result.serviceType || ''),
     mdEscape(customerFirstName || ''),
-    mdEscape(result.topic?.kind || (result.error ? 'error' : 'none')),
+    mdEscape(result.error ? 'error' : (result.rawKind || 'no evidence')),
     mdEscape(result.topic?.topic || ''),
     mdEscape(result.topic?.source || ''),
     result.topic ? result.topic.confidence.toFixed(2) : '',
@@ -169,13 +182,16 @@ function renderMarkdown({ days, since, now, visits, results, summary, wouldFireC
     '|---|---|---|---|---|---|---|---|---|',
     ...results.map((r, i) => renderMarkdownRow(r, visits[i].customer_first_name)),
     '',
-    '## Summary by kind',
+    '## Summary by kind (the model\'s own answer, before the checks)',
     '',
     `- service_concern: ${summary.service_concern}`,
     `- question: ${summary.question}`,
     `- logistics: ${summary.logistics}`,
     `- praise: ${summary.praise}`,
-    `- no topic stored (none / ungrounded / low confidence / no evidence): ${summary.no_topic}`,
+    `- none: ${summary.none}`,
+    `- service_concern/question refused by the confidence or grounding check: ${summary.rejected}`,
+    `- no evidence (never sent to the model): ${summary.no_evidence}`,
+    `- failed (lookup or provider error — not counted anywhere else): ${summary.failed}`,
     `- would fire (topic stored): ${wouldFireCount} / ${visits.length}`,
     `- visits with any customer texts in the evidence window: ${withTextsCount} / ${visits.length}`,
     `- of those, would fire (real customer-texts hit rate): ${withTextsFiredCount} / ${withTextsCount}`,
@@ -201,8 +217,13 @@ async function main() {
   const visits = await fetchCompletedRecurringVisits(since, now);
   console.log(`[replay] ${visits.length} completed recurring visit(s) with a service record in window`);
 
-  const results = [];
-  for (const visit of visits) results.push(await classifyVisit(visit));
+  // Recorded as replay workload (`<policy>:replay`), never as live
+  // review_topic traffic in the dispatch metrics or the call ledger.
+  const results = await runAsReplay(async () => {
+    const out = [];
+    for (const visit of visits) out.push(await classifyVisit(visit));
+    return out;
+  }, 'review_topic');
 
   fs.writeFileSync(jsonlPath, results.map((r) => JSON.stringify(r)).join('\n') + (results.length ? '\n' : ''));
 

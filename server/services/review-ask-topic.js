@@ -43,15 +43,14 @@ const TOPIC_VERSION = "review-day0-context-v2";
 
 const EVIDENCE_WINDOW_DAYS = 14;
 const EVIDENCE_WINDOW_MS = EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-// A visit completed within this long before the anchor is this same stop —
-// the visit itself (every live enrollment runs after markComplete stamped it)
-// or a sibling service completed alongside it — never the PREVIOUS visit.
-// Recurring visits are weeks apart.
-const SAME_STOP_GAP_MS = 12 * 60 * 60 * 1000;
+// The visit's real start stamps (complete-scheduled-service.js
+// BACKFILL_INFERRED_START_FIELDS): the earliest one ends the text window.
+const VISIT_START_FIELDS = ["arrived_at", "check_in_time", "actual_start_time"];
 const MAX_TEXTS = 8;
 const MAX_TEXT_CHARS = 320;
 const MIN_TEXT_CHARS = 12;
 const MIN_CONFIDENCE = 0.8;
+const MAX_TOPIC_WORDS = 6;
 // Fast classification, not customer copy — bounded so this never holds up
 // the enrollment path the way a customer-facing draft would need to.
 const TOPIC_TIMEOUT_MS = 8 * 1000;
@@ -99,79 +98,114 @@ function parseStructuredNotes(value) {
   }
 }
 
-// customerConcernText ONLY — `observations`/`customerRecap` are the
-// technician's own findings, not the customer's words (see module header).
-// Also resolves the visit's own completed_at, which anchors the text window.
+function concernTextOf(structuredNotes) {
+  const notes = parseStructuredNotes(structuredNotes);
+  return typeof notes.customerConcernText === "string" ? notes.customerConcernText.trim() : "";
+}
+
+function earliestDate(values) {
+  return values
+    .map((v) => (v ? new Date(v) : null))
+    .filter((d) => d && !Number.isNaN(d.getTime()))
+    .sort((a, b) => a - b)[0] || null;
+}
+
+// The visit, its grouped-visit members (scheduled_services.visit_id — one
+// physical stop), and what the customer told the technician:
+// customerConcernText ONLY, from every member's record (each member has its
+// own completion form; enrollment names only the first). `observations` /
+// `customerRecap` are the technician's own findings (see module header).
+// windowEnd is the visit's real start, else its completed_at: a closeout
+// submitted hours after the stop must not turn a post-visit text into a
+// pre-visit topic.
 async function loadVisit({ serviceRecordId, scheduledServiceId }) {
   const sr = serviceRecordId
     ? await db("service_records").where({ id: serviceRecordId }).select("structured_notes", "scheduled_service_id").first()
     : null;
-  const notes = parseStructuredNotes(sr?.structured_notes);
-  // Same redact-then-cap as the texts below: free-text concerns can carry a
-  // gate or lockbox code.
-  const concernText = typeof notes.customerConcernText === "string"
-    ? redactAccessCodes(notes.customerConcernText.trim()).slice(0, MAX_TEXT_CHARS)
-    : "";
   const visitId = scheduledServiceId || sr?.scheduled_service_id || null;
-  const visit = visitId ? await db("scheduled_services").where({ id: visitId }).select("completed_at").first() : null;
-  return { concernText: concernText || null, completedAt: visit?.completed_at ? new Date(visit.completed_at) : null };
+  const visit = visitId
+    ? await db("scheduled_services").where({ id: visitId }).select("id", "visit_id", "completed_at", ...VISIT_START_FIELDS).first()
+    : null;
+  const memberIds = visit?.visit_id
+    ? (await db("scheduled_services").where({ visit_id: visit.visit_id }).select("id")).map((r) => r.id)
+    : [];
+  const memberRecords = memberIds.length
+    ? await db("service_records").whereIn("scheduled_service_id", memberIds).select("structured_notes")
+    : [];
+  const concerns = [...new Set([sr, ...memberRecords].map((r) => concernTextOf(r?.structured_notes)).filter(Boolean))];
+  return {
+    // Same redact-then-cap as the texts: free-text concerns can carry a gate
+    // or lockbox code.
+    concernText: concerns.length ? redactAccessCodes(concerns.join(" / ")).slice(0, MAX_TEXT_CHARS) : null,
+    windowEnd: visit ? earliestDate(VISIT_START_FIELDS.map((f) => visit[f])) || earliestDate([visit.completed_at]) : null,
+    sameStopIds: visit ? [...new Set([visit.id, ...memberIds])] : [],
+  };
 }
 
 /**
  * Gathers the ONLY two evidence sources this lane is allowed to read: what
  * the customer told the technician on this visit (customerConcernText), and
- * the customer's own inbound texts from their previous completed visit up to
- * THIS visit's completion (capped at 14 days back). The window is anchored on
- * the visit's own completed_at — never the enrollment time, which runs after
- * the visit is completed (and, on the paid-invoice path, days later) — and
- * falls back to `completedAt` only when the visit row has none; with neither,
- * no texts are read. Never throws — any lookup failure returns fully empty
- * evidence.
+ * the customer's own inbound texts sent BEFORE this visit, since their
+ * previous completed visit (capped at 14 days back). The window ends at the
+ * visit's own real start (else its completed_at) — never the enrollment
+ * time, which runs after the visit is completed (and, on the paid-invoice
+ * path, days later) — and at the caller's `completedAt` only when the visit
+ * row has neither; with none of them, no texts are read. The previous visit
+ * is never this visit or a member of its grouped visit. Throws on a lookup
+ * failure — the replay reports it; live callers use collectTopicEvidence.
  */
-async function collectTopicEvidence({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null } = {}) {
+async function readTopicEvidence({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null } = {}) {
+  const visit = await loadVisit({ serviceRecordId, scheduledServiceId });
+  const completion = { concernText: visit.concernText };
+  const at = visit.windowEnd || (completedAt ? new Date(completedAt) : null);
+  if (!at || Number.isNaN(at.getTime())) return { completion, texts: [] };
+
+  let prevQuery = db("scheduled_services")
+    .where({ customer_id: customerId, status: "completed" })
+    .where("completed_at", "<", at);
+  if (visit.sameStopIds.length) prevQuery = prevQuery.whereNotIn("id", visit.sameStopIds);
+  const prevVisit = await prevQuery
+    .orderBy("completed_at", "desc")
+    .select("completed_at")
+    .first();
+
+  const floor = new Date(at.getTime() - EVIDENCE_WINDOW_MS);
+  const prevCompletedAt = prevVisit?.completed_at ? new Date(prevVisit.completed_at) : null;
+  const windowStart = prevCompletedAt && prevCompletedAt.getTime() > floor.getTime() ? prevCompletedAt : floor;
+
+  let rows = await db("sms_log")
+    .where({ customer_id: customerId, direction: "inbound" })
+    .where("created_at", ">", windowStart)
+    .where("created_at", "<=", at)
+    .orderBy("created_at", "asc")
+    .select("id", "message_body", "created_at");
+
+  rows = rows.filter((r) => {
+    const body = String(r.message_body || "").trim();
+    if (body.length < MIN_TEXT_CHARS) return false;
+    if (isSmsReaction(body)) return false;
+    return true;
+  });
+  if (rows.length > MAX_TEXTS) rows = rows.slice(-MAX_TEXTS);
+
+  const texts = rows.map((r) => ({
+    id: String(r.id),
+    at: new Date(r.created_at).toISOString(),
+    // Redact the FULL body first, then cap — truncating first can split a
+    // secret across the boundary (same order as review-ask-drafter.js).
+    body: redactAccessCodes(String(r.message_body || "")).slice(0, MAX_TEXT_CHARS),
+  }));
+
+  return { completion, texts };
+}
+
+// Fail-soft readTopicEvidence for the live enrollment path: any lookup
+// failure returns fully empty evidence.
+async function collectTopicEvidence(args = {}) {
   try {
-    const visit = await loadVisit({ serviceRecordId, scheduledServiceId });
-    const completion = { concernText: visit.concernText };
-    const at = visit.completedAt || (completedAt ? new Date(completedAt) : null);
-    if (!at || Number.isNaN(at.getTime())) return { completion, texts: [] };
-
-    const prevVisit = await db("scheduled_services")
-      .where({ customer_id: customerId, status: "completed" })
-      .where("completed_at", "<", new Date(at.getTime() - SAME_STOP_GAP_MS))
-      .orderBy("completed_at", "desc")
-      .select("completed_at")
-      .first();
-
-    const floor = new Date(at.getTime() - EVIDENCE_WINDOW_MS);
-    const prevCompletedAt = prevVisit?.completed_at ? new Date(prevVisit.completed_at) : null;
-    const windowStart = prevCompletedAt && prevCompletedAt.getTime() > floor.getTime() ? prevCompletedAt : floor;
-
-    let rows = await db("sms_log")
-      .where({ customer_id: customerId, direction: "inbound" })
-      .where("created_at", ">", windowStart)
-      .where("created_at", "<=", at)
-      .orderBy("created_at", "asc")
-      .select("id", "message_body", "created_at");
-
-    rows = rows.filter((r) => {
-      const body = String(r.message_body || "").trim();
-      if (body.length < MIN_TEXT_CHARS) return false;
-      if (isSmsReaction(body)) return false;
-      return true;
-    });
-    if (rows.length > MAX_TEXTS) rows = rows.slice(-MAX_TEXTS);
-
-    const texts = rows.map((r) => ({
-      id: String(r.id),
-      at: new Date(r.created_at).toISOString(),
-      // Redact the FULL body first, then cap — truncating first can split a
-      // secret across the boundary (same order as review-ask-drafter.js).
-      body: redactAccessCodes(String(r.message_body || "")).slice(0, MAX_TEXT_CHARS),
-    }));
-
-    return { completion, texts };
+    return await readTopicEvidence(args);
   } catch (err) {
-    logger.warn(`[review-topic] evidence collection failed (customerId=${customerId}): ${err.message}`);
+    logger.warn(`[review-topic] evidence collection failed (customerId=${args.customerId}): ${err.message}`);
     return { completion: { concernText: null }, texts: [] };
   }
 }
@@ -207,21 +241,28 @@ function normalizePluralToken(token) {
   return token.length > 1 && token.endsWith("s") ? token.slice(0, -1) : token;
 }
 
+// Three-letter words a topic may add around the customer's own nouns ("ants
+// in THE kitchen"). Every other three-letter word names something — "rat",
+// "ant", "bug", "fly", "air wig" — and must be grounded like a long word.
+const SHORT_FILLER_WORDS = new Set(["the", "and", "for", "are", "was", "has", "had", "our", "you", "any", "all", "not", "but", "its", "his", "her", "out", "off", "too", "can", "get", "got", "one", "two", "lot", "new", "old", "few", "per", "via", "yet", "now", "how", "why", "who", "did", "may", "own", "see", "day", "way"]);
+
 /**
  * Deterministic grounding check (never trusts the model alone): every
- * alphabetic topic token longer than 3 characters must appear in the cited
- * evidence text, or the topic is rejected. A topic made only of short words
- * ("rat", "air wig") must match each one as a whole word instead — a short
- * substring is too loose ("rat" is inside "rather").
+ * alphabetic topic word longer than 3 characters must appear in the cited
+ * evidence text, and every meaningful three-letter word must appear there as
+ * a whole word (a short substring is too loose: "rat" is inside "rather"), or
+ * the topic is rejected. So an invented short pest never rides along with a
+ * grounded longer word ("rat noise in attic" against "noise in the attic").
  */
 function isTopicGrounded(topic, citedText) {
   const evidenceLower = String(citedText || "").toLowerCase();
   if (!evidenceLower) return false;
   const words = String(topic || "").toLowerCase().match(/[a-z]+/g) || [];
-  const tokens = words.filter((t) => t.length > 3);
-  if (tokens.length) return tokens.every((t) => evidenceLower.includes(normalizePluralToken(t)));
-  if (!words.some((w) => w.length === 3)) return false;
-  return words.every((w) => new RegExp(`\\b${w}s?\\b`).test(evidenceLower));
+  const long = words.filter((w) => w.length > 3);
+  const short = words.filter((w) => w.length === 3 && !SHORT_FILLER_WORDS.has(w));
+  if (!long.length && !short.length) return false;
+  return long.every((w) => evidenceLower.includes(normalizePluralToken(w)))
+    && short.every((w) => new RegExp(`\\b${w}s?\\b`).test(evidenceLower));
 }
 
 function hasEvidenceToClassify(ev) {
@@ -241,6 +282,7 @@ function validateTopicResult(json, ev) {
 
   const topic = String(json.topic || "").trim();
   if (!topic) return null;
+  if (topic.split(/\s+/).length > MAX_TOPIC_WORDS) return null;
   if (!isTopicGrounded(topic, resolveCitedText(ev, source, evidenceId))) return null;
 
   return {
@@ -254,27 +296,34 @@ function validateTopicResult(json, ev) {
 }
 
 /**
- * One bounded classification call over the collected evidence. Returns null
- * unless the model names a groundable service_concern/question at or above
- * MIN_CONFIDENCE. Never throws, and never calls the model when evidence is
- * entirely empty.
+ * One bounded classification call over the collected evidence, with its raw
+ * outcome kept so the replay can tell a provider failure from a "none"
+ * answer: { status: "no_evidence" | "failed" | "classified", reason, raw,
+ * topic }. `topic` is set only for a groundable service_concern/question at
+ * or above MIN_CONFIDENCE. Never calls the model when evidence is entirely
+ * empty. May throw — live callers use extractReviewTopic.
  */
-async function extractReviewTopic(evidence, { firstName = null } = {}) {
+async function classifyTopic(evidence, { firstName = null } = {}) {
   const ev = evidence || { completion: {}, texts: [] };
-  if (!hasEvidenceToClassify(ev)) return null;
+  if (!hasEvidenceToClassify(ev)) return { status: "no_evidence", reason: null, raw: null, topic: null };
+  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+    laneId: "review_topic",
+    system: TOPIC_SYSTEM_PROMPT,
+    text: buildTopicUserMessage(ev, firstName),
+    jsonSchema: TOPIC_SCHEMA,
+    maxTokens: 200,
+    timeoutMs: TOPIC_TIMEOUT_MS,
+    promptVersion: TOPIC_VERSION,
+  });
+  if (!result.ok) return { status: "failed", reason: result.reason || "error", raw: null, topic: null };
+  return { status: "classified", reason: null, raw: result.json || null, topic: validateTopicResult(result.json, ev) };
+}
 
+// Fail-soft classifyTopic for the live enrollment path: the stored topic, or
+// null. Never throws.
+async function extractReviewTopic(evidence, options = {}) {
   try {
-    const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
-      laneId: "review_topic",
-      system: TOPIC_SYSTEM_PROMPT,
-      text: buildTopicUserMessage(ev, firstName),
-      jsonSchema: TOPIC_SCHEMA,
-      maxTokens: 200,
-      timeoutMs: TOPIC_TIMEOUT_MS,
-      promptVersion: TOPIC_VERSION,
-    });
-    if (!result.ok) return null;
-    return validateTopicResult(result.json, ev);
+    return (await classifyTopic(evidence, options)).topic;
   } catch (err) {
     logger.warn(`[review-topic] extraction failed: ${err.message}`);
     return null;
@@ -314,7 +363,9 @@ async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = n
 
 module.exports = {
   TOPIC_VERSION,
+  readTopicEvidence,
   collectTopicEvidence,
+  classifyTopic,
   extractReviewTopic,
   resolveReviewTopicForEnrollment,
 };
