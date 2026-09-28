@@ -83,7 +83,8 @@ visits in the current ET calendar year: completed, customer-visible service
 records whose outcome is not inspection-only, customer-declined or incomplete
 (the Pest Pressure prior-visit rule, `pest-pressure/first-visit.js`), never a
 schedule row's status alone, and one physical stop counts once (grouped
-services share the booking's `visit_id`). `reservicesThisYear` counts how many
+services share the booking's `visit_id`, and a booking's sibling completion
+records — detailed form, recap rail — count as that one booking). `reservicesThisYear` counts how many
 of those stops were callbacks (the record's completion-time `is_callback`
 snapshot, the booking's flag only when the record has none, a
 `pest_re_service` / `lawn_re_service` key, or a "Re-Service" service name when

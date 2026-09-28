@@ -157,6 +157,7 @@ const record = (id, overrides = {}) => ({
   structured_notes: '{}',
   record_is_callback: false,
   service_key_snapshot: null,
+  scheduled_service_id: null,
   visit_id: null,
   scheduled_is_callback: null,
   ...overrides,
@@ -212,6 +213,24 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, LIVE_PAGE);
   expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 11, reservicesThisYear: 5 });
+});
+
+test('one booking with several completion records (detailed form + recap rail) is one visit', async () => {
+  const build = requireWithGateOn();
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    service_records: [
+      // two sibling records of one booking — one visit, not two
+      record('record-form', { service_date: `${YEAR}-02-10`, scheduled_service_id: 'booking-feb' }),
+      record('record-recap', { service_date: `${YEAR}-02-10`, scheduled_service_id: 'booking-feb' }),
+      // a callback booking whose siblings disagree on the flag — one visit,
+      // one re-service
+      record('record-cb-form', { service_date: `${YEAR}-03-10`, scheduled_service_id: 'booking-mar', record_is_callback: true }),
+      record('record-cb-recap', { service_date: `${YEAR}-03-10`, scheduled_service_id: 'booking-mar' }),
+    ],
+  });
+  const data = await build(BASE_SERVICE, 'token-plan-siblings', knex, LIVE_PAGE);
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 2, reservicesThisYear: 1 });
 });
 
 test('the frozen record callback flag wins over a booking reclassified after closeout, in both directions', async () => {

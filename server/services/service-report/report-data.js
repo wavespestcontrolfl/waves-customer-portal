@@ -5028,6 +5028,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
           .select(
             'service_records.id',
+            'service_records.scheduled_service_id',
             'service_records.service_line',
             'service_records.service_type',
             'service_records.structured_notes',
@@ -5044,9 +5045,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         : [];
       if (performedRows.length) {
         // One physical stop is one visit: grouped services completed at one
-        // stop each get a service record, but share the booking's visit_id
-        // (the service_visits parent). An ungrouped record is its own visit.
-        const visitIdentity = (row) => (row.visit_id ? `visit:${row.visit_id}` : `record:${row.id}`);
+        // stop share the booking's visit_id (the service_visits parent), and
+        // one booking can own several completion records (the detailed form,
+        // the pest-recap rail, a project close — completion-record-invariants
+        // documents the sibling model), so the booking id comes next. Only a
+        // legacy record with no booking link is its own visit.
+        const visitIdentity = (row) => {
+          if (row.visit_id) return `visit:${row.visit_id}`;
+          if (row.scheduled_service_id) return `booking:${row.scheduled_service_id}`;
+          return `record:${row.id}`;
+        };
         const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
         const reservicesThisYear = new Set(performedRows
           // A rodent-program visit (the included trapping follow-up, a trap
