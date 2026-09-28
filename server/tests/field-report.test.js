@@ -148,6 +148,11 @@ describe('field-report SQL — service-address-first geography (no live DB in th
     expect(FIELD_REPORT_QUERY).not.toMatch(/COALESCE\(ss\.service_address_/i);
   });
 
+  test('a snapshot-less visit linked to the catalog uses the catalog category', () => {
+    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(ss\.service_category_snapshot, svc\.category\) AS service_category_snapshot/);
+    expect(FIELD_REPORT_QUERY).toMatch(/LEFT JOIN services svc ON svc\.id = ss\.service_id/);
+  });
+
   test('a customer-declined closeout is treated like an incomplete one', () => {
     expect(FIELD_REPORT_QUERY).toMatch(/sr\.structured_notes->>'visitOutcome' = 'customer_declined'/);
     expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(sr\.structured_notes->>'visitOutcome', ''\) <> 'customer_declined'/);

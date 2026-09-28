@@ -335,7 +335,10 @@ function formatMarkdown(summary, { from, to } = {}) {
 // serviceLocationSelects in server/services/scheduling/day-stops.js.
 const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS service_month,
               ss.service_type,
-              ss.service_category_snapshot,
+              -- The snapshot first, then the linked catalog row's category
+              -- (graduated reservations stamp service_id but no snapshot);
+              -- the keyword fallback only sees visits with neither.
+              COALESCE(ss.service_category_snapshot, svc.category) AS service_category_snapshot,
               CASE WHEN ss.service_address_zip IS NOT NULL OR ss.service_address_city IS NOT NULL
                    THEN ss.service_address_zip ELSE c.zip END AS zip,
               CASE WHEN ss.service_address_zip IS NOT NULL OR ss.service_address_city IS NOT NULL
@@ -345,6 +348,7 @@ const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS serv
               c.last_name
          FROM scheduled_services ss
          JOIN customers c ON c.id = ss.customer_id
+         LEFT JOIN services svc ON svc.id = ss.service_id
         WHERE ss.status = 'completed'
           AND ss.scheduled_date >= $1::date
           AND ss.scheduled_date < $2::date
