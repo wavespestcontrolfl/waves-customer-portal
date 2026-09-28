@@ -43,7 +43,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
-const { mergeEvents } = require('./event-dedup');
+const { mergeEvents, pickSurvivor } = require('./event-dedup');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -844,8 +844,9 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
       // can't apply then (the unique (source_id, external_id) constraint
       // already claims the new key), so without this the legacy row would
       // sit forever under a key nothing else ever looks up — invisible to
-      // every dedup/eligibility pass. Retire it into the new-key row
-      // through the SAME merge mechanism cross-source dedup uses
+      // every dedup/eligibility pass. Reconcile the pair through the SAME
+      // merge mechanism cross-source dedup uses, keeping whichever row
+      // carries the stronger editorial decision
       // (merged_into set, admin_status rejected, calendars rewritten —
       // event-dedup.js's mergeEvents), so it disappears from the
       // digest/pipeline exactly like any other merged duplicate while its
@@ -855,18 +856,32 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
       // whereNull('merged_into') below, so a re-pull is a no-op here.
       if (!renamed) {
         const legacyRow = await db('events_raw')
-          .select('id')
           .where({ source_id: source.id, external_id: legacyExternalId })
           .whereNull('merged_into')
           .first();
         if (legacyRow) {
           const newKeyRow = await db('events_raw')
-            .select('id')
             .where({ source_id: source.id, external_id: row.external_id })
             .first();
           if (newKeyRow && newKeyRow.id !== legacyRow.id) {
             try {
-              await mergeEvents(newKeyRow.id, [legacyRow.id]);
+              // The stronger editorial decision survives (pickSurvivor's
+              // featured > approved > pending precedence, same as dedup).
+              // When that is the legacy row, it also takes over the new key
+              // so later pulls keep updating the survivor; the merged loser
+              // moves to a unique retired key first to free it.
+              const survivor = pickSurvivor([newKeyRow, legacyRow]);
+              if (survivor.id === newKeyRow.id) {
+                await mergeEvents(newKeyRow.id, [legacyRow.id]);
+              } else {
+                await mergeEvents(legacyRow.id, [newKeyRow.id]);
+                await db.transaction(async (trx) => {
+                  await trx('events_raw').where({ id: newKeyRow.id })
+                    .update({ external_id: `${row.external_id}#retired-${newKeyRow.id}`, updated_at: trx.fn.now() });
+                  await trx('events_raw').where({ id: legacyRow.id })
+                    .update({ external_id: row.external_id, updated_at: trx.fn.now() });
+                });
+              }
             } catch (err) {
               // A concurrent pull/merge already resolved this pair — non-fatal,
               // same as autoMergeDuplicates' own per-cluster handling; the

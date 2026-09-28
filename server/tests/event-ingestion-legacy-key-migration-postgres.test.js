@@ -169,6 +169,38 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(rowsAfterSecond.find((r) => r.id === legacyId).merged_into).toBe(newKeyId);
   });
 
+  test('when the legacy row carries the stronger editorial decision, it survives and takes over the new key', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Approved Legacy Row Event';
+    const url = 'https://test.invalid/approved-legacy-row-event/';
+    const startIso = daysFromNowIso(33);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    const [newKeyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: newKey, title, start_at: start, event_url: url, admin_status: 'pending',
+    }).returning(['id']);
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyKey, title, start_at: start, event_url: url, admin_status: 'approved',
+    }).returning(['id']);
+    const newKeyId = newKeyRow.id || newKeyRow;
+    const legacyId = legacyRow.id || legacyRow;
+
+    await upsertExtractedEvents(source, [
+      { title, startAt: startIso, eventUrl: url, description: 'updated on re-pull' },
+    ]);
+
+    const rows = await db('events_raw').where({ source_id: sourceId, title });
+    const survivor = rows.find((r) => r.id === legacyId);
+    const retired = rows.find((r) => r.id === newKeyId);
+    expect(survivor.admin_status).toBe('approved');
+    expect(survivor.merged_into).toBeNull();
+    expect(survivor.external_id).toBe(newKey);
+    expect(survivor.description).toBe('updated on re-pull');
+    expect(retired.merged_into).toBe(legacyId);
+    expect(retired.external_id).not.toBe(newKey);
+  });
+
   test('with no legacy row present, a fresh pull inserts once under the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Fresh Pull Event';
