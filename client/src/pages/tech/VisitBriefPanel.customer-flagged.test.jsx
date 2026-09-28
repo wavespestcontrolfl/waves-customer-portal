@@ -62,7 +62,9 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     expect(screen.getByText('Customer flagged')).toBeInTheDocument();
     // 2026-09-30T23:42:00.000Z is 7:42 PM ET.
     expect(screen.getByText(/sent Sep 30, 7:42 PM/)).toBeInTheDocument();
-    expect(screen.getByText('"Brown spots spreading by the driveway"', { exact: false })).toBeInTheDocument();
+    // The panel wraps the note in curly quotes (same convention as
+    // TechRecapCapture.jsx's caption display), not straight ones.
+    expect(screen.getByText('“Brown spots spreading by the driveway”')).toBeInTheDocument();
     expect(screen.getByText('Back yard · Lawn')).toBeInTheDocument();
   });
 
