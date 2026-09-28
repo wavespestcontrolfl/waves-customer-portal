@@ -100,7 +100,7 @@ describe('admin billing-recovery routes', () => {
     // Refusals now surface from inside the mint transaction.
     installTransaction();
     // Current schema: the billing-mode columns are probed before they are read.
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
   });
 
   test('technician cannot bill a visit (write requires admin)', async () => {
@@ -387,7 +387,7 @@ describe('admin billing-recovery routes', () => {
       { scheduled_service_id: 'ss-1', service_record_id: 'sr-1', service_type: 'Quarterly Pest Control Service', estimated_price: '129.00', prepaid_amount: '0', completed_at: '2026-06-18', customer_id: 'cust-1', first_name: 'Tyler', last_name: 'Levin', monthly_rate: '0', waveguard_tier: null },
       { scheduled_service_id: 'ss-5', service_record_id: 'sr-5', service_type: 'Pest Control', estimated_price: null, prepaid_amount: null, completed_at: '2026-06-12', customer_id: 'cust-5', first_name: 'Taras', last_name: 'Malyshev', monthly_rate: '55.30', waveguard_tier: null, billing_mode: 'per_application', per_application_fee: '55.30' },
     ];
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ rows });
       throw new Error(`unexpected table ${JSON.stringify(arg)}`);
@@ -501,7 +501,7 @@ describe('billVisit refuseDepositCredit', () => {
 describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
   });
 
   test('an autopay lookup error refuses instead of reading as "not on autopay"', async () => {
@@ -522,7 +522,7 @@ describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => 
 
   test('a pre-migration schema skips the billing-mode read instead of erroring inside the transaction', async () => {
     const { assessVisitBillable } = require('../services/billing-recovery-bill');
-    db.schema = { hasColumn: jest.fn(async (table, col) => !(table === 'customers' && col === 'billing_mode')) };
+    db.schema = { hasColumn: jest.fn(async (table, col) => !(table === 'customers' && col === 'billing_mode')), hasTable: jest.fn().mockResolvedValue(false) };
     const customersRead = jest.fn();
     db.mockImplementation((arg) => {
       if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
@@ -548,7 +548,7 @@ describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => 
 describe('billVisit — canonical payer, visit status, card hold (GH Codex r2)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
     customerOnAutopay.mockResolvedValue(false);
   });
 
@@ -591,7 +591,7 @@ describe('billVisit — canonical payer, visit status, card hold (GH Codex r2)',
 describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
     customerOnAutopay.mockResolvedValue(false);
   });
 
@@ -646,7 +646,7 @@ describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => 
 describe('billVisit pins self-pay through the mint (GH Codex r3)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true), hasTable: jest.fn().mockResolvedValue(false) };
     customerOnAutopay.mockResolvedValue(false);
   });
 

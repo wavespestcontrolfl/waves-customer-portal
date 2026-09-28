@@ -56,6 +56,12 @@ async function loadBillableVisit(scheduledServiceId, serviceRecordId, database) 
   return query
     .select(
       'ss.id as scheduled_service_id',
+      // annualPrepayCoversVisit's termite-grace check reads the visit's own
+      // id and its plan links (recurring parent, source estimate, property).
+      'ss.id',
+      'ss.recurring_parent_id',
+      'ss.source_estimate_id',
+      'ss.property_id',
       'sr.id as service_record_id',
       'ss.service_type',
       'ss.estimated_price',
