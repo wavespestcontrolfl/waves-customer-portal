@@ -419,3 +419,65 @@ test.each([[false, 200], [true, 200], [false, 409], [true, 409]])('failure stays
   expect(screen.getByText('The destination changed. Request a fresh preview.')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
+
+describe('auto-growing composer', () => {
+  // Owner-reported bug: the composer was a single-line <input>, so dictated
+  // text longer than the box couldn't be seen or edited past the cut-off.
+  it('renders the composer as a growable textarea, not a single-line input', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    expect(box.tagName).toBe('TEXTAREA');
+  });
+
+  it('Enter (no Shift) submits the prompt', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    fireEvent.change(box, { target: { value: 'Read this customer' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    await waitFor(() => expect(queryResolvers).toHaveLength(1));
+  });
+
+  it('Shift+Enter does not submit, leaving the multi-line draft in place', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    fireEvent.change(box, { target: { value: 'Line one' } });
+    fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
+    expect(queryResolvers).toHaveLength(0);
+    expect(box).toHaveValue('Line one');
+    // The textarea's own default behavior inserts the newline; simulate
+    // that follow-on onChange the same way a real keystroke would.
+    fireEvent.change(box, { target: { value: 'Line one\nLine two' } });
+    expect(box).toHaveValue('Line one\nLine two');
+    expect(queryResolvers).toHaveLength(0);
+  });
+
+  it('Enter during IME composition does not submit', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    fireEvent.change(box, { target: { value: '日本語' } });
+    // keyCode 229 is the IME-composition signal handleKeyDown checks
+    // (nativeEvent.isComposing isn't reliably settable through jsdom's
+    // fireEvent, but every browser also sends keyCode 229 for this key).
+    fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+    expect(queryResolvers).toHaveLength(0);
+    expect(box).toHaveValue('日本語');
+  });
+
+  it('Escape still closes the palette from the composer', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    fireEvent.keyDown(box, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByPlaceholderText('Ask anything...')).not.toBeInTheDocument());
+  });
+
+  it('preserves long, multi-line text in the composer value', async () => {
+    await mount();
+    const box = screen.getByPlaceholderText('Ask anything...');
+    const long = 'This is a long dictated sentence that would have been cut off by the ' +
+      'old single-line input box before this fix landed, and it keeps going well past ' +
+      'the width of the box.\nA second line follows after a manual newline.\n' +
+      'And a third line, so the box would have to grow across several lines to show it all.';
+    fireEvent.change(box, { target: { value: long } });
+    expect(box).toHaveValue(long);
+  });
+});
