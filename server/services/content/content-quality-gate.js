@@ -1166,13 +1166,12 @@ function normalizeFrontmatterPath(value) {
   if (!candidate.endsWith('/')) candidate += '/';
   return candidate;
 }
-function checkNextStepsRelatedPostsClosedSet(draft, brief) {
-  const fm = draft.frontmatter || {};
-  const nextSteps = Array.isArray(fm.next_steps) ? fm.next_steps : [];
-  const relatedPosts = Array.isArray(fm.related_posts) ? fm.related_posts : [];
-  if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
-  if (nextSteps.length > 4) return { ok: false, reason: 'next_steps_exceeds_max_4' };
-
+// Verified-route predicate shared by both fields below: a value counts only
+// when it is one of the brief's own verified related-post paths, one of its
+// internal_links_to_add, or a route the static allowlist/city-service
+// pattern already proves (isKnownGoodInternalRoute) — the same closed-set
+// posture internalRouteFinding applies to body links.
+function buildFrontmatterRouteVerifier(brief) {
   const briefRelated = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
   const briefRelatedPaths = new Set(
     briefRelated.map((r) => normalizeFrontmatterPath(typeof r === 'string' ? r : r?.path)).filter(Boolean),
@@ -1182,21 +1181,42 @@ function checkNextStepsRelatedPostsClosedSet(draft, brief) {
       .map(normalizeFrontmatterPath)
       .filter(Boolean),
   );
-  const isVerified = (value) => {
+  return (value) => {
     const norm = normalizeFrontmatterPath(value);
     return Boolean(norm) && (briefRelatedPaths.has(norm) || briefLinks.has(norm) || isKnownGoodInternalRoute(value));
   };
+}
 
+function firstUnverifiedRelatedPost(relatedPosts, isVerified) {
   for (const value of relatedPosts) {
     if (typeof value !== 'string' || !value.trim()) return { ok: false, reason: 'related_posts_entry_not_a_string' };
     if (!isVerified(value)) return { ok: false, reason: `related_posts_entry_not_verified:${value}` };
   }
+  return null;
+}
+
+function firstUnverifiedNextStep(nextSteps, isVerified) {
   for (const step of nextSteps) {
     if (!step || typeof step.label !== 'string' || !step.label.trim() || typeof step.href !== 'string' || !step.href.trim()) {
       return { ok: false, reason: 'next_steps_entry_missing_label_or_href' };
     }
     if (!isVerified(step.href)) return { ok: false, reason: `next_steps_entry_not_verified:${step.href}` };
   }
+  return null;
+}
+
+function checkNextStepsRelatedPostsClosedSet(draft, brief) {
+  const fm = draft.frontmatter || {};
+  const nextSteps = Array.isArray(fm.next_steps) ? fm.next_steps : [];
+  const relatedPosts = Array.isArray(fm.related_posts) ? fm.related_posts : [];
+  if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
+  if (nextSteps.length > 4) return { ok: false, reason: 'next_steps_exceeds_max_4' };
+
+  const isVerified = buildFrontmatterRouteVerifier(brief);
+  const badRelatedPost = firstUnverifiedRelatedPost(relatedPosts, isVerified);
+  if (badRelatedPost) return badRelatedPost;
+  const badNextStep = firstUnverifiedNextStep(nextSteps, isVerified);
+  if (badNextStep) return badNextStep;
   return { ok: true };
 }
 

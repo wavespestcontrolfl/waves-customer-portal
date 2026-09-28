@@ -102,7 +102,9 @@ function findPhotoForSlot(topic, slot) {
   for (const entry of PHOTO_LIBRARY) {
     if (entry.slot !== slot) continue;
     if (entry.aliases.some((alias) => norm.includes(alias))) {
-      const { aliases, slot: _slot, ...photo } = entry;
+      const photo = { ...entry };
+      delete photo.aliases;
+      delete photo.slot;
       return photo;
     }
   }
