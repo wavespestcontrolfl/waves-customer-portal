@@ -499,24 +499,31 @@ const EXPLICIT_SERVICE_INTENTS = Object.freeze([
   { patterns: [RODENT_WORDS_RE, TRAPPING_RE], keys: ['rodent_trapping', 'rodent_exclusion'] },
   { patterns: [RODENT_WORDS_RE, EXCLUSION_RE], keys: ['rodent_exclusion_only', 'rodent_exclusion'] },
 ]);
+// Pricing-resolver results that already name one-time work rather than the
+// family's recurring program are explicit too (pre-push audit P1): "a
+// one-time mosquito treatment for a party" beside a scheduled monthly visit
+// is a NEW booking, priced with the one-time treatment's own duration.
+const EXPLICIT_PRICING_KEYS = new Set(['one_time_lawn', 'one_time_mosquito']);
 
 async function requestedServiceType(inboundMessage) {
   return (await resolveRequestedService(inboundMessage))?.name || null;
 }
 // The service a customer is asking FOR in an inbound message: the first
 // bookable catalog row among its candidate keys, as { name, explicit } —
-// `explicit` for specific work (EXPLICIT_SERVICE_INTENTS) as opposed to a
-// family-level request ("pest control", "lawn service") resolved through
-// the pricing resolver (customer-pricing-ai serviceKeyFromText). Null when
-// the message names no service, no candidate is bookable, or on any
-// resolver error (fail-safe: the caller falls back to the customer's own
-// visit).
+// `explicit` for specific work (EXPLICIT_SERVICE_INTENTS, or a one-time
+// pricing family) as opposed to a family-level request ("pest control",
+// "lawn service") resolved through the pricing resolver (customer-pricing-ai
+// serviceKeyFromText). Null when the message names no service, no candidate
+// is bookable, or on any resolver error (fail-safe: the caller falls back
+// to the customer's own visit).
 async function resolveRequestedService(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
   try {
     const intent = EXPLICIT_SERVICE_INTENTS.find(({ patterns }) => patterns.every((re) => re.test(text)));
-    const candidates = intent ? intent.keys : PRICING_KEY_TO_CATALOG_KEYS[require('./customer-pricing-ai').serviceKeyFromText(text)];
+    const pricingKey = intent ? null : require('./customer-pricing-ai').serviceKeyFromText(text);
+    const candidates = intent ? intent.keys : PRICING_KEY_TO_CATALOG_KEYS[pricingKey];
+    const explicit = Boolean(intent) || EXPLICIT_PRICING_KEYS.has(pricingKey);
     const { resolveServiceType } = require('./service-library');
     for (const catalogKey of candidates || []) {
       const row = await resolveServiceType(catalogKey);
@@ -524,7 +531,7 @@ async function resolveRequestedService(inboundMessage) {
       // (booking_enabled=false, e.g. bi-monthly lawn); a historical visit
       // keeps its own identity through the scheduled-visit match.
       if (row?.name && row.is_archived !== true && row.is_active !== false && row.booking_enabled !== false) {
-        return { name: String(row.name), explicit: Boolean(intent) };
+        return { name: String(row.name), explicit };
       }
     }
     return null;

@@ -2124,8 +2124,19 @@ describe('#5194 round 5', () => {
     if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
     jest.dontMock('../services/service-library'); jest.resetModules();
   });
-  const CATALOG = { rodent_trapping: 'Rodent Trapping', rodent_inspection: 'Rodent Inspection', pest_general_quarterly: 'General Pest Control (Quarterly)' };
+  const CATALOG = { rodent_trapping: 'Rodent Trapping', rodent_inspection: 'Rodent Inspection', pest_general_quarterly: 'General Pest Control (Quarterly)', mosquito_one_time: 'One-Time Mosquito Treatment', lawn_care_one_time: 'One-Time Lawn Care Service' };
   const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('one-time lawn and mosquito work beside a scheduled recurring visit is a new booking (real keyword resolver)', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const monthly = { upcomingServices: [{ type: 'Mosquito Control (Monthly)', date: '2026-10-01' }, { type: 'Monthly Lawn Care Service', date: '2026-10-03' }] };
+    await expect(serviceIdentityFor('Can you add a one-time mosquito treatment for a party?', monthly)).resolves.toMatchObject({ serviceType: 'One-Time Mosquito Treatment', reason: 'new_booking' });
+    await expect(serviceIdentityFor('Can I get a one-time fungicide treatment?', monthly)).resolves.toMatchObject({ serviceType: 'One-Time Lawn Care Service', reason: 'new_booking' });
+    // moving the one-time visit itself still finds it
+    const both = { upcomingServices: [...monthly.upcomingServices, { type: 'One-Time Mosquito Treatment', date: '2026-10-05' }] };
+    await expect(serviceIdentityFor('Can we move the one-time mosquito treatment?', both)).resolves.toMatchObject({ serviceType: 'One-Time Mosquito Treatment', reason: 'named_scheduled_visit' });
+  });
 
   test('a named service picks the visit booked as exactly that service, not the first visit of its family', async () => {
     mockCatalog();
