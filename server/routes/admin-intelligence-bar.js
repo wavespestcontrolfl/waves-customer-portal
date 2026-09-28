@@ -2745,8 +2745,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     }
     // Gap reports: records only when this reply says the bar could not do
     // something. Awaited — flush() never rejects and writes nothing on an
-    // ordinary request; the task context supplies customer names to redact.
-    await gapCollector?.flush({ reply: finalResponse, taskContext });
+    // ordinary request.
+    await gapCollector?.flush({ reply: finalResponse });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

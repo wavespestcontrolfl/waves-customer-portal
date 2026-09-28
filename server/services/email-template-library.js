@@ -785,8 +785,14 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // is still a commercial email — the visible unsubscribe link must survive
   // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream
   // sends, so plain service emails are unaffected.
+  // The label stays scope-neutral: asmGroupIdFor() sends EVERY marketing_*
+  // stream (newsletter, referral, nurture) through the one newsletter ASM
+  // group, so this link unsubscribes from all of them at SendGrid — naming
+  // one stream ("referral emails", "these follow-ups") would understate it.
+  // Only an admin preview/test passes a link for a service-stream template.
+  const unsubScope = isMarketingSend(template, null) ? 'Waves marketing emails' : 'these emails';
   const unsubFooterHtml = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from referral emails.`
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${unsubScope}.`
     : null;
   const footerNote = mode === 'marketing'
     ? null
