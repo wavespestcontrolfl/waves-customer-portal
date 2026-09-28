@@ -5,7 +5,7 @@
  * login, and every technician login, does not.
  */
 
-const { ibFullAccess, fullAccessAllowlist, assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const { ibFullAccess, requireFullAccess, fullAccessAllowlist, assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 
 describe('ibFullAccess', () => {
   const ORIGINAL_ENV = process.env.IB_FULL_ACCESS_EMAILS;
@@ -96,6 +96,48 @@ describe('ibFullAccess', () => {
       expect(ibFullAccess(undefined)).toBe(false);
       expect(ibFullAccess({})).toBe(false);
     });
+  });
+});
+
+describe('requireFullAccess middleware', () => {
+  const ORIGINAL_ENV = process.env.IB_FULL_ACCESS_EMAILS;
+
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.IB_FULL_ACCESS_EMAILS;
+    else process.env.IB_FULL_ACCESS_EMAILS = ORIGINAL_ENV;
+  });
+
+  beforeEach(() => {
+    delete process.env.IB_FULL_ACCESS_EMAILS;
+  });
+
+  test('calls next() for the owner account, with no response written', () => {
+    const req = { techRole: 'admin', technician: { email: 'contact@wavespestcontrol.com' } };
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    requireFullAccess(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json).not.toHaveBeenCalled();
+  });
+
+  test('403s a non-owner admin with the owner-only message and never calls next()', () => {
+    const req = { techRole: 'admin', technician: { email: 'virginia@wavespestcontrol.com' } };
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    requireFullAccess(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ error: 'This action is limited to the owner account.' });
+  });
+
+  test('403s a technician login, even with the owner email', () => {
+    const req = { techRole: 'technician', technician: { email: 'contact@wavespestcontrol.com' } };
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    requireFullAccess(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 });
 

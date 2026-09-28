@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const logger = require('../services/logger');
 
@@ -66,7 +67,7 @@ router.post('/generate', requireAdmin, async (req, res) => {
 });
 
 // POST /:id/approve — approve action + write seo_decisions
-router.post('/:id/approve', requireAdmin, async (req, res) => {
+router.post('/:id/approve', requireAdmin, requireFullAccess, async (req, res) => {
   try {
     const result = await db.transaction(async (trx) => {
       const action = await trx('seo_actions').where('id', req.params.id).first();

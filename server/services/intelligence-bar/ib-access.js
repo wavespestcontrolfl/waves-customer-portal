@@ -49,6 +49,20 @@ function ibFullAccess(req) {
   return fullAccessAllowlist().includes(email);
 }
 
+// Middleware form of ibFullAccess() for the SAME red-tier actions when they
+// are reachable from an ordinary admin page route rather than the bar (owner
+// ruling 2026-09-28: the restriction is contact@-only EVERYWHERE those
+// actions live, not just inside the Intelligence Bar). Apply it per-route to
+// each red-tier action handler — never router-wide, since every other route
+// on these routers stays open to any admin. Reads stay open; only the write
+// itself is gated.
+function requireFullAccess(req, res, next) {
+  if (!ibFullAccess(req)) {
+    return res.status(403).json({ error: 'This action is limited to the owner account.' });
+  }
+  next();
+}
+
 function canonicalOrNull(email) {
   if (typeof email !== 'string') return null;
   const trimmed = email.trim().toLowerCase();
@@ -95,6 +109,7 @@ function assertMayChangeFullAccessEmail(req, { fromEmail = null, toEmail = null 
 
 module.exports = {
   ibFullAccess,
+  requireFullAccess,
   fullAccessAllowlist,
   isFullAccessEmail,
   assertMayChangeFullAccessEmail,
