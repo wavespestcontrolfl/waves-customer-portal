@@ -205,8 +205,9 @@ gate**: unlike an OpenAI candidate, they are plain Anthropic, just a
 different request shape (`low` effort; Opus 5.5 sends no `thinking` field
 with `max_tokens` raised by the same floor `anthropic-wire.js` uses
 elsewhere, while Sonnet 5.5 sends its catalog `voice.thinking` floor,
-`thinking: { type: 'between_tools' }` — no up-front thinking — at the plain
-cap). A candidate in
+`thinking: { type: 'between_tools' }` — no up-front thinking — with the
+same raised `max_tokens`, since its progress-update thinking blocks between
+tool calls spend from it). A candidate in
 this Set never sets `GATE_VOICE_RELAY_OPENAI`.
 
 ### Model-stamp verification (candidate conditions only)

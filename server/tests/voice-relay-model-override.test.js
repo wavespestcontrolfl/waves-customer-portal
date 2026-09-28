@@ -468,7 +468,7 @@ describe('Sonnet 5.5 sandbox candidate (between_tools floor)', () => {
     expect(resolveSessionModel({ sandbox: false, evalHarness: true })).toEqual({ model: SONNET_55, fallbackReason: null });
   });
 
-  test('a sandbox request sends thinking between_tools at low effort with the plain cap', async () => {
+  test('a sandbox request sends thinking between_tools at low effort with the thinking floor cap', async () => {
     process.env.VOICE_RELAY_SANDBOX_MODEL = SONNET_55;
     mockScriptedMessages.push({ content: [{ type: 'text', text: 'Sandbox reply.' }], stop_reason: 'end_turn' });
     const convo = new RelayConversation({ callSid: 'CA-sonnet55-sandbox', from: '+19415551234', send: jest.fn(), sandbox: true });
@@ -479,7 +479,7 @@ describe('Sonnet 5.5 sandbox candidate (between_tools floor)', () => {
       expect(p.model).toBe(SONNET_55);
       expect(p.thinking).toEqual({ type: 'between_tools' });
       expect(p.output_config).toEqual({ effort: 'low' });
-      expect(p.max_tokens).toBe(1024);
+      expect(p.max_tokens).toBe(THINKING_FLOOR_TOKENS); // progress-update thinking blocks spend from it
       expect(p).not.toHaveProperty('tool_choice');
     }
   });
