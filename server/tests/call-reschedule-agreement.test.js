@@ -124,6 +124,8 @@ describe('groundRescheduleAgreement', () => {
     expect(committed('We will see you Thursday at two AM')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Great, we will see you Thursday at two').ok).toBe(true);
     expect(committed('Great, we will see you Thursday at two PM').ok).toBe(true);
+    // Codex #5092 r16: "minutes before" is a minute count too.
+    expect(committed('We will see you Thursday at five minutes before two')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
   });
 
   test('a quote under three words must be the whole turn, never a fragment of a longer one', () => {
@@ -218,6 +220,9 @@ describe('groundRescheduleAgreement', () => {
   // (reschedule-date-evidence.js), abbreviations included.
   test('day words are one date the shared grammar reads, bounded by what they leave unstated', () => {
     const on = (day, slot = THURSDAY_2PM) => agreedAt(slot, `We will see you ${day} at two in the afternoon.`, { day, hour: 'two', period: 'in the afternoon' });
+    // Codex #5092 r16: "the day after tomorrow".
+    expect(on('the day after tomorrow', '2026-09-25T14:00:00-04:00').ok).toBe(true);
+    expect(on('the day after tomorrow').ok).toBe(false);
     for (const day of ['Thurs.', 'Thu', 'this Thursday', 'tomorrow', 'Sept. 24th', 'September 24', 'the 24th', '9/24', 'Thurs., Sept. 24']) {
       expect([day, on(day).ok]).toEqual([day, true]);
     }
@@ -280,6 +285,19 @@ describe('groundRescheduleAgreement', () => {
     // Codex #5092 r8: a negated moved-date sentence does not name the visit to move.
     expect(moved('my September 24th visit', 'September 24th', { callerOpening: 'Do not move my September 24th visit.' }))
       .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // Codex #5092 r16: a same-day commitment must name no other day.
+    const SAME_DAY_OTHER = 'We will see you Friday at two in the afternoon.';
+    const sameDayCommit = (commit) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'September 24th', agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', commit),
+        quote('/scheduling/confirmed_start_at', 'caller', 'Two in the afternoon works for me'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Two in the afternoon works for me'),
+        quote('/scheduling/moved_appointment_date', 'caller', 'my September 24th visit'),
+      ],
+    }), `Caller: Can you move my September 24th visit? Two in the afternoon works for me.\nAgent: ${commit}`);
+    expect(sameDayCommit(SAME_DAY_OTHER)).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(sameDayCommit('Okay, we will mark it for two in the afternoon.').ok).toBe(true);
     // With no day words, the slot must keep the moved appointment's date.
     expect(moved('my September 25th visit', 'September 25th', { movedDate: '2026-09-25' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     // Without the moved appointment, slot words naming no day ground nothing.

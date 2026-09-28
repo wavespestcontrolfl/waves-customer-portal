@@ -209,6 +209,7 @@ const TODAY_WORDS = /^(?:tonight|this (?:morning|afternoon|evening))$/;
 // "This Thursday" / "this coming Thursday" is the nearest one. "Next
 // Thursday" is left to the grammar, which does not read it: it can mean
 // either of two dates, so it grounds none.
+const DAY_AFTER_TOMORROW = /^(?:the )?day after tomorrow$/;
 const NEAREST_LEAD = /^\s*(?:this coming|this|coming)\s+/i;
 
 function isoDate(y, m, d) {
@@ -252,6 +253,7 @@ function nearestDate(said, started) {
 // state must be the date's, and the date must be the one they name — the
 // next that fits (nearestDate), never a later one.
 function namesDate(words, date, started) {
+  if (DAY_AFTER_TOMORROW.test(normalize(words))) return etDateString(addETDays(started, 2)) === date;
   const said = statedDateComponents(TODAY_WORDS.test(normalize(words)) ? 'today' : String(words).replace(NEAREST_LEAD, ''), started);
   if (!said) return false;
   const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
@@ -296,7 +298,7 @@ const MINUTE_WORDS = new Set([
   'oh', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen',
   'twenty', 'thirty', 'forty', 'fifty', 'quarter', 'half',
 ]);
-const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of']);
+const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of', 'before']);
 
 // Does the hour in this quote carry minutes, on either side? Appointment
 // starts are on the hour, so such a quote never states the slot.
@@ -347,12 +349,27 @@ function statesSlotWords(quote, words) {
 
 // Does this agent commitment quote commit to the recorded slot? It must say
 // the recorded hour, on the hour (periodIsTheHours's minute check), any day
-// words the slot records, and no am/pm or part of the day but the slot's.
+// words the slot records (none at all for a same-day change), and no am/pm
+// or part of the day but the slot's.
 function commitsToSlot(quote, words, hour24) {
   const withoutPeriod = { ...words, period: null };
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    && (typeof words.day !== 'string' || holds(quote, words.day))
+    && (typeof words.day === 'string' ? holds(quote, words.day) : !namesAnyDay(quote))
     && halvesSaid(quote).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+}
+
+// Does this quote name a day at all (a weekday, a month, today/tomorrow/
+// tonight, or an ordinal)? A same-day change records no day words, so its
+// commitment must name none ("see you Friday at two PM" is another day).
+const DAY_WORDS = new Set([
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'sun', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat',
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+  'today', 'tonight', 'tomorrow',
+]);
+function namesAnyDay(quote) {
+  return normalize(quote).split(' ').some((t) => DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t));
 }
 
 // The halves of the day this quote's am/pm and part-of-day words state
