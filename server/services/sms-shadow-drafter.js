@@ -377,11 +377,12 @@ function indexOpenTimesDays(openTimesDays) {
   return { validPairs, windowsByText };
 }
 
-function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
+function validateOfferedTimes({ offeredTimes, openTimesDays, reply, factsBlock = '' }) {
   const violations = [];
   const list = Array.isArray(offeredTimes) ? offeredTimes : [];
   const replyText = reply || '';
   const { validPairs, windowsByText } = indexOpenTimesDays(openTimesDays);
+  const factsOutsideOpenTimes = stripOpenTimesSection(factsBlock);
 
   // window text -> how many VALID declared entries carry it
   const declaredCount = new Map();
@@ -410,15 +411,29 @@ function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
   // then never be persisted or rechecked at send time. Counting occurrences
   // needs no prose parsing: the window text is the one thing FACT
   // DISCIPLINE already makes the model copy verbatim.
+  //
+  // Pre-push audit P1 (round 2): the same window text can be grounded
+  // ELSEWHERE in the facts — an existing appointment's arrival window under
+  // UPCOMING SERVICES renders through the same formatter, so a reply that
+  // CONFIRMS "Tuesday 9:00 AM - 11:00 AM" (booked, not open) while Wednesday
+  // 9:00 AM - 11:00 AM happens to be open is not offering anything. Each
+  // occurrence of the window text outside the OPEN TIMES section is one
+  // quote the reply may make without declaring it; every quote beyond that
+  // is a new offer and must be declared. Still no prose parsing: both counts
+  // are exact-text.
   for (const [window, dates] of windowsByText) {
     const quoted = countQuotedWindow(replyText, window);
     if (!quoted) continue;
     const declared = declaredCount.get(window) || 0;
-    if (!declared) {
+    const groundedElsewhere = countQuotedWindow(factsOutsideOpenTimes, window);
+    const undeclared = quoted - declared;
+    if (undeclared < 0) {
+      violations.push(`the reply quotes "${window}" ${quoted} time(s) but offered_times declares it ${declared} time(s) — write the time out once per offered day, with one {date, window} entry each`);
+    } else if (undeclared > groundedElsewhere && !declared && !groundedElsewhere) {
       const dateHint = dates.size === 1 ? ` (offered on ${[...dates][0]})` : '';
       violations.push(`the reply quotes "${window}" from OPEN TIMES${dateHint} but it is not listed in offered_times`);
-    } else if (declared !== quoted) {
-      violations.push(`the reply quotes "${window}" ${quoted} time(s) but offered_times declares it ${declared} time(s) — write the time out once per offered day, with one {date, window} entry each`);
+    } else if (undeclared > groundedElsewhere) {
+      violations.push(`the reply quotes "${window}" ${quoted} time(s) but only ${declared} offered_times entr${declared === 1 ? 'y' : 'ies'} plus ${groundedElsewhere} already-scheduled mention${groundedElsewhere === 1 ? '' : 's'} account for it — write the time out once per offered day, with one {date, window} entry each`);
     }
   }
 
@@ -433,17 +448,33 @@ function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
 // empty list and the exam would grade drift toward deferral. Parses our own
 // rendered "- <date>: <w1>, <w2>" lines only — never model prose.
 const OPEN_TIMES_SECTION_HEADER = 'OPEN TIMES (real, bookable slots, ET';
+// [start, endExclusive) line range of the OPEN TIMES section, or null.
+function openTimesSectionRange(lines) {
+  const start = lines.findIndex((l) => l.startsWith(OPEN_TIMES_SECTION_HEADER));
+  if (start === -1) return null;
+  let end = start + 1;
+  while (end < lines.length && lines[end].startsWith('- ') && lines[end].includes(': ')) end++;
+  return [start, end];
+}
+// The facts block with its OPEN TIMES section removed — what a reply may
+// quote a window from WITHOUT it being a new offer (an existing visit's
+// arrival window, a history line).
+function stripOpenTimesSection(factsBlock) {
+  if (!factsBlock) return '';
+  const lines = String(factsBlock).split('\n');
+  const range = openTimesSectionRange(lines);
+  if (!range) return String(factsBlock);
+  return [...lines.slice(0, range[0]), ...lines.slice(range[1])].join('\n');
+}
 function parseOpenTimesDaysFromFactsBlock(factsBlock) {
   if (!factsBlock) return [];
   const lines = String(factsBlock).split('\n');
-  const start = lines.findIndex((l) => l.startsWith(OPEN_TIMES_SECTION_HEADER));
-  if (start === -1) return [];
+  const range = openTimesSectionRange(lines);
+  if (!range) return [];
   const days = [];
-  for (let i = start + 1; i < lines.length; i++) {
+  for (let i = range[0] + 1; i < range[1]; i++) {
     const line = lines[i];
-    if (!line.startsWith('- ')) break;
     const idx = line.indexOf(': ');
-    if (idx === -1) break;
     const date = line.slice(2, idx);
     const windows = line.slice(idx + 2).split(', ').map((w) => w.trim()).filter(Boolean);
     if (date && windows.length) days.push({ date, windows });
@@ -1329,7 +1360,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // any violation is a verifier-grade failure and feeds the SAME
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
-    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply });
+    const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
 
     let verdict;
     if (!timesCheck.ok) {
@@ -1866,6 +1897,7 @@ module.exports = {
   validateOfferedTimes,
   countQuotedWindow,
   parseOpenTimesDaysFromFactsBlock,
+  stripOpenTimesSection,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
 };

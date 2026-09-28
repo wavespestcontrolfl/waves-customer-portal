@@ -1159,7 +1159,7 @@ describe('validateOfferedTimes — the reverse check binds PER OCCURRENCE (pre-p
     });
     expect(result.ok).toBe(false);
     expect(result.violations).toEqual([
-      'the reply quotes "9:00 AM - 11:00 AM" 2 time(s) but offered_times declares it 1 time(s) — write the time out once per offered day, with one {date, window} entry each',
+      'the reply quotes "9:00 AM - 11:00 AM" 2 time(s) but only 1 offered_times entry plus 0 already-scheduled mentions account for it — write the time out once per offered day, with one {date, window} entry each',
     ]);
   });
 
@@ -1215,5 +1215,67 @@ describe('parseOpenTimesDaysFromFactsBlock — recovers the FROZEN OPEN TIMES a 
     expect(parseOpenTimesDaysFromFactsBlock(block)).toEqual([
       { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM'] },
     ]);
+  });
+});
+
+describe('validateOfferedTimes — a window grounded ELSEWHERE in the facts (an existing visit\'s arrival window) is not an undeclared offer (pre-push audit P1, round 2)', () => {
+  const { validateOfferedTimes, stripOpenTimesSection, buildFactsBlock } = require('../services/sms-shadow-drafter');
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+  // Tuesday 9-11 is BOOKED (UPCOMING SERVICES); Wednesday 9-11 happens to be OPEN.
+  const context = {
+    summary: 'Dana — Quarterly Pest, Venice',
+    upcomingServices: [{ type: 'Quarterly Pest', date: '2026-09-29', window: '9:00 AM - 11:00 AM', tech: 'Sam' }],
+  };
+  const openTimesBlock = '- Wednesday, September 30: 9:00 AM - 11:00 AM';
+  const openTimesDays = [{ date: 'Wednesday, September 30', windows: ['9:00 AM - 11:00 AM'] }];
+  const factsBlock = buildFactsBlock(context, { openTimesBlock });
+
+  test('stripOpenTimesSection removes exactly the OPEN TIMES lines and keeps the scheduled visit\'s window', () => {
+    const stripped = stripOpenTimesSection(factsBlock);
+    expect(stripped).not.toContain('OPEN TIMES (real');
+    expect(stripped).not.toContain('Wednesday, September 30');
+    expect(stripped).toContain('window 9:00 AM - 11:00 AM');
+    expect(stripOpenTimesSection('no section here')).toBe('no section here');
+    expect(stripOpenTimesSection(null)).toBe('');
+  });
+
+  test('CONFIRMING the booked Tuesday 9-11 with offered_times [] → ok (not an offer, nothing to declare)', () => {
+    expect(validateOfferedTimes({
+      offeredTimes: [], openTimesDays, factsBlock,
+      reply: 'You are all set for Tuesday 9:00 AM - 11:00 AM with Sam.',
+    })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('declaring the booked Tuesday as an offer is still rejected — it is not an OPEN TIMES slot', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }], openTimesDays, factsBlock,
+      reply: 'You are all set for Tuesday 9:00 AM - 11:00 AM with Sam.',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual(['offered_times claims "Tuesday, September 29: 9:00 AM - 11:00 AM" but that is not an OPEN TIMES slot']);
+  });
+
+  test('confirming Tuesday AND offering the open Wednesday 9-11 → the Wednesday offer must still be declared', () => {
+    const reply = 'You are set for Tuesday 9:00 AM - 11:00 AM; if you would rather, Wednesday 9:00 AM - 11:00 AM is open too.';
+    const undeclared = validateOfferedTimes({ offeredTimes: [], openTimesDays, factsBlock, reply });
+    expect(undeclared.ok).toBe(false);
+    expect(undeclared.violations).toHaveLength(1);
+    expect(undeclared.violations[0]).toMatch(/quotes "9:00 AM - 11:00 AM" 2 time\(s\) but only 0 offered_times entries plus 1 already-scheduled mention account for it/);
+    expect(validateOfferedTimes({
+      offeredTimes: [{ date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' }], openTimesDays, factsBlock, reply,
+    })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('without a facts block (unit callers) the strict per-occurrence rule still applies', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [], openTimesDays,
+      reply: 'You are all set for Tuesday 9:00 AM - 11:00 AM with Sam.',
+    });
+    expect(result.ok).toBe(false);
   });
 });

@@ -289,3 +289,41 @@ describe('generateGroundedDraft — frozen replay (presetFactsBlock) validates o
     expect(client.calls).toHaveLength(3); // never reached the verifier
   });
 });
+
+// Pre-push audit P1 (round 2): a reply CONFIRMING an existing visit whose
+// arrival window text equals an OPEN TIMES window on another day must not
+// be forced into revision as an undeclared offer.
+describe('generateGroundedDraft — confirming a booked visit whose window text matches an open slot elsewhere is not an offer', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('offered_times [] on a confirmation converges on the first pass, with no send-time snapshot', async () => {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [{ fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00' }] }] })),
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const context = {
+      summary: 'Dana — Quarterly Pest, Venice',
+      upcomingServices: [{ type: 'Quarterly Pest', date: '2026-09-29', window: '9:00 AM - 11:00 AM', tech: 'Sam' }],
+    };
+    const client = makeClient([
+      { reply: 'You are all set for Tuesday 9:00 AM - 11:00 AM with Sam.', intended_actions: [], missing_info: null, offered_times: [] },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft({
+      client, context, inboundMessage: 'What time are you coming Tuesday?',
+      intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice',
+    });
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(1);
+    expect(r.factsBlock).toContain('Wednesday, September 30: 9:00 AM - 11:00 AM'); // the open slot WAS in play
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+});
