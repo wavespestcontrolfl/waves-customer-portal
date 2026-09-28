@@ -5,6 +5,11 @@
 // callback). Owner ask: today's forms are "too long and laborious for techs"
 // for what is, in practice, a quick targeted treatment.
 //
+// The visit note leads the sheet: the tech talks (or types), adds photos, and
+// may pick ONE tip for the customer (owner ruling 2026-09-28: one per service
+// visit, chosen from that visit's options). Photos are staged against the
+// visit through the existing photo manager and promoted at completion.
+//
 // Records only what the application record needs for the HOUSE PEST MIX
 // (Taurus SC, Atticus Talak 7.9 F, LESCO 90/10 surfactant — lib/pest-default-mix.js): which of
 // those went down, their amounts and rates, pests targeted, where, how, and
@@ -23,7 +28,7 @@
 //
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
-import React, { useCallback, useEffect, useRef, useState, useId } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -32,7 +37,10 @@ import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
-import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
+import { rankTechTips, techTipSubtext, techTipSentLabel } from '../../lib/tech-tips';
+import DictationButton from './DictationButton';
+import TechServicePhotosModal from './TechServicePhotosModal';
+import { UiSurface, Button, Field, Input, Textarea, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Fallback amount unit when the resolver names none.
@@ -64,6 +72,12 @@ const ACTIVITY_LEVELS = [
   { value: 'moderate', label: 'Moderate', rating: 3 },
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
+// Tips shown before the tech searches or opens the whole list.
+const TIP_PREVIEW_COUNT = 4;
+// Mirrors MAX_CUSTOM_TIP_CHARS (server tip-library.js): the server rejects a
+// longer line, never trims it.
+const CUSTOM_TIP_MAX_CHARS = 240;
+const MIC_PALETTE = { accent: '#e2e8f0', muted: '#334155', red: '#ef4444', card: '#1e293b' };
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 const dayOf = (value) => String(value || '').slice(0, 10);
 // Letters and digits only: the row's address is built in SQL and the live
@@ -223,7 +237,16 @@ function targetsOf(form) {
   return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
+// One tip per service visit: a library pick OR the tech's own line, never
+// both. null when the picker never loaded, so nothing the tech could not see
+// freezes onto the report.
+function techTipsOf(form, tipsAvailable) {
+  if (!tipsAvailable) return null;
+  const custom = form.customTip.trim();
+  return custom ? { ids: [], custom } : { ids: form.tipId ? [form.tipId] : [], custom: null };
+}
+
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -248,6 +271,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
     areasServiced: [...form.areas],
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
+    techTips: techTipsOf(form, tipsAvailable),
     // The customer recap text ships in a later Fast Complete PR; until then
     // this path sends none. No review ask on a re-service (adopted
     // 2026-09-26), and a free callback never carries a pay link.
@@ -264,16 +288,19 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
+    tips: null,
   });
   useEffect(() => {
     let active = true;
     (async () => {
       try {
-        const [data, ratingContract] = await Promise.all([
+        const [data, ratingContract, tipLibrary] = await Promise.all([
           request(`${base}/pest-recap/context`),
           // A failed read keeps the rating off: never send a rating the
           // server may drop, or show a scale it may not use.
           request(`${base}/tech-rating-allowed`).catch(() => null),
+          // A failed read, or the tips gate off, hides the picker.
+          request(`${base}/tech-tips`).catch(() => null),
         ]);
         if (!active) return;
         const visit = data?.service || {};
@@ -286,6 +313,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
           rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
+          tips: tipLibrary?.available === true ? tipLibrary : null,
         });
       } catch (err) {
         if (active) setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load products' }));
@@ -433,14 +461,14 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
           )}
           <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
         </header>
-        <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} onFullForm={onFullForm} />
+        <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} onFullForm={onFullForm} />
       </section>
     </UiSurface>,
     document.body,
   );
 }
 
-function SheetBody({ service, ctx, submission, locked, onCompleted, onFullForm }) {
+function SheetBody({ service, request, ctx, submission, locked, onCompleted, onFullForm }) {
   if (submission.done) {
     return (
       <div className="tech-visit-body">
@@ -457,16 +485,22 @@ function SheetBody({ service, ctx, submission, locked, onCompleted, onFullForm }
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm ctx={ctx} submission={submission} locked={locked} onFullForm={onFullForm} />;
+  return <FastCompleteForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} onFullForm={onFullForm} />;
 }
 
-function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
+function FastCompleteForm({ service, request, ctx, submission, locked, onFullForm }) {
   const [rows, setRows] = useState(ctx.rows);
   const [editAmounts, setEditAmounts] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: 'spot_treatment', linearFt: '', activity: '', note: '',
+    tipId: '', customTip: '',
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
+  // Each dictated chunk joins what is already in the box.
+  const appendNote = useCallback((text) => {
+    setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
+  }, []);
+  const tipsAvailable = !!ctx.tips;
 
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
@@ -482,7 +516,7 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed }),
+      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -491,6 +525,8 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
     <>
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} serviceId={service?.id} locked={locked} />
+          <PhotosSection serviceId={service?.id} customerName={ctx.visit?.customerName || service?.customerName} request={request} locked={locked} />
           <ProductsSection
             rows={rows}
             method={form.method}
@@ -515,7 +551,16 @@ function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
               ))}
             </ChoiceSection>
           )}
-          <NoteField note={form.note} onChange={(value) => setField('note', value)} />
+          {tipsAvailable && (
+            <TipSection
+              library={ctx.tips}
+              tipId={form.tipId}
+              customTip={form.customTip}
+              locked={locked}
+              onPick={(id) => setForm((prev) => ({ ...prev, tipId: prev.tipId === id ? '' : id, customTip: '' }))}
+              onCustom={(value) => setForm((prev) => ({ ...prev, customTip: value, tipId: value.trim() ? '' : prev.tipId }))}
+            />
+          )}
         </fieldset>
         {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
       </div>
@@ -610,16 +655,144 @@ function MethodSection({ form, rows, setField, chooseMethod, locked }) {
   );
 }
 
-// Optional, so it stays one tap away until the tech wants it.
-function NoteField({ note, onChange }) {
-  const [open, setOpen] = useState(!!note);
-  if (!open) {
-    return <Button type="button" variant="ghost" className="tech-visit-action" onClick={() => setOpen(true)}>+ Add note</Button>;
-  }
+// The visit note leads the sheet. The mic appends what the tech says; on a
+// phone without speech recognition it records a clip for server transcription
+// (DictationButton's upload fallback), and renders nothing where neither works.
+function VisitNote({ note, onChange, onDictated, serviceId, locked }) {
+  const noteId = useId();
   return (
-    <Field label="Note (optional)" className="tech-visit-field">
-      <Input className="tech-visit-control" value={note} onChange={(e) => onChange(e.target.value)} placeholder="Anything for the next visit" autoFocus />
-    </Field>
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
+      </div>
+      <div className="tech-visit-note-row">
+        <DictationButton onAppend={onDictated} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
+        <Textarea
+          id={noteId}
+          className="tech-visit-control"
+          rows={3}
+          value={note}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="What you treated, where, and what you saw"
+        />
+      </div>
+    </section>
+  );
+}
+
+// Photos are staged against the visit by the existing photo manager and
+// promoted into the service record at completion. Optional here.
+function PhotosSection({ serviceId, customerName, request, locked }) {
+  const [open, setOpen] = useState(false);
+  const [count, setCount] = useState(null);
+  const loadCount = useCallback(async () => {
+    try {
+      const data = await request(`/tech/services/${serviceId}/photos`);
+      setCount(Array.isArray(data?.photos) ? data.photos.length : null);
+    } catch {
+      // The count is a convenience; the photo manager reports its own errors.
+      setCount(null);
+    }
+  }, [request, serviceId]);
+  useEffect(() => { void loadCount(); }, [loadCount]);
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Photos</h3>
+        <span className="tech-visit-muted">{count ? `${count} added` : 'Optional'}</span>
+      </div>
+      <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={() => setOpen(true)} disabled={locked}>
+        {count ? 'Add or view photos' : 'Add photos'}
+      </Button>
+      {open && (
+        <TechServicePhotosModal
+          serviceId={serviceId}
+          customerName={customerName}
+          onClose={() => { setOpen(false); void loadCount(); }}
+        />
+      )}
+    </section>
+  );
+}
+
+// What the picker says beside a tip: already covered by the customer's
+// saved settings, or when it last went out to this customer.
+function tipMark(tip, library) {
+  if (tip.condition === 'irrigation_on_file' && library?.conditions?.irrigation_on_file === true) return 'already on file';
+  const day = library?.lastSent?.[tip.id];
+  return day ? techTipSentLabel(day) : null;
+}
+
+// The tips on screen: search results, the whole list, or the short list,
+// with the pick always kept in view. `noMatch` is about the search alone, so
+// a pinned pick never hides that a search found nothing.
+function visibleTips(allTips, { query, showAll, tipId }) {
+  const listed = query ? rankTechTips(allTips, query) : showAll ? allTips : allTips.slice(0, TIP_PREVIEW_COUNT);
+  const pinned = tipId && !listed.some((tip) => tip.id === tipId) ? allTips.find((tip) => tip.id === tipId) : null;
+  return { tips: pinned ? [pinned, ...listed] : listed, noMatch: !!query && !listed.length };
+}
+
+function TipOption({ tip, library, pressed, locked, onPick }) {
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      className="tech-visit-action tech-visit-tip"
+      aria-pressed={pressed}
+      onClick={() => onPick(tip.id)}
+      disabled={locked}
+    >
+      <span>
+        {tip.label}
+        <span className="tech-visit-tip-copy">{[techTipSubtext(tip.copy), tipMark(tip, library)].filter(Boolean).join(' · ')}</span>
+      </span>
+    </Button>
+  );
+}
+
+// One tip per service visit, from this visit's options: a short list first,
+// the whole list behind "Show all", search across all of it, or the tech's
+// own line. Only the id (or the typed line) goes on the wire; the server
+// resolves and freezes the copy.
+function TipSection({ library, tipId, customTip, locked, onPick, onCustom }) {
+  const [query, setQuery] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const allTips = useMemo(
+    () => (library?.groups || []).flatMap((group) => group.tips || []),
+    [library],
+  );
+  const q = query.trim().toLowerCase();
+  const { tips: visible, noMatch } = visibleTips(allTips, { query: q, showAll, tipId });
+  const hasPick = !!tipId || !!customTip.trim();
+  const writingOwn = writing || !!customTip;
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">Tip for the customer</h3>
+        <span className="tech-visit-muted">{hasPick ? '1 picked' : 'Pick 1 (optional)'}</span>
+      </div>
+      <Field label="Search tips" className="tech-visit-field">
+        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. ants, porch light" />
+      </Field>
+      <div className="tech-visit-tip-list">
+        {visible.map((tip) => (
+          <TipOption key={tip.id} tip={tip} library={library} pressed={tip.id === tipId} locked={locked} onPick={onPick} />
+        ))}
+        {noMatch && <p className="tech-visit-muted">No tips match.</p>}
+      </div>
+      <div className="tech-visit-tile-grid">
+        {!q && allTips.length > TIP_PREVIEW_COUNT && (
+          <Chip disabled={locked} label={showAll ? 'Show fewer' : 'Show all'} onClick={() => setShowAll((on) => !on)} />
+        )}
+        {!writingOwn && <Chip disabled={locked} label="Write your own" onClick={() => setWriting(true)} />}
+      </div>
+      {writingOwn && (
+        <Field label="Your own tip (one sentence)" className="tech-visit-field">
+          <Input className="tech-visit-control" value={customTip} maxLength={CUSTOM_TIP_MAX_CHARS} onChange={(e) => onCustom(e.target.value)} placeholder="Goes on the report as a note from you" />
+        </Field>
+      )}
+    </section>
   );
 }
 

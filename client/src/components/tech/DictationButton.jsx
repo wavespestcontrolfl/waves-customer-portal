@@ -16,6 +16,9 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
  *   palette         optional — { accent, muted, red, card } for theming
  *   title           optional — accessible label / tooltip (default "Dictate")
  *   size            optional — button diameter in px (default 30)
+ *   uploadServiceId optional — the visit's id; where SpeechRecognition is
+ *                   missing, the hook records a clip and sends it for server
+ *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
  */
 export default function DictationButton({
   onAppend,
@@ -24,10 +27,11 @@ export default function DictationButton({
   size = 30,
   presentation = "legacy",
   disabled = false,
+  uploadServiceId,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel } = useSpeechDictation(onAppend);
+  const { listening, supported, toggle, cancel } = useSpeechDictation(onAppend, { uploadServiceId });
 
   // A consumer disables the mic while it is busy (e.g. an AI rewrite of the
   // same field). Dictation keeps listening through pauses, and a disabled
