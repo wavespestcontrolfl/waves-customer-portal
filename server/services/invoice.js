@@ -5652,7 +5652,9 @@ const InvoiceService = {
           status: trx.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
           ),
-          sent_at: settledEvent.eventVisibleAt || new Date(),
+          sent_at: settledEvent.deduped
+            ? trx.raw("COALESCE(sent_at, ?::timestamptz)", [settledEvent.eventVisibleAt || null])
+            : new Date(),
           ...(smsOrAppAccepted ? { sms_sent_at: smsFinalizationStamp(trx) } : {}),
           ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped
             ? trx.raw("COALESCE(email_sent_at, ?::timestamptz)", [originalEmailTime])
@@ -5773,9 +5775,16 @@ const InvoiceService = {
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
       acceptedChannelResults = sendResult.channelResults || null;
-      if (acceptedChannelResults?.push?.eventVisibleAt
-        && Object.entries(acceptedChannelResults).every(([channel, leg]) => billingLegDeliveryState(channel, leg) !== "delivered")) {
-        settledEvent = { deduped: true, eventVisibleAt: acceptedChannelResults.push.eventVisibleAt };
+      const legStates = Object.entries(acceptedChannelResults || {})
+        .map(([channel, leg]) => ({ channel, leg, state: billingLegDeliveryState(channel, leg) }));
+      if (legStates.some(({ state }) => state === "deduped")
+        && legStates.every(({ state }) => state !== "delivered")) {
+        const originalTimes = legStates.filter(({ state }) => state === "deduped")
+          .flatMap(({ leg }) => [leg.eventVisibleAt, leg.sentAt])
+          .map((value) => (value == null ? null : new Date(value)))
+          .filter((value) => value && !Number.isNaN(value.getTime()));
+        settledEvent = { deduped: true, ...(originalTimes.length
+          ? { eventVisibleAt: new Date(Math.max(...originalTimes.map((value) => value.getTime()))) } : {}) };
       }
       // Codex round-2 P1 (#4963): billing-channel-routing.js's
       // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own

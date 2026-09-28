@@ -506,25 +506,61 @@ describe('invoice SMS provider handoff', () => {
         expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [visibleAt]);
       }
       if (mode === 'prior+old-text') expect(db.raw).toHaveBeenCalledWith('COALESCE(sms_sent_at, ?::timestamptz)', [visibleAt]);
-      if (!mode.startsWith('bell')) { expect(result.deduped).toBe(true); expect(stamp.sent_at).toEqual(visibleAt); expect(activityInserts).toHaveLength(0); }
+      if (!mode.startsWith('bell')) {
+        expect(result.deduped).toBe(true);
+        expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
+        expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [visibleAt]);
+        expect(activityInserts).toHaveLength(0);
+      }
     });
 
     test.each([
       ['stored acceptance', new Date('2026-05-20T14:00:00Z'), new Date('2026-05-20T14:00:00Z')],
       ['unusable evidence', 'invalid', null],
     ])('deduped Email uses %s when repairing a missing invoice stamp', async (_label, sentAt, expectedAt) => {
-      const { invoiceQueries, mock } = invoiceQueryDb();
+      const activityInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
       db.mockImplementation(mock);
       sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', deduped: true,
         channelResults: { email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt } } });
 
       await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
-        .resolves.toMatchObject({ sent: true });
+        .resolves.toMatchObject({ sent: true, deduped: true });
 
       const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
       expect(stamp.email_sent_at).toBe('COALESCE(email_sent_at, ?::timestamptz)');
+      expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
       expect(stamp).not.toHaveProperty('sms_sent_at');
       expect(db.raw).toHaveBeenCalledWith('COALESCE(email_sent_at, ?::timestamptz)', [expectedAt]);
+      expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [expectedAt]);
+      expect(activityInserts).toHaveLength(0);
+    });
+
+    test.each(['fresh', 'retryable'])('old Email plus %s Text keeps its sibling outcome', async (textOutcome) => {
+      const originalAt = new Date('2026-05-20T14:00:00Z');
+      const activityInserts = [], smsLogInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts, smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockResolvedValue({ sent: textOutcome === 'fresh', deliveryOutcome: textOutcome === 'fresh' ? 'accepted' : 'not_sent',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: originalAt },
+          sms: textOutcome === 'fresh' ? { sent: true, deliveryOutcome: 'accepted' }
+            : { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED' },
+        } });
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      if (textOutcome === 'fresh') {
+        expect(result.deduped).not.toBe(true);
+        expect(stamp.sent_at).toEqual(expect.any(Date));
+        expect(activityInserts).toHaveLength(1);
+      } else {
+        expect(result).toMatchObject({ deduped: true, pendingChannel: 'sms', pendingChannelQueued: true });
+        expect(stamp.sent_at).toBe('COALESCE(sent_at, ?::timestamptz)');
+        expect(db.raw).toHaveBeenCalledWith('COALESCE(sent_at, ?::timestamptz)', [originalAt]);
+        expect(activityInserts).toHaveLength(0);
+        expect(smsLogInserts).toHaveLength(1);
+      }
     });
 
     test('an accepted Email leg is finalized and never restores the claim when the Text leg still needs a retryable retry', async () => {
