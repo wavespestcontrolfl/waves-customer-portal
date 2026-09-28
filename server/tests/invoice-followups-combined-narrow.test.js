@@ -456,6 +456,41 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledTimes(1);
   });
 
+  test('the Day 90 final notice is never combined: the oldest invoice gets its own final notice and a young sibling fires on its own', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    try {
+      const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-02-20T12:00:00.000Z', step_index: 5 });
+      const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+      const anchorUpdate = chain();
+      const siblingUpdate = chain();
+      setDbQueues({
+        // First read: the ladder's legacy-finish revival pass (nothing to revive).
+        'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [anchorSeq, siblingSeq] })],
+        customers: [chain({ first: customer() }), chain({ first: customer() })],
+        invoices: [
+          chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }),
+          chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+        ],
+        notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain(), chain(), chain(), chain()],
+        invoice_followup_sequences: [...claimCycle(anchorSeq, anchorUpdate), ...claimCycle(siblingSeq, siblingUpdate)],
+      });
+
+      await InvoiceFollowUps.runPending();
+
+      // No combined variant is even resolved for the final notice, and the
+      // sibling may never resolve one either.
+      expect(ComposerLinks.buildPayBalanceLink).not.toHaveBeenCalled();
+      expect(smsTemplates.getTemplate).not.toHaveBeenCalledWith(
+        'invoice_followup_combined_90day', expect.anything(), expect.anything(),
+      );
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(2);
+      expect(siblingUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+    } finally {
+      delete process.env.GATE_DUNNING_LADDER_90;
+    }
+  });
+
   test('invoice_count/total_due come from the pay-balance link\'s own snapshot, not from how many rows are due this run', async () => {
     // Only ONE row is due this run, but the customer has 3 open invoices
     // (buildPayBalanceLink's own balance — e.g. a paid or not-yet-due one

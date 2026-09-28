@@ -69,13 +69,17 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 // resolveCombinedVariant finds 2+ open invoices for the customer; see
 // runPending's anchor/sibling grouping below for why only one row per
 // customer fires per run.
+// No Day 90 entry: the final notice is never combined. Its copy says the
+// invoices "may be sent to collections", and the combined count covers every
+// open invoice, including ones only days past due. The oldest invoice gets
+// its own single final notice; the others keep their own ladders. (The
+// combined Day 90 templates stay seeded, unused.)
 const COMBINED_SMS_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice_followup_combined_3day',
   d7_reminder: 'invoice_followup_combined_10day',
   d14_firmer: 'invoice_followup_combined_17day',
   d30_final: 'invoice_followup_combined_30day',
   d60_reminder: 'invoice_followup_combined_60day',
-  d90_final_notice: 'invoice_followup_combined_90day',
 };
 const COMBINED_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_combined_3_day',
@@ -83,11 +87,10 @@ const COMBINED_EMAIL_TEMPLATE_BY_STEP_ID = {
   d14_firmer: 'invoice.followup_combined_17_day',
   d30_final: 'invoice.followup_combined_30_day',
   d60_reminder: 'invoice.followup_combined_60_day',
-  d90_final_notice: 'invoice.followup_combined_90_day',
 };
 
 // GATE_DUNNING_COMBINED_MESSAGE, read at call time (strict 'true'). Ships
-// DARK — wording awaits owner approval (see the seed migration).
+// DARK. Wording owner-approved 2026-09-28 (the seed migration).
 function combinedMessageLive() {
   return process.env.GATE_DUNNING_COMBINED_MESSAGE === 'true';
 }
