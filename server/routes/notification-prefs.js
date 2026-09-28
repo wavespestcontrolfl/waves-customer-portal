@@ -44,7 +44,9 @@ router.get('/', async (req, res, next) => {
       referralNudge: prefs.referral_nudge ?? true,
       marketingOffers: prefs.marketing_offers === true,
       weatherAlerts: prefs.weather_alerts ?? true,
-      paymentReceipt: prefs.payment_receipt ?? true,
+      // Always on: customers cannot turn payment receipts off (owner ruling
+      // 2026-09-26), so a legacy false is never echoed back to a client.
+      paymentReceipt: true,
       // Channel preferences
       serviceReminderChannel: legacyChannel(prefs.service_reminder_channel, 'sms'),
       enRouteChannel: legacyChannel(prefs.en_route_channel, 'sms'),
