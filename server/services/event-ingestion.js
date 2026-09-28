@@ -876,10 +876,18 @@ async function finalSurvivorId(id) {
 // lives, and a merged-away current-key row sends the legacy row to its final
 // survivor.
 async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
-  const renamed = await db('events_raw')
-    .where({ source_id: sourceId, external_id: legacyKey })
-    .whereNotExists(db('events_raw').select(1).where({ source_id: sourceId, external_id: currentKey }))
-    .update({ external_id: currentKey });
+  let renamed = 0;
+  try {
+    renamed = await db('events_raw')
+      .where({ source_id: sourceId, external_id: legacyKey })
+      .whereNotExists(db('events_raw').select(1).where({ source_id: sourceId, external_id: currentKey }))
+      .update({ external_id: currentKey });
+  } catch (err) {
+    // An overlapping pull of the same source took the current key first (the
+    // unique (source_id, external_id) index); the rest of this batch goes on.
+    logger.warn(`[event-ingestion] legacy-key rename skipped for source ${sourceId}: ${err.message}`);
+    return;
+  }
   if (renamed) return;
 
   const legacyRow = await db('events_raw')

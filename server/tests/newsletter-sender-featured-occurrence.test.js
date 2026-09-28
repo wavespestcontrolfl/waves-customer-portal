@@ -77,7 +77,29 @@ describe('occurrence map saved with a send', () => {
       a: '2026-12-31T23:00:00.000Z', // drafted date wins over the live row
       c: 'not-a-date',
       z: '2026-12-31T23:00:00.000Z', // not in the saved list
-    });
+    }, new Date('2026-12-28T12:00:00Z'));
     expect(JSON.parse(json)).toEqual({ a: '2026-12-31T23:00:00.000Z', c: '2027-01-05T15:00:00.000Z' });
+  });
+
+  test('resolveEventOccurrences falls back to the row for a drafted date that is stale or implausibly far out', async () => {
+    const knex = jest.fn(() => {
+      const q = {};
+      q.whereIn = jest.fn(() => q);
+      q.select = jest.fn(async () => [
+        { id: 'stale', start_at: new Date('2027-01-05T15:00:00Z') },
+        { id: 'far', start_at: new Date('2027-01-06T15:00:00Z') },
+      ]);
+      return q;
+    });
+    const json = await resolveEventOccurrences(knex, ['stale', 'far', 'yesterday'], {
+      stale: '2026-11-01T23:00:00.000Z', // a tab left open for weeks
+      far: '2028-01-01T23:00:00.000Z',
+      yesterday: '2026-12-27T23:00:00.000Z', // still within the window
+    }, new Date('2026-12-28T12:00:00Z'));
+    expect(JSON.parse(json)).toEqual({
+      yesterday: '2026-12-27T23:00:00.000Z',
+      stale: '2027-01-05T15:00:00.000Z',
+      far: '2027-01-06T15:00:00.000Z',
+    });
   });
 });

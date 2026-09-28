@@ -17,7 +17,7 @@ const MODELS = require('../config/models');
 const config = require('../config');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { getNewsletterType } = require('../config/newsletter-types');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 const { FEEDBACK_HTML_TOKEN, FEEDBACK_TEXT_TOKEN } = require('./newsletter-feedback');
 const logger = require('./logger');
 const {
@@ -2007,21 +2007,30 @@ function lockedEventOccurrences(events) {
     .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]));
 }
 
+// A drafted date further out than this is not an upcoming issue's event.
+const OCCURRENCE_MAX_AHEAD_DAYS = 120;
+
 /**
  * The occurrence map saved with a send's event list. The Compose client
  * carries the map the draft generator returned (`provided`, the dates the
- * email was rendered with); only entries for listed ids with a valid date
- * are kept. An id without one (a hand-picked list, an old client) falls back
- * to the row's start_at at save time. The sender stamps
+ * email was rendered with); only entries for listed ids with a plausible
+ * date are kept: from yesterday (ET) through OCCURRENCE_MAX_AHEAD_DAYS out,
+ * so a stale tab or a client bug can't write a far-off date into
+ * last_featured_occurrence_at, which the calendar-year rule reads. An id
+ * without one (a hand-picked list, an old client, an implausible date)
+ * falls back to the row's start_at at save time. The sender stamps
  * last_featured_occurrence_at from this map.
  */
-async function resolveEventOccurrences(knex, eventIds, provided) {
+async function resolveEventOccurrences(knex, eventIds, provided, reference = new Date()) {
   const ids = (Array.isArray(eventIds) ? eventIds : []).map(String).filter(Boolean);
   const given = provided && typeof provided === 'object' && !Array.isArray(provided) ? provided : {};
+  const earliest = parseETDateTime(`${etDateString(addETDays(reference, -1))}T00:00:00`).getTime();
+  const latest = reference.getTime() + OCCURRENCE_MAX_AHEAD_DAYS * 24 * 60 * 60 * 1000;
   const out = {};
   for (const id of ids) {
     const value = given[id];
-    if (typeof value === 'string' && !Number.isNaN(new Date(value).getTime())) out[id] = new Date(value).toISOString();
+    const at = typeof value === 'string' ? new Date(value).getTime() : NaN;
+    if (!Number.isNaN(at) && at >= earliest && at <= latest) out[id] = new Date(at).toISOString();
   }
   const missing = ids.filter((id) => !out[id]);
   if (missing.length) {
