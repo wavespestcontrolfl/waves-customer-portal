@@ -4192,6 +4192,14 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            // A voicemail quote-link text queued before this lane's own
+            // window check was removed (owner ruling 2026-09-28) is still
+            // sitting on the rail waiting for 8 AM — this entry point is
+            // used for nothing else, so any row wearing it is by
+            // construction the answer to a prospect's own voicemail. Send
+            // it on the very next replay instead of making it wait out the
+            // window it no longer needs to.
+            ...(claimMeta.entry_point === 'voicemail_lead_sms_deferred' ? { customerInitiated: true } : {}),
             ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
