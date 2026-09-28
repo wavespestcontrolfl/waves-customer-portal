@@ -289,22 +289,21 @@ describe('groundModelCommitments', () => {
     expect(out.kept[0].due_basis).toBe('stated');
   });
 
-  test('the stated time is kept as SPOKEN beside the instant: a wrong-season ET offset keeps its wall clock, a UTC one is converted (#5081 follow-up)', () => {
+  test('an AI time with an Eastern offset of either season is the wall clock it spells; other offsets are instants (#5081 follow-up)', () => {
     const say = (due_at) => groundModelCommitments([
       { party: 'waves', kind: 'callback', description: 'Call back at three', confidence: 0.8, due_at, evidence: [{ quote: 'someone will call you back tomorrow morning', speaker: 'agent' }] },
-    ], TRANSCRIPT).kept[0];
-    // July is EDT (-04:00): "-05:00" is the model's season slip — due_at
-    // reads 16:00 ET as an instant, the spoken clock stays 15:00.
-    expect(say('2026-07-10T15:00:00-05:00')).toMatchObject({ due_at: '2026-07-10T20:00:00.000Z', due_local: '2026-07-10T15:00' });
-    expect(say('2026-07-10T15:00:00-04:00')).toMatchObject({ due_at: '2026-07-10T19:00:00.000Z', due_local: '2026-07-10T15:00' });
-    expect(say('2026-07-10T15:00:00')).toMatchObject({ due_local: '2026-07-10T15:00' });
-    expect(say('2026-07-10T19:00:00Z')).toMatchObject({ due_local: '2026-07-10T15:00' });
-    expect(say('tomorrow-ish')).toMatchObject({ due_at: null, due_local: null });
-    // Shaped like a time but not one: never persisted (the sweep casts it).
-    expect(say('2026-13-45T15:00:00-04:00')).toMatchObject({ due_at: null, due_local: null });
-    // A calendar rollover the parser would accept as another day never is.
-    expect(say('2026-02-30T15:00:00-05:00').due_local).toBeNull();
-    expect(say('2026-07-10T25:00:00-04:00').due_local).toBeNull();
+    ], TRANSCRIPT).kept[0].due_at;
+    // July is EDT: 3 PM is 19:00Z. "-05:00" is the model's season slip —
+    // still 3 PM, never 4 PM. Seconds ride along.
+    expect(say('2026-07-10T15:00:00-04:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:00-05:00')).toBe('2026-07-10T19:00:00.000Z');
+    expect(say('2026-07-10T15:00:30-0500')).toBe('2026-07-10T19:00:30.000Z');
+    expect(say('2026-07-10T15:00')).toBe('2026-07-10T19:00:00.000Z');
+    // January is EST: the same rule the other way round.
+    expect(say('2026-01-10T15:00:00-04:00')).toBe('2026-01-10T20:00:00.000Z');
+    // A UTC or other offset is a real instant.
+    expect(say('2026-07-10T20:00:00Z')).toBe('2026-07-10T20:00:00.000Z');
+    expect(say('2026-07-10T15:00:00-07:00')).toBe('2026-07-10T22:00:00.000Z');
   });
 
   test('a nonempty due_at the parser rejects is not a stated deadline: kept, counted, and its wording rides in due_text (codex gh-r12 P2)', () => {

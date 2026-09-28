@@ -398,17 +398,6 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePmEt });
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
-    // The spoken clock is persisted beside the instant.
-    await cc.upsertCommitments(db, call.id, [{ party: 'waves', kind: 'schedule_visit', description: 'Put the caller on the schedule for 3', due_at: wrongSeasonDue, due_local: `${day}T15:00`, due_basis: 'stated', due_type: 'floor', confidence: 0.9, evidence: [] }]);
-    expect(await db('call_commitments').where({ call_log_id: call.id, kind: 'schedule_visit' }).first('due_local')).toEqual({ due_local: `${day}T15:00` });
-    await db('call_commitments').where({ call_log_id: call.id }).del();
-    // …unless the promise kept the time as SPOKEN (due_local): the season
-    // slip is recognized and the 3 PM booking keeps it (#5081 follow-up).
-    // A due_local that no longer names due_at (rewritten elsewhere) is
-    // ignored: the instant wins.
-    expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue, due_local: `${day}T15:00` }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
-    expect(await cc.resolveFulfillment(db, { ...promise, due_at: threePm, due_local: `${day}T15:00` }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
-    expect(await cc.resolveFulfillment(db, { ...promise, due_at: new Date(Date.parse(threePm) + 2 * 60 * 60 * 1000).toISOString(), due_local: `${day}T15:00` }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePmEt });
 
     // Kept by the booking, never final: every refresh judges it again and
@@ -462,15 +451,6 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     cleanup.customerIds.push(elsewhere.id);
     await lapses(() => db('call_log').where({ id: call.id }).update({ customer_id: elsewhere.id }), () => db('call_log').where({ id: call.id }).update({ customer_id: cust.id }));
     expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
-    // The sweep reads the spoken clock by the same rule: a season-slipped
-    // due_at with its due_local is intact; a due_local due_at no longer
-    // names is ignored, and the instant disagrees with the booking.
-    await db('call_commitments').where({ id: kept.id }).update({ due_at: wrongSeasonDue, due_local: `${day}T15:00` });
-    expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
-    await db('call_commitments').where({ id: kept.id }).update({ due_at: new Date(Date.parse(threePm) + 2 * 60 * 60 * 1000) });
-    expect(await cc.listSlotKeptCallIds(db)).toContain(call.id);
-    await db('call_commitments').where({ id: kept.id }).update({ due_at: threePm, due_local: null });
-    expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
     // A human verdict stands: the office's review is never re-judged.
     await db('call_commitments').where({ id: kept.id }).update({ human_state: 'confirmed' });
     await db('scheduled_services').where({ id: atSlot.id }).update({ status: 'cancelled' });
