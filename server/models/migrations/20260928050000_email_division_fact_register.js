@@ -207,6 +207,11 @@ exports.up = async function up(knex) {
     }).returning(['id']);
 
     if (hasAuditLog && inserted?.id) {
+      // trx: knex (this migration's own transactional handle, per house
+      // style — knex wraps each migration file in one transaction by
+      // default) + critical: true so the audit row commits atomically with
+      // the seed row instead of going through the application's separate
+      // DB handle, where a write failure is only logged, not propagated.
       await require('../../services/audit-log').recordAuditEvent({
         actor_type: 'migration',
         actor_id: null,
@@ -214,6 +219,8 @@ exports.up = async function up(knex) {
         resource_type: 'knowledge_base',
         resource_id: inserted.id,
         metadata: { slug: fact.slug, migration: MIGRATION_TAG, source: SOURCE },
+        trx: knex,
+        critical: true,
       });
     }
   }

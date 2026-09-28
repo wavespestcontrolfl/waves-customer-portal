@@ -67,6 +67,16 @@ describe('findUnverifiedClaims', () => {
     expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
   });
 
+  test('does NOT flag a correctly-scoped drywood swarm claim (a different species, a real wide window)', () => {
+    const claims = findUnverifiedClaims('Western drywood termites can have another round of late-summer swarms.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+  });
+
+  test('still flags an unscoped "termites" claim naming the same false shape', () => {
+    const claims = findUnverifiedClaims('Termites will throw a second swarm event after significant rain and storm activity.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(true);
+  });
+
   test('flags brown/large patch mis-described as a summer disease', () => {
     const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);

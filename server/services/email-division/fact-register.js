@@ -100,10 +100,21 @@ function globalPattern(pattern) {
 }
 
 // True when THIS occurrence is the rule's own correct fact stated
-// correctly (a negated denial, or — for the vacuum rule only — the
-// affirmative flea-context instruction), not the false claim.
+// correctly (a negated denial, a correctly-scoped drywood swarm claim, or
+// — for the vacuum rule only — the affirmative flea-context instruction),
+// not the false claim.
 function isExemptOccurrence(body, match, rule, negatable) {
   if (negatable && NEGATION_RE.test(match[0])) return true;
+  if (rule === 'termite_second_swarm') {
+    // The false claim is specific to NATIVE SUBTERRANEAN termites (no UF
+    // source documents a storm-triggered second swarm for that species) —
+    // fact-west-indian-drywood-termite-dispersal and
+    // fact-western-drywood-termite-flight-season both correctly document
+    // drywood species flying across most of the year, including late
+    // summer and repeat/near-any-month flights. A mention of "drywood"
+    // near the match is that correct, wider window, not the false claim.
+    if (/\bdrywood\b/i.test(nearbyWindow(body, match, 200))) return true;
+  }
   if (rule === 'non_flea_vacuum_advice') {
     const negated = !!match[1];
     // A negated instruction ("do not"/"avoid" vacuuming for N days) is
