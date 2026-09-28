@@ -563,6 +563,20 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 2 });
   });
 
+  test('a sync that finishes after a concurrent run paused the connection for new accounts applies nothing', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockImplementationOnce(async () => {
+      // the other run discovered an account and returned the item to setup
+      await mockPg('plaid_items').where({ id: itemId }).update({ status: 'setup' });
+      return page([txn('t-x', 'acc-chk', 4, '2026-09-05')], [], [], 'cursor-1');
+    });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'setup' });
+    const item = await mockPg('plaid_items').where({ id: itemId }).first();
+    expect(item).toMatchObject({ status: 'setup', sync_cursor: null });
+    expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
+  });
+
   test('a replacement connection cannot re-import days an earlier feed of the label already covered', async () => {
     const first = await connect();
     await activate(first);

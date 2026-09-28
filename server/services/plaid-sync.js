@@ -774,6 +774,10 @@ async function syncItem(itemId, { runMatching = true } = {}) {
       // cursor BACKWARDS would not be
       const fresh = await trx('plaid_items').where({ id: itemId }).forUpdate().first('sync_cursor', 'status');
       if (!fresh || fresh.status === 'removed') return { skipped: 'removed' };
+      // a concurrent run found a new account and handed the connection back
+      // to the operator — nothing applies (and the status is never flipped
+      // back to active) until they confirm the accounts
+      if (fresh.status === 'setup') return { skipped: 'setup' };
       if ((fresh.sync_cursor || null) !== startCursor) return { skipped: 'concurrent' };
       // The mapping is read HERE, under the item row lock setupItem also
       // takes: an edit that committed while Plaid was answering (account
