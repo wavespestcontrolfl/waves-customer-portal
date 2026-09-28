@@ -244,6 +244,7 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
   const matchesByInvoice = new Map(); // invoiceId -> { row, siblingIds: Set }
   const invoicesBySibling = new Map(); // siblingId -> Set(invoiceId)
   const nearMissSiblingIds = new Set(); // in-window, but its date at invoice creation didn't match ANY candidate invoice's anchor
+  const pricedUnitemizedSiblingIds = new Set(); // in-window but priced and not itemized — never inferred
   const matchedSiblingIds = new Set();
   let scanned = 0;
   for (const row of candidates) {
@@ -261,15 +262,13 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
         .whereNot('s.id', row.anchor_id)
         .whereNull('s.recurring_parent_id')
         .where('s.is_recurring', true)
-        // NOT filtered on estimated_price (Codex r20 P1): a staff price edit
-        // on a covered sibling does not shrink or replace the combined
-        // invoice; only a live base-application invoice of its own
-        // (splitOff below) proves the split — the same rule the live sweep
-        // applies.
+        // estimated_price is read, not filtered here: a PRICED row is stamped
+        // only on itemized-line evidence (see the loop below — Codex r20 P1
+        // vs. the pre-push P0 on d8f1c92da1).
         .whereRaw('ABS(EXTRACT(EPOCH FROM (s.created_at - ?::timestamptz))) <= 120', [row.invoice_created_at]),
       's',
     )
-      .select('s.id', 's.scheduled_date');
+      .select('s.id', 's.scheduled_date', 's.estimated_price');
     // A sibling whose application a live invoice already bills was split off
     // by hand: not a covered member. Decided by the base-application identity,
     // never by "any invoice on the row" (Codex r17 P1).
@@ -293,6 +292,15 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
         invoicesBySibling.get(sib.id).add(row.invoice_id);
         continue;
       }
+      // A PRICED row with no itemized line is never inferred into a group
+      // (Codex pre-push P0 on d8f1c92da1): a separately priced same-estimate
+      // program created in the same accept window bills itself at
+      // completion, and stamping it would make the stamp-aware lookup reuse
+      // the combined invoice for it — suppressing its legitimate charge. A
+      // covered member that staff priced LATER is stamped only on the
+      // itemized-line evidence above; otherwise it is logged for hand review
+      // rather than guessed. Fails toward not stamping.
+      if (sib.estimated_price != null) { pricedUnitemizedSiblingIds.add(sib.id); continue; }
       const sibDateAtInvoice = await dateAtInstant(conn, hasRescheduleLog, sib.id, sib.scheduled_date, row.invoice_created_at);
       if (anchorDateAtInvoice && sibDateAtInvoice && sibDateAtInvoice === anchorDateAtInvoice) {
         siblingIds.add(sib.id);
@@ -322,6 +330,10 @@ async function backfillFirstApplicationInvoiceStamps(conn = db, { sinceDays = nu
   // and was never resolved as ambiguous either, fell inside the timing
   // window with no same-trip evidence this backfill could confirm.
   const unresolvedNearMisses = [...nearMissSiblingIds].filter((id) => !matchedSiblingIds.has(id) && !ambiguousSiblingIds.has(id));
+  const pricedSkipped = [...pricedUnitemizedSiblingIds].filter((id) => !matchedSiblingIds.has(id));
+  if (pricedSkipped.length) {
+    logger.warn(`[estimate-first-application-invoice] backfill: ${pricedSkipped.length} priced row(s) created within the accept-time window of a combined invoice were not inferred as members (no itemized line names them) — review by hand if any was a covered visit priced later: ${pricedSkipped.join(', ')}`);
+  }
   if (unresolvedNearMisses.length) {
     logger.warn(`[estimate-first-application-invoice] backfill: ${unresolvedNearMisses.length} row(s) created within the accept-time window of a combined invoice, but with no matching date-at-invoice evidence — left unstamped for hand review: ${unresolvedNearMisses.join(', ')}`);
   }
