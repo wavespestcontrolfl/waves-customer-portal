@@ -9059,27 +9059,47 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
   if (!(samePlaceMiles <= 0.15)) return;
   await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
-    // No excludeCustomerAutomaticGeocodeForId fence here (Codex P1):
-    // that fence exists to stop an automatic geocode from overwriting
-    // a staff-reviewed customer/property pin, but this write stamps
-    // the AUTHORITATIVE reviewed pin itself (custCoords, resolved via
-    // reviewedCustomerLocation above and already proven same-place as
-    // the estimate address) onto a coordless visit. Applying the
-    // fence here made the update affect zero rows for exactly the
-    // reviewed customers this lane exists to serve, leaving their
-    // accepted visits invisible to route scoring.
+    // No excludeCustomerAutomaticGeocodeForId fence on the visit write
+    // (Codex P1 round 1): that fence exists to stop an automatic geocode
+    // from overwriting a staff-reviewed customer/property pin, but this
+    // write stamps the AUTHORITATIVE reviewed pin itself onto a coordless
+    // visit, already proven same-place as the estimate address.
+    //
+    // custCoords above was read BEFORE any lock (Codex P1 round 2, fallback
+    // auditor 2026-09-28: a TOCTOU race, unlike the customers-table write
+    // below whose excludeCustomerAutomaticGeocodeForId filter is evaluated
+    // live at write time) — a staff outside_area/needs_pin decision landing
+    // between that read and this fenced callback, including while blocked
+    // waiting on the fence's own customer-row lock, must not have its
+    // rejection overwritten by the now-stale pin. Re-derive under the SAME
+    // locked connection so it sees the fence's FOR-UPDATE-consistent state
+    // (the same lock-then-reread idiom reuseMatchedProfile's fenced re-read
+    // uses), and skip the write if the customer is blocked as of THIS read.
+    const freshCust = await conn('customers')
+      .where({ id: customerId })
+      .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
+    if (!freshCust) return;
+    const freshReviewed = await review.reviewedCustomerLocation({ ...freshCust, id: customerId }, conn);
+    if (freshReviewed.geocode_review_blocked) return;
+    // A network geocode call is never made under this lock (this file's own
+    // established rule elsewhere) — when the fresh read has no live pin to
+    // offer (not blocked, just nothing stored yet), the pre-lock provider
+    // result stands, same as before this round's fix.
+    const freshCoords = (freshReviewed.latitude != null && freshReviewed.longitude != null)
+      ? { lat: Number(freshReviewed.latitude), lng: Number(freshReviewed.longitude) }
+      : custCoords;
     await conn('scheduled_services')
       .where({ source_estimate_id: estimate.id })
       .whereNull('lat')
-      .update({ lat: custCoords.lat, lng: custCoords.lng });
-    if (review.needsCoordinatePairRepair(cust)) {
+      .update({ lat: freshCoords.lat, lng: freshCoords.lng });
+    if (review.needsCoordinatePairRepair(freshCust)) {
       let customerUpdate = conn('customers').where({ id: customerId }).where(function () {
         this.whereNull('latitude').orWhereNull('longitude');
       });
       customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
       await customerUpdate.update({
-        latitude: custCoords.lat,
-        longitude: custCoords.lng,
+        latitude: freshCoords.lat,
+        longitude: freshCoords.lng,
         updated_at: new Date(),
       });
     }

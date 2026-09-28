@@ -39,8 +39,15 @@ const CUSTOMER_ID = 'cust-1';
 // customer row, and runs `transaction`/withCustomerReviewWriteFence's
 // callback against itself (same "no separate connection" convention the
 // bigger fixtures in this suite use).
+// `customerRow` / `reviewRow` / `primaryRow` may each be a plain value OR a
+// function returning one — a function lets a test simulate a race by
+// answering differently once the fence's OWN re-read runs than it did for
+// the initial pre-lock read (same order stampAcceptedVisitCoordinates
+// actually issues its queries in: db('customers') first, then
+// conn('customers') again inside the fence).
 function makeFakeDb({ customerRow, reviewRow = null, primaryRow = null } = {}) {
   const updateCalls = [];
+  const resolve = (v) => (typeof v === 'function' ? v() : v);
   const chain = (table) => {
     const q = { table, conds: {} };
     q.where = (cond) => { if (cond && typeof cond === 'object') Object.assign(q.conds, cond); return q; };
@@ -52,9 +59,9 @@ function makeFakeDb({ customerRow, reviewRow = null, primaryRow = null } = {}) {
     q.select = () => q;
     q.whereNotExists = () => q;
     q.first = async () => {
-      if (table === 'customers') return customerRow;
-      if (table === 'customer_geocode_reviews') return reviewRow;
-      if (table === 'customer_properties') return primaryRow;
+      if (table === 'customers') return resolve(customerRow);
+      if (table === 'customer_geocode_reviews') return resolve(reviewRow);
+      if (table === 'customer_properties') return resolve(primaryRow);
       return null;
     };
     q.update = async (payload) => { updateCalls.push({ table, conds: { ...q.conds }, payload }); return 1; };
@@ -122,6 +129,42 @@ test('reviewedCustomerLocation blocked (e.g. needs_pin) → no visit write at al
 
   await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
 
+  expect(db.updateCalls).toEqual([]);
+});
+
+// Codex P1 round 2 (fallback auditor, 2026-09-28): custCoords is read
+// BEFORE any lock. This proves a staff outside_area/needs_pin decision that
+// lands between that read and the fence's own row-lock acquisition — the
+// exact window this async, fire-and-forget stamp can be blocked inside —
+// is never overwritten: the write re-derives the reviewed pin under the
+// SAME locked connection and skips the write once it sees the fresh block.
+test('TOCTOU: a review that turns blocking AFTER the pre-lock read is never overwritten', async () => {
+  const customerRow = {
+    address_line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: null, longitude: null,
+  };
+  let reviewCalls = 0;
+  const reviewRow = () => {
+    reviewCalls += 1;
+    // Call 1 = the pre-lock read inside reviewedCustomerLocation (no review
+    // yet). Call 2 = stampAcceptedVisitCoordinates's fresh re-read INSIDE
+    // the fence, after a staff outside_area decision has since landed.
+    if (reviewCalls === 1) return null;
+    return {
+      customer_id: CUSTOMER_ID, status: 'outside_area',
+      address_snapshot: ['1 Main St', null, 'Bradenton', 'FL', '34205'],
+      latitude: null, longitude: null, updated_at: new Date(),
+    };
+  };
+  const db = makeFakeDb({ customerRow, reviewRow });
+  mockGeocodeAddress
+    .mockResolvedValueOnce({ lat: 27.4, lng: -82.5 }) // the estimate address
+    .mockResolvedValueOnce({ lat: 27.41, lng: -82.51 }); // pre-lock: no review, no stored pin — geocoded directly
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  // Nothing is written — NOT the stale pre-lock coordinates (27.41/-82.51),
+  // which is exactly what a staff outside_area decision just rejected.
   expect(db.updateCalls).toEqual([]);
 });
 
