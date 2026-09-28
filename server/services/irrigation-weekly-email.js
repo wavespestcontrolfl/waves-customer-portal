@@ -869,6 +869,10 @@ const NON_LIVE_VISIT_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled
 // '%lawn%'.
 const LAWN_SERVICE_TYPE_LIKES = ['%lawn%', '%fertiliz%', '%fungicide%', '%turf%'];
 
+// customer_tags value that adds a customer to the Monday email without lawn
+// service (see findEligibleCustomers).
+const IRRIGATION_EMAIL_OPT_IN_TAG = 'irrigation_email';
+
 // The recurring-lawn-evidence WHERE, shared VERBATIM between the Monday
 // sweep's audience (findEligibleCustomers) and the daily audience-gap check
 // (findLawnEmailAudienceGaps). Two copies of one predicate diverge — the gap
@@ -980,6 +984,19 @@ async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   return !!row;
 }
 
+// Is ONE customer tagged into the Monday email? The portal's irrigation
+// surfaces (Weekly Inches, the watering-plan card the plan push links to)
+// accept this too via customerQualifiesForLawnInches — otherwise the email's
+// schedule ask and the plan push dead-end for an opted-in customer.
+async function hasIrrigationEmailOptIn(customerId) {
+  if (!customerId) return false;
+  const row = await db('customer_tags')
+    .where('customer_id', customerId)
+    .whereRaw('LOWER(tag) = ?', [IRRIGATION_EMAIL_OPT_IN_TAG])
+    .first('id');
+  return !!row;
+}
+
 async function findEligibleCustomers({ now = new Date(), customerId = null, includeApp = false, conn = db } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
@@ -1017,7 +1034,20 @@ async function findEligibleCustomers({ now = new Date(), customerId = null, incl
     // else gets the same measured rainfall plus the matching ask. Gating on
     // them reached 3 of 23 recurring-lawn customers; the other 20 simply
     // never opened the portal's Property Preferences form.
-    .where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+    // Owner opt-in (2026-09-28): a customer tagged IRRIGATION_EMAIL_OPT_IN_TAG
+    // joins without recurring-lawn evidence (a pest-only customer who wants
+    // the check-in). Every other clause above still applies. Kept OUT of
+    // recurringLawnEvidenceFilter, which also gates lawn-only surfaces and
+    // the audience-gap check.
+    .where(function lawnOrOptedIn() {
+      this.where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+        .orWhereExists(function optInTag() {
+          this.select(conn.raw('1'))
+            .from('customer_tags as ct')
+            .whereRaw('ct.customer_id = c.id')
+            .whereRaw('LOWER(ct.tag) = ?', [IRRIGATION_EMAIL_OPT_IN_TAG]);
+        });
+    })
     // One-customer re-read (the sweep revalidates each candidate at its
     // turn — codex gh-r38): same query, same columns, so the fresh row can
     // never disagree in shape with the audience load.
@@ -2054,6 +2084,7 @@ module.exports = {
   findLawnEmailAudienceGaps,
   hasLawnServiceEvidence,
   hasRecurringLawnEvidence,
+  hasIrrigationEmailOptIn,
   fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
@@ -2062,6 +2093,7 @@ module.exports = {
   TEMPLATE_SETUP_SYSTEM,
   TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_WEEK_PLAN,
+  IRRIGATION_EMAIL_OPT_IN_TAG,
   PLAN_WINDOW_END_HOUR_ET,
   _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE, sizingFieldsUnconfirmed, IRRIGATION_SIZING_FIELDS },
 };

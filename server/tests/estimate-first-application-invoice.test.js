@@ -377,3 +377,165 @@ describe('estimate first-application invoice lookup', () => {
     expect(knex).not.toHaveBeenCalled();
   });
 });
+
+// Codex round 14 P1 (PR #5021): the lookup honours the accept-time STAMP
+// (scheduled_services.first_application_invoice_id), not only a shared
+// scheduled_date. A fake knex that records every builder call — including the
+// ones made inside where(fn)/orWhereIn(col, fn) callbacks — and answers the
+// fallback stamp read and the invoice query with fixed rows. The SQL itself
+// is exercised against real Postgres in
+// first-application-sibling-split.postgres.test.js.
+function makeStampAwareKnex({ invoiceRows = [], stampRow } = {}) {
+  const calls = [];
+  const recorder = (label) => {
+    const builder = {};
+    for (const method of ['join', 'where', 'orWhere', 'whereNot', 'whereIn', 'orWhereIn', 'orderBy', 'select', 'from', 'forUpdate', 'noWait']) {
+      builder[method] = jest.fn((...args) => {
+        calls.push([label, method, ...args.map((a) => (typeof a === 'function' ? '[fn]' : a))]);
+        for (const arg of args) {
+          if (typeof arg === 'function') arg.call(recorder(`${label}>${method}`), recorder(`${label}>${method}`));
+        }
+        return builder;
+      });
+    }
+    return builder;
+  };
+  const knex = jest.fn((table) => {
+    calls.push(['table', table]);
+    if (table === 'scheduled_services') {
+      const chain = {
+        where: jest.fn((...args) => { calls.push(['stamp', 'where', ...args]); return chain; }),
+        first: jest.fn(async (...args) => { calls.push(['stamp', 'first', ...args]); return stampRow; }),
+      };
+      return chain;
+    }
+    const chain = recorder('q');
+    chain.then = (resolve, reject) => Promise.resolve(invoiceRows).then(resolve, reject);
+    return chain;
+  });
+  knex.calls = calls;
+  return knex;
+}
+
+describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (Codex round 14 P1)', () => {
+  const RECOGNIZED = {
+    title: 'First Service Application',
+    notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
+  };
+  const movedSibling = {
+    id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1',
+    scheduled_date: '2026-10-20', // moved off the anchor's 2026-10-01
+    first_application_invoice_id: 'combined-inv',
+  };
+
+  test('a stamped sibling moved to another day → the stamped combined invoice is returned, even with edited title/notes', async () => {
+    const combined = {
+      id: 'combined-inv', status: 'paid', scheduled_service_id: 'anchor-visit',
+      title: 'Edited by the office', notes: 'Nothing recognizable here.',
+    };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined] });
+    const found = await findFirstApplicationInvoiceForEstimateService(movedSibling, knex);
+    expect(found).toEqual({ invoice: combined, liveBeside: null });
+    // The svc carried the column — no fallback read.
+    expect(knex.calls.some((c) => c[0] === 'stamp')).toBe(false);
+    // The stamped query: ONLY the stamped row OR any invoice on the stamped
+    // anchor — never the date branch (Codex r17 P1: another group's same-day
+    // invoice must never compete with the stamp).
+    expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+    expect(knex.calls.some((c) => c[2] === 'first_visit.source_estimate_id')).toBe(false);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
+    expect(knex.calls).toContainEqual(['q>where', 'orWhereIn', 'i.scheduled_service_id', '[fn]']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'select', 'scheduled_service_id']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'from', 'invoices']);
+    expect(knex.calls).toContainEqual(['q>where>orWhereIn', 'where', 'id', 'combined-inv']);
+    expect(knex.calls).toContainEqual(['q', 'where', 'i.customer_id', 'customer-1']);
+    expect(knex.calls).toContainEqual(['q', 'whereNot', 'i.status', 'void']);
+  });
+
+  test('stamped invoice voided + a live replacement on the anchor → the replacement is returned as live', async () => {
+    // The void stamped row is excluded in SQL (whereNot void); the anchor
+    // branch returns the replacement minted on the same anchor visit.
+    const replacement = { id: 'replacement-inv', status: 'sent', scheduled_service_id: 'anchor-visit', ...RECOGNIZED };
+    const knex = makeStampAwareKnex({ invoiceRows: [replacement] });
+    const found = await findFirstApplicationInvoiceForEstimateService(movedSibling, knex);
+    expect(found).toEqual({ invoice: replacement, liveBeside: null });
+  });
+
+  test('status ordering is unchanged on the widened rows: a refunded stamped invoice wins, the live replacement rides as liveBeside', async () => {
+    const replacement = { id: 'replacement-inv', status: 'sent', ...RECOGNIZED };
+    const refundedStamped = { id: 'combined-inv', status: 'refunded', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [replacement, refundedStamped] });
+    expect(await findFirstApplicationInvoiceForEstimateService(movedSibling, knex))
+      .toEqual({ invoice: refundedStamped, liveBeside: replacement });
+  });
+
+  test('only the STAMPED row skips the text recognizer — an unrecognized other invoice on the anchor is still ignored', async () => {
+    const unrelated = { id: 'repair-inv', status: 'sent', title: 'Repair', notes: 'Sprinkler head.' };
+    const knex = makeStampAwareKnex({ invoiceRows: [unrelated] });
+    expect(await findFirstApplicationInvoiceForEstimateService(movedSibling, knex))
+      .toEqual({ invoice: null, liveBeside: null });
+  });
+
+  test('lockRows/noWait apply to the widened query exactly as before', async () => {
+    const knex = makeStampAwareKnex({ invoiceRows: [] });
+    await findFirstApplicationInvoiceForEstimateService(movedSibling, knex, { lockRows: true, noWait: true });
+    expect(knex.calls).toContainEqual(['q', 'forUpdate', 'i']);
+    expect(knex.calls).toContainEqual(['q', 'noWait']);
+  });
+
+  test('an unstamped visit (column present, NULL) → identical to the date-based query, no fallback read', async () => {
+    const unstamped = { ...movedSibling, first_application_invoice_id: null };
+    const legacy = { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20' };
+    const rows = [{ id: 'first-app', status: 'sent', ...RECOGNIZED }];
+    const knexA = makeStampAwareKnex({ invoiceRows: rows });
+    const knexB = makeStampAwareKnex({ invoiceRows: rows });
+    const a = await findFirstApplicationInvoiceForEstimateService(unstamped, knexA);
+    const b = await findFirstApplicationInvoiceForEstimateService(legacy, knexB);
+    expect(a).toEqual(b);
+    expect(knexA.calls).toEqual(knexB.calls);
+    expect(knexA.calls).toEqual([
+      ['table', 'invoices as i'],
+      ['q', 'join', 'scheduled_services as first_visit', 'i.scheduled_service_id', 'first_visit.id'],
+      ['q', 'where', 'i.customer_id', 'customer-1'],
+      ['q', 'where', 'first_visit.source_estimate_id', 'est-1'],
+      ['q', 'where', 'first_visit.scheduled_date', '2026-10-20'],
+      ['q', 'whereNot', 'i.status', 'void'],
+      ['q', 'orderBy', 'i.created_at', 'desc'],
+      ['q', 'select', 'i.*'],
+    ]);
+  });
+
+  test('a svc WITHOUT the column (narrow select) → the stamp is read by id before deciding', async () => {
+    const narrow = {
+      id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20',
+    };
+    const combined = { id: 'combined-inv', status: 'sent', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined], stampRow: { first_application_invoice_id: 'combined-inv' } });
+    expect(await findFirstApplicationInvoiceForEstimateService(narrow, knex))
+      .toEqual({ invoice: combined, liveBeside: null });
+    expect(knex.calls.slice(0, 3)).toEqual([
+      ['table', 'scheduled_services'],
+      ['stamp', 'where', { id: 'sibling-visit' }],
+      ['stamp', 'first', 'first_application_invoice_id'],
+    ]);
+    expect(knex.calls).toContainEqual(['q>where', 'where', 'i.id', 'combined-inv']);
+  });
+
+  test('a svc WITHOUT the column whose row is unstamped → the fallback read happens, then the plain date query', async () => {
+    const narrow = {
+      id: 'sibling-visit', customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-10-20',
+    };
+    const knex = makeStampAwareKnex({ invoiceRows: [], stampRow: { first_application_invoice_id: null } });
+    await findFirstApplicationInvoiceForEstimateService(narrow, knex);
+    expect(knex.calls).toContainEqual(['stamp', 'first', 'first_application_invoice_id']);
+    expect(knex.calls.some((c) => c[1] === 'orWhere' || c[1] === 'orWhereIn')).toBe(false);
+  });
+
+  test('a stamped svc with no scheduled_date still finds the stamped invoice (the date branch is simply omitted)', async () => {
+    const combined = { id: 'combined-inv', status: 'sent', title: 'Edited', notes: '' };
+    const knex = makeStampAwareKnex({ invoiceRows: [combined] });
+    const found = await findFirstApplicationInvoiceForEstimateService({ ...movedSibling, scheduled_date: null }, knex);
+    expect(found).toEqual({ invoice: combined, liveBeside: null });
+    expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+  });
+});

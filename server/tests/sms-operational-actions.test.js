@@ -25,8 +25,7 @@ const source = (message_body, direction = 'inbound') => ({
 });
 const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
-  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null,
-  answered_by_payment: false, answered_by_reply: false, ...extra,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, answered_by_payment: false, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
@@ -1039,39 +1038,48 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
   });
 
-  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (the split-billing ask "separate the charges")', () => {
+  test('owner ruling 2026-09-28 (reverses R3): an "other" ask admits any text a person sent and a call back a person placed, never an automated text or call', () => {
     const other = { kind: 'other' };
-    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, other)).toBe(false);
-    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, other)).toBe(false);
+    const personSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    const staffCall = { type: 'call', status: 'completed', duration_seconds: 90, source: 'admin-click',
+      v2_extraction_status: 'valid', is_voicemail: 'false' };
+    // The R3 "separate the charges" case: a person's "Done" now answers it.
+    expect(admissibleWitness(personSms, other)).toBe(true);
+    // Staff draft-approval sends carry their own provenance type.
+    expect(admissibleWitness({ ...personSms, operator_sent: false, message_type: 'ai_approved' }, other)).toBe(true);
+    // Codex #5169 r1 P1: automated senders reuse the bare 'manual' type.
+    expect(admissibleWitness({ ...personSms, operator_sent: false }, other)).toBe(false);
+    expect(admissibleWitness({ ...personSms, message_type: 'confirmation' }, other)).toBe(false);
+    expect(admissibleWitness({ ...personSms, status: 'queued' }, other)).toBe(false);
+    // A text a person queued before the ask and that went out after it was not written in reply to it.
+    const asked = { kind: 'other', sms_context: { source_at: '2040-03-10T15:00:00Z' } };
+    expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T14:00:00Z' }, asked)).toBe(false);
+    expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T15:30:00Z' }, asked)).toBe(true);
+    // A call back counts only through the staff bridge, never a robocall or an unsourced row,
+    // and only once it reached the customer (Codex #5220 r1 P1): the recording's reviewed
+    // extraction heard a live conversation, and a card call's own customer leg completed.
+    for (const source of ['admin-click', 'admin-callback', 'tech-click']) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(true);
+    for (const source of ['collections_voice', 'status_callback', null]) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, duration_seconds: 30 }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: 'true' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: null }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, v2_extraction_status: 'schema_failed' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'no-answer', customer_leg_seconds: '0' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '45' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '75' }, other)).toBe(true);
+    // An ask naming an address still takes a person's reply (Codex #5169 r1
+    // P2); an email delivery is still no `other` witness.
     const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
+    expect(admissibleWitness(personSms, emailOther)).toBe(true);
+    expect(admissibleWitness(staffCall, emailOther)).toBe(true);
     expect(admissibleWitness({ type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
       recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
-    // `callback` keeps its existing call/visit mix — unaffected by R3.
+    // `callback` keeps its existing call/visit mix, whoever placed the call.
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
-  });
-
-  test('owner ruling 2026-09-28 partly reverses R3: a plain-information "other" ask (reply_answerable) admits an operator-sent staff sms; an unstamped or action-request ask keeps R3', () => {
-    const info = { kind: 'other', sms_context: { reply_answerable: true } };
-    const humanSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
-    const humanCall = { type: 'call', status: 'completed', duration_seconds: 90 };
-    expect(admissibleWitness(humanSms, info)).toBe(true);
-    // Staff draft-approval sends carry their own provenance type.
-    expect(admissibleWitness({ ...humanSms, operator_sent: false, message_type: 'ai_approved' }, info)).toBe(true);
-    // Codex #5169 r1 P1: a bare 'manual' type is overloaded across automated
-    // senders, and call_log records no human provenance at all.
-    expect(admissibleWitness({ ...humanSms, operator_sent: false }, info)).toBe(false);
-    expect(admissibleWitness(humanCall, info)).toBe(false);
-    // An automated notice never answers, even on a reply-answerable row.
-    expect(admissibleWitness({ ...humanSms, message_type: 'confirmation' }, info)).toBe(false);
-    // Unstamped (a row from before this lane, the R3 "separate the charges"
-    // case) or explicitly false: sms/call stay refused, R3 unchanged.
-    expect(admissibleWitness(humanSms, { kind: 'other' })).toBe(false);
-    expect(admissibleWitness(humanCall, { kind: 'other' })).toBe(false);
-    expect(admissibleWitness(humanSms, { kind: 'other', sms_context: { reply_answerable: false } })).toBe(false);
-    // Payment admissibility is untouched: still gated by money_answerable alone.
+    // Payment admissibility is untouched: gated by money_answerable alone.
     const paid = { type: 'payment', payment_source: 'ledger' };
-    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: false } })).toBe(false);
-    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: true } })).toBe(true);
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { money_answerable: false } })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { money_answerable: true } })).toBe(true);
   });
 
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
@@ -1331,7 +1339,7 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
-  test('only admissible records are offered to the model as witness_refs (R2/R3: a staff reply never is; a payment now can be)', async () => {
+  test('only admissible records are offered to the model as witness_refs (R2: a payment can be; a text with no person\'s mark never is)', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
@@ -1399,7 +1407,7 @@ describe('fulfillment proof', () => {
   });
 });
 
-describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid invoice/payments row, a deposit) closes a settlement question; a staff "done" reply never does', () => {
+describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid invoice/payments row, a deposit) closes a settlement question', () => {
   // A payment question the extraction marked answerable by a payment (stamped at intake).
   const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z', money_answerable: true };
   const invoicePaid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
@@ -1444,25 +1452,42 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
   });
 
-  test('owner ruling 2026-09-28: the extraction schema and prompt carry answered_by_reply for a plain-information "other" ask', () => {
+  test('owner ruling 2026-09-28: the extraction no longer judges whether a reply could answer an ask', () => {
     const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
     const obligationSchema = SCHEMA.properties.obligations.items;
-    expect(obligationSchema.required).toContain('answered_by_reply');
-    expect(obligationSchema.properties.answered_by_reply).toEqual({ type: 'boolean' });
-    const prompt = buildPrompt({ message: source("What's the Zelle number?") });
-    expect(prompt).toContain('answered_by_reply is true only when the obligation is a plain question');
-    for (const phrase of ['change, cancel, book, come out, fix, send a document', 'a complaint', 'a customer-owned promise']) {
-      expect(prompt).toContain(phrase);
-    }
+    expect(obligationSchema.required).not.toContain('answered_by_reply');
+    expect(obligationSchema.properties).not.toHaveProperty('answered_by_reply');
+    expect(buildPrompt({ message: source("What's the Zelle number?") })).not.toContain('answered_by_reply');
   });
 
-  test('owner ruling 2026-09-28: the completion check tells the model a staff reply must actually answer the question, not just acknowledge it', async () => {
+  test('owner ruling 2026-09-28: a person\'s reply or call back closes a general ask without the model, whatever it says', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'The Zelle number is 941-555-0101' };
-    await verifySmsFulfillment({ kind: 'other', description: "What's the Zelle number?", sms_context: { ...ctx, reply_answerable: true, money_answerable: false } },
-      { records: [staffSms], failures: [] });
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
-      .toContain('it answers only when it actually gives the asked-for information');
+    const ask = { kind: 'other', description: 'I thought it was 125 a quarter', sms_context: { ...ctx, money_answerable: false } };
+    const reply = (id, created_at, text, extra = {}) => ({ id, ref: `sms:${id}`, type: 'sms', status: 'delivered',
+      message_type: 'manual', operator_sent: true, created_at, text, ...extra });
+    const first = reply('first', '2040-03-11T15:00:00Z', 'You got it');
+    const later = reply('later', '2040-03-11T16:00:00Z', 'Following up');
+    // The earliest response is the witness, with no quote to find in it.
+    expect(await verifySmsFulfillment(ask, { records: [later, first], failures: [] })).toMatchObject({ verdict: 'fulfilled',
+      record_type: 'sms', record_id: 'first', matched_at: '2040-03-11T15:00:00Z', quote: null, basis: 'person_reply' });
+    expect(await verifySmsFulfillment(ask, { records: [reply('ok', '2040-03-11T15:00:00Z', 'Ok')], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'ok' });
+    // A call back through the staff bridge, earlier than any text.
+    const call = { id: 'call-1', ref: 'call:call-1', type: 'call', status: 'completed', duration_seconds: 300, source: 'tech-click',
+      v2_extraction_status: 'valid', is_voicemail: 'false', created_at: '2040-03-11T14:00:00Z', text: '' };
+    expect(await verifySmsFulfillment(ask, { records: [first, call], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'call', record_id: 'call-1' });
+    // A failed or truncated channel cannot hide a response that was loaded.
+    expect(await verifySmsFulfillment(ask, { records: [first], failures: ['visit', 'sms_truncated'] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'first' });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    // Inside an open window a message waits for the deadline (R1).
+    expect(await verifySmsFulfillment(ask, { records: [first], failures: [] }, { eventOnly: true })).toMatchObject({ verdict: 'open' });
+    // A text with no person's mark is never the shortcut; the model sees it as context.
+    await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
+    // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
+    await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(3);
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {
