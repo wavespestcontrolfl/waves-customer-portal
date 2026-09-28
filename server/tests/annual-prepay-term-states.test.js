@@ -762,6 +762,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(f({ status: 'sent' })).toBe('payment_pending');
     expect(f({ status: 'paid' })).toBe('active');
     expect(f({ status: 'viewed', paid_at: new Date() })).toBe('active');
+    // Codex #4971 r21 P1: a prepay invoice settled entirely by account
+    // credit is 'prepaid' with NO paid_at (stripe.js credit-coverage seam)
+    // — consumed credit is money collected, so the term activates.
+    expect(f({ status: 'prepaid' })).toBe('active');
+    expect(f({ status: 'PREPAID', paid_at: null })).toBe('active');
     // Both spellings and refunded on the INVOICE all land on term 'cancelled' —
     // never on the legacy term names.
     for (const invStatus of ['void', 'cancelled', 'canceled', 'refunded']) {

@@ -4721,10 +4721,14 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // closes the remaining crash-adjacent window (a successor minted, or a
     // send already past its own reads, in the instant between that guard's
     // check and this transaction's commit).
-    const { withCustomerDeletionGateForCustomers } = require('../services/termite-annual-renewal-charge');
+    // r21: the gate opens the transaction itself and takes this customer's
+    // termite keys as transaction-level locks on it (gate → customer row →
+    // the rest, the ordering every termite writer follows) — no separate
+    // lock session that could be lost while deleted_at commits.
+    const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
     let relink;
     try {
-      relink = await withCustomerDeletionGateForCustomers([req.params.id], () => db.transaction(async (trx) => {
+      relink = await withCustomerDeletionGate(req.params.id, async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
@@ -4752,9 +4756,15 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
           newsletterRelinked: result.relinked,
         }, true, trx);
         return result;
-      }));
+      });
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
+      if (e && e.code === 'PARENT_DECISION_LOCK_TIMEOUT') {
+        return res.status(409).json({
+          error: 'termite_renewal_in_progress',
+          message: 'A termite plan renewal action is in progress for this customer. Try again in a few minutes.',
+        });
+      }
       throw e;
     }
     logger.info(`[customers] Soft-deleted customer id=${req.params.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));

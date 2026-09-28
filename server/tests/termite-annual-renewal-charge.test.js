@@ -115,262 +115,97 @@ describe('termite annual renewal charge', () => {
   // test suites — cancelled-portal-read-access.test.js and
   // admin-customers-archive-relink.test.js — for the wiring itself); this
   // proves the helper's own gating logic in isolation.
+  // Codex #4971 r15 P1, restructured r21: the deletion fence is a
+  // TRANSACTION-level advisory lock on every termite term of the customer(s),
+  // taken on the deletion's own transaction (acquireTermiteGateAtEntry) before
+  // fn(trx) writes deleted_at on that same connection — no raw lock session
+  // (nothing to lose, count against a cap, or re-check at the write).
   describe('withCustomerDeletionGate', () => {
-    test('no customerId at all — fn runs directly, no query, no gate', async () => {
-      mockCommon();
-      const dbSpy = jest.fn();
-      jest.doMock('../models/db', () => dbSpy);
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      const fn = jest.fn(async () => 'deleted');
-      await expect(withCustomerDeletionGate(null, fn)).resolves.toBe('deleted');
-      expect(fn).toHaveBeenCalledTimes(1);
-      expect(dbSpy).not.toHaveBeenCalled();
-    });
-
-    test('no renewable termite parent term for this customer — fn runs directly, no gate taken', async () => {
-      mockCommon();
-      const withParentDecisionLock = jest.fn((termId, fn) => fn());
-      jest.doMock('../services/annual-prepay-renewals', () => ({
-        ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
-      }));
-      jest.doMock('../models/db', () => jest.fn((table) => {
-        if (table === 'annual_prepay_terms') {
-          return {
-            where: jest.fn(() => ({
-              whereNotNull: jest.fn(() => ({ whereIn: jest.fn(() => ({ select: jest.fn(async () => []) })) })),
-            })),
-          };
-        }
-        throw new Error(`unexpected table ${table}`);
-      }));
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      const fn = jest.fn(async () => 'deleted');
-      await expect(withCustomerDeletionGate('cust-1', fn)).resolves.toBe('deleted');
-      expect(fn).toHaveBeenCalledTimes(1);
-      expect(withParentDecisionLock).not.toHaveBeenCalled();
-    });
-
-    // Codex #4971 r16 P1 — finding 4: keys on the customer's renewable
-    // termite PARENT term(s) directly (withParentDecisionLock, no
-    // alsoTermIds) rather than on an existing payment_pending successor —
-    // the SAME key mintRenewalSuccessor now also takes before it ever reads
-    // the customer's liveness, so a concurrently-minting successor (no
-    // successor row exists yet — the old query found nothing to lock) is
-    // now fenced too.
-    test('a live renewable parent term takes withParentDecisionLock (its own key) before fn runs — and never commits until the gate releases', async () => {
-      mockCommon();
-      const order = [];
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => {
-        expect(termId).toBe('parent-1');
-        order.push('gate-acquired');
-        const result = await innerFn();
-        order.push('gate-released');
-        return result;
-      });
-      jest.doMock('../services/annual-prepay-renewals', () => ({
-        ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
-      }));
-      jest.doMock('../models/db', () => jest.fn((table) => {
-        if (table === 'annual_prepay_terms') {
-          return {
-            where: jest.fn(() => ({
-              whereNotNull: jest.fn(() => ({ whereIn: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'parent-1' }]) })) })),
-            })),
-          };
-        }
-        throw new Error(`unexpected table ${table}`);
-      }));
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      const result = await withCustomerDeletionGate('cust-1', async () => { order.push('deletion-commits'); return 'deleted'; });
-      expect(result).toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      // The deletion write runs ONLY inside the gate's callback — never
-      // before it is acquired, never after it releases.
-      expect(order).toEqual(['gate-acquired', 'deletion-commits', 'gate-released']);
-    });
-
-    // Codex #4971 r17 P2 — finding 2: every renewable parent term is taken
-    // on ONE withParentDecisionLock call (its own alsoTermIds), sorted —
-    // never one nested withParentDecisionLock call per parent. The old
-    // `reduceRight` chain opened one raw lock session (capped at 8) PER
-    // PARENT, all held open at once by the outer calls waiting on their
-    // inner ones, so a customer with more renewable parents than the cap
-    // deterministically exhausted it; a single call with alsoTermIds takes
-    // them all on the ONE session withParentDecisionLock already opens.
-    test('more than one renewable parent term takes all of them on a SINGLE withParentDecisionLock call, sorted', async () => {
-      mockCommon();
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
-      jest.doMock('../services/annual-prepay-renewals', () => ({
-        ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
-      }));
-      jest.doMock('../models/db', () => jest.fn((table) => {
-        if (table === 'annual_prepay_terms') {
-          return {
-            where: jest.fn(() => ({
-              whereNotNull: jest.fn(() => ({
-                whereIn: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'parent-b' }, { id: 'parent-a' }]) })),
-              })),
-            })),
-          };
-        }
-        throw new Error(`unexpected table ${table}`);
-      }));
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      expect(withParentDecisionLock).toHaveBeenCalledWith('parent-a', expect.any(Function), { alsoTermIds: ['parent-b'] });
-    });
-
-    // Codex #4971 r17 P2 — finding 2 regression: the scenario that
-    // deterministically failed before this fix — more renewable parents
-    // than PARENT_DECISION_LOCK_SESSIONS' own 8-session cap. Still exactly
-    // ONE withParentDecisionLock call (one raw session), never nine.
-    test('nine renewable parent terms (past the 8-session raw-connection cap) still take a SINGLE withParentDecisionLock call', async () => {
-      mockCommon();
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
-      jest.doMock('../services/annual-prepay-renewals', () => ({
-        ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
-      }));
-      const nineParents = Array.from({ length: 9 }, (_, i) => ({ id: `parent-${i}` }));
-      jest.doMock('../models/db', () => jest.fn((table) => {
-        if (table === 'annual_prepay_terms') {
-          return {
-            where: jest.fn(() => ({
-              whereNotNull: jest.fn(() => ({
-                whereIn: jest.fn(() => ({ select: jest.fn(async () => nineParents) })),
-              })),
-            })),
-          };
-        }
-        throw new Error(`unexpected table ${table}`);
-      }));
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      const [, , options] = withParentDecisionLock.mock.calls[0];
-      expect(options.alsoTermIds).toHaveLength(8);
-    });
-
-    // Codex #4971 r20 P1 — finding 3: a staff-recorded 'renew' decision
-    // moves the PARENT to 'renewed' (no longer in RENEWABLE_STATUSES) while
-    // its successor still sits payment_pending, unbilled/unpaid. The parents
-    // query alone found nothing for that pair, so the gate took NOTHING —
-    // yet every renewal action on that successor (withRenewalGate) keys on
-    // exactly {parent, successor}. The gate now also keys on every
-    // payment_pending renewal successor and its parent, whatever the
-    // parent's status. The two queries share one chain shape and are told
-    // apart by their status whereIn.
-    function deletionGateDb({ parents = [], successors = [] }) {
-      const whereInCalls = [];
-      return {
-        whereInCalls,
-        db: jest.fn((table) => {
-          if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
-          return {
-            where: jest.fn((scope) => {
-              // Run the scoping callback against a recorder so the customer
-              // ids each query is keyed on can be asserted.
-              if (typeof scope === 'function') {
-                const recorder = {
-                  whereIn: jest.fn(function whereIn(column, values) { whereInCalls.push([column, values]); return this; }),
-                  whereNotNull: jest.fn(function whereNotNull() { return this; }),
-                };
-                scope.call(recorder);
-              }
-              return {
-                whereNotNull: jest.fn(() => ({
-                  whereIn: jest.fn((column, statuses) => ({
-                    select: jest.fn(async () => (statuses.includes('payment_pending') ? successors : parents)),
-                  })),
-                })),
-              };
-            }),
-          };
-        }),
-      };
+    function deletionDb() {
+      const trx = Object.assign(jest.fn(), { isTrx: true });
+      const db = Object.assign(jest.fn(), { transaction: jest.fn(async (cb) => cb(trx)) });
+      return { db, trx };
     }
 
-    test('Codex #4971 r20 P1 (finding 3): a payment_pending renewal successor of a staff-RENEWED parent takes BOTH keys — the pair withRenewalGate holds', async () => {
+    test('no customer ids at all — fn(trx) runs in the transaction, no gate taken', async () => {
       mockCommon();
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
+      const { db, trx } = deletionDb();
+      jest.doMock('../models/db', () => db);
+      const acquireTermiteGateAtEntry = jest.fn(async () => []);
       jest.doMock('../services/annual-prepay-renewals', () => ({
         ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
+        acquireTermiteGateAtEntry,
       }));
-      // The parent is 'renewed' — the renewable-parents query misses it —
-      // but its unpaid successor still names it.
-      const { db } = deletionGateDb({ parents: [], successors: [{ id: 'succ-1', renewed_from_term_id: 'parent-1' }] });
-      jest.doMock('../models/db', () => db);
       const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      expect(withParentDecisionLock).toHaveBeenCalledWith('parent-1', expect.any(Function), { alsoTermIds: ['succ-1'] });
+      const fn = jest.fn(async (conn) => (conn === trx ? 'deleted' : 'wrong-connection'));
+      await expect(withCustomerDeletionGate([], fn)).resolves.toBe('deleted');
+      await expect(withCustomerDeletionGate(null, fn)).resolves.toBe('deleted');
+      expect(db.transaction).toHaveBeenCalledTimes(2);
+      expect(acquireTermiteGateAtEntry).not.toHaveBeenCalled();
     });
 
-    test('Codex #4971 r20 P1 (finding 3): renewable parents and pending successors are unioned onto ONE call, no duplicate keys', async () => {
+    test('takes every customer\'s termite keys on the deletion transaction BEFORE fn runs — and fn writes on that same transaction', async () => {
       mockCommon();
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
-      jest.doMock('../services/annual-prepay-renewals', () => ({
-        ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
-      }));
-      // parent-1 is still renewal_pending AND already has an unpaid
-      // successor — it shows up in both queries and must be keyed once.
-      const { db } = deletionGateDb({
-        parents: [{ id: 'parent-1' }, { id: 'parent-0' }],
-        successors: [{ id: 'succ-1', renewed_from_term_id: 'parent-1' }],
+      const { db, trx } = deletionDb();
+      jest.doMock('../models/db', () => db);
+      const order = [];
+      const acquireTermiteGateAtEntry = jest.fn(async (conn, inputs) => {
+        expect(conn).toBe(trx);
+        order.push(['gate', inputs]);
+        return ['parent-1', 'succ-1'];
       });
-      jest.doMock('../models/db', () => db);
-      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
-      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      expect(withParentDecisionLock).toHaveBeenCalledWith('parent-0', expect.any(Function), { alsoTermIds: ['parent-1', 'succ-1'] });
-    });
-
-    // Codex #4971 r20 P2 — finding 4: auth.js's self-service DELETE
-    // /account affects every profile on the account. Nine profiles used to
-    // mean nine NESTED withCustomerDeletionGate calls (one raw lock session
-    // each, all held open at once — the 8-session cap failed the 9th). The
-    // array form keys every profile's terms on ONE withParentDecisionLock
-    // call, and both queries are scoped to ALL the ids at once.
-    test('Codex #4971 r20 P2 (finding 4): nine customers (past the 8-session cap) take a SINGLE withParentDecisionLock call, both queries keyed on every id', async () => {
-      mockCommon();
-      const withParentDecisionLock = jest.fn(async (termId, innerFn) => innerFn());
       jest.doMock('../services/annual-prepay-renewals', () => ({
         ...jest.requireActual('../services/annual-prepay-renewals'),
-        withParentDecisionLock,
+        acquireTermiteGateAtEntry,
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      const result = await withCustomerDeletionGate('cust-1', async (conn) => {
+        expect(conn).toBe(trx);
+        order.push(['deletion-write']);
+        return 'deleted';
+      });
+      expect(result).toBe('deleted');
+      expect(order).toEqual([['gate', { customerIds: ['cust-1'] }], ['deletion-write']]);
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    // Codex #4971 r20 P2 (finding 4): DELETE /account's nine profiles — ONE
+    // transaction, one gate call keyed on every id, duplicates and blanks
+    // collapsed. Nothing here can exhaust a session cap.
+    test('nine customer ids (past the old 8-session cap) are ONE gate call on ONE transaction, deduped', async () => {
+      mockCommon();
+      const { db } = deletionDb();
+      jest.doMock('../models/db', () => db);
+      const acquireTermiteGateAtEntry = jest.fn(async () => []);
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        acquireTermiteGateAtEntry,
       }));
       const ids = Array.from({ length: 9 }, (_, i) => `cust-${i}`);
-      const { db, whereInCalls } = deletionGateDb({
-        parents: ids.map((id, i) => ({ id: `parent-${i}` })),
-        successors: [{ id: 'succ-8', renewed_from_term_id: 'parent-8' }],
-      });
-      jest.doMock('../models/db', () => db);
-      const { withCustomerDeletionGateForCustomers } = require('../services/termite-annual-renewal-charge');
-      // Duplicates and blanks collapse — one key set, one call.
-      await expect(withCustomerDeletionGateForCustomers([...ids, 'cust-0', null], async () => 'deleted')).resolves.toBe('deleted');
-      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
-      const [firstKey, , options] = withParentDecisionLock.mock.calls[0];
-      expect([firstKey, ...options.alsoTermIds]).toHaveLength(10);
-      expect([firstKey, ...options.alsoTermIds]).toEqual(expect.arrayContaining(['parent-8', 'succ-8']));
-      // Both the renewable-parents query and the pending-successors query
-      // were keyed on every affected customer id.
-      const customerScopes = whereInCalls.filter(([column]) => column === 'customer_id');
-      expect(customerScopes).toHaveLength(2);
-      for (const [, values] of customerScopes) expect(values).toEqual(ids);
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      await expect(withCustomerDeletionGate([...ids, 'cust-0', null, undefined], async () => 'deleted')).resolves.toBe('deleted');
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(acquireTermiteGateAtEntry).toHaveBeenCalledTimes(1);
+      expect(acquireTermiteGateAtEntry.mock.calls[0][1]).toEqual({ customerIds: ids });
     });
 
-    test('Codex #4971 r20 P2 (finding 4): an empty id list runs fn directly — no query, no gate', async () => {
+    // Codex #4971 r21 P1: a gate that cannot be taken (a renewal action
+    // holding it past lock_timeout) aborts the deletion — fn never runs, the
+    // typed error reaches the route (which answers 409).
+    test('a gate that times out aborts before any deletion write, with the typed error', async () => {
       mockCommon();
-      const dbSpy = jest.fn();
-      jest.doMock('../models/db', () => dbSpy);
-      const { withCustomerDeletionGateForCustomers } = require('../services/termite-annual-renewal-charge');
-      await expect(withCustomerDeletionGateForCustomers([], async () => 'deleted')).resolves.toBe('deleted');
-      expect(dbSpy).not.toHaveBeenCalled();
+      const { db } = deletionDb();
+      jest.doMock('../models/db', () => db);
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        acquireTermiteGateAtEntry: jest.fn(async () => {
+          throw Object.assign(new Error('could not acquire the parent-decision lock'), { code: 'PARENT_DECISION_LOCK_TIMEOUT' });
+        }),
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      const fn = jest.fn(async () => 'deleted');
+      await expect(withCustomerDeletionGate('cust-1', fn)).rejects.toMatchObject({ code: 'PARENT_DECISION_LOCK_TIMEOUT' });
+      expect(fn).not.toHaveBeenCalled();
     });
   });
 

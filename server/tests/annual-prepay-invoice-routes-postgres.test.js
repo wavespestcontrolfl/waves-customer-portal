@@ -638,4 +638,38 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: movedEnd })).status).toBe(200);
     expect(await stampOf()).toEqual(stamped);
   });
+
+  // Codex #4971 r15 P1 / r21 P1: withCustomerDeletionGate (the account
+  // deletion fence, termite-annual-renewal-charge.js) takes the customer's
+  // termite term keys as TRANSACTION-level advisory locks on the deletion's
+  // own transaction — the same key a renewal action's session lock holds
+  // through its provider handoff — and runs the deletion write on that same
+  // connection. Proven on real Postgres: a separate session holding the
+  // customer's term key makes the gated write WAIT for its release.
+  test('withCustomerDeletionGate waits on a held termite term key, then runs its write on the gate transaction', async () => {
+    const { customerId, term } = await markedPaidPrepay();
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ annual_plan_version: 'v3' });
+
+    const order = [];
+    const holder = database.transaction(async (holderTrx) => {
+      await holderTrx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['annual-prepay-parent-decision', String(term.id)],
+      );
+      order.push('holder-has-gate');
+      await new Promise((resolve) => { setTimeout(resolve, 400); });
+      order.push('holder-releasing');
+    });
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+
+    const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    const gated = withCustomerDeletionGate(customerId, async (conn) => {
+      order.push('deletion-write');
+      return conn('customers').where({ id: customerId }).whereNull('deleted_at').update({ deleted_at: new Date() });
+    });
+    const [deleted] = await Promise.all([gated, holder]);
+    expect(deleted).toBe(1);
+    expect(order).toEqual(['holder-has-gate', 'holder-releasing', 'deletion-write']);
+    expect((await trx('customers').where({ id: customerId }).first('deleted_at')).deleted_at).not.toBeNull();
+  }, 20000);
 });

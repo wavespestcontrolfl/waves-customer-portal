@@ -519,6 +519,35 @@ function whereAttemptSubmitted(attempts) {
   });
 }
 
+// SQL form of "the customer was PRESENTED with the charge" — the stricter
+// twin of whereAttemptSubmitted, read by the grace-lapse scan
+// (processGraceLapses) and renewalWasPresented. Codex #4971 r21 P1: the
+// submission marker (submitted_at) is committed immediately BEFORE the
+// Stripe call (stripe.js commitInvoiceSavedCardChargeSubmission — the
+// fail-closed boundary that makes "money may be in motion" conservative),
+// so a process death between that commit and the SDK call leaves
+// submitted_at set although no request ever reached Stripe: recovery
+// (leg 7d) rightly records that shape as ambiguous and bells staff only —
+// no pay link, no notice — so the customer has seen NOTHING, and lapsing
+// coverage / requesting station retrieval on it is wrong. Presentation
+// therefore needs PROVIDER-derived evidence: a PaymentIntent id on the
+// attempt (stripe.js stamps it from the create call's result or its error,
+// and the webhook path keys it by idempotency_key), which only exists once
+// Stripe actually processed the request. submitted_at alone keeps its
+// "may have reached Stripe" meaning everywhere else (7b/7d ownership,
+// the withdrawal / void guards) — that direction must stay conservative.
+// A submitted-only ambiguous attempt is thus held out of the lapse scan
+// until staff reconcile it in Stripe (the ambiguous bell already asks for
+// exactly that): a PI turns up → presented; none → the attempt resolves
+// as never reached and the pay-link fallback delivers.
+function whereAttemptPresented(attempts) {
+  // Same chain shape as whereAttemptSubmitted (where → callback), so every
+  // query-builder stub built for that predicate answers this one too.
+  return attempts.where(function providerEvidence() {
+    this.whereNotNull('a.stripe_payment_intent_id');
+  });
+}
+
 // Kept for its callers and tests: the parent's year is still paid (settled,
 // above). Vacuously true with no linked invoice at all (a legacy manual
 // term — historically covered, matching coveredTermsAsOf's carve-out).
@@ -1218,7 +1247,7 @@ async function renewalWasPresented(conn, successor) {
   const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
   if (invoice.delivered) return true;
   if (await chargeFollowThroughOwed(conn, successor)) return false;
-  const reached = await whereAttemptSubmitted(
+  const reached = await whereAttemptPresented(
     conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
   ).first('a.id');
   return Boolean(reached);
@@ -1313,113 +1342,43 @@ function assertRenewalLockAlive() {
   if (typeof mod.assertParentDecisionLockAlive === 'function') mod.assertParentDecisionLockAlive();
 }
 
-// Codex #4971 r15 P1, widened r16 P1 (finding 4): EVERY code path that
-// soft-deletes or archives a customer (routes/auth.js self-service DELETE
-// /account, admin-customers.js archive) must wait on this SAME gate before
-// its deleted_at write may commit. Without it, deleted_at can commit AFTER
-// a pay-link send's own in-gate eligibility read (payLinkVerdict, at the
-// top of withPayLinkClearance) but BEFORE that same send's provider handoff
-// — both of which run inside withRenewalGate, but nothing stops an
-// unrelated writer from ignoring an advisory lock it never takes. Held
-// here, the deletion literally cannot commit until any in-flight renewal
-// action (send, charge, withdrawal, MINT) for this customer's terms has
-// released the gate — and once held for deletion, no such action can start
-// until the deletion itself releases it.
-//
-// r16 P1: this used to key on the customer's EXISTING payment_pending
-// successors only — a customer with no successor minted yet (its parent
-// term still 'active', not yet due, or due but not yet ticked) took NO
-// lock at all, so a mint racing in in that exact gap (mintRenewalSuccessor)
-// was never fenced against the deletion. Keys on every one of the
-// customer's termite PARENT-shaped terms instead — any annual_prepay_terms
-// row still in a RENEWABLE status (a not-yet-renewed original, OR the
-// parent of an existing live successor: it stays 'active'/'renewal_pending'
-// until its OWN renewal decision is recorded, which never happens before
-// the successor itself settles or lapses) — the SAME withParentDecisionLock
-// key mintRenewalSuccessor now also takes before it ever reads the
-// customer's liveness (see its own comment). Locking the parent id alone
-// mutually excludes against any renewal action on its successor too: every
-// such action's own withRenewalGate/acquireTermiteGateAtEntry call takes
-// this SAME parent key alongside the successor's, and Postgres advisory
-// locks contend on any one shared key regardless of what else is held with
-// it. In id order (sorted defensively so a customer with more than one
-// in-flight parent can't cross-deadlock two concurrent deletion attempts).
-// No renewable parent → fn() runs directly, no lock taken.
-async function withCustomerDeletionGate(customerId, fn) {
-  return withCustomerDeletionGateForCustomers([customerId], fn);
-}
-
-// Codex #4971 round-20 P2 (finding 4): the array form. auth.js's
-// self-service DELETE /account can affect several profiles (a merged
-// account's linked customers) in one request — nine profiles used to mean
-// nine NESTED withCustomerDeletionGate calls (auth.js's own reduceRight),
-// each opening its own raw lock session against the shared
-// PARENT_DECISION_LOCK_SESSIONS cap (8), all held open at once by the outer
-// calls waiting on their inner ones: a 9th profile deterministically
-// exhausted the cap. Collect every key across every customer id first, then
-// take them ALL, sorted, in ONE withParentDecisionLock call — the same
-// "one session, every key via alsoTermIds" fix r17 P2 already applied to
-// this function's own per-parent loop. admin-customers.js's single-id
-// DELETE /:id still calls this with a one-element array.
-async function withCustomerDeletionGateForCustomers(customerIds, fn) {
-  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
-  if (!ids.length) return fn();
-  // Both queries below keep the SAME top-level chain shape (where →
-  // whereNotNull → whereIn → select, matching the pre-existing single-id
-  // query) — any customer-scoping or extra predicate is folded into the
-  // first `.where(callback)`, so a `db('annual_prepay_terms')` mock/stub
-  // built for the original single-query shape (see this function's own
-  // unit tests) still resolves both calls correctly.
-  const parents = await db('annual_prepay_terms')
-    .where(function scopeCustomers() { this.whereIn('customer_id', ids); })
-    .whereNotNull('annual_plan_version')
-    .whereIn('status', RENEWABLE_STATUSES)
-    .select('id');
-  // Codex #4971 r20 P1 (finding 3): a staff-recorded 'renew' decision moves
-  // the PARENT to 'renewed' (renewal_decision 'renew') while its successor
-  // can still sit payment_pending, unbilled/unpaid — a status no longer in
-  // RENEWABLE_STATUSES, so the parents query above misses that pair
-  // entirely and this gate then takes NOTHING for it, even though every
-  // renewal action on the successor (withRenewalGate: {parent.id,
-  // successor.id}) still keys on exactly this parent. The full lock set is
-  // therefore: every renewable termite parent of these customers (above) ∪
-  // every payment_pending renewal successor of theirs (renewed_from_term_id
-  // NOT NULL — a plain, non-renewal annual-prepay term never matches) ∪
-  // those successors' own parents, whatever status the parent is currently
-  // in — the SAME key pair withRenewalGate holds for any in-flight renewal
-  // action on that successor.
-  const successors = await db('annual_prepay_terms')
-    .where(function scopeCustomers() { this.whereIn('customer_id', ids).whereNotNull('renewed_from_term_id'); })
-    .whereNotNull('annual_plan_version')
-    .whereIn('status', [PAYMENT_PENDING_STATUS])
-    .select('id', 'renewed_from_term_id');
-  // Array.isArray, not a truthy/length check alone (r15's own parents query
-  // kept the equivalent `parents?.length` guard) — a query-builder stub in
-  // an existing unit test resolves a bare `.select()` chain to the builder
-  // object itself rather than an array/thenable, and that object must read
-  // as "no rows" here exactly like it always has, never throw on `.map`.
-  const keys = new Set();
-  for (const parent of Array.isArray(parents) ? parents : []) keys.add(String(parent.id));
-  for (const successor of Array.isArray(successors) ? successors : []) {
-    keys.add(String(successor.id));
-    if (successor.renewed_from_term_id) keys.add(String(successor.renewed_from_term_id));
-  }
-  if (!keys.size) return fn();
-  // Sorted in JS, not the query (a plain array sort — no ORDER BY needed
-  // for a handful of rows, and it keeps this callable against a query
-  // builder stub that supports where/whereNotNull/whereIn/select but not
-  // orderBy).
-  //
-  // Codex #4971 r17 P2: every key is taken on ONE session via
-  // withParentDecisionLock's own alsoTermIds — never one nested
-  // withParentDecisionLock call per key. Nesting them (the old
-  // `reduceRight` chain) opened one raw lock session (PARENT_DECISION_LOCK_
-  // SESSIONS, capped at 8) PER KEY, all held open at once by the outer
-  // calls waiting on their inner ones. Passing every id through
-  // alsoTermIds takes them all, sorted, on the single session
-  // withParentDecisionLock already opens for that call.
-  const sorted = [...keys].sort();
-  return require('./annual-prepay-renewals').withParentDecisionLock(sorted[0], fn, { alsoTermIds: sorted.slice(1) });
+// Account deletion's fence against a live renewal action (Codex #4971 r15
+// P1; restructured r21). Both deleted_at writers (auth.js DELETE /account,
+// admin-customers.js archive) run their deletion INSIDE this helper's
+// transaction: every termite term of the customer(s) — parents, successors,
+// whatever status (termiteGateKeys' customer arm) — is locked with
+// pg_advisory_xact_lock on that same transaction first
+// (acquireTermiteGateAtEntry: the SAME key space, sorted the same way, as the
+// session lock every renewal action — send, charge, withdrawal, mint — holds
+// through its provider handoff via withRenewalGate / withParentDecisionLock),
+// and fn(trx) then writes deleted_at on that same connection. So the
+// deletion cannot commit while any renewal action for these terms holds the
+// gate, and no such action can start until the deletion commits — the r15
+// property — with none of the raw-session machinery the old shape needed:
+//   - r21 P1 / r19: a transaction-level lock cannot be "lost" while its
+//     write proceeds. If the connection drops, the transaction — and the
+//     deletion write with it — is gone too; there is no separate lock
+//     session to keep alive and no liveness check to forget at the write
+//     boundary.
+//   - r17 P2 / r20 P2: no per-parent or per-profile raw session counted
+//     against PARENT_DECISION_LOCK_SESSIONS' cap — the keys are taken on the
+//     deletion's own pooled connection, however many there are.
+//   - r16 P1 / r20 P1 (finding 3): keyed on EVERY termite term of the
+//     customer, not on a status-filtered subset (a not-yet-minted successor's
+//     parent, a staff-renewed parent with an unpaid successor — all of them),
+//     so no status transition can slip a pair out of the fence.
+// A gate held by a renewal action makes this wait up to lock_timeout
+// (PARENT_DECISION_LOCK_TIMEOUT_MS) and then throw with code
+// PARENT_DECISION_LOCK_TIMEOUT, which both routes answer with 409. Ids
+// already held by this async tree's own withParentDecisionLock are skipped
+// (re-entrant). No customer ids at all → fn(trx) still runs in the
+// transaction, nothing locked.
+async function withCustomerDeletionGate(customerIds, fn) {
+  const ids = [...new Set((Array.isArray(customerIds) ? customerIds : [customerIds]).filter(Boolean).map(String))];
+  return db.transaction(async (trx) => {
+    if (ids.length) await require('./annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { customerIds: ids });
+    return fn(trx);
+  });
 }
 
 async function withdrawSuccessorUnderGate(original, label, conn) {
@@ -2897,8 +2856,10 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
             .where(function followThroughNotOwed() {
               this.whereNull('t.renewal_charge_failure_kind').orWhereNotNull('t.renewal_charge_failure_handled_at');
             })
-            .whereExists(function reachedStripe() {
-              whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
+            // Codex #4971 r21 P1: provider evidence (a PaymentIntent id),
+            // not the pre-call submission marker — see whereAttemptPresented.
+            .whereExists(function presentedByStripe() {
+              whereAttemptPresented(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
             });
         })
           .orWhere(function invoiceDelivered() { whereInvoiceDelivered(this, 'i'); });
@@ -4106,7 +4067,6 @@ module.exports = {
   withRenewalSendClearance,
   withRenewalGate,
   withCustomerDeletionGate,
-  withCustomerDeletionGateForCustomers,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,

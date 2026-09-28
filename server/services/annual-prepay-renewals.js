@@ -2203,7 +2203,16 @@ function invoiceTermStatus(invoice) {
   if (!invoice) return PAYMENT_PENDING_STATUS;
   const status = String(invoice.status || '').toLowerCase();
   if (INVOICE_CANCELLED_STATUSES.has(status)) return 'cancelled';
-  if (status === 'paid' || invoice.paid_at) return 'active';
+  // Codex #4971 r21 P1: a PREPAY invoice settled entirely by auto-applied
+  // account credit is 'prepaid' with NO paid_at (stripe.js's credit-coverage
+  // seam — chargeInvoiceWithSavedCard returns covered_by_credit without a
+  // card charge and calls syncTermForInvoicePayment with that row). That
+  // credit was CONSUMED for this term's year, so it is money collected —
+  // the same rule the visit-invoice direction (paidForVisit / visitCollected)
+  // already applied — and the term activates. Only a term's own prepay
+  // invoice reaches this function; the coverage-settled 'prepaid' a visit
+  // invoice carries under a term is never a prepay_invoice_id.
+  if (status === 'paid' || status === 'prepaid' || invoice.paid_at) return 'active';
   return PAYMENT_PENDING_STATUS;
 }
 
@@ -4710,11 +4719,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   //     slice becomes the visit's payment again (matching the never-billed
   //     branch). Without this the customer keeps the credit AND the refund.
   // The account-credit seam resolves a fully credit-covered visit invoice as
-  // 'prepaid' with NO paid_at — invoiceTermStatus maps that to payment_pending,
-  // but consumed account credit IS money collected for the visit (the same rule
-  // reconcilePendingWindowCompletions applies via paidForVisit), so it takes
-  // the PAID direction here. Coverage-settled 'prepaid' invoices are harmless
-  // re-entries: the reconcile skips rows carrying a covered-term marker.
+  // 'prepaid' with NO paid_at — consumed account credit IS money collected
+  // for the visit (the same rule reconcilePendingWindowCompletions applies
+  // via paidForVisit, and, since Codex #4971 r21, invoiceTermStatus itself),
+  // so it takes the PAID direction here. Coverage-settled 'prepaid' invoices
+  // are harmless re-entries: the reconcile skips rows carrying a
+  // covered-term marker.
   const visitCollected = nextStatus === 'active'
     || String(invoice.status || '').toLowerCase() === 'prepaid';
   if (!terms.length && (visitCollected || nextStatus === 'cancelled')) {
@@ -8993,7 +9003,10 @@ async function acquireParentDecisionXactLock(trx, termId) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
   } catch (err) {
     if (err && err.code === '55P03') {
-      throw new Error(`could not acquire the parent-decision lock for term ${termId} within ${PARENT_DECISION_LOCK_TIMEOUT_MS}ms — a decision or charge is already in progress for this term`);
+      const timeout = new Error(`could not acquire the parent-decision lock for term ${termId} within ${PARENT_DECISION_LOCK_TIMEOUT_MS}ms — a decision or charge is already in progress for this term`);
+      // Typed so a route can answer 409 (the deletion gate, Codex #4971 r21).
+      timeout.code = 'PARENT_DECISION_LOCK_TIMEOUT';
+      throw timeout;
     }
     throw err;
   }

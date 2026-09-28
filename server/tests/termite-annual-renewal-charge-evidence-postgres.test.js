@@ -347,6 +347,10 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       Renewals2.withParentDecisionLock = (_termId, fn) => fn();
       try {
         const bare = await claimedDraftSuccessor({ status: 'failed' }); // released pre-submit claim
+        // Codex #4971 r21 P1: submitted_at alone is the pre-call crash
+        // shape (the marker commits BEFORE the Stripe call) — no longer
+        // presentation either. Only provider evidence (a PaymentIntent id)
+        // or a delivered invoice lets the lapse run.
         const submitted = await claimedDraftSuccessor({ status: 'failed', submitted_at: new Date() });
         const withIntent = await claimedDraftSuccessor({ status: 'ambiguous', stripe_payment_intent_id: 'pi_sent' });
 
@@ -354,9 +358,10 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
         await Charge._private.processGraceLapses({ conn: db, limit: 50, counts });
 
         const started = await db('annual_prepay_terms').whereNotNull('renewal_lapse_started_at').pluck('id');
-        expect(started.sort()).toEqual([submitted.id, withIntent.id].sort());
+        expect(started).toEqual([withIntent.id]);
         expect(started).not.toContain(bare.id);
-        expect(counts.graceScanned).toBe(2);
+        expect(started).not.toContain(submitted.id);
+        expect(counts.graceScanned).toBe(1);
       } finally {
         Renewals2.withParentDecisionLock = originalLock;
       }
@@ -516,11 +521,16 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       }
     });
 
-    test('renewalWasPresented (the retire guard) reads the SAME submission evidence', async () => {
+    test('renewalWasPresented (the retire guard) reads the SAME presentation evidence as the lapse scan', async () => {
       const bare = await claimedDraftSuccessor({ status: 'failed' });
+      // Codex #4971 r21 P1: submitted_at alone (committed before the Stripe
+      // call) is not presentation — only a PaymentIntent id proves Stripe
+      // processed the request.
       const submitted = await claimedDraftSuccessor({ status: 'failed', submitted_at: new Date() });
+      const withIntent = await claimedDraftSuccessor({ status: 'failed', submitted_at: new Date(), stripe_payment_intent_id: 'pi_seen' });
       expect(await Charge._private.renewalWasPresented(db, bare)).toBe(false);
-      expect(await Charge._private.renewalWasPresented(db, submitted)).toBe(true);
+      expect(await Charge._private.renewalWasPresented(db, submitted)).toBe(false);
+      expect(await Charge._private.renewalWasPresented(db, withIntent)).toBe(true);
     });
   });
 
@@ -628,12 +638,13 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       Renewals2.withParentDecisionLock = (_termId, fn) => fn();
       try {
         // Past the grace deadline (term_start 34 days ago), undelivered draft,
-        // attempt genuinely submitted.
+        // attempt genuinely processed by Stripe (r21: a PaymentIntent id, not
+        // the pre-call submission marker alone, is what presentation reads).
         const make = async (fields) => {
           const parent = await insertParent();
           const invoice = await insertInvoice({ status: 'draft' });
           const successor = await insertSuccessor(parent, invoice, { renewal_charge_attempted_at: new Date(Date.now() - 86400000), ...fields });
-          await db('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id, status: 'failed', submitted_at: new Date() });
+          await db('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id, status: 'failed', submitted_at: new Date(), stripe_payment_intent_id: `pi_${invoice.id}` });
           return successor;
         };
         const pending = await make({ renewal_charge_failure_kind: 'outcome_pending' });
@@ -1368,6 +1379,48 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     test('never moved (NULL stamp): a still-authorizing parent dates no change at all, exactly as before', async () => {
       const { parent, successor } = await movedParentRenewal({ mintedAt: hoursAgo(2), movedAt: null, paidAt: hoursAgo(1) });
       await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(false);
+    });
+  });
+
+  // Codex #4971 r21 P1: presentation needs PROVIDER evidence. submitted_at is
+  // committed immediately before the Stripe call, so a crash in that gap
+  // leaves it set with no request ever made — recovery bells staff only and
+  // the customer has seen nothing. Such a row must never read as "presented"
+  // (which is what lets the grace lapse void coverage and request retrieval).
+  describe('r21: a submitted-only attempt (no PaymentIntent id) is not presentation', () => {
+    async function undeliveredRenewal(attempt) {
+      const parent = await insertParent();
+      const invoice = await insertInvoice({ status: 'sent', sent_at: null, sms_sent_at: null, email_sent_at: null });
+      const successor = await insertSuccessor(parent, invoice, { renewal_charge_attempted_at: new Date(Date.now() - 3600000) });
+      if (attempt) await db('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id, ...attempt });
+      return { successor: await db('annual_prepay_terms').where({ id: successor.id }).first(), invoice };
+    }
+
+    test('submitted_at alone (the pre-call crash shape, promoted to ambiguous): NOT presented', async () => {
+      const { successor } = await undeliveredRenewal({ status: 'ambiguous', submitted_at: new Date() });
+      await expect(Charge._private.renewalWasPresented(db, successor)).resolves.toBe(false);
+    });
+
+    test('a PaymentIntent id on the attempt (Stripe processed it): presented', async () => {
+      const { successor } = await undeliveredRenewal({ status: 'failed', submitted_at: new Date(), stripe_payment_intent_id: 'pi_r21_seen', resolved_at: new Date() });
+      await expect(Charge._private.renewalWasPresented(db, successor)).resolves.toBe(true);
+    });
+
+    test('a delivered invoice is presentation regardless of any attempt', async () => {
+      const { successor, invoice } = await undeliveredRenewal({ status: 'ambiguous', submitted_at: new Date() });
+      await db('invoices').where({ id: invoice.id }).update({ sent_at: new Date() });
+      await expect(Charge._private.renewalWasPresented(db, successor)).resolves.toBe(true);
+    });
+
+    test('the grace-lapse scan selects the PI-backed renewal past its deadline and never the submitted-only one', async () => {
+      const seen = await undeliveredRenewal({ status: 'failed', submitted_at: new Date(), stripe_payment_intent_id: 'pi_r21_lapse', resolved_at: new Date() });
+      const blind = await undeliveredRenewal({ status: 'ambiguous', submitted_at: new Date() });
+      const counts = { graceScanned: 0, graceLapsed: 0, graceReconciliationDeferred: 0, graceRetiredSettled: 0 };
+      await Charge._private.processGraceLapses({ conn: db, limit: 50, counts });
+      expect(counts.graceScanned).toBe(1);
+      const started = await db('annual_prepay_terms').whereNotNull('renewal_lapse_started_at').pluck('id');
+      expect(started).toEqual([seen.successor.id]);
+      expect(started).not.toContain(blind.successor.id);
     });
   });
 
