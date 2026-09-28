@@ -75,6 +75,10 @@ const { mergeEvents, pickSurvivor } = require('./event-dedup');
 //      now() would treat earlier-today as past and clobber that curation.
 // EXCLUDED.* is the proposed insert; events_raw.* is the existing row.
 const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidnight AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= :etMidnight';
+// A still-pending row whose feed moved it to a different ET day is a new
+// occurrence editorially too: re-open curation so an earlier policy drop
+// (e.g. "already featured this year") doesn't stick to next year's date.
+const REOPEN_CURATION_COND = `(${REVIVAL_COND}) OR (events_raw.admin_status = 'pending' AND (events_raw.start_at AT TIME ZONE 'America/New_York')::date IS DISTINCT FROM (EXCLUDED.start_at AT TIME ZONE 'America/New_York')::date)`;
 function revivalResetFields() {
   // ET-midnight-today as a bound timestamptz — identical to the sweep's
   // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
@@ -88,18 +92,18 @@ function revivalResetFields() {
     // again after its date moved back into the future). Safe for
     // approved rows: the curation candidate query also requires
     // admin_status='pending', so clearing the marker can't re-judge them.
-    curated_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
-    curation_note: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
+    curated_at: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
+    curation_note: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
     // The structured editorial assessment (2026-07-28 rubric) belongs to
     // the occurrence that was examined — a revived occurrence must start
     // clean, or a later missing/malformed reassessment would leave the
     // prior occurrence's score, codes, and evidence permanently attached.
-    editorial_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
-    score_breakdown: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
-    rejection_codes: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
-    audience_tags: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
-    novelty_type: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
-    editorial_evidence: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
+    editorial_score: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
+    score_breakdown: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
+    rejection_codes: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
+    audience_tags: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
+    novelty_type: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
+    editorial_evidence: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
     // Image handling (og:image backfill contract, event-image-backfill.js):
     // a feed that HAS an image always wins, but a feed null must not
     // clobber a backfilled value — EXCEPT on revival, where the old

@@ -35,7 +35,6 @@
  * this lane autonomous like the blog lane).
  */
 
-const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const {
@@ -82,17 +81,25 @@ const CLASSIFY_BATCH = 12;
 const CLASSIFY_MAX_TOKENS = 24000;
 // Per-batch wall-clock budget. At most CURATION_RUN_LIMIT/CLASSIFY_BATCH = 5
 // sequential batches per run; 10 minutes/batch (≈5 per leg once the fallback
-// reserve is split off — max effort on a 12-event batch needs it) keeps a
-// full run under 50 minutes, inside the events_curation lane's 1-hour hard_timeout
-// (agent-control/lane-policies.js LONG_BATCH). reserveFallbackBudget so a
+// reserve is split off — max effort on a 12-event batch needs it);
+// CURATION_RUN_BUDGET_MS below bounds the whole run. reserveFallbackBudget so a
 // slow/failed Opus leg still leaves the OpenAI fallback real time instead of
 // losing the whole share to the primary.
 const CLASSIFY_TIMEOUT_MS = 10 * 60 * 1000;
 const FORWARD_WINDOW_DAYS = 90;
 const NOTE_MAX = 200;
-// Rescore pass (deterministic, no model call — see runScoreRescore): bounded
-// generously since it's pure SQL + arithmetic, not an LLM call.
-const RESCORE_RUN_LIMIT = 1000;
+// Whole-run budget: the 7:00 AM ET newsletter autopilot plans from whatever
+// is approved by then, and a skipped week is not retried. The 6:15 run only
+// starts a classify batch when that batch's full CLASSIFY_TIMEOUT_MS still
+// fits, so it finishes by about 6:55. Rows it doesn't reach stay unexamined
+// for tomorrow's run.
+const CURATION_RUN_BUDGET_MS = 40 * 60 * 1000;
+
+// A classify batch may run for up to CLASSIFY_TIMEOUT_MS, so it only starts
+// when that whole allowance still fits inside the run budget.
+function batchFitsRunBudget(elapsedMs, runBudgetMs = CURATION_RUN_BUDGET_MS) {
+  return elapsedMs + CLASSIFY_TIMEOUT_MS <= runBudgetMs;
+}
 
 function curationEnabled() {
   return process.env.EVENT_AUTO_CURATION !== 'false';
@@ -100,10 +107,7 @@ function curationEnabled() {
 
 // Freshness statuses that hard-reject a row UNCONDITIONALLY, regardless of
 // when it was first examined or what the routine/first-of-year gate below
-// would otherwise say — shared by fresh curation AND the rescore pass (Codex
-// P1: the rescore path used to skip this gate entirely, so an operator flip
-// to needs_review/expired after the original assessment never blocked a
-// stale stored score from later auto-approving).
+// would otherwise say.
 //
 // 'stale_recurring' is deliberately NOT in this list (Codex P1, 2026-09-27,
 // second pass) — it used to be, and that was itself a bug: this constant is
@@ -122,8 +126,7 @@ function curationEnabled() {
 const CURATION_FRESHNESS_EXCLUSIONS = Object.freeze(['expired', 'needs_review']);
 
 /**
- * Hard gates shared by fresh curation's candidate query AND the deterministic
- * rescore pass's candidate query (Codex P1, 2026-09-27): not merged, has a
+ * Hard gates for curation's candidate query: not merged, has a
  * link, dated, normalized, not a hard-rejected freshness status, not an
  * unknown event type, and not routine-recurring (excludeRoutineRecurringFromQuery,
  * itself widened the same day to admit a genuine first-of-year occurrence).
@@ -187,12 +190,12 @@ function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
 }
 
 /**
- * The identity/history eligibility pipeline shared by fresh curation and the
- * rescore pass (Codex P1, 2026-09-27): filterRepeatedDateIdentities (routine/
- * first-of-year), filterPreviouslyFeaturedIdentities (cross-row feature
- * history), then isEligibleForFreshDigest — the SAME order and the SAME
- * functions used to decide what the digest itself will accept, so neither
- * pass can approve a row the digest would reject.
+ * The identity/history eligibility pipeline for curation:
+ * filterRepeatedDateIdentities (routine/first-of-year),
+ * filterPreviouslyFeaturedIdentities (cross-row feature history), then
+ * isEligibleForFreshDigest — the SAME order and the SAME functions used to
+ * decide what the digest itself will accept, so curation can't approve a row
+ * the digest would reject.
  */
 async function runCurationEligibilityPipeline(rows, { reference = new Date(), knex = db } = {}) {
   // One calendar-year identity pool for this batch, shared by both filters
@@ -401,38 +404,6 @@ function missingAssessmentFallbacks(batch, assessments) {
  * row in both branches — the proof diagnostics panel and the Event
  * Inbox read it.
  */
-/**
- * Fingerprint of the content the model actually assessed: the fields the
- * classify prompt shows plus the classification that gates eligibility.
- * Stored inside score_breakdown at curation time; the rescore pass compares
- * it with the row's current content. updated_at can't serve: daily
- * ingestion advances it on every re-pull even when nothing changed.
- */
-function contentFingerprint(row) {
-  const iso = (value) => {
-    const t = value ? new Date(value) : null;
-    return t && !Number.isNaN(t.getTime()) ? t.toISOString() : null;
-  };
-  const payload = [
-    row?.title ?? null, row?.description ?? null, iso(row?.start_at), iso(row?.end_at),
-    row?.venue_name ?? null, row?.city ?? null, row?.is_free ?? null, row?.family_friendly ?? null,
-    row?.price_text ?? null, row?.event_url ?? null, row?.event_type ?? null, row?.recurrence_type ?? null,
-  ];
-  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-}
-
-// Raw update value marking an operator's return-to-pending on the stored
-// assessment, so the deterministic rescore never re-approves it.
-function manualHoldScoreBreakdown(knex = db) {
-  return knex.raw(`CASE WHEN score_breakdown IS NULL THEN NULL ELSE score_breakdown || '{"manual_hold": true}'::jsonb END`);
-}
-
-function storedBreakdown(row) {
-  let breakdown = row?.score_breakdown;
-  if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = null; } }
-  return breakdown && typeof breakdown === 'object' && !Array.isArray(breakdown) ? breakdown : null;
-}
-
 async function applyDecision(event, rawAssessment, reference = new Date()) {
   // Missing AND structurally malformed assessments take the same
   // fail-closed path: examined, pending, and — critically — the
@@ -472,7 +443,7 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
   ).slice(0, NOTE_MAX);
   const assessmentFields = {
     editorial_score: decision.score,
-    score_breakdown: JSON.stringify({ ...decision.breakdown, content_fingerprint: contentFingerprint(event) }),
+    score_breakdown: JSON.stringify(decision.breakdown),
     rejection_codes: JSON.stringify(decision.rejectionCodes),
     audience_tags: JSON.stringify(decision.audienceTags),
     novelty_type: decision.noveltyType,
@@ -485,10 +456,10 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
   // The classify call can take up to CLASSIFY_TIMEOUT_MS (10 minutes);
   // ingestion (or an admin edit) can change this row's title/description/
   // start_at/event_url/recurrence_type underneath a candidate already
-  // fetched for classification, and an approved row never re-enters rescore
+  // fetched for classification, and an approved row is never re-examined
   // — so an approval (or even just stamping curated_at from this decision)
   // must be pinned to the EXACT version this assessment was computed from.
-  // Same date_trunc('milliseconds', …) comparison applyRescore uses: pg's
+  // date_trunc('milliseconds', …) because pg's
   // timestamptz is microsecond-precision, but node-pg reads it back as a
   // millisecond-precision JS Date, so a plain `=` never matches even the
   // unchanged row it was just read from.
@@ -521,291 +492,15 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
 }
 
 /**
- * Rescore candidates: upcoming (start_at in the future), still-pending,
- * already-curated (curated_at set) rows with a stored score_breakdown.
- *
- * Codex P1 (2026-09-27): this used to say "NOT filtered by freshness/
- * eligibility the way fetchCurationCandidates is — those hard gates already
- * ran when the row was first curated, and haven't changed since." That
- * assumption is false — an operator can flip freshness_status to
- * needs_review/expired, or a later merge can set merged_into, on a row that
- * keeps its curated_at and score_breakdown untouched. The query now shares
- * applyCurationHardGates with fresh curation, and runScoreRescore below runs
- * the SAME identity/eligibility pipeline (runCurationEligibilityPipeline)
- * before ever approving, so a row that is no longer eligible under CURRENT
- * rules can never ride a stale assessment to approval.
- */
-function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT, { sourceId = null } = {}) {
-  const query = db('events_raw as e')
-    .select(...CANDIDATE_COLUMNS, 'e.score_breakdown', 'e.rejection_codes', 'e.audience_tags',
-      'e.novelty_type', 'e.editorial_evidence', 'e.curation_note', 'e.curated_at')
-    .where('e.admin_status', 'pending')
-    .whereNotNull('e.curated_at')
-    .whereNotNull('e.score_breakdown')
-    .where('e.start_at', '>=', new Date());
-  // Optional scope (tests run against a shared database): one source only.
-  if (sourceId) query.where('e.source_id', sourceId);
-
-  return applyCurationHardGates(query)
-    .orderBy('e.start_at', 'asc')
-    .limit(limit);
-}
-
-/**
- * True when the row's content no longer matches what the model assessed —
- * or when that can't be proven (rows curated before content fingerprints
- * existed carry none). Either way the stored assessment can't be trusted
- * for an approval, so the caller returns the row to fresh curation. Codex
- * P1: a later re-pull that replaces the description with a cancellation
- * notice must never let a pre-cancellation stored score ride to approval.
- */
-function hasContentChangedSinceCuration(row) {
-  const stored = storedBreakdown(row)?.content_fingerprint;
-  return !stored || stored !== contentFingerprint(row);
-}
-
-/**
- * Send a rescore candidate back to fresh curation instead of ever rescoring
- * it from a STALE assessment: clears the stored assessment and curated_at so
- * the row re-enters buildCurationCandidateQuery's own pool (curated_at IS
- * NULL) for a real model re-examination. Guarded exactly like applyDecision's
- * fail-closed paths (admin_status='pending', merged_into IS NULL) so a
- * concurrent operator decision always wins.
- */
-async function revalidateStaleRescoreCandidate(row, note) {
-  // Pinned to the fetched version like applyRescore: a concurrent write (an
-  // operator's reset with its manual_hold, a fresh pull) leaves the row as-is.
-  await db('events_raw')
-    .where({ id: row.id, admin_status: 'pending' })
-    .whereNull('merged_into')
-    .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
-    .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at])
-    .update({
-      editorial_score: null,
-      score_breakdown: null,
-      rejection_codes: null,
-      audience_tags: null,
-      novelty_type: null,
-      editorial_evidence: null,
-      curated_at: null,
-      curation_note: note.slice(0, NOTE_MAX),
-      updated_at: db.fn.now(),
-    });
-}
-
-/**
- * Deterministic rescore of one already-curated row — NO model call. Rebuilds
- * the model's original structured assessment from what's already stored
- * (score_breakdown.factors / .penalty_flags / .family_status,
- * rejection_codes, audience_tags, novelty_type, editorial_evidence) and runs
- * it back through the same assessEvent() the initial curation used, so the
- * decision math (and any future scoring-rule change) never has two
- * implementations. Returns null when the stored breakdown is missing or
- * malformed (nothing to reconstruct from — left for a human, same as
- * curation's own missing/malformed path).
- */
-function rescoreCuratedEvent(row) {
-  let breakdown = row.score_breakdown;
-  if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = null; } }
-  if (!breakdown || typeof breakdown !== 'object' || Array.isArray(breakdown) || !breakdown.factors) return null;
-
-  const parseArray = (value) => {
-    let v = value;
-    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = []; } }
-    return Array.isArray(v) ? v : [];
-  };
-
-  const rawAssessment = {
-    scores: breakdown.factors,
-    penalty_flags: breakdown.penalty_flags,
-    rejection_codes: parseArray(row.rejection_codes),
-    audience_tags: parseArray(row.audience_tags),
-    novelty_type: row.novelty_type,
-    family_status: breakdown.family_status,
-    editorial_reason: row.curation_note,
-    evidence: parseArray(row.editorial_evidence),
-  };
-  if (malformedAssessmentReason(rawAssessment)) return null;
-  return assessEvent(row, rawAssessment);
-}
-
-/**
- * Persist one rescore decision. Guarded on admin_status='pending' like
- * applyDecision's approval branch (a concurrent operator decision always
- * wins) — but UNLIKE applyDecision, curated_at is never touched: the row was
- * already examined by the model, this only recomputes deterministic math
- * under whatever rules are live now. The score is written whether or not it
- * now clears the floor, so the Event Inbox never shows a score computed
- * under retired penalty rules.
- *
- * `canApprove` (Codex P1, 2026-09-27) is the caller's own current-eligibility
- * verdict (runScoreRescore's runCurationEligibilityPipeline + freshness
- * check) — decision.approve is ONLY the deterministic score math, so it can't
- * by itself know the row was later marked needs_review/expired or lost its
- * event_url. The approval UPDATE also re-checks the column-level hard gates
- * in its own WHERE, atomically, in case they changed between the SELECT
- * above and this write. The content fingerprint rides along unchanged in the
- * rewritten score_breakdown, so the next rescore pass still compares against
- * what the model actually assessed.
- *
- * Codex P1, 2026-09-27 (second pass): hasContentChangedSinceCuration in the
- * caller only inspects the batch's OWN fetch-time snapshot — it catches drift
- * that happened before this rescore run started, not a write that lands
- * DURING it (a long batch processes many rows; a concurrent ingestion
- * re-pull or admin edit can land on THIS row between the initial SELECT and
- * this UPDATE). The approval UPDATE is therefore made optimistic: its WHERE
- * also pins `updated_at` and `curated_at` to the exact values this decision
- * was computed from (`row`, the SELECT snapshot), so ANY concurrent write to
- * either column — not just one that happens to touch a gate column this
- * function already checks — makes it match 0 rows instead of approving from
- * math that may no longer describe the row.
- *
- * The comparison is via date_trunc('milliseconds', …), NOT plain `=` —
- * verified against real Postgres: pg's timestamptz has microsecond
- * precision, but node-postgres reads it back into a JS Date, which is
- * MILLISECOND precision. A plain `.where('updated_at', row.updated_at)`
- * therefore compares a millisecond-truncated value against the column's own
- * full microsecond value and NEVER matches — not even the unchanged row it
- * was just read from — which would silently zero out every rescore approval
- * forever. Truncating the column to the same millisecond precision before
- * comparing is what makes "unchanged" actually match while a genuine
- * concurrent write (which moves the value by more than a truncation
- * rounding) still does not.
- */
-async function applyRescore(row, decision, { canApprove = decision.approve } = {}) {
-  const note = (decision.editorialReason
-    || (decision.rejectionCodes.length
-      ? `Policy: ${decision.rejectionCodes.join(', ')}`
-      : `Scored ${decision.score}/100`)
-  ).slice(0, NOTE_MAX);
-  const assessmentFields = {
-    editorial_score: decision.score,
-    score_breakdown: JSON.stringify({
-      ...decision.breakdown,
-      content_fingerprint: storedBreakdown(row)?.content_fingerprint ?? null,
-      ...(storedBreakdown(row)?.manual_hold ? { manual_hold: true } : {}),
-    }),
-    curation_note: note,
-  };
-  // Every rescore write is pinned to the snapshot the decision came from; on
-  // a version mismatch the row is left untouched for the next run.
-  const unchangedSinceRead = () => db('events_raw')
-    .where({ id: row.id, admin_status: 'pending' })
-    .whereNull('merged_into')
-    .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
-    .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at]);
-  if (canApprove) {
-    const updated = await unchangedSinceRead()
-      .whereNotNull('event_url')
-      .whereNot('event_type', 'unknown')
-      .whereNotIn('freshness_status', CURATION_FRESHNESS_EXCLUSIONS)
-      .update({ ...assessmentFields, admin_status: 'approved', approved_via: 'auto_curation' });
-    if (updated) return 'approved';
-  }
-  const updated = await unchangedSinceRead().update(assessmentFields);
-  return updated ? (canApprove ? 'raced' : 'rescored') : 'skipped';
-}
-
-/**
- * Daily deterministic rescore (no model call, no cost): recomputes the
- * editorial score of every upcoming, still-pending, already-curated event
- * from its stored assessment under whatever penalty rules are LIVE NOW, and
- * auto-approves through the same guarded path as fresh curation when the
- * recomputed score clears the feature floor with zero rejection codes AND the
- * row is STILL eligible under the current rules (Codex P1, 2026-09-27):
- *   - a row whose content changed since it was assessed (ingestion re-pull,
- *     normalizer reclassification, or an admin edit — hasContentChangedSince-
- *     Curation) is never rescored from the stale assessment; it's sent back
- *     to fresh curation for a real re-examination instead.
- *   - a row that no longer clears the SAME eligibility gates fresh curation
- *     itself requires (runCurationEligibilityPipeline: routine/first-of-year,
- *     feature history, isEligibleForFreshDigest — e.g. an operator flipped
- *     freshness_status to needs_review/expired, or a merge landed) is left
- *     exactly as-is: its deterministic math is never recomputed into an
- *     approval it shouldn't have. An operator can still approve manually.
- *
- * Exists because curation examines each event ONCE (curated_at) — an event
- * penalized under a rule that later changes (e.g. the 2026-09-27
- * missing_price/unclear_age removal) would otherwise sit under-scored and
- * pending forever, never re-examined. Idempotent: re-running recomputes the
- * same deterministic value from the same stored factors every time, and an
- * approved row drops out of the admin_status='pending' candidate set on the
- * next run. Shares the EVENT_AUTO_CURATION kill switch with fresh curation —
- * both auto-approve through the same path.
- */
-async function runScoreRescore({ limit = RESCORE_RUN_LIMIT, sourceId = null } = {}) {
-  if (!curationEnabled()) {
-    return { disabled: true, candidates: 0, rescored: 0, approved: 0 };
-  }
-  const rows = await buildRescoreCandidateQuery(limit, { sourceId });
-  if (!rows.length) {
-    logger.info(`[event-curation] rescore: 0/0 candidates updated, 0 newly approved (feature floor ${featureScoreFloor()})`);
-    return {
-      candidates: 0, rescored: 0, approved: 0, revalidated: 0,
-    };
-  }
-
-  const reference = new Date();
-  let eligibleIds;
-  try {
-    const { candidates } = await runCurationEligibilityPipeline(rows, { reference });
-    eligibleIds = new Set(candidates.map((row) => String(row.id)));
-  } catch (err) {
-    // Fail closed: an eligibility-check failure must never fall back to
-    // approving from stale math unchecked. Leave every row exactly as-is —
-    // the next run retries.
-    logger.error(`[event-curation] rescore eligibility check failed: ${err.message}`);
-    return {
-      candidates: rows.length, rescored: 0, approved: 0, revalidated: 0,
-    };
-  }
-
-  let rescored = 0;
-  let approved = 0;
-  let revalidated = 0;
-  for (const row of rows) {
-    // An operator who put the row back to pending (manual_hold) decides it.
-    // A held row is never sent back to fresh curation (that would clear the
-    // hold and let the model re-approve it); its score may still refresh,
-    // but only while its content is unchanged, and it is never approved.
-    const held = Boolean(storedBreakdown(row)?.manual_hold);
-    const contentChanged = hasContentChangedSinceCuration(row);
-    if (held && contentChanged) continue;
-    if (contentChanged) {
-      await revalidateStaleRescoreCandidate(row, 'Returned to fresh curation: row content changed since it was last assessed');
-      revalidated += 1;
-      continue;
-    }
-    const decision = rescoreCuratedEvent(row);
-    if (!decision) continue;
-    const canApprove = decision.approve && eligibleIds.has(String(row.id)) && !held;
-    const outcome = await applyRescore(row, decision, { canApprove });
-    if (outcome === 'approved' || outcome === 'rescored' || outcome === 'raced') rescored += 1;
-    if (outcome === 'approved') approved += 1;
-  }
-  logger.info(`[event-curation] rescore: ${rescored}/${rows.length} candidates updated, ${approved} newly approved, ${revalidated} returned to fresh curation (feature floor ${featureScoreFloor()})`);
-  return {
-    candidates: rows.length, rescored, approved, revalidated,
-  };
-}
-
-/**
  * Cron entry point. Returns a summary for logging/tests.
  */
-async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
+async function runAutoCuration({ limit = CURATION_RUN_LIMIT, runBudgetMs = CURATION_RUN_BUDGET_MS } = {}) {
   if (!curationEnabled()) {
     logger.info('[event-curation] disabled via EVENT_AUTO_CURATION=false');
     return { disabled: true, examined: 0, approved: 0 };
   }
 
-  // Deterministic rescore of already-curated upcoming events runs first
-  // (same daily cron, no extra registration needed) — cheap (no model
-  // call), so it never risks the classify batches' token/time budget below.
-  const rescore = await runScoreRescore().catch((err) => {
-    logger.error(`[event-curation] rescore pass failed: ${err.message}`);
-    return { candidates: 0, rescored: 0, approved: 0 };
-  });
-
+  const runStartedAt = Date.now();
   const { candidates, policyDrops } = await fetchCurationCandidates(limit);
 
   // Stamp policy-dropped rows first so they leave the candidate window
@@ -830,7 +525,7 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
 
   if (!candidates.length) {
     return {
-      examined: 0, approved: 0, policyDropped: policyDrops.length, rescore,
+      examined: 0, approved: 0, policyDropped: policyDrops.length,
     };
   }
 
@@ -841,6 +536,10 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
   let examined = 0;
 
   for (let i = 0; i < candidates.length; i += CLASSIFY_BATCH) {
+    if (!batchFitsRunBudget(Date.now() - runStartedAt, runBudgetMs)) {
+      logger.warn(`[event-curation] run budget reached; ${candidates.length - i} candidates left for the next run`);
+      break;
+    }
     const batch = candidates.slice(i, i + CLASSIFY_BATCH);
     let assessments;
     try {
@@ -862,13 +561,12 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
 
   logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved}, policy-dropped ${policyDrops.length} (feature floor ${featureScoreFloor()})`);
   return {
-    examined, approved, candidates: candidates.length, policyDropped: policyDrops.length, rescore,
+    examined, approved, candidates: candidates.length, policyDropped: policyDrops.length,
   };
 }
 
 module.exports = {
   runAutoCuration,
-  runScoreRescore,
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
   CURATION_SCHEMA,
@@ -876,16 +574,11 @@ module.exports = {
   missingAssessmentFallbacks,
   curationEnabled,
   buildCurationCandidateQuery,
-  buildRescoreCandidateQuery,
   applyCurationHardGates,
   runCurationEligibilityPipeline,
-  hasContentChangedSinceCuration,
-  contentFingerprint,
   fetchCurationCandidates,
-  manualHoldScoreBreakdown,
-  revalidateStaleRescoreCandidate,
-  rescoreCuratedEvent,
-  applyRescore,
   applyDecision,
   CURATION_FRESHNESS_EXCLUSIONS,
+  CURATION_RUN_BUDGET_MS,
+  batchFitsRunBudget,
 };

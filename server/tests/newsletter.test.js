@@ -551,6 +551,15 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     expect(lower).toMatch(/else events_raw\.normalized_at end/);
   });
 
+  test('a pending row moved to a different ET day re-opens curation, but normalization stays revival-only', () => {
+    const f = revivalResetFields();
+    const curated = f.curated_at.toSQL().sql.toLowerCase();
+    expect(curated).toMatch(/events_raw\.admin_status = 'pending'/);
+    expect(curated).toMatch(/\(events_raw\.start_at at time zone 'america\/new_york'\)::date is distinct from \(excluded\.start_at at time zone 'america\/new_york'\)::date/);
+    expect(f.score_breakdown.toSQL().sql.toLowerCase()).toMatch(/is distinct from/);
+    expect(f.normalized_at.toSQL().sql.toLowerCase()).not.toMatch(/is distinct from/);
+  });
+
   test('re-queues via normalized_at + sets the explicit revival marker — never nulls the NOT NULL freshness_status', () => {
     const f = revivalResetFields();
     // freshness_status is NOT NULL in the DB, so the revival must not touch it

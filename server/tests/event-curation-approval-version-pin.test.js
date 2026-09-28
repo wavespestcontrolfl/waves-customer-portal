@@ -5,18 +5,16 @@
  * event_url/recurrence_type changed DURING the (up to 10-minute)
  * classify call — an ingestion re-pull, or an admin edit — could still
  * auto-approve (or just get curated_at stamped) from a decision computed
- * against the STALE content, and an approved row never re-enters rescore.
+ * against the STALE content, and an approved row is never re-examined.
  *
  * The fix pins both writes (the approval UPDATE, and the fallback
  * non-approving assessment write) to the exact `updated_at` the row carried
- * when it was fetched for classification, via the SAME
- * date_trunc('milliseconds', …) comparison applyRescore already uses. On a
+ * when it was fetched for classification, via a
+ * date_trunc('milliseconds', …) comparison. On a
  * version mismatch, the row is left exactly as-is (curated_at untouched) so
  * the next run re-classifies its CURRENT content.
  *
- * Mocked DB (no live Postgres in this environment) — isolates the write
- * path itself, mirroring event-curation-rescore-approval-write.test.js's
- * approach for applyRescore.
+ * Mocked DB — isolates the write path itself.
  */
 
 jest.mock('../models/db', () => jest.fn());
