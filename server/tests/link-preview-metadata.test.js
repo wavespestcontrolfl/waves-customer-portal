@@ -84,6 +84,19 @@ describe('route matching per customer link kind', () => {
     expect(matchLinkPreviewRoute('/report/' + '0'.repeat(32))).toBeNull();
   });
 
+  test('a lookup kind only matches a path the privacy headers also cover; tokens are never URL-decoded', () => {
+    // /recap/%61 + 31 a's decodes to a valid report token but slips the
+    // hex-only limiter and header checks, so it must not match at all.
+    expect(matchLinkPreviewRoute(`/recap/%61${'a'.repeat(31)}`)).toBeNull();
+    expect(matchLinkPreviewRoute(`/appointment/%61${'a'.repeat(63)}`)).toBeNull();
+    expect(matchLinkPreviewRoute(`/prep/%63${'c'.repeat(31)}`)).toBeNull();
+    expect(matchLinkPreviewRoute(`/reschedule/${'b'.repeat(63)}`)).toBeNull();
+    expect(matchLinkPreviewRoute(`/appointment/${'A'.repeat(64)}`)).toBeNull();
+    expect(matchLinkPreviewRoute('/report/project/jane_sample-0123456789ab')).toBeNull();
+    // token-free kinds read nothing, so an odd token still gets its card
+    expect(matchLinkPreviewRoute('/pay/%61bc')).toEqual({ kind: 'pay', token: '%61bc' });
+  });
+
   test('an unrecognized path matches nothing', () => {
     expect(matchLinkPreviewRoute('/login')).toBeNull();
     expect(matchLinkPreviewRoute('/')).toBeNull();

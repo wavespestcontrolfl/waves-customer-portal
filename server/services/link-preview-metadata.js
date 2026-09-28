@@ -25,6 +25,9 @@ const {
   loadServiceReportCardContent,
   loadServiceReportPageMetadata,
 } = require('./report-page-metadata');
+const {
+  isAppointmentPath, isPrepPath, isReschedulePath, isServiceReportPath,
+} = require('../utils/sensitive-spa-headers');
 
 const OG_IMAGE_WIDTH = 1200;
 const OG_IMAGE_HEIGHT = 630;
@@ -96,14 +99,27 @@ const ROUTE_MATCHERS = [
   { kind: 'interview', re: /^\/careers\/interview\/([^/]+)\/?$/i },
 ];
 
+// A kind that looks its token up only matches a path the privacy-header set
+// (sensitive-spa-headers.js) also covers, so "the <head> carries visit
+// details" and "the document is noindex/no-referrer/no-store" can never
+// disagree. Tokens are never URL-decoded: an encoded form (/recap/%61…)
+// fails the gate instead of slipping past the raw-path limiter and header
+// checks.
+const LOOKUP_PATH_GATES = {
+  report: isServiceReportPath,
+  'report-project': isServiceReportPath,
+  appointment: isAppointmentPath,
+  reschedule: isReschedulePath,
+  prep: isPrepPath,
+};
+
 function matchLinkPreviewRoute(reqPath) {
   const p = String(reqPath || '');
   for (const { kind, re } of ROUTE_MATCHERS) {
     const m = re.exec(p);
     if (m) {
-      let token = m[1];
-      try { token = decodeURIComponent(token); } catch { /* keep raw */ }
-      return { kind, token };
+      if (LOOKUP_PATH_GATES[kind] && !LOOKUP_PATH_GATES[kind](p)) return null;
+      return { kind, token: m[1] };
     }
   }
   return null;
