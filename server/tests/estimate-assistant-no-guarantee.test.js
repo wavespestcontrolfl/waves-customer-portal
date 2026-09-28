@@ -1140,6 +1140,31 @@ describe('estimate assistant no-guarantee context', () => {
       .toContain('Termite Service: No guarantee.');
   });
 
+  // Two tiers (Codex #4982): a question that names a guarantee term gets each
+  // service's terms whatever else it mentions; only a genuine price question
+  // leaves it. Softer re-treatment wording still yields to scheduling.
+  test.each([
+    ['Is my next visit covered by the warranty?', true],
+    ['How much warranty coverage do I get?', true],
+    ['How much is covered?', true],
+    ['How much does the warranty cover?', true],
+    ['Does the cost of trenching include a warranty?', true],
+    ['How much does the 5-year termite bond cost?', false],
+    ['How much is the bond?', false],
+    ['What’s the price of the warranty?', false],
+    ['How often do you retreat the lawn?', false],
+    ['Are you licensed and bonded?', false],
+  ])('"%s" gets each service\'s terms: %s', (question, termsAnswer) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 45 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 45, included: [
+        { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    expect(/No guarantee\./.test(answerEstimateQuestionFallback(question, context))).toBe(termsAnswer);
+  });
+
   test('a bond price question keeps its pricing answer (Codex #4982)', () => {
     const context = buildEstimateAssistantContext({
       estimate: { monthly_total: 45 },

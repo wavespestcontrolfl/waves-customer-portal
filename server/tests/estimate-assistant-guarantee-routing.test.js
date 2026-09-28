@@ -42,6 +42,9 @@ describe('Ask Waves routes guarantee questions before the live models', () => {
     'Am I covered?',
     'Is it warrantied?',
     'What if they come back?',
+    // Named guarantee terms beside scheduling or "how much" wording.
+    'Is my next visit covered by the warranty?',
+    'How much warranty coverage do I get?',
   ])('recurrence wording is routed too: %s', async (question) => {
     const result = await answerEstimateQuestion({
       database: null,

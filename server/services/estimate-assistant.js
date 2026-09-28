@@ -1716,30 +1716,41 @@ function withoutEstimateWideTerms(context = {}) {
 // Recurrence wording counts only with a pest as its subject: "When will you
 // return for the next treatment?" is a scheduling question.
 const RECURRING_PEST = '(?:termites|pests|bugs|(?:cock)?roach(?:es)?|ants|spiders|rodents|rats|mice|mosquito(?:e)?s|fleas|ticks|wasps|bees|beetles)';
-// Word stems, so every inflection counts ("Is this guaranteed?", "Is it
-// warrantied?"), plus coverage ("Am I covered?") and a pronoun subject for
-// recurrence ("What if they come back?"). "bond" stays exact: "licensed and
-// bonded" asks about the company, not a termite bond (Codex #4982).
+// Two tiers of guarantee wording. A question that NAMES a guarantee term
+// (any inflection: "Is this guaranteed?", "Am I covered?", "Is it
+// warrantied?") asks about terms whatever else it mentions, so only a
+// genuine price question leaves the deterministic answer; scheduling wording
+// does not ("Is my next visit covered by the warranty?"). Re-treatment and
+// recurrence wording can also be scheduling ("How often do you retreat the
+// lawn?"), so scheduling wording leaves it. "bond" stays exact: "licensed
+// and bonded" asks about the company, not a termite bond (Codex #4982).
+const EXPLICIT_GUARANTEE_PATTERN = /\b(?:guarant\w*|warrant\w*|call[- ]?backs?|money[- ]?back|satisf\w*|risk[- ]?free|bonds?|annual inspection|cover(?:age|ed))\b/i;
 const RECURRENCE_SUBJECT = `(?:${RECURRING_PEST}|they|it)`;
-const GUARANTEE_QUESTION_PATTERN = new RegExp(
-  '\\b(?:guarant\\w*|call[- ]?backs?|re-?treat\\w*|re-?service\\w*|money[- ]?back|satisf\\w*|risk[- ]?free|bonds?|warrant\\w*|annual inspection|cover(?:age|ed)'
+const RECURRENCE_QUESTION_PATTERN = new RegExp(
+  '\\b(?:re-?treat\\w*|re-?service\\w*'
   + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
   + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
   + `|treat(?:ed|ing)?\\s+(?:them|it|the\\s+${RECURRING_PEST})\\s+again)\\b`,
   'i',
 );
-// A price question gets the price: "How much does the 5-year bond cost?"
-// names a coverage product, but it asks what that product costs. Only real
-// price intent counts; a dollar figure that names a job ("Does the $700
-// trenching include a guarantee?") is still a guarantee question.
-const PRICE_QUESTION_PATTERN = /\bhow much\b|\bwhat (?:does|do|is|would|will|'s)\b[^?.!]*\b(?:cost|price)s?\b/i;
+// A price question asks for an amount of money: "How much does the 5-year
+// bond cost?", "What's the price of the warranty?", "How much is the bond?".
+// "How much" alone is not one ("How much warranty coverage do I get?", "How
+// much is covered?"), and a dollar figure or cost that names a job ("Does
+// the cost of trenching include a warranty?") is still a guarantee question.
+const PRICE_QUESTION_PATTERN = new RegExp([
+  '\\bhow much\\b[^?.!]*\\b(?:costs?|prices?|charges?|fees?|run)\\b',
+  "\\bwhat(?:\\s+(?:does|do|is|would|will)|['’]s)\\b[^?.!]*\\b(?:costs?|prices?)\\b",
+  '\\bhow much (?:is|are|would|will)\\b(?![^?.!]*\\b(?:cover\\w*|guarant\\w*|warrant\\w*)\\b)',
+].join('|'), 'i');
 // Scheduling wording is a scheduling question: "How often do you retreat the
 // lawn?", "When will you treat the yard again?".
 const SCHEDULING_QUESTION_PATTERN = /\bhow often\b|\bwhat (?:day|time)\b|\bschedul\w*|\bappointment\b|\bnext (?:visit|treatment|service|application)\b|\bwhen (?:will|do|can|should|is|are) (?:you|the tech|your tech|someone|a tech)\b/i;
 function answersWithServiceTerms(question, context = {}) {
   const q = cleanText(question);
-  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(q)
-    && !PRICE_QUESTION_PATTERN.test(q) && !SCHEDULING_QUESTION_PATTERN.test(q);
+  if (!withoutEstimateWideTerms(context) || PRICE_QUESTION_PATTERN.test(q)) return false;
+  return EXPLICIT_GUARANTEE_PATTERN.test(q)
+    || (RECURRENCE_QUESTION_PATTERN.test(q) && !SCHEDULING_QUESTION_PATTERN.test(q));
 }
 
 // On an estimate without estimate-wide terms, a model answer that makes a
