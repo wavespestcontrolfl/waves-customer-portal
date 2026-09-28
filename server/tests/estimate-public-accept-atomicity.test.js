@@ -2139,6 +2139,24 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.last_name).toBe('Sample');
   });
 
+  test('a multi-word collected first name keeps the existing surname whole on a new profile', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-28',
+      token: 'tok-contact-28-x0123456789',
+      customer_id: null,
+      customer_name: 'Unknown Sample',
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-28-x0123456789', { contactFirstName: 'mary ann' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Mary Ann Sample');
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.first_name).toBe('Mary Ann');
+    expect(cust.last_name).toBe('Sample');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

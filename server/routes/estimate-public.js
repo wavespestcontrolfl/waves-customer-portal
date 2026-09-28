@@ -9115,6 +9115,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // must never steer matchAcceptCustomerByPhone toward another profile.
     let contactFillFirstName = null;
     let contactFillLastName = null;
+    // The surname the patched estimate name ends with, carried separately so
+    // a multi-word collected first name ("Mary Ann") never splits it.
+    let acceptContactSurname = null;
     let contactFillEmail = null;
     let acceptContactView = null;
     // The estimate's own first name (pre-fill) — the identity an existing
@@ -10875,6 +10878,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             const patchLastName = contactFillLastName
               || (lockedGivenIsPlaceholder ? lockedNameTokens.slice(1).join(' ') : '')
               || (contactGapHasRealLastName(linkedLast) ? linkedLast : '');
+            acceptContactSurname = patchLastName || null;
             contactWrite.customer_name = contactGapCapCodePoints(`${patchFirstName} ${patchLastName}`.trim(), 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
@@ -11051,7 +11055,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // The accept-card surname verbatim (codex #5102 r3 P2): the
             // estimates.customer_name snapshot is capped at 100 chars and
             // could clip it; customers.last_name holds the full 50.
-            lastName: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
+            lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,
           });
@@ -11066,7 +11070,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             is_primary_profile: !account.existingCustomer,
             profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
             first_name: contactFillFirstName || nameParts[0] || 'New',
-            last_name: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
+            last_name: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
