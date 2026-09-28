@@ -1329,13 +1329,20 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
   return opp;
 }
 
+// The route a row writes: the live page it refreshes, or the target path a
+// new article is pinned to.
+function aeoQuestionGapRoute(o) {
+  return routeIdentity(o.page_url || hubTargetUrl(o.signal_metadata?.target_path));
+}
+
 // Highest score first, at most `cap`. Before the cap (so they never burn a
-// slot): frozen keys, do_not_publish demotions, and refreshes of a page
-// that another row is editing or recently edited (fencedPages: in-flight
-// page edits under a DIFFERENT key, or one done inside the cooldown; null =
-// lookup failed → no refresh this run), that this batch already edits
-// (batchRefreshPages), or that an earlier pick this run targets.
-function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), fencedPages = new Map(), batchRefreshPages = new Set() } = {}) {
+// slot): frozen keys, do_not_publish demotions, missing targets an article
+// can't be pinned to, and any route another row is writing or recently
+// wrote (fencedPages: in-flight page edits or pinned articles under a
+// DIFFERENT key, or one done inside the cooldown; null = lookup failed →
+// nothing this run) or that an earlier pick this run targets — two
+// questions sharing a target never queue two writes to it.
+function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), fencedPages = new Map() } = {}) {
   const ordered = [...opps].sort((a, b) => b.score - a.score
     || b.signal_metadata.gap_strength - a.signal_metadata.gap_strength
     || String(a.signal_metadata.benchmark_id).localeCompare(String(b.signal_metadata.benchmark_id)));
@@ -1347,14 +1354,12 @@ function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), f
     // Missing target the article cannot be pinned to (a tool, resource or
     // city-service path) — nothing this lane publishes would close it.
     if (!o.page_url && !aeoPinnableBlogPath(o.signal_metadata.target_path)) continue;
-    if (o.page_url) {
-      if (fencedPages === null) continue;
-      const id = routeIdentity(o.page_url);
-      const holders = fencedPages.get(id);
-      if (holders && [...holders].some((k) => k !== o.dedupe_key)) continue;
-      if (batchRefreshPages.has(id) || pages.has(id)) continue;
-      pages.add(id);
-    }
+    if (fencedPages === null) continue;
+    const id = aeoQuestionGapRoute(o);
+    const holders = fencedPages.get(id);
+    if (holders && [...holders].some((k) => k !== o.dedupe_key)) continue;
+    if (pages.has(id)) continue;
+    pages.add(id);
     out.push(o);
   }
   return out;
@@ -1909,15 +1914,9 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, { periodDays, exemptQueries: sweepExemptQueries.no_content_yet })],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      // After answer_gap by list order: a page this batch already edits is
-      // not refreshed again for a benchmark question the same run. The
-      // floor test allows for the facts boost applied after mining.
-      ['aeo_question_gap', () => this.mineAeoQuestionGaps(since, {
-        batchRefreshPages: new Set(Object.values(buckets).flat()
-          .filter((o) => o.page_url && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
-            && (o.score ?? 0) + WEIGHTS.factsReady >= persistFloorFor(o))
-          .map((o) => routeIdentity(o.page_url))),
-      })],
+      // Same-batch page conflicts are arbitrated in persistAll
+      // (aeoQuestionOppYields), after the facts boost and frozen-aware.
+      ['aeo_question_gap', () => this.mineAeoQuestionGaps(since)],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
       // fence the family refreshes — two buckets must not queue
       // independently claimable edits of one page (their dedupe keys
@@ -3394,7 +3393,7 @@ class GscOpportunityMiner {
    * disables), AEO_QUESTION_GAP_COOLDOWN_DAYS (28: a page edited that
    * recently is not refreshed again for another question).
    */
-  async mineAeoQuestionGaps(since, { batchRefreshPages = new Set() } = {}) {
+  async mineAeoQuestionGaps(since) {
     if (!isEnabled('aeoQuestionGapMining')) return [];
     const minDays = envIntAtLeast('AEO_GAP_MIN_DAYS', 3, 1);
     const minEngines = envIntAtLeast('AEO_QUESTION_GAP_MIN_ENGINES', 3, 1);
@@ -3446,7 +3445,7 @@ class GscOpportunityMiner {
     // with the loader answer_gap uses — bounded, and confirmed non-editable
     // pages are remembered across runs in the listicle probe's cache. Such
     // a question is skipped, not turned into a competing new article.
-    const ranked = selectAeoQuestionGaps(opps, { cap: Infinity, occupiedKeys: occupied, fencedPages, batchRefreshPages });
+    const ranked = selectAeoQuestionGaps(opps, { cap: Infinity, occupiedKeys: occupied, fencedPages });
     const out = [];
     const probe = { remaining: cap * 3 };
     for (const o of ranked) {
@@ -3523,18 +3522,25 @@ class GscOpportunityMiner {
     return map;
   }
 
-  // Pages under an in-flight edit (pending / claimed / pending_review) or
-  // edited inside the cooldown (done), by route identity → holder keys.
+  // Routes under an in-flight write (pending / claimed / pending_review) or
+  // written inside the cooldown (done), by route identity → holder keys:
+  // page edits from every bucket, plus this bucket's pinned articles (no
+  // page_url yet — their route is the target_path they publish at).
   async _aeoQuestionPageFence(cooldownDays) {
     const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
-    const rows = await db('opportunity_queue')
+    const recent = (b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .orWhere((d) => d.where('status', 'done').where('updated_at', '>=', cutoff));
+    const edits = await db('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNotNull('page_url')
-      .where((b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
-        .orWhere((d) => d.where('status', 'done').where('updated_at', '>=', cutoff)))
+      .where(recent)
       .select('page_url', 'dedupe_key');
+    const articles = await db('opportunity_queue')
+      .where({ bucket: AEO_QUESTION_GAP_BUCKET, action_type: 'new_supporting_blog' })
+      .where(recent)
+      .select('dedupe_key', db.raw("signal_metadata->>'target_path' as target_path"));
     const map = new Map();
-    for (const r of rows) {
+    for (const r of [...edits, ...articles.map((a) => ({ ...a, page_url: hubTargetUrl(a.target_path) }))]) {
       const id = routeIdentity(r.page_url);
       if (!id) continue;
       if (!map.has(id)) map.set(id, new Set());
@@ -4181,11 +4187,22 @@ class GscOpportunityMiner {
     }
     return {
       pages: new Set(live.map((o) => routeIdentity(o.page_url))),
+      // Pages another bucket will edit this batch — an aeo_question_gap
+      // refresh yields to them (aeoQuestionOppYields).
+      nonAeoQuestionPages: new Set(live.filter((o) => o.bucket !== AEO_QUESTION_GAP_BUCKET).map((o) => routeIdentity(o.page_url))),
       // A family BLOG whose variant one of these refreshes targets is the
       // same intent under a different key — a boosted ordinary refresh and
       // a family blog must not both persist (Codex r21).
       queries: liveQueries,
     };
+  }
+
+  // An aeo_question_gap refresh yields to a floor-clearing, non-frozen edit
+  // of the same page from another bucket in this batch (it retries next
+  // mine; the page fence then sees that edit in flight).
+  static aeoQuestionOppYields(o, arbitrated) {
+    return o.bucket === AEO_QUESTION_GAP_BUCKET && !!o.page_url
+      && !!arbitrated.nonAeoQuestionPages?.has(routeIdentity(o.page_url));
   }
 
   // Does this family opp lose page/query arbitration to another bucket?
@@ -4776,7 +4793,8 @@ class GscOpportunityMiner {
     // and familyOppYields (family refreshes yield by PAGE, family blogs
     // by QUERY intent).
     const arbitrated = await this._arbitratedRefreshPages(opportunities);
-    const admitted = opportunities.filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated));
+    const admitted = opportunities.filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated)
+      && !GscOpportunityMiner.aeoQuestionOppYields(o, arbitrated));
 
     // Group by dedupe_key, keep highest-score entry per key.
     const winners = new Map();

@@ -3166,14 +3166,33 @@ describe('aeo_question_gap bucket', () => {
     const bondPage = 'wavespestcontrol.com::/termite/termite-bond';
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set(['decay_refresh::x'])]]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set([a.dedupe_key])]]) })).toHaveLength(2);
-    expect(selectAeoQuestionGaps([a, c], { cap: 2, batchRefreshPages: new Set([bondPage]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
     // A missing target that is not a /category/leaf/ blog route can't be
     // published at its path → no article.
     const calc = buildAeoQuestionGapOpp(gapFor('Q31'), { liveUrl: null });
     expect(calc.action_type).toBe('new_supporting_blog');
     expect(selectAeoQuestionGaps([calc, d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
-    // Fence lookup failed → no refreshes, new articles still flow.
-    expect(selectAeoQuestionGaps([a, c, d], { cap: 2, fencedPages: null }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
+    // Two MISSING-target questions pinned to one path queue one article,
+    // and an in-flight article for that path fences the other question.
+    const bondArticle = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+    const bondArticle2 = buildAeoQuestionGapOpp(gapFor('Q37'), { liveUrl: null });
+    expect(selectAeoQuestionGaps([bondArticle, bondArticle2], { cap: 2 })).toHaveLength(1);
+    expect(selectAeoQuestionGaps([bondArticle2], { cap: 2, fencedPages: new Map([[bondPage, new Set([bondArticle.dedupe_key])]]) })).toEqual([]);
+    // Fence lookup failed → nothing this run.
+    expect(selectAeoQuestionGaps([a, c, d], { cap: 2, fencedPages: null })).toEqual([]);
+  });
+
+  test('persist-time arbitration: a refresh yields to another bucket\'s floor-clearing edit of the page', async () => {
+    const db = require('../models/db');
+    db.mockImplementation(() => ({ whereIn() { return this; }, select: async () => [] }));
+    const miner = new GscOpportunityMiner();
+    const mine = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: `${HUB}/termite/termite-bond/`, impressions: 900 });
+    const decay = { bucket: 'decay_refresh', action_type: 'refresh_existing_page', page_url: `${HUB}/termite/termite-bond/`, score: 90, dedupe_key: 'decay::x', signal_metadata: {} };
+    const weak = { ...decay, score: 10 };
+    const yields = async (batch) => GscOpportunityMiner.aeoQuestionOppYields(mine, await miner._arbitratedRefreshPages(batch));
+    expect(await yields([mine, decay])).toBe(true);
+    expect(await yields([mine, weak])).toBe(false); // below its floor → lands nothing
+    expect(await yields([mine])).toBe(false);
+    db.mockReset();
   });
 
   test('dedupe key is per question and target', () => {
