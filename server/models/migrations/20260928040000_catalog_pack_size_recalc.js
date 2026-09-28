@@ -16,10 +16,16 @@
  * For each catalog row at the old OR the corrected size (an earlier migration
  * may already have moved it):
  *   1. the catalog pack becomes the corrected size;
- *   2. that product's SiteOne rows quoting the old pack (the offers the
- *      listings verified) take the corrected quantity and per-oz fields
- *      (approvedPerOzFields); other vendors' pack sizes are theirs and stay;
- *   3. recalcBestPrice re-ranks, re-scales, and rewrites the winner and the
+ *   2. that product's SiteOne rows at the old OR corrected pack (the offers
+ *      the listings verified; 030000 may already have relabelled them) take
+ *      the corrected quantity and fresh approvedPerOzFields, which also
+ *      re-syncs price_amount and clears landed cost built on the old pack;
+ *   3. 030000 relabelled EVERY vendor's matching pack. A non-SiteOne
+ *      Dominion row reading '4 x 1 gal case' — a label only that migration
+ *      writes — goes back to '1 gal' with fresh per-oz fields. (SedgeHammer
+ *      75% has no 64 oz package anywhere, so a non-SiteOne '64 oz' row it
+ *      relabelled to '1.33 oz' was the same error and stays corrected.)
+ *   4. recalcBestPrice re-ranks, re-scales, and rewrites the winner and the
  *      cached best-price fields.
  * A catalog row an administrator moved to some other size is left alone.
  * Production was corrected by hand on 2026-09-27 and carries only SiteOne
@@ -32,6 +38,7 @@ const FIXES = [
     oldQuantities: ['1 gal'],
     container: '4 x 1 gal case',
     oz: 512,
+    restoreOthers: '1 gal',
   },
   {
     name: 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide',
@@ -59,18 +66,33 @@ exports.up = async function up(knex) {
           .update({ container_size: fix.container, unit_size_oz: fix.oz, updated_at: knex.fn.now() });
       }
       if (!hasVendorPricing) continue;
-      const stale = await knex('vendor_pricing')
+      const siteOne = await knex('vendor_pricing')
         .join('vendors', 'vendors.id', 'vendor_pricing.vendor_id')
         .where('vendor_pricing.product_id', product.id)
         .whereRaw('lower(vendors.name) = ?', ['siteone'])
-        .whereIn('vendor_pricing.quantity', fix.oldQuantities)
+        .whereIn('vendor_pricing.quantity', [...fix.oldQuantities, fix.container])
         .select('vendor_pricing.id', 'vendor_pricing.price');
-      for (const row of stale) {
+      for (const row of siteOne) {
         await knex('vendor_pricing').where({ id: row.id }).update({
           quantity: fix.container,
           ...approvedPerOzFields(row.price, fix.container),
           updated_at: knex.fn.now(),
         });
+      }
+      if (fix.restoreOthers) {
+        const relabelled = await knex('vendor_pricing')
+          .join('vendors', 'vendors.id', 'vendor_pricing.vendor_id')
+          .where('vendor_pricing.product_id', product.id)
+          .whereRaw('lower(vendors.name) <> ?', ['siteone'])
+          .where('vendor_pricing.quantity', fix.container)
+          .select('vendor_pricing.id', 'vendor_pricing.price');
+        for (const row of relabelled) {
+          await knex('vendor_pricing').where({ id: row.id }).update({
+            quantity: fix.restoreOthers,
+            ...approvedPerOzFields(row.price, fix.restoreOthers),
+            updated_at: knex.fn.now(),
+          });
+        }
       }
       // The canonical best-price writer (ranking, eligibility, pack scaling,
       // cached winner fields) — never a hand-copied price.

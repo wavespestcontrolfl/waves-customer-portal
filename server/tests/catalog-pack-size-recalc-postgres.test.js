@@ -6,7 +6,10 @@ const d = SKIP ? describe.skip : describe;
 d('20260928040000 catalog pack-size recalc', () => {
   let db;
   const first = require('../models/migrations/20260928020000_catalog_package_size_corrections');
+  const second = require('../models/migrations/20260928030000_catalog_package_size_vendor_rows');
   const migration = require('../models/migrations/20260928040000_catalog_pack_size_recalc');
+  // Every environment runs the whole frozen sequence in order.
+  const runAll = async (trx) => { await first.up(trx); await second.up(trx); await migration.up(trx); };
   const DOMINION = 'Dominion 2L 1 gal';
   const SEDGE = 'Sedgehammer Halosulfuron-methyl 75% Post Emergent Soluble Herbicide';
   const ROLLBACK = new Error('rollback');
@@ -52,7 +55,7 @@ d('20260928040000 catalog pack-size recalc', () => {
   test('Dominion: catalog and imported vendor row move to the case together', async () => {
     await inRollback(async (trx) => {
       const ids = await seed(trx, { name: DOMINION, container: '1 gal', oz: 128, bestPrice: 469.53, vendorPrice: 469.53, vendorQty: '1 gal' });
-      await migration.up(trx);
+      await runAll(trx);
       expect(await state(trx, ids)).toEqual({
         container: '4 x 1 gal case', oz: 512, best: 469.53, vendorQty: '4 x 1 gal case', perOz: 0.9171,
       });
@@ -66,7 +69,7 @@ d('20260928040000 catalog pack-size recalc', () => {
       // The import already wrote that vendor row's per-oz for 1.33 oz.
       const ids = await seed(trx, { name: SEDGE, container: '64 oz', oz: 64, bestPrice: 2886.74, vendorPrice: 59.99, vendorQty: '1.33 oz' });
       await trx('vendor_pricing').where({ id: ids.vendorRowId }).update({ price_per_oz: 45.1053 });
-      await migration.up(trx);
+      await runAll(trx);
       expect(await state(trx, ids)).toEqual({
         container: '1.33 oz', oz: 1.33, best: 59.99, vendorQty: '1.33 oz', perOz: 45.1053,
       });
@@ -76,7 +79,7 @@ d('20260928040000 catalog pack-size recalc', () => {
   test('SedgeHammer: the original 64 oz import is corrected too', async () => {
     await inRollback(async (trx) => {
       const ids = await seed(trx, { name: SEDGE, container: '64 oz', oz: 64, bestPrice: 3485.35, vendorPrice: 72.43, vendorQty: '64 oz' });
-      await migration.up(trx);
+      await runAll(trx);
       expect(await state(trx, ids)).toMatchObject({ container: '1.33 oz', oz: 1.33, best: 72.43, vendorQty: '1.33 oz' });
     });
   });
@@ -84,8 +87,7 @@ d('20260928040000 catalog pack-size recalc', () => {
   test('after 20260928020000 already moved the catalog size, the vendor row and price still follow', async () => {
     await inRollback(async (trx) => {
       const ids = await seed(trx, { name: DOMINION, container: '1 gal', oz: 128, bestPrice: 469.53, vendorPrice: 469.53, vendorQty: '1 gal' });
-      await first.up(trx);
-      await migration.up(trx);
+      await runAll(trx);
       expect(await state(trx, ids)).toEqual({
         container: '4 x 1 gal case', oz: 512, best: 469.53, vendorQty: '4 x 1 gal case', perOz: 0.9171,
       });
@@ -99,7 +101,7 @@ d('20260928040000 catalog pack-size recalc', () => {
         product_id: ids.productId, vendor_id: await vendorId(trx, 'Test Gallon Vendor'), price: 140, quantity: '1 gal',
         approval_status: 'approved', is_active: true,
       }).returning('id');
-      await migration.up(trx);
+      await runAll(trx);
       const row = await trx('vendor_pricing').where({ id: other.id }).first('quantity');
       expect(row.quantity).toBe('1 gal');
       // The case ($0.92/oz) is cheaper per ounce than $140/gal ($1.09/oz),
@@ -109,10 +111,22 @@ d('20260928040000 catalog pack-size recalc', () => {
     });
   });
 
+  test('full sequence: stale landed cost and price_amount on the SiteOne row are re-derived', async () => {
+    await inRollback(async (trx) => {
+      const ids = await seed(trx, { name: DOMINION, container: '1 gal', oz: 128, bestPrice: 469.53, vendorPrice: 469.53, vendorQty: '1 gal' });
+      await trx('vendor_pricing').where({ id: ids.vendorRowId }).update({ price_amount: 400, landed_unit_price: 3.9, landed_cost: 499 });
+      await runAll(trx);
+      const v = await trx('vendor_pricing').where({ id: ids.vendorRowId }).first('price_amount', 'landed_unit_price', 'landed_cost', 'price_per_oz');
+      expect([Number(v.price_amount), v.landed_unit_price, v.landed_cost, Number(v.price_per_oz)]).toEqual([469.53, null, null, 0.9171]);
+      const p = await trx('products_catalog').where({ id: ids.productId }).first('best_price');
+      expect(Number(p.best_price)).toBe(469.53);
+    });
+  });
+
   test('a catalog row already moved off the old size is left alone', async () => {
     await inRollback(async (trx) => {
       const ids = await seed(trx, { name: SEDGE, container: '2 x 1.33 oz', oz: 2.66, bestPrice: 110, vendorPrice: 110, vendorQty: '2 x 1.33 oz' });
-      await migration.up(trx);
+      await runAll(trx);
       expect(await state(trx, ids)).toEqual({
         container: '2 x 1.33 oz', oz: 2.66, best: 110, vendorQty: '2 x 1.33 oz', perOz: 0.0001,
       });
