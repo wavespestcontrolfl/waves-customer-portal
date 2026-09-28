@@ -396,6 +396,14 @@ describe('candidateFromRegistryRow', () => {
     }
   });
 
+  test('rejects an astro_changed_since_sync row that is DB-matched (db_blog_id set) — not Astro-only lineage', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'astro_changed_since_sync',
+      db_blog_id: 'blog-123',
+    })).toBeNull();
+  });
+
   test('rejects db_changed_since_sync — that status is only reachable from a DB-matched row the blog_posts query already covers', () => {
     expect(candidateFromRegistryRow({
       ...liveAstroOnly,
