@@ -206,3 +206,9 @@ describe('matchStandaloneImageLine — the single shared placement definition', 
     });
   });
 });
+
+test('matchStandaloneImageLine: a literal ">" inside a quoted alt does not end the <img> tag (Codex P1 r11)', () => {
+  const { matchStandaloneImageLine } = require('../services/content/licensed-photo-library');
+  expect(matchStandaloneImageLine('<img src="https://upload.wikimedia.org/x.jpg" alt="workers can be > 1/4 inch">'))
+    .toEqual({ alt: 'workers can be > 1/4 inch', url: 'https://upload.wikimedia.org/x.jpg' });
+});

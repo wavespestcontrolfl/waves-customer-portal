@@ -211,7 +211,9 @@ function buildPhotoSlots(topic) {
 // ALONE on its own line. An <img> carrying srcset is not a match (the
 // publisher re-hosts src only and would silently drop the other sources).
 const STANDALONE_INLINE_IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
-const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b([^>]*)>\s*$/i;
+// Quote-aware attrs (a literal `>` inside alt="… > 1/4 inch" must not end
+// the tag) — same shape as content-quality-gate's BOTTOM_LINE_BOX_TAG_RE.
+const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>\s*$/i;
 
 function htmlAttrValue(attrs, name) {
   const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');

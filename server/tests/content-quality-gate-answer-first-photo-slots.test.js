@@ -748,3 +748,10 @@ test('checkCtaAfterVerdictBox: a link after a literal ">" inside a box prop is s
   expect(r.ok).toBe(false);
   expect(r.reason).toBe('link_inside_verdict_box');
 });
+
+test('checkPhotoSlotsLicensedOnly: a licensed standalone <img> whose alt contains ">" passes (Codex P1 r11)', () => {
+  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
+  const ALT = 'workers can be > 1/4 inch';
+  const b = brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: ALT }, flagged_for_human: false }] } });
+  expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body: `<img src="${PHOTO_URL}" alt="${ALT}">` }, b).ok).toBe(true);
+});

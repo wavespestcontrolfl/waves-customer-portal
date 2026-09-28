@@ -1215,7 +1215,7 @@ const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 // reference in this writer's plain-Markdown subset and is left to the
 // general unsupported-body-syntax gate.
 const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
-const RAW_IMG_TAG_RE = /<img\b([^>]*)>/gi;
+const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
 const { htmlAttrValue: attrValue, matchStandaloneImageLine } = require('./licensed-photo-library');
 // alt is trimmed in every form, exactly as the shared matchStandaloneImage
 // Line (the publisher's re-host path) trims it — Codex P1 r9: an untrimmed
