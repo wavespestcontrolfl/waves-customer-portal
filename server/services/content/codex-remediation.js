@@ -71,7 +71,7 @@ const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connecto
 // eligibility predicate lives in comparison-table-gate (PR #3508 r4 P1) —
 // every call site (runner, both remediation parks, the PR poller's merge
 // gate) imports it from there.
-const { namedCompetitorAutopublishEligible, namedCompetitorListVerdict } = require('./comparison-table-gate');
+const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
 
 // RAW eligibility load (PR #3508 r11 + r13 P1s): only the brief row's own
 // PERSISTED gsc_signal marker counts for the autopublish decision —
@@ -1318,36 +1318,39 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
     }
-    // Whole-draft company extraction on the FIXED file — a fix commit
-    // bypasses the publisher's owner-list chokepoint, so the same check runs
-    // here on the committed text (final: its frontmatter IS what ships). The
-    // run's stored extraction is reused when the text is unchanged (same
-    // key); otherwise one fresh call. A failed extraction refuses the fix.
+    // The publisher's owner-list chokepoint on the FIXED file — a fix commit
+    // bypasses the publisher, so the same full check runs here on the
+    // committed text (pre-push r16): the final-text comparison gate over the
+    // body AND every frontmatter text field (a rewritten hero alt), the
+    // whole-draft company extraction (the run's stored result reused when
+    // the text is unchanged), and the owner-list verdict. A check outage is
+    // transient (Codex r6): the caller retries it on the remediation's
+    // bounded transient-round budget instead of parking.
     const stored = parseJsonMaybe(run.comparison_table_result);
-    const extractor = deps.businessNameConfirmer || require('./business-name-confirmer');
-    comparisonResult.companyExtraction = await extractor.extractCompanyNames(draft, {
-      prior: stored && stored.companyExtraction,
-      brief,
-      final: true,
-    });
-    if (comparisonResult.companyExtraction.ok !== true) {
-      // A provider outage is transient (Codex r6): the caller retries it on
-      // the remediation's bounded transient-round budget instead of parking.
-      return {
-        ok: false,
-        transient: comparisonResult.companyExtraction.retryable === true,
-        reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})`,
-      };
-    }
-    if (comparisonResult.requiresHumanReview === true || comparisonResult.companyExtraction.companies.length) {
-      // Owner list on the FIXED body (owner rulings 2026-09-27 D2 +
-      // 2026-09-28) — a fix must not add an unapproved name to an
-      // unattended PR.
-      const list = namedCompetitorListVerdict(comparisonResult);
-      if (!list.ok) {
-        return { ok: false, reason: `fix breaks the named-competitor owner list (${list.reason}${list.offList ? `: ${list.offList.join(', ')}` : ''})` };
+    const confirmer = deps.businessNameConfirmer || require('./business-name-confirmer');
+    const chokepointDraft = { company_extraction: stored && stored.companyExtraction };
+    try {
+      await confirmer.assertOwnerListForCommit({
+        draft: chokepointDraft, brief, frontmatter: draft.frontmatter || {}, body: draft.body,
+      });
+    } catch (err) {
+      if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
+        return { ok: false, transient: err.retryable === true, reason: `company-name check unavailable for the fix (${err.message})` };
       }
-      comparisonResult.competitors_approved_by_list = list.approved;
+      if (err.code === 'BLOG_OWNER_LIST_BLOCKED') {
+        return { ok: false, reason: `fix breaks the named-competitor owner list (${err.reason}${err.offList && err.offList.length ? `: ${err.offList.join(', ')}` : ''})` };
+      }
+      throw err;
+    }
+    // Persisted with the head pin: the fixed text's extraction, its
+    // deterministic names, and the names the list cleared.
+    comparisonResult.companyExtraction = chokepointDraft.company_extraction;
+    comparisonResult.namedCompetitors = [...new Set([
+      ...(Array.isArray(comparisonResult.namedCompetitors) ? comparisonResult.namedCompetitors : []),
+      ...(Array.isArray(chokepointDraft.final_named_competitors) ? chokepointDraft.final_named_competitors : []),
+    ])].sort();
+    if (Array.isArray(chokepointDraft.competitors_approved_by_list)) {
+      comparisonResult.competitors_approved_by_list = chokepointDraft.competitors_approved_by_list;
     }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless

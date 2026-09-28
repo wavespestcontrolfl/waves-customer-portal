@@ -1733,6 +1733,11 @@ describe('validateAutonomousRunGates', () => {
         page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
       });
       deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] });
+      // The publisher's commit chokepoint, simulated: it cleared Orkin.
+      deps.businessNameConfirmer = { assertOwnerListForCommit: jest.fn(async ({ draft }) => {
+        Object.assign(draft, { company_extraction: { ok: true, key: 'k', companies: ['Orkin'] }, final_named_competitors: ['Orkin'], competitors_approved_by_list: ['Orkin'] });
+        return { extraction: draft.company_extraction, requiresHumanMerge: false };
+      }) };
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
       // The owner list cleared the fix — recorded on the returned verdict
@@ -1746,6 +1751,9 @@ describe('validateAutonomousRunGates', () => {
       // Owner rulings 2026-09-27 (D2) + 2026-09-28: a fix that adds a name
       // off the owner list never rides the unattended lane.
       deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Hughes Exterminators'] });
+      deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+        throw Object.assign(new Error('off list'), { code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Hughes Exterminators'] });
+      });
       const offList = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(offList).toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Hughes Exterminators/) });
     } finally {
@@ -1753,28 +1761,49 @@ describe('validateAutonomousRunGates', () => {
     }
   });
 
-  test('company extraction on a fix: the stored extraction is handed over for reuse; an off-list company or a failure refuses the fix', async () => {
+  test('owner-list chokepoint on a fix: the stored extraction is handed over for reuse with the FIXED frontmatter + body; a block or an outage refuses the fix', async () => {
     const stored = { ok: true, key: 'k-stored', companies: [] };
     const deps = goodDeps();
     deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1').comparison_table_result = JSON.stringify({ companyExtraction: stored });
-    deps.businessNameConfirmer = { extractCompanyNames: jest.fn(async (_draft, { prior }) => prior) };
+    deps.businessNameConfirmer = { assertOwnerListForCommit: jest.fn(async ({ draft }) => ({ extraction: draft.company_extraction, requiresHumanMerge: false })) };
     deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] });
+    const fixed = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: A technician at a lanai\n---\nFixed body text';
 
-    const cleared = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
+    const cleared = await rem.validateAutonomousRunGates(fixed, RUN_REF, deps);
     expect(cleared.ok).toBe(true);
-    expect(deps.businessNameConfirmer.extractCompanyNames).toHaveBeenCalledWith(
-      expect.objectContaining({ body: expect.any(String) }),
-      { prior: stored, brief: expect.objectContaining({ action_type: 'new_supporting_blog' }), final: true },
-    );
+    const [args] = deps.businessNameConfirmer.assertOwnerListForCommit.mock.calls[0];
+    expect(args.draft.company_extraction).toEqual(stored);
+    expect(args.frontmatter).toMatchObject({ title: 'T', hero_image: { alt: 'A technician at a lanai' } });
+    expect(args.body).toBe('Fixed body text');
+    expect(args.brief).toMatchObject({ action_type: 'new_supporting_blog' });
     expect(cleared.comparisonResult.companyExtraction).toEqual(stored);
 
-    deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: true, key: 'k2', companies: ['Bug Out'] }));
-    expect(await rem.validateAutonomousRunGates(MD, RUN_REF, deps))
+    deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+      throw Object.assign(new Error('x'), { code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+    });
+    expect(await rem.validateAutonomousRunGates(fixed, RUN_REF, deps))
       .toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Bug Out/) });
 
-    deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: false, key: 'k2', reason: 'timeout', retryable: true }));
-    expect(await rem.validateAutonomousRunGates(MD, RUN_REF, deps))
+    deps.businessNameConfirmer.assertOwnerListForCommit = jest.fn(async () => {
+      throw Object.assign(new Error('company-name check unavailable for the final text (timeout)'), { code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true });
+    });
+    expect(await rem.validateAutonomousRunGates(fixed, RUN_REF, deps))
       .toMatchObject({ ok: false, transient: true, reason: expect.stringMatching(/company-name check unavailable/) });
+  });
+
+  test('a fix whose rewritten hero alt disparages a competitor is refused by the REAL chokepoint (pre-push r16)', async () => {
+    const realConfirmer = jest.requireActual('../services/content/business-name-confirmer');
+    const spy = jest.spyOn(realConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
+    try {
+      const deps = goodDeps();
+      deps.businessNameConfirmer = realConfirmer;
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] });
+      const fixed = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Orkin scams customers with hidden fees\n---\nFixed body text';
+
+      const r = await rem.validateAutonomousRunGates(fixed, RUN_REF, deps);
+
+      expect(r).toMatchObject({ ok: false, reason: expect.stringMatching(/comparison_table_failed/) });
+    } finally { spy.mockRestore(); }
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {
