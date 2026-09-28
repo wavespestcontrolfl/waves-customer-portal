@@ -500,6 +500,10 @@ function parseDecision(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 
+// How long after enrollment the detached topic classifier has surely settled
+// (its model budget is 8 s; review-ask-topic.js TOPIC_TIMEOUT_MS).
+const TOPIC_SETTLE_MS = 60 * 1000;
+
 // The resolved SMS recipient IS the account holder — not a tenant, buyer or
 // other service contact, who must never see the account's own history.
 function isAccountHolderRecipient(contact, customer) {
@@ -4912,11 +4916,12 @@ const ReviewService = {
     try {
       const seq = await db("review_sequences").where({ id: sequenceId }).first("ask_context");
       const askContext = parseDecision(seq?.ask_context);
-      if (!askContext?.topic) return null;
+      if (!askContext?.topic || !askContext?.concern) return null;
       return await require("./review-ask-drafter").draftTopicFollowupBody({
         customerId: customer.id,
         recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
         topic: askContext.topic,
+        concern: askContext.concern,
       });
     } catch (err) {
       logger.warn(`[review] topic follow-up draft skipped (sequenceId=${sequenceId}): ${err.message}`);
@@ -6566,6 +6571,20 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
     const step = plan[seq.current_step] || {};
+    // GATE_REVIEW_DAY0_CONTEXT: enrollment classifies the topic detached
+    // (an 8 s model budget), so a recurring Day-0 ask due within moments of
+    // enrolling — an operator's "Now" right before a runner tick — waits
+    // until a minute after enrollment; the follow-up decision after the send
+    // then reads a settled topic instead of racing the classifier.
+    const topicSettlesAt = seq.started_at ? new Date(seq.started_at).getTime() + TOPIC_SETTLE_MS : 0;
+    if ((seq.current_step || 0) === 0 && seq.started_by === "post_service" && seq.ask_context == null
+      && Date.now() < topicSettlesAt && isRecurringAskPlan(plan)
+      && require("../config/feature-gates").isEnabled("reviewDay0Context")) {
+      const nextEvalAt = new Date(topicSettlesAt);
+      await db("review_sequences").where({ id: seq.id, status: "active" })
+        .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "topic_pending", nextEvalAt }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "topic_pending" };
+    }
     if (step.templateKey === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY) {
       // GATE_REVIEW_DAY0_CONTEXT is the topic follow-up's kill switch too:
       // off, a follow-up not yet sent ends the sequence instead of going out.

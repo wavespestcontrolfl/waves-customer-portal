@@ -367,7 +367,7 @@ describe('draftTopicFollowupBody — the recurring topic follow-up', () => {
   const TOPIC = 'ants in the kitchen';
   const draft = (question, over = {}) => {
     mockDispatch.mockResolvedValue({ ok: true, text: question });
-    return Drafter.draftTopicFollowupBody({ customerId: 'cust-1', recipientFirstName: 'Aaron', topic: TOPIC, ...over });
+    return Drafter.draftTopicFollowupBody({ customerId: 'cust-1', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants', ...over });
   };
   const REAL_LINK = 'https://portal.wavespestcontrol.com/l/abcdefghjk';
 
@@ -387,35 +387,37 @@ describe('draftTopicFollowupBody — the recurring topic follow-up', () => {
   test('the drafter kill switch (GATE_REVIEW_ASK_PERSONALIZED) off, no first name, or no topic → null, no model call', async () => {
     expect(await draft('Are the ants backing off?', { recipientFirstName: '' })).toBeNull();
     expect(await draft('Are the ants backing off?', { topic: '' })).toBeNull();
+    expect(await draft('Are the ants backing off?', { concern: '' })).toBeNull();
     mockGates.reviewAskPersonalized = false;
     expect(await draft('Are the ants backing off?')).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('the model sees only the topic, and the allowed words', async () => {
+  test('the model sees only the topic and its concern, and the allowed words', async () => {
     await draft('Are the ants backing off?');
     const payload = mockDispatch.mock.calls[0][1];
     expect(payload.text).toContain('ants in the kitchen');
+    expect(payload.text).toContain('CONCERN: ants');
     expect(payload.text).not.toMatch(/Aaron/);
     expect(payload.system).toMatch(/Use ONLY words from TOPIC/);
   });
 
   test('both providers down, or a throw, → null (the topic_followup template sends)', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
-    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC })).toBeNull();
+    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants' })).toBeNull();
     mockDispatch.mockRejectedValue(new Error('boom'));
-    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC })).toBeNull();
+    expect(await Drafter.draftTopicFollowupBody({ customerId: 'c', recipientFirstName: 'Aaron', topic: TOPIC, concern: 'ants' })).toBeNull();
   });
 });
 
 describe('verifyTopicFollowupQuestion — a closed vocabulary, not a banned-word list', () => {
-  const v = (text, topic = 'ants in the kitchen') => Drafter.verifyTopicFollowupQuestion(text, { topic, budget: 60 });
+  const v = (text, topic = 'ants in the kitchen', concern = 'ants') => Drafter.verifyTopicFollowupQuestion(text, { topic, concern, budget: 60 });
 
   test('natural check-in questions in the customer\'s own words pass', () => {
     expect(v('Are the ants backing off since the visit?')).toBeNull();
     expect(v('How are the ants in the kitchen looking since the visit?')).toBeNull();
-    expect(v('Still seeing the bugs in your bathroom?', 'bugs in my bathroom')).toBeNull();
-    expect(v('How is the Bermuda grass looking since the visit?', 'Bermuda grass')).toBeNull();
+    expect(v('Still seeing the bugs in your bathroom?', 'bugs in my bathroom', 'bugs')).toBeNull();
+    expect(v('How is the Bermuda grass looking since the visit?', 'Bermuda grass', 'Bermuda grass')).toBeNull();
   });
 
   test('claims of work, promised results, days, weather, places, names and second pests cannot be written (Codex r1 on #5246)', () => {
@@ -434,10 +436,14 @@ describe('verifyTopicFollowupQuestion — a closed vocabulary, not a banned-word
     ]) expect([text, v(text)]).toEqual([text, 'word_outside_vocabulary']);
   });
 
-  test('it must be one question that names the topic, within budget', () => {
-    expect(v('How is everything?')).toBe('topic_missing');
+  test('it must name the concern itself, never just the place (codex r5 on #5246)', () => {
+    expect(v("How's the kitchen looking?")).toBe('concern_missing');
+    expect(v('How is everything?')).toBe('concern_missing');
+  });
+
+  test('it must be one question within budget', () => {
     expect(v('The ants should settle down.')).toBe('not_a_question');
     expect(v('Ants? Backing off?')).toBe('not_one_sentence');
-    expect(Drafter.verifyTopicFollowupQuestion('How are the ants in the kitchen looking since the visit?', { topic: 'ants in the kitchen', budget: 30 })).toBe('too_long');
+    expect(Drafter.verifyTopicFollowupQuestion('How are the ants in the kitchen looking since the visit?', { topic: 'ants in the kitchen', concern: 'ants', budget: 30 })).toBe('too_long');
   });
 });

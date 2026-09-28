@@ -45,7 +45,11 @@ const { SERVICE_LINE_IDS, detectServiceLine } = require("./service-report/servic
 // a buy/add/price question reading as a topic.
 // v3 (owner ruling 2026-09-28): the model also names the service line the
 // topic belongs to; a topic is kept only when that is the service just done.
-const TOPIC_VERSION = "review-day0-context-v3";
+// v4: the model also names the concern itself (the pest, plant or condition,
+// never a place) from the topic's own words; the recurring follow-up question
+// must name it.
+const TOPIC_VERSION = "review-day0-context-v4";
+const MAX_CONCERN_WORDS = 3;
 
 const EVIDENCE_WINDOW_DAYS = 14;
 const EVIDENCE_WINDOW_MS = EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -77,9 +81,10 @@ const TOPIC_SCHEMA = {
     source: { type: "string", enum: ["completion", "sms", "none"] },
     evidence_id: { type: "string" },
     service_line: { type: "string", enum: TOPIC_SERVICE_LINES },
+    concern: { type: "string" },
     confidence: { type: "number" },
   },
-  required: ["topic", "kind", "source", "evidence_id", "service_line", "confidence"],
+  required: ["topic", "kind", "source", "evidence_id", "service_line", "concern", "confidence"],
   additionalProperties: false,
 };
 
@@ -95,6 +100,8 @@ Read the evidence — what the customer told the technician on this visit (their
 - kind = "none": nothing above applies, only a bare place/room is named with no condition, or the evidence is too vague to name a topic.
 
 When kind is "service_concern" or "question", set topic to AT MOST 6 WORDS using the customer's OWN nouns from the evidence, and it MUST name the pest/animal/plant/lawn/property condition itself — never a place alone, never invent a pest, condition, or word that isn't in the evidence. Otherwise set topic to "".
+
+concern is the pest, animal, plant or condition itself, in ONE TO THREE words taken from topic (for example "ants" from "ants in the kitchen", "Bermuda grass", "bugs", "grass dying"). Never a place or room. When kind is not "service_concern" or "question", concern is "".
 
 service_line is the Waves service that treats the topic itself, judged from the topic alone: "pest" (household insects and spiders — ants, roaches, earwigs, spiders, wasps, fleas, silverfish), "lawn" (grass, turf, weeds, lawn disease, lawn insects such as chinch bugs or grubs), "tree_shrub" (trees, shrubs, palms, ornamental plants), "mosquito", "termite" (termites and other wood-destroying insects), "rodent" (rats, mice), or "other" (anything Waves does not treat — snakes, birds, raccoons and other wildlife — or when you cannot tell). When kind is not "service_concern" or "question", service_line is "other".
 
@@ -365,10 +372,17 @@ function validateTopicResult(json, ev) {
   // topic after a pest visit). Anything else gets the fixed Day-0 text.
   const serviceLine = json.service_line;
   if (serviceLine === "other" || !(ev?.serviceLines || []).includes(serviceLine)) return refuse("off_service");
+  // The concern itself (pest, plant, condition), from the topic's own words —
+  // the recurring follow-up question must name it, never just the place.
+  const concern = String(json.concern || "").trim();
+  const concernWords = (concern.toLowerCase().match(/[a-z]+/g) || []).filter((w) => !TOPIC_FILLER_WORDS.has(w));
+  if (!concernWords.length || concern.split(/\s+/).length > MAX_CONCERN_WORDS
+    || !concernWords.every((w) => isWordInEvidence(w, topic.toLowerCase()))) return refuse("concern_invalid");
 
   return {
     topic: {
       topic,
+      concern,
       kind,
       source,
       evidenceId: evidenceId != null ? String(evidenceId) : null,

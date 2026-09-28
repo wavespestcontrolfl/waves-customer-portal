@@ -543,15 +543,20 @@ describe('review sequences — cadence engine', () => {
   describe('GATE_REVIEW_DAY0_CONTEXT — the recurring topic follow-up (owner rulings 2026-09-28)', () => {
     const RECURRING = [{ day: 0, channel: 'sms', templateKey: 'day0_ask' }];
     const FOLLOWUP = { day: 4, channel: 'sms', templateKey: 'topic_followup', weekdaysOnly: true };
-    const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v3' });
+    const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', concern: 'ants', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v4' });
     const DRAFTED = "Hi Dee! Are the ants backing off since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
     const setup = ({ seq = {}, customer = {}, prefs = [], sms = [] } = {}) => {
       const mock = makeMock({
         customers: [{ id: 'tf-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
         notification_prefs: prefs,
         sms_log: sms,
+        // The recurring visit behind the sequence, so a post-service first
+        // send's plan re-resolve keeps the recurring plan.
+        service_records: [{ id: 'sr-tf', customer_id: 'tf-1', scheduled_service_id: 'ss-tf', service_type: 'Quarterly Pest Control Service' }],
+        scheduled_services: [{ id: 'ss-tf', customer_id: 'tf-1', is_recurring: true, status: 'completed', scheduled_date: new Date().toISOString().slice(0, 10) }],
         review_sequences: [{
           id: 'seq-tf', customer_id: 'tf-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'admin',
+          service_record_id: 'sr-tf', scheduled_service_id: 'ss-tf',
           plan: JSON.stringify(RECURRING), ask_context: TOPIC,
           started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000), ...seq,
         }],
@@ -579,6 +584,30 @@ describe('review sequences — cadence engine', () => {
       expect(seq.current_step).toBe(1);
       expect(JSON.parse(seq.plan)).toEqual([...RECURRING, FOLLOWUP]);
       expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now() + 2 * 86400000);
+    });
+
+    test('a Day-0 ask due moments after a post-service enrollment waits a minute for the topic to settle (codex r5 on #5246)', async () => {
+      const mock = setup({ seq: { ask_context: null, started_by: 'post_service', started_at: new Date(Date.now() - 5000) } });
+      const out = await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out.deferred).toBe(1);
+      const seq = seqRow(mock);
+      expect(seq.status).toBe('active');
+      expect(JSON.parse(seq.decision)).toMatchObject({ reason: 'topic_pending' });
+      expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now() + 40000);
+    });
+
+    test.each([
+      ['the gate is off', { gateOff: true, seq: { ask_context: null, started_by: 'post_service', started_at: new Date(Date.now() - 5000) } }],
+      ['a minute has passed since enrollment', { seq: { ask_context: null, started_by: 'post_service', started_at: new Date(Date.now() - 90000) } }],
+      ['the topic already landed', { seq: { started_by: 'post_service', started_at: new Date(Date.now() - 5000) } }],
+    ])('no hold when %s: the Day-0 ask goes out', async (_label, { gateOff, ...opts }) => {
+      if (gateOff) mockGates.reviewDay0Context = false;
+      const mock = setup(opts);
+      await ReviewService.processReviewSequences();
+
+      expect(lastTouch(mock).template_key).toBe('day0_ask');
     });
 
     test('a topic the classifier stores while the Day-0 send is in flight still earns the follow-up (codex r4 on #5246)', async () => {
@@ -614,7 +643,7 @@ describe('review sequences — cadence engine', () => {
       const mock = setup({ seq: followupDue });
       await ReviewService.processReviewSequences();
 
-      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen' }));
+      expect(mockDraftTopicFollowup).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'tf-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen', concern: 'ants' }));
       expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! Are the ants backing off since the visit\? A Google review means a lot: \S+ Reply if anything's off\.$/);
       expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
       expect(seqRow(mock)).toMatchObject({ status: 'completed', current_step: 2 });
