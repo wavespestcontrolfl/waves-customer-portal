@@ -14,22 +14,41 @@
  *   3. notification_prefs.email_enabled === false -> email_switch_off
  *   4. marketing_offers !== true (null/false/no row) -> marketing_flag_not_on
  *   5. otherwise -> importable
- * subscribeOrResubscribe runs only for a row just certified `importable`,
- * re-certified immediately before its write — so a customer who
- * unsubscribes/gets suppressed in between is skipped, never imported.
+ *
+ * The write is a plain INSERT with `ON CONFLICT (email) DO NOTHING` (backed
+ * by newsletter_subscribers.email's real UNIQUE constraint, from the
+ * original 20260416000001 migration — `subscribeOrResubscribe`'s own insert
+ * path relies on the same constraint's 23505 to detect a concurrent row).
+ * There is no UPDATE branch in this statement, so it is IMPOSSIBLE for this
+ * write to touch an existing row: a row that turned pending/unsubscribed/
+ * suppressed a millisecond earlier is left byte-for-byte unchanged, and the
+ * 0-rows-returned case is counted under `row_appeared` rather than treated
+ * as success. `subscribeOrResubscribe` is deliberately NOT called here (it
+ * can resubscribe an existing row) — the insert instead mirrors its own
+ * insertNewSubscriber() column values for a trusted, already-confirmed
+ * subscriber (status 'active', confirmed_at, source 'customer_import';
+ * subscribed_at and unsubscribe_token take their column defaults, exactly as
+ * insertNewSubscriber leaves them), then reuses the canonical linkToCustomer
+ * picker for customer_id — same as every other trusted caller.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { cityToZone } = require('./event-freshness');
 const { activeSuppressionsFor } = require('./email-template-library');
-const { subscribeOrResubscribe } = require('./newsletter-subscribers');
+const { linkToCustomer } = require('./newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 
-// Narrower than the canonical whereLiveCustomer (customer-stages.js): this
-// only ever ADDS candidates, so `at_risk` is left out, and a NULL
-// pipeline_stage (pre backfill) counts as active_customer rather than being
-// dropped the way whereLiveCustomer's whereIn would silently drop it.
+// The ONE canonical candidate-stage predicate, named and reused verbatim by
+// every query below that needs it, so they can never drift out of sync with
+// each other. Narrower than the canonical whereLiveCustomer
+// (customer-stages.js): this only ever ADDS candidates, so `at_risk` is left
+// out, and a NULL pipeline_stage (pre backfill) counts as active_customer
+// rather than being dropped the way whereLiveCustomer's whereIn would
+// silently drop it — a deliberate, documented divergence from
+// whereLiveCustomer, not an accidental duplicate of it.
+const candidateStageSql = (alias) => `(${alias}.pipeline_stage IN ('active_customer', 'won') OR ${alias}.pipeline_stage IS NULL)`;
+
 async function fetchCandidateRows(conn) {
   const result = await conn.raw(`
     SELECT c.id AS customer_id, c.email, c.first_name, c.last_name, c.city
@@ -37,7 +56,7 @@ async function fetchCandidateRows(conn) {
      WHERE c.deleted_at IS NULL
        AND c.active = true
        AND c.churned_at IS NULL
-       AND (c.pipeline_stage IN ('active_customer', 'won') OR c.pipeline_stage IS NULL)
+       AND ${candidateStageSql('c')}
        AND c.email IS NOT NULL
        AND TRIM(c.email) <> ''
        AND NOT EXISTS (
@@ -55,15 +74,15 @@ async function fetchCandidateRows(conn) {
 // otherwise leave a stale row importable.
 async function fetchLiveCandidateNow(conn, customerId) {
   const result = await conn.raw(
-    `SELECT id AS customer_id, email, first_name, last_name, city
-       FROM customers
-      WHERE id = ?
-        AND deleted_at IS NULL
-        AND active = true
-        AND churned_at IS NULL
-        AND (pipeline_stage IN ('active_customer', 'won') OR pipeline_stage IS NULL)
-        AND email IS NOT NULL
-        AND TRIM(email) <> ''`,
+    `SELECT c.id AS customer_id, c.email, c.first_name, c.last_name, c.city
+       FROM customers c
+      WHERE c.id = ?
+        AND c.deleted_at IS NULL
+        AND c.active = true
+        AND c.churned_at IS NULL
+        AND ${candidateStageSql('c')}
+        AND c.email IS NOT NULL
+        AND TRIM(c.email) <> ''`,
     [customerId],
   );
   return result.rows?.[0] || null;
@@ -153,20 +172,52 @@ async function findLiveCustomersForEmail(conn, email) {
   return result.rows || [];
 }
 
+// Links ONE orphan subscriber to its live twin in a SINGLE statement — the
+// exactly-one-match check and the write are the same atomic UPDATE, not a
+// separate read followed by a write, so there is no window between "we
+// looked" and "we wrote" for a second live customer (or an email change on
+// either side) to land in. Returns true only when a row was actually
+// updated (the report below distinguishes "matched at read time" from
+// "actually linked").
+async function applyOrphanLink(conn, link) {
+  const result = await conn.raw(
+    `UPDATE newsletter_subscribers ns
+        SET customer_id = twin.id, updated_at = NOW()
+       FROM (
+             SELECT id FROM customers
+              WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
+                AND deleted_at IS NULL AND active = true AND pipeline_stage = ANY(?)
+              LIMIT 1
+           ) twin
+      WHERE ns.id = ?
+        AND ns.email = ?
+        AND ns.status = 'active'
+        AND ns.customer_id IS NULL
+        AND (
+              SELECT count(*) FROM customers c2
+               WHERE LOWER(TRIM(c2.email)) = LOWER(TRIM(?))
+                 AND c2.deleted_at IS NULL AND c2.active = true AND c2.pipeline_stage = ANY(?)
+            ) = 1
+      RETURNING ns.id`,
+    [link.email, CUSTOMER_STAGES, link.subscriberId, link.email, link.email, CUSTOMER_STAGES],
+  );
+  return (result.rows || []).length > 0;
+}
+
 /**
  * Reconcile the newsletter list against live customers. Read-only unless
  * `dryRun === false` — the route is responsible for requiring an explicit
- * confirmation before ever passing that. `conn` runs the READS on a
- * connection of the caller's choosing (default the shared db pool);
- * subscribeOrResubscribe always writes through the shared pool (no
- * connection override), so a write-mode call is never wrapped in an outer
- * transaction.
+ * confirmation before ever passing that. `conn` runs the READS AND the
+ * INSERT-only import write on a connection of the caller's choosing
+ * (default the shared db pool); `linkToCustomer` always writes through the
+ * shared pool (no connection override, same as every other trusted caller),
+ * so a write-mode call is never fully wrapped in one outer transaction.
  */
 async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const write = dryRun === false;
   const excluded = {
     previously_unsubscribed: 0, pending_confirmation: 0, inactive_subscriber: 0,
-    suppressed: 0, marketing_flag_not_on: 0, email_switch_off: 0,
+    suppressed: 0, marketing_flag_not_on: 0, email_switch_off: 0, row_appeared: 0,
   };
   const errors = [];
 
@@ -219,6 +270,8 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   }
 
   let imported = 0;
+  let zoneFillsApplied = 0;
+  let orphanLinksApplied = 0;
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
       // Re-check immediately before writing: reload the customer (an
@@ -229,41 +282,51 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       const fresh = await fetchLiveCandidateNow(conn, row.customer_id);
       if (!fresh || await classifyCustomer(conn, fresh)) return;
 
-      const result = await subscribeOrResubscribe({
-        email: fresh.email,
-        firstName: fresh.first_name || null,
-        lastName: fresh.last_name || null,
-        source: 'customer_import',
-        strict: false,
-        requireConfirmation: false,
-        linkCustomer: true,
-      });
-      if (!['created', 'resubscribed', 'confirmed'].includes(result.action)) return;
+      const lc = fresh.email.trim().toLowerCase();
+      // INSERT-only: no UPDATE branch exists for this statement to take, so
+      // a row that appeared for this email in the instant between the
+      // recheck above and this write is left completely untouched — the
+      // conflict just yields zero returned rows.
+      const inserted = await conn('newsletter_subscribers')
+        .insert({
+          email: lc,
+          first_name: fresh.first_name || null,
+          last_name: fresh.last_name || null,
+          source: 'customer_import',
+          status: 'active',
+          confirmed_at: new Date(),
+        })
+        .onConflict('email')
+        .ignore()
+        .returning('id');
+      if (!inserted.length) {
+        excluded.row_appeared += 1;
+        return;
+      }
+
       imported += 1;
+      await linkToCustomer(lc); // canonical picker — same as every other trusted caller
       const zone = cityToZone(fresh.city);
-      if (zone && result.subscriber?.id) {
+      if (zone) {
         await conn('newsletter_subscribers')
-          .where({ id: result.subscriber.id })
+          .where({ id: inserted[0].id })
           .whereNull('region_zone')
           .update({ region_zone: zone });
       }
     });
 
-    await guardedEach(zoneFillCandidates, (fill) => ({ subscriberId: fill.subscriberId }), (fill) => conn('newsletter_subscribers')
-      .where({ id: fill.subscriberId })
-      .where((qb) => qb.whereNull('region_zone').orWhereRaw("TRIM(region_zone) = ''"))
-      .update({ region_zone: fill.zone }));
+    await guardedEach(zoneFillCandidates, (fill) => ({ subscriberId: fill.subscriberId }), async (fill) => {
+      const updated = await conn('newsletter_subscribers')
+        .where({ id: fill.subscriberId, status: 'active' })
+        .where((qb) => qb.whereNull('region_zone').orWhereRaw("TRIM(region_zone) = ''"))
+        .update({ region_zone: fill.zone });
+      if (updated) zoneFillsApplied += 1;
+    });
 
+    // applyOrphanLink is ONE atomic statement — the exactly-one-match check
+    // and the write happen together, so there is no separate read to trust.
     await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), async (link) => {
-      // Re-derive the match fresh immediately before writing — an email
-      // change on either side, or a second live customer now sharing the
-      // address, must drop the link rather than trust the earlier read.
-      const fresh = await findLiveCustomersForEmail(conn, link.email);
-      if (fresh.length !== 1) return;
-      await conn('newsletter_subscribers')
-        .where({ id: link.subscriberId, email: link.email })
-        .whereNull('customer_id')
-        .update({ customer_id: fresh[0].id });
+      if (await applyOrphanLink(conn, link)) orphanLinksApplied += 1;
     });
   }
 
@@ -273,8 +336,11 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     importable: importableRows.length,
     imported,
     excluded,
-    zoneFills: zoneFillCandidates.length,
-    orphanLinks: orphanLinks.length,
+    // Dry run reports the read-phase candidate/match count (what WOULD
+    // happen); write mode reports what was ACTUALLY applied — a race can
+    // make these differ even within one call.
+    zoneFills: write ? zoneFillsApplied : zoneFillCandidates.length,
+    orphanLinks: write ? orphanLinksApplied : orphanLinks.length,
     byCity,
     errors,
   };

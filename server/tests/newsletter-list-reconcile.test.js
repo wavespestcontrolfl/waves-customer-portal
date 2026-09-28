@@ -6,11 +6,11 @@
  * priority-order/filtering logic gets real behavioral coverage.
  */
 
-jest.mock('../services/newsletter-subscribers', () => ({ subscribeOrResubscribe: jest.fn() }));
+jest.mock('../services/newsletter-subscribers', () => ({ linkToCustomer: jest.fn(async () => {}) }));
 jest.mock('../services/email-template-library', () => ({ activeSuppressionsFor: jest.fn(async () => []) }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 
-const { subscribeOrResubscribe } = require('../services/newsletter-subscribers');
+const { linkToCustomer } = require('../services/newsletter-subscribers');
 const { activeSuppressionsFor } = require('../services/email-template-library');
 const { CUSTOMER_STAGES } = require('../services/customer-stages');
 const { reconcileCustomers } = require('../services/newsletter-list-reconcile');
@@ -21,9 +21,10 @@ const isCandidate = (c) => !c.deleted_at && c.active === true && !c.churned_at
   && !!(c.email && c.email.trim());
 const isLive = (c) => !c.deleted_at && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
 
-// Fake knex-like `conn`: table-call handlers for the two plain reads/writes,
+// Fake knex-like `conn`: table-call handlers for the plain reads/writes,
 // `.raw(sql, bindings)` dispatched on SQL shape for everything else.
 function makeConn(state) {
+  let nextId = 1;
   const conn = (table) => {
     if (table === 'notification_prefs') {
       return { where: (cond) => ({ first: async () => state.prefs.find((p) => p.customer_id === cond.customer_id) || null }) };
@@ -37,12 +38,28 @@ function makeConn(state) {
             update: async (fields) => {
               const row = state.subscribers.find((s) => s.id === cond.id);
               if (!row) return 0;
+              if (cond.status && row.status !== cond.status) return 0;
+              if (cond.email && (row.email || '').toLowerCase() !== String(cond.email).toLowerCase()) return 0;
               Object.assign(row, fields);
               return 1;
             },
           };
           return chain;
         },
+        insert: (fields) => ({
+          onConflict: () => ({
+            ignore: () => ({
+              returning: async () => {
+                const email = String(fields.email).toLowerCase();
+                const exists = state.subscribers.some((s) => (s.email || '').toLowerCase() === email);
+                if (exists) return [];
+                const row = { id: `sub-${nextId++}`, region_zone: null, customer_id: null, ...fields, email };
+                state.subscribers.push(row);
+                return [{ id: row.id }];
+              },
+            }),
+          }),
+        }),
       };
     }
     throw new Error(`Unexpected table ${table}`);
@@ -56,7 +73,7 @@ function makeConn(state) {
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
       return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
     }
-    if (sql.includes('WHERE id = ?')) {
+    if (sql.includes('WHERE c.id = ?')) {
       const [customerId] = bindings;
       const c = state.customers.find((x) => x.id === customerId && isCandidate(x));
       return { rows: c ? [{ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city }] : [] };
@@ -75,14 +92,27 @@ function makeConn(state) {
         .map((s) => { const c = state.customers.find((x) => x.id === s.customer_id); return c && isLive(c) ? { subscriber_id: s.id, city: c.city } : null; })
         .filter(Boolean) };
     }
-    if (sql.includes('customer_id IS NULL')) {
+    if (sql.includes('customer_id IS NULL') && sql.includes('SELECT id, email')) {
       return { rows: state.subscribers.filter((s) => s.status === 'active' && s.customer_id == null).map((s) => ({ id: s.id, email: s.email })) };
     }
-    if (sql.includes('SELECT id FROM customers')) {
-      const [email] = bindings;
-      return { rows: state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c)).map((c) => ({ id: c.id })) };
+    if (sql.includes('UPDATE newsletter_subscribers ns')) {
+      const [email, , subscriberId, whereEmail] = bindings;
+      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
+      const row = state.subscribers.find((s) => s.id === subscriberId);
+      if (row && matches.length === 1 && row.status === 'active' && row.customer_id == null
+          && (row.email || '').toLowerCase() === key(whereEmail)) {
+        row.customer_id = matches[0].id;
+        return { rows: [{ id: row.id }] };
+      }
+      return { rows: [] };
     }
-    throw new Error(`Unhandled raw SQL: ${sql.slice(0, 60)}`);
+    if (sql.includes('SELECT id FROM customers') || sql.includes('SELECT count(*) FROM customers')) {
+      const [email] = bindings;
+      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
+      if (sql.includes('count(*)')) return { rows: [{ count: String(matches.length) }] };
+      return { rows: matches.map((c) => ({ id: c.id })) };
+    }
+    throw new Error(`Unhandled raw SQL: ${sql.slice(0, 80)}`);
   });
 
   return conn;
@@ -96,6 +126,7 @@ const cust = (o) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   activeSuppressionsFor.mockResolvedValue([]);
+  linkToCustomer.mockResolvedValue();
 });
 
 // Exclusion priority order: one case per reason, each ALSO carrying a
@@ -118,32 +149,47 @@ test.each([
   const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
   expect(result.excluded[reason]).toBe(1);
   expect(result.imported).toBe(0);
-  expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+  expect(result.excluded.row_appeared).toBe(0);
+  expect(linkToCustomer).not.toHaveBeenCalled();
   // Reused verbatim, never re-derived — checked on the one row that expects a suppression lookup.
   if (reason === 'suppressed') expect(activeSuppressionsFor).toHaveBeenCalledWith(null, 'a@example.com', 'marketing_newsletter', expect.anything());
 });
 
-test('dry run performs zero writes (importable + byCity still computed); write mode then imports and backfills region_zone via cityToZone', async () => {
+test('dry run performs zero writes (importable + byCity still computed); write mode then INSERTs and backfills region_zone via cityToZone', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'ok@example.com', city: 'Venice' }), cust({ id: 'c2', email: 'unsub@example.com' })],
-    subscribers: [{ id: 's-unsub', customer_id: 'c2', email: 'unsub@example.com', status: 'unsubscribed' }], prefs: [{ customer_id: 'c1', marketing_offers: true }],
+    subscribers: [{ id: 's-unsub', customer_id: 'c2', email: 'unsub@example.com', status: 'unsubscribed' }],
+    prefs: [{ customer_id: 'c1', marketing_offers: true }],
   };
   const dry = await reconcileCustomers({ conn: makeConn(state) });
   expect(dry).toMatchObject({ dryRun: true, importable: 1, imported: 0, byCity: [{ city: 'Venice', count: 1 }] });
-  expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+  expect(state.subscribers).toHaveLength(1); // dry run inserted nothing
 
-  // The row doesn't exist yet when the candidate fetch/recheck run (both read BEFORE this is called).
-  subscribeOrResubscribe.mockImplementation(async ({ email }) => {
-    state.subscribers.push({ id: 'sub-new', customer_id: 'c1', email, status: 'active', region_zone: null });
-    return { action: 'created', subscriber: { id: 'sub-new' } };
-  });
   const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
   expect(write.imported).toBe(1);
-  expect(subscribeOrResubscribe).toHaveBeenCalledWith(expect.objectContaining({
-    email: 'ok@example.com', source: 'customer_import', requireConfirmation: false, linkCustomer: true, strict: false,
-  }));
-  expect(state.subscribers.find((s) => s.id === 'sub-new').region_zone).toBe('south_sarasota');
+  const created = state.subscribers.find((s) => s.email === 'ok@example.com');
+  expect(created).toMatchObject({ status: 'active', source: 'customer_import', first_name: 'F', last_name: 'L', region_zone: 'south_sarasota' });
+  expect(created.confirmed_at).toBeInstanceOf(Date);
+  expect(linkToCustomer).toHaveBeenCalledWith('ok@example.com');
 });
+
+test.each(['unsubscribed', 'pending', 'inactive'])(
+  'a previously %s address is NEVER (re)subscribed even when marketing_offers is true — the INSERT has no UPDATE branch to take',
+  async (status) => {
+    const state = {
+      customers: [cust({ email: 'a@example.com' })],
+      subscribers: [{ id: 's0', customer_id: 'c1', email: 'a@example.com', status, source: 'public_form', first_name: null }],
+      prefs: [{ customer_id: 'c1', marketing_offers: true }],
+    };
+    const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+    expect(result.imported).toBe(0);
+    expect(linkToCustomer).not.toHaveBeenCalled();
+    const row = state.subscribers.find((s) => s.id === 's0');
+    expect(row.status).toBe(status); // byte-for-byte unchanged
+    expect(row.source).toBe('public_form');
+    expect(row.first_name).toBeNull();
+  },
+);
 
 test('re-check before write: a customer who unsubscribes between the read and the write is skipped, not imported', async () => {
   const state = { customers: [cust({ email: 'flips@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
@@ -162,27 +208,60 @@ test('re-check before write: a customer who unsubscribes between the read and th
   const result = await reconcileCustomers({ dryRun: false, conn });
   expect(result.importable).toBe(1); // the pre-write snapshot still counted it
   expect(result.imported).toBe(0); // the recheck caught the mid-flight unsubscribe
-  expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+  expect(linkToCustomer).not.toHaveBeenCalled();
 });
 
 test('re-check reloads the customer: one archived between the read and the write is skipped, not imported', async () => {
   const state = { customers: [cust({ id: 'c1', email: 'gone@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
-  subscribeOrResubscribe.mockImplementation(async () => { throw new Error('must not be called'); });
   const conn = makeConn(state);
   const rawImpl = conn.raw.getMockImplementation();
   conn.raw = jest.fn(async (sql, bindings) => {
     // Archive the customer right before the write-time reload reads it (the
     // batch classification loop never calls this query at all).
-    if (sql.includes('WHERE id = ?')) state.customers[0].deleted_at = new Date();
+    if (sql.includes('WHERE c.id = ?')) state.customers[0].deleted_at = new Date();
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
   expect(result.importable).toBe(1); // the pre-write snapshot still counted it
   expect(result.imported).toBe(0);
-  expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+  expect(linkToCustomer).not.toHaveBeenCalled();
 });
 
-test('zone fill (write mode only): fills a null/blank region_zone from a live customer city that maps to a zone; a non-mapping city is left alone', async () => {
+test('a row that appears for the same email in the instant between the recheck and the INSERT is left byte-for-byte unchanged, and counted as row_appeared', async () => {
+  const state = { customers: [cust({ email: 'race@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
+  const conn = makeConn(state);
+  // notification_prefs is classifyCustomer's LAST read, on both the batch
+  // pass (call 1) and the write-time recheck (call 2) — mutate right after
+  // call 2 finishes reading, so classifyCustomer still reports "importable"
+  // but the row exists by the time the INSERT's own ON CONFLICT runs.
+  let prefsReads = 0;
+  const originalPrefsTable = conn('notification_prefs');
+  const realConnFn = conn;
+  const wrapped = (table) => {
+    if (table !== 'notification_prefs') return realConnFn(table);
+    return {
+      where: (cond) => ({
+        first: async () => {
+          prefsReads += 1;
+          const result = await originalPrefsTable.where(cond).first();
+          if (prefsReads === 2) {
+            state.subscribers.push({ id: 's-race', customer_id: null, email: 'race@example.com', status: 'active', source: 'other_flow', region_zone: null });
+          }
+          return result;
+        },
+      }),
+    };
+  };
+  wrapped.raw = conn.raw;
+  const result = await reconcileCustomers({ dryRun: false, conn: wrapped });
+  expect(result.imported).toBe(0);
+  expect(result.excluded.row_appeared).toBe(1);
+  expect(linkToCustomer).not.toHaveBeenCalled();
+  const row = state.subscribers.find((s) => s.id === 's-race');
+  expect(row.source).toBe('other_flow'); // untouched by the import
+});
+
+test('zone fill (write mode only): fills a null/blank region_zone from a live customer city that maps to a zone; a non-mapping city is left alone; reports ACTUALLY applied', async () => {
   const state = {
     customers: [cust({ id: 'c1', email: 'z1@e.com', city: 'Venice' }), cust({ id: 'c2', email: 'z2@e.com', city: 'Nowhere' })],
     subscribers: [{ id: 's1', customer_id: 'c1', email: 'z1@e.com', status: 'active', region_zone: null },
@@ -190,42 +269,45 @@ test('zone fill (write mode only): fills a null/blank region_zone from a live cu
     prefs: [],
   };
   const dry = await reconcileCustomers({ conn: makeConn(state) });
-  expect(dry.zoneFills).toBe(1); // only the mappable city counts
+  expect(dry.zoneFills).toBe(1); // only the mappable city counts (read-phase candidate count)
   expect(state.subscribers[0].region_zone).toBeNull(); // dry run touches nothing
 
   const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
-  expect(write.zoneFills).toBe(1);
+  expect(write.zoneFills).toBe(1); // write-mode reports ACTUALLY applied
   expect(state.subscribers[0].region_zone).toBe('south_sarasota');
   expect(state.subscribers[1].region_zone).toBe(''); // 'Nowhere' never maps — untouched
 });
 
-// Orphan link (write mode only) — exact-match only.
+// Orphan link (write mode only) — exact-match only; the check and the write
+// are ONE atomic statement (applyOrphanLink), not a separate read + write.
 test.each([
   ['exactly one live customer -> linked', [cust({ id: 'c1', email: 'orphan@e.com' })], 'c1'],
   ['two live customers sharing the email -> never guesses, stays unlinked', [cust({ id: 'c1', email: 'orphan@e.com' }), cust({ id: 'c2', email: 'orphan@e.com' })], null],
   ['zero live customers -> stays unlinked', [], null],
 ])('%s', async (_label, customers, expected) => {
   const state = { customers, subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
-  const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
-  expect(result.orphanLinks).toBe(expected ? 1 : 0);
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.orphanLinks).toBe(expected ? 1 : 0); // read-phase candidate count
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.orphanLinks).toBe(expected ? 1 : 0); // write-mode: actually applied
   expect(state.subscribers[0].customer_id).toBe(expected);
 });
 
-test('orphan link re-derives the match fresh: a second live customer sharing the email appearing mid-batch drops the link', async () => {
+test('orphan link is atomic with the match check: a second live customer sharing the email appearing mid-batch drops the link (reported count reflects what was ACTUALLY applied, not the read-phase snapshot)', async () => {
   const state = { customers: [cust({ id: 'c1', email: 'orphan@e.com' })], subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
   const conn = makeConn(state);
   let firstRead = true;
   const rawImpl = conn.raw.getMockImplementation();
   conn.raw = jest.fn(async (sql, bindings) => {
     // Call 1 = the read-phase count (sees exactly one match); call 2 = the
-    // write-phase re-derivation — add a second live customer before it reads.
-    if (sql.includes('SELECT id FROM customers')) {
+    // atomic UPDATE's own match check — add a second live customer first.
+    if ((sql.includes('SELECT id FROM customers') || sql.includes('count(*) FROM customers'))) {
       if (!firstRead) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com' }));
       firstRead = false;
     }
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
-  expect(result.orphanLinks).toBe(1); // the read-phase snapshot still counted it
-  expect(state.subscribers[0].customer_id).toBeNull(); // the write-phase recheck found it now ambiguous
+  expect(result.orphanLinks).toBe(0); // NOT the read-phase snapshot — what was actually applied
+  expect(state.subscribers[0].customer_id).toBeNull(); // the atomic write found it now ambiguous
 });
