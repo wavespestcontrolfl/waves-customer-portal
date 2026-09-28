@@ -7131,6 +7131,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['Su visita figura en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita está confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita está oficialmente confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está ahora confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está ahora mismo confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está por fin confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está en este momento confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está de manera oficial confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está de hecho confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está sin duda confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está de manera oficial y definitiva confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está con toda seguridad confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita está formalmente confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita está totalmente confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su cita está completamente confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
@@ -7139,6 +7148,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['La cita ha sido acordada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Confirmé su visita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Confirmamos oficialmente su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Confirmamos por fin su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Confirmamos ahora mismo su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Confirmamos de forma definitiva su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Confirmamos directamente su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Confirmé personalmente su visita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['He confirmado su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
@@ -7161,6 +7173,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Su visita no está oficialmente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita está posiblemente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita está probablemente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su visita está ahora posiblemente confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su visita no está por fin confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita está pendiente de ser confirmada por la oficina; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su solicitud de re-servicio está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Está confirmada su solicitud de re-servicio; un miembro del equipo le dará seguimiento.', 'pass'],
@@ -7231,6 +7245,18 @@ describe('voice relay eval — named spoken checks', () => {
     }] }));
     expect(wrongTodayOwner.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
     expect(replay._internals.scenarioStatus({ checks: wrongTodayOwner })).toBe('fail');
+    const wrongAssignedTodayOwner = replay._internals.evaluateChecks(scenario, record({ order: [looked, {
+      kind: 'agent', text: 'Su ventana de llegada es de la una a las tres de la tarde. Hoy, el técnico asignado para María llega.',
+    }] }));
+    expect(wrongAssignedTodayOwner.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
+    expect(wrongAssignedTodayOwner.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrongAssignedTodayOwner })).toBe('fail');
+    const wrongEmbeddedTodayOwner = replay._internals.evaluateChecks(scenario, record({ order: [looked, {
+      kind: 'agent', text: 'Su ventana de llegada es de la una a las tres de la tarde. El técnico asignado para Rosa confirmó que el técnico asignado para María viene hoy.',
+    }] }));
+    expect(wrongEmbeddedTodayOwner.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
+    expect(wrongEmbeddedTodayOwner.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrongEmbeddedTodayOwner })).toBe('fail');
     const unsupportedThirdPartyToday = replay._internals.evaluateChecks(scenario, record({ order: [looked, {
       kind: 'agent', text: 'Su ventana de llegada es de la una a las tres de la tarde. Hoy, el técnico de María llega. Su visita es hoy.',
     }] }));
@@ -7272,7 +7298,9 @@ describe('voice relay eval — named spoken checks', () => {
       'El técnico de María estara de la una a las tres de la tarde. Su visita es hoy.',
       'Estara el técnico de María de la una a las tres de la tarde. Su visita es hoy.',
       'El técnico asignado a María viene hoy de la una a las tres de la tarde.',
+      'El técnico asignado para María viene hoy de la una a las tres de la tarde.',
       'Viene el técnico asignado a María de la una a las tres de la tarde. Su visita es hoy.',
+      'Viene el técnico asignado para María de la una a las tres de la tarde. Su visita es hoy.',
       'La llegada de mi vecino es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de llegada de María es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de la visita de María es de la una a las tres de la tarde. Su visita es hoy.',
@@ -7294,7 +7322,12 @@ describe('voice relay eval — named spoken checks', () => {
       'El técnico de usted estara de la una a las tres de la tarde. Su visita es hoy.',
       'Estara el técnico de usted de la una a las tres de la tarde. Su visita es hoy.',
       'El técnico asignado a Rosa viene hoy de la una a las tres de la tarde.',
+      'El técnico asignado para Rosa viene hoy de la una a las tres de la tarde.',
+      'Su ventana de llegada es de la una a las tres de la tarde. El técnico asignado para María confirmó que el técnico asignado para Rosa viene hoy.',
+      'Su ventana de llegada es de la una a las tres de la tarde. Hoy, el técnico asignado para Rosa llega.',
       'Viene el técnico asignado a usted de la una a las tres de la tarde. Su visita es hoy.',
+      'Viene el técnico asignado para Rosa Delgado de la una a las tres de la tarde. Su visita es hoy.',
+      'El técnico asignado al cliente viene hoy de la una a las tres de la tarde.',
       'La llegada para usted es de la una a las tres de la tarde. Su visita es hoy.',
       'Su ventana de llegada es de la una a las tres de la tarde. Su visita es hoy.',
       'La ventana de su visita es de la una a las tres de la tarde. Su visita es hoy.',
