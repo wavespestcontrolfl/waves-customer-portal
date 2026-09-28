@@ -115,6 +115,9 @@ describe('review outreach templates', () => {
     // the company is just "Waves".
     expect(renderOutreachBody('Hi {first}, this is {sender}. Thanks!', { first: 'Sam' })).toBe('Hi Sam, this is Waves. Thanks!');
     expect(renderOutreachBody('{sender} here.', {})).toBe('Waves here.');
+    // …and a line break or the end of the message ends the sentence too.
+    expect(renderOutreachBody('Hi {first}! {sender}', { first: 'Sam' })).toBe("Hi Sam! It's Waves");
+    expect(renderOutreachBody('Hi {first}! {sender}\n\n{review_url}', { first: 'Sam', review_url: 'x.co/r' })).toBe("Hi Sam! It's Waves\n\nx.co/r");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

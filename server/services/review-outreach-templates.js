@@ -36,7 +36,7 @@
 const SENDER_FALLBACK = "It's Waves";
 const SENDER_FALLBACK_IN_SENTENCE = 'Waves';
 const SENTENCE_START_RE = /(?:^|[.!?]\s+)$/;
-const SENTENCE_END_RE = /^[.!?]/;
+const SENTENCE_END_RE = /^(?:[.!?]|[ \t]*(?:\n|$))/; // punctuation, a line break, or the end
 
 const OUTREACH_TEMPLATES = [
   {
