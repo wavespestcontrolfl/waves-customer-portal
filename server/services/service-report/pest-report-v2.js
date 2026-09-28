@@ -405,21 +405,30 @@ function pestReportV2PdfSignature(service = {}) {
   return `-pestv2c${tonSuffix}${pexSuffix}`;
 }
 
-// Best-effort, fail-open (null) week-weather fetch — mirrors
-// reports-public.js's own fetchPestWeekWeatherSafe. Kept here too (rather
-// than re-implemented ad hoc) so pdf-queue.js's queued renderer — which
-// never composes pestReportV2 itself; the actual PDF bytes come from a real
-// HTTP round-trip to the report page fetching its own /data — can still
-// learn the SAME settledness fact the served render will use.
+// Best-effort week-weather fetch — mirrors reports-public.js's own
+// fetchPestWeekWeatherSafe (same return contract: a bare `null` means ONLY
+// "no coordinates" — a permanent, legitimately-cacheable absence; a
+// geocoded property ALWAYS gets the fetch's own result object back, even
+// its empty/failed shape, and an unexpected throw becomes an explicit
+// `{ rainInches: null, windowClosed: false, unavailable: true }` sentinel
+// rather than being folded into the same `null` "no coordinates" uses —
+// codex P1 2026-09-29 pre-push audit: conflating the two let a transient
+// provider outage look identical to "nothing to fetch" here, so
+// pestWeekWeatherUncacheableForPdf below could not tell them apart either).
+// Kept here too (rather than re-implemented ad hoc) so pdf-queue.js's
+// queued renderer — which never composes pestReportV2 itself; the actual
+// PDF bytes come from a real HTTP round-trip to the report page fetching
+// its own /data — can still learn the SAME settledness fact the served
+// render will use.
 async function fetchPestWeekWeatherForCache(service) {
+  const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+  const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
+  const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
+  if (lat == null || lng == null) return null;
   try {
-    const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
-    const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
-    const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
-    if (lat == null || lng == null) return null;
     return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
   } catch {
-    return null;
+    return { rainInches: null, windowClosed: false, unavailable: true };
   }
 }
 
@@ -459,7 +468,14 @@ async function pestWeekWeatherUncacheableForPdf(service = {}, { mode } = {}) {
     if (isCockroachTypedReportType(parsed?.typedReportSnapshot?.type)) return false;
   } catch { /* fall through — an unparsable snapshot is not a cockroach report */ }
   const weekWeather = await fetchPestWeekWeatherForCache(service);
-  return !!weekWeather && weekWeather.windowClosed !== true;
+  // Same rule reports-public.js's own pestWeekWeatherUncacheable applies
+  // (codex P1 2026-09-29): `null` means ONLY "no coordinates" — a
+  // permanent, cacheable absence. Any other result (a fetch was attempted)
+  // is uncacheable unless it is BOTH settled (windowClosed === true) AND
+  // populated (rainInches != null) — `windowClosed` alone can't tell a
+  // genuine settled reading from a provider failure disguised as one.
+  return weekWeather !== null
+    && !(weekWeather.rainInches != null && weekWeather.windowClosed === true);
 }
 
 module.exports = {

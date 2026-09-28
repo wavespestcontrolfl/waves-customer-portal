@@ -86,15 +86,34 @@ async function fetchSeasonalForecastSafe(zip) {
 // machinery: this block is not a permanent water-balance narrative, it's a
 // short deterministic sentence, and application-conditions.js already
 // caches by coordinate+date for 6h).
+//
+// Return contract matters for CACHING (codex P1 2026-09-29, pre-push audit
+// on the P0-A fix): a bare `null` here must mean ONLY "no coordinates" — a
+// permanent, legitimately-cacheable absence (nothing will ever retry a
+// property with no location). A geocoded visit whose PROVIDER fetch failed
+// or threw is a DIFFERENT, transient condition — fetchServiceWeekWeather's
+// own "empty" fallback can legitimately return `{ rainInches: null,
+// windowClosed: true }` for a geocoded property (both Open-Meteo and MRMS
+// missed), which looks identical to a genuinely settled reading unless the
+// caller also checks `rainInches`. Conflating the two here would let a
+// transient provider outage cache a PDF with no rain block under the
+// permanent '-pex1' key, and recovery would never refresh those bytes. So:
+// no coordinates => null; coordinates present => ALWAYS the fetch's own
+// result object, even when it is the empty/failed shape, and an unexpected
+// throw becomes an explicit `{ rainInches: null, windowClosed: false,
+// unavailable: true }` sentinel rather than being swallowed into the same
+// `null` the "no coordinates" case uses. pestWeekWeatherUncacheable below
+// reads `rainInches`/`windowClosed` (and this sentinel) to tell a settled,
+// populated reading from every other, non-cacheable outcome.
 async function fetchPestWeekWeatherSafe(service) {
+  const { fetchServiceWeekWeather, toCoordinate } = require('../services/service-report/application-conditions');
+  const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
+  const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
+  if (lat == null || lng == null) return null;
   try {
-    const { fetchServiceWeekWeather, toCoordinate } = require('../services/service-report/application-conditions');
-    const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
-    const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
-    if (lat == null || lng == null) return null;
     return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
   } catch {
-    return null;
+    return { rainInches: null, windowClosed: false, unavailable: true };
   }
 }
 
@@ -581,12 +600,24 @@ async function buildServiceReportV1ResponseData(service, token, {
       // while a durably cached PDF keeps serving the "no rain block" bytes
       // forever. Mark it so the direct PDF route and the queued renderer
       // (pdf-queue.js) both skip storing, exactly like the lawn precedent.
-      // Only meaningful when a week was actually fetched — a failed fetch or
-      // missing coordinates leaves no rain-derived bytes to protect.
+      //
+      // codex P1 2026-09-29 (pre-push audit on the P0-A fix): `windowClosed`
+      // ALONE is not enough. fetchServiceWeekWeather's own "empty" fallback
+      // returns `{ rainInches: null, windowClosed: true }` for a GEOCODED
+      // property when the provider fetch genuinely failed (both Open-Meteo
+      // and MRMS missed) — that reads exactly like a settled reading unless
+      // rainInches is also checked, and a failure IS transient (a retry can
+      // recover it, unlike a merely-open window that only elapsed time
+      // resolves). So: uncacheable whenever a fetch was attempted (had
+      // coordinates — fetchedWeekWeather !== null; `null` means ONLY "no
+      // coordinates", see fetchPestWeekWeatherSafe) AND the result is not
+      // BOTH settled (windowClosed === true) AND populated
+      // (rainInches != null). "No coordinates" is the one legitimate,
+      // permanently-cacheable absence — nothing will ever retry it.
       const pestWeekWeatherUncacheable = expectationsGateOn
         && mode !== 'live'
-        && !!fetchedWeekWeather
-        && fetchedWeekWeather.windowClosed !== true;
+        && fetchedWeekWeather !== null
+        && !(fetchedWeekWeather.rainInches != null && fetchedWeekWeather.windowClosed === true);
       // Set unconditionally (even if buildPestReportV2 below returns null
       // because nothing else is meaningful to show) so the cache-decision
       // sites in reports-public.js and pdf-queue.js always see it — a

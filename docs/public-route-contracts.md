@@ -110,19 +110,32 @@ ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
 rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
 the calendar month alone, and never when there is no rain data at all. A
-PDF/static render whose trailing 7-day window is still open (fetched but
-`windowClosed !== true`) is additionally marked **uncacheable** (codex P0
-2026-09-28, same rule as the lawn week-weather freeze above):
+PDF/static render of a GEOCODED visit whose week is not both SETTLED
+(`windowClosed === true`) AND POPULATED (`rainInches != null`) is
+additionally marked **uncacheable** (codex P0 2026-09-28, refined codex P1
+2026-09-29, same rule as the lawn week-weather freeze above):
 `reports-public.js` sets a top-level `data.pestWeekWeatherUncacheable`
 (sibling of `pestReportV2`, not nested inside it, so it survives even when
 `pestReportV2` itself composes to nothing) whenever the gate is on, the
-render is non-live, and a week was fetched with an open window; both PDF
-cache-decision sites (the direct `/:token` route and the queued renderer in
-`pdf-queue.js`, via the shared `pestWeekWeatherUncacheableForPdf` in
-`pest-report-v2.js`) skip storing under the stable `-pex1` key when it is
-set, so a later render — once the window closes — is what gets cached, not
-a permanent "no rain block" copy. This flag rides the JSON payload the same
-way `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
+render is non-live, coordinates exist (a fetch was attempted at all —
+`fetchPestWeekWeatherSafe` returns a bare `null` ONLY for "no coordinates",
+never for a fetch that ran and failed), and the result is not both settled
+and populated — an open window, a provider outage disguised as a "settled"
+empty reading (`fetchServiceWeekWeather`'s own fallback can legitimately
+return `{ rainInches: null, windowClosed: true }` for a geocoded property
+when every source misses), and an unexpected fetch exception (an explicit
+`{ unavailable: true }` sentinel, never folded into the same `null` "no
+coordinates" uses) are ALL treated as not-yet-cacheable, since a retry can
+recover any of them and the render only shows "no rain block" because the
+data is missing, not because none exists. "No coordinates" is the one
+legitimate, permanently-cacheable absence. Both PDF cache-decision sites
+(the direct `/:token` route and the queued renderer in `pdf-queue.js`, via
+the shared `pestWeekWeatherUncacheableForPdf` in `pest-report-v2.js`, which
+applies the identical settled+populated rule) skip storing under the stable
+`-pex1` key when the marker is set, so a later render — once the window
+closes or the provider recovers — is what gets cached, not a permanent "no
+rain block" copy. This flag rides the JSON payload the same way
+`lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
 `spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling

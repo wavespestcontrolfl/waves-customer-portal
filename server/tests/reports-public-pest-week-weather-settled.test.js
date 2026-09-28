@@ -77,7 +77,7 @@ describe('settledWeekWeatherForRender', () => {
   test('the v1 response builder routes the fetched week through the settle check before buildPestReportV2', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
     expect(source).toMatch(/const \[fetchedWeekWeather, forecastHeavyRain\] = expectationsGateOn/);
-    expect(source).toMatch(/const weekWeather = settledWeekWeatherForRender\(fetchedWeekWeather, mode\);[\s\S]{0,1600}buildPestReportV2\(\{/);
+    expect(source).toMatch(/const weekWeather = settledWeekWeatherForRender\(fetchedWeekWeather, mode\);[\s\S]{0,2500}buildPestReportV2\(\{/);
   });
 });
 
@@ -91,10 +91,33 @@ describe('settledWeekWeatherForRender', () => {
 describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsettled window into the cache', () => {
   test('reports-public.js computes it from the SAME fetched week/mode the rain block used, and sets it on `data` regardless of pestReportV2 composing', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    // codex P1 2026-09-29: `windowClosed` alone is not enough — a provider
+    // failure can return `{ rainInches: null, windowClosed: true }` for a
+    // geocoded property, which reads exactly like a settled reading unless
+    // rainInches is also checked. Pin BOTH conditions and the "had
+    // coordinates at all" gate (`!== null`, not `!!`, so a fetch that ran
+    // and failed is never conflated with "no coordinates").
     expect(source).toMatch(
-      /const pestWeekWeatherUncacheable = expectationsGateOn[\s\S]{0,200}mode !== 'live'[\s\S]{0,200}fetchedWeekWeather\.windowClosed !== true;/,
+      /const pestWeekWeatherUncacheable = expectationsGateOn[\s\S]{0,200}fetchedWeekWeather !== null[\s\S]{0,200}fetchedWeekWeather\.rainInches != null && fetchedWeekWeather\.windowClosed === true/,
     );
     expect(source).toMatch(/data\.pestWeekWeatherUncacheable = pestWeekWeatherUncacheable;/);
+  });
+
+  // codex P1 2026-09-29: fetchPestWeekWeatherSafe's return contract is what
+  // makes the check above sound — a bare `null` must mean ONLY "no
+  // coordinates", never "a fetch ran and failed", or the two collapse into
+  // the same (wrongly cacheable) outcome.
+  test('fetchPestWeekWeatherSafe never folds a provider failure into the same `null` "no coordinates" uses', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    const fn = source.slice(
+      source.indexOf('async function fetchPestWeekWeatherSafe'),
+      source.indexOf('async function fetchPestRainForecastHeavySafe'),
+    );
+    // No-coordinates early return is the ONLY bare `return null;`.
+    expect(fn).toMatch(/if \(lat == null \|\| lng == null\) return null;/);
+    // The fetch itself is OUTSIDE that early return's try/catch — an
+    // exception there returns a distinguishable sentinel, not `null`.
+    expect(fn).toMatch(/catch \{\s*return \{ rainInches: null, windowClosed: false, unavailable: true \};\s*\}/);
   });
 
   test('BOTH PDF cache-decision sites consult it — the direct route (reports-public.js) and the queued renderer (pdf-queue.js)', () => {
@@ -116,7 +139,7 @@ describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsett
     expect(pdfQueue).toMatch(/pestWeekWeatherUncacheableForPdf\(service, \{ mode: 'static' \}\)/);
   });
 
-  test('the shared pestWeekWeatherUncacheableForPdf is fail-open (false) and never live', () => {
+  test('never live, and gate off is always false regardless of mode', () => {
     const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
     const ORIGINAL_GATE = process.env.GATE_PEST_REPORT_EXPECTATIONS;
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
@@ -126,9 +149,6 @@ describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsett
       .then(async () => {
         // LIVE is never uncacheable this way, even with a broken service row.
         await expect(pestWeekWeatherUncacheableForPdf({}, { mode: 'live' })).resolves.toBe(false);
-        // No coordinates at all => the fetch resolves null => not uncacheable
-        // (nothing rain-derived is at risk of being cached stale).
-        await expect(pestWeekWeatherUncacheableForPdf({ service_line: 'pest' }, { mode: 'static' })).resolves.toBe(false);
         // Gate off => always false regardless of mode.
         process.env.GATE_PEST_REPORT_EXPECTATIONS = 'false';
         await expect(pestWeekWeatherUncacheableForPdf({ service_line: 'pest' }, { mode: 'static' })).resolves.toBe(false);
@@ -137,5 +157,79 @@ describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsett
         process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL_GATE;
         process.env.PEST_REPORT_V2 = ORIGINAL_V2;
       });
+  });
+
+  // codex P1 2026-09-29 (pre-push audit): windowClosed alone conflated a
+  // genuine settled reading with a provider outage disguised as one, and a
+  // fetch exception was swallowed into the SAME `null` "no coordinates"
+  // uses. These four cases are the exact regression matrix that finding
+  // named: provider throws, closed-window-but-empty, no coordinates, and
+  // recovery once the provider is healthy again.
+  describe('settled vs provider-failure vs no-coordinates (codex P1 2026-09-29)', () => {
+    const ORIGINAL_GATE = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
+    const GEOCODED = {
+      service_line: 'pest',
+      customer_latitude: 27.4,
+      customer_longitude: -82.5,
+      service_date: '2026-07-16',
+    };
+
+    function toCoordinateStub(value) {
+      if (value === null || value === undefined || value === '') return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function mockWeekWeather(impl) {
+      jest.doMock('../services/service-report/application-conditions', () => ({
+        toCoordinate: toCoordinateStub,
+        fetchServiceWeekWeather: impl,
+      }));
+    }
+
+    beforeEach(() => {
+      process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+      process.env.PEST_REPORT_V2 = 'true';
+      jest.resetModules();
+    });
+    afterEach(() => {
+      process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL_GATE;
+      process.env.PEST_REPORT_V2 = ORIGINAL_V2;
+      jest.dontMock('../services/service-report/application-conditions');
+    });
+
+    test('(1) geocoded visit, provider throws => marker TRUE (transient, PDF must not be stored)', async () => {
+      mockWeekWeather(jest.fn().mockRejectedValue(new Error('provider unavailable')));
+      const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+      await expect(pestWeekWeatherUncacheableForPdf(GEOCODED, { mode: 'static' })).resolves.toBe(true);
+    });
+
+    test('(2) geocoded visit, closed window but rainInches null => marker TRUE (provider outage disguised as settled)', async () => {
+      mockWeekWeather(jest.fn().mockResolvedValue({ rainInches: null, windowClosed: true }));
+      const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+      await expect(pestWeekWeatherUncacheableForPdf(GEOCODED, { mode: 'static' })).resolves.toBe(true);
+    });
+
+    test('(3) no coordinates at all => marker FALSE (legitimately cacheable — nothing will ever retry)', async () => {
+      const fetchServiceWeekWeather = jest.fn();
+      mockWeekWeather(fetchServiceWeekWeather);
+      const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+      await expect(pestWeekWeatherUncacheableForPdf({ service_line: 'pest' }, { mode: 'static' })).resolves.toBe(false);
+      // Never even attempts the fetch when there is nowhere to fetch for.
+      expect(fetchServiceWeekWeather).not.toHaveBeenCalled();
+    });
+
+    test('(4) recovery: the SAME geocoded visit, provider now returns a settled populated reading => marker FALSE', async () => {
+      mockWeekWeather(jest.fn().mockResolvedValue({ rainInches: 1.2, windowClosed: true }));
+      const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+      await expect(pestWeekWeatherUncacheableForPdf(GEOCODED, { mode: 'static' })).resolves.toBe(false);
+    });
+
+    test('geocoded visit, window still open (no failure, just accumulating) => marker TRUE', async () => {
+      mockWeekWeather(jest.fn().mockResolvedValue({ rainInches: 0.2, windowClosed: false }));
+      const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+      await expect(pestWeekWeatherUncacheableForPdf(GEOCODED, { mode: 'static' })).resolves.toBe(true);
+    });
   });
 });
