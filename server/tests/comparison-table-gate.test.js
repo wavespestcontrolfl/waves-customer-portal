@@ -2873,6 +2873,12 @@ describe('owner competitor list', () => {
     expect(cands('Acme Pest Solutions is based in Sarasota alongside Orkin.')).toEqual(['Acme Pest Solutions']);
     expect(cands('Biological Pest Control offers a way to reduce chemical use.')).toEqual(['Biological Pest Control']);
     expect(cands('Orkin and Bob Smith Lawn Care LLC both mow.')).toEqual(['Bob Smith Lawn Care LLC']);
+    // Its own broad detector, not the tone scans' provider regex (pre-push r6).
+    expect(cands('Compare Orkin with Acme Lawn Care for local lawn treatments.')).toEqual(['Acme Lawn Care']);
+    expect(cands('Green Turf Co mows lawns near Orkin customers.')).toEqual(['Green Turf Co']);
+    expect(cands('Hire Bug Busters for ants, or call Orkin.')).toEqual(['Bug Busters']);
+    // Category-only phrases are provably not names.
+    expect(cands('Orkin sells Pest Control and Lawn Care. Termite Treatment varies.')).toEqual([]);
     expect(cands('Compare [their plans](https://acme-pest-solutions.com/plans) with Orkin.')).toEqual(['acme pest solutions']);
     expect(cands('Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control and the Florida Department of Agriculture enforce it.')).toEqual([]);
     expect(cands('Orkin offers plans. See [FDACS](https://www.fdacs.gov/pest-control-licensing) and [our page](https://www.wavespestcontrol.com/pest-control/).')).toEqual([]);

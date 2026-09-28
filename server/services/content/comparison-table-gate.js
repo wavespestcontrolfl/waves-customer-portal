@@ -1648,6 +1648,60 @@ function candidateSentence(text, index, length) {
   return text.slice(Math.max(0, start), end).replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
+// The candidate detector is deliberately its OWN broad pattern, not the
+// tone scans' providerNameRe (whose lead-word exclusions and suffix list
+// drop "Acme Lawn Care", "Green Turf Co" — pre-push r6): any run of
+// Title-Case words that contains an industry word or ends in a business
+// noun. Leading prose words ("Compare", "Why", "Hire") are trimmed from the
+// run, never used to drop it.
+const CANDIDATE_TOKEN = "[A-Z][A-Za-z0-9&'’.\\-]*";
+// Runs never cross a line break (a heading is its own run).
+const CANDIDATE_RUN_RE = new RegExp(`${CANDIDATE_TOKEN}(?:[ \\t]+(?:(?:of|and|&|the|de|la)[ \\t]+)?${CANDIDATE_TOKEN}){1,6}`, 'g');
+const CANDIDATE_INDUSTRY_RE = /\b(?:Pest|Pests|Termite|Termites|Bug|Bugs|Lawn|Lawns|Mosquito|Mosquitoes|Wildlife|Rodent|Rodents|Critter|Exterminat\w*|Landscap\w*|Turf|Tree|Trees|Weed|Irrigation|Environmental|Green|Yard|Garden)\b/;
+// A company name ENDS in a business noun ("Acme Lawn Care", "Green Turf
+// Co", "Bug Busters", "Acme Exterminators"); a run that merely contains an
+// industry word mid-phrase ("Lawn Turns Brown") is prose, not a name.
+const CANDIDATE_INDUSTRY_TAIL_RE = /\b(?:Control|Management|Solutions?|Services?|Care|Pros?|Experts?|Specialists?|Defen[sc]e|Prevention|Protection|Patrol|Squad|Busters?|Brigade|Exterminators?|Exterminating|Environmental|Lawns?|Landscaping|Landscapes?|Turf|Pest|Termite|Mosquito|Wildlife|Removal|Treatment|Doctors?|Guys|Man|Men|Team|Crew)$/;
+// Generic service nouns — a run made only of these plus industry words is a
+// category. Brand-style tails (Busters, Squad, Pros, Guys…) are NOT here.
+const CANDIDATE_CATEGORY_WORD_RE = /^(?:Control|Management|Care|Services?|Solutions?|Prevention|Protection|Removal|Treatments?|Lawns?|Landscaping|Landscapes?|Turf|Pests?|Termites?|Mosquito(?:es)?|Wildlife|Environmental|Rodents?|Bugs?|Trees?|Weeds?|Yards?|Gardens?|Irrigation|Green|Critter|Exterminat\w*)$/;
+const CANDIDATE_BUSINESS_TAIL_RE = /\b(?:Company|Companies|Co\.?|Corp\.?|Inc\.?|LLC|Group|Brothers|Bros\.?|Sons?|Enterprises?|Partners)$/;
+const CANDIDATE_REGULATORY_WORD_RE = /\b(?:Acts?|Laws?|Boards?|Bureaus?|Commissions?|Programs?|Divisions?|Offices?|Rules?|Statutes?|Chapters?|Regulations?)\b/;
+// Sentence-starter / function words trimmed from the FRONT of a run.
+const CANDIDATE_LEAD_TRIM = new Set(('how|what|when|where|why|who|which|compare|compared|comparing|versus|vs|choose|choosing|hire|hiring|call|calling|contact|consider|ask|try|read|see|like|unlike|with|without|for|from|about|after|before|between|than|the|a|an|and|or|is|are|was|were|your|our|their|its|this|that|these|those|if|in|on|at|by|to|best|top|local|professional|affordable|reliable|trusted|licensed').split('|'));
+
+// Abbreviations whose period does not end a sentence inside a name.
+const CANDIDATE_ABBREV_RE = /^(?:Co|Inc|Corp|Bros|St|Jr|Sr|Mt|Ft|Dr|Mr|Mrs|Ms|U\.S|L\.L\.C)\.$/;
+
+function broadCandidateRuns(blanked) {
+  const out = [];
+  for (const m of blanked.matchAll(CANDIDATE_RUN_RE)) {
+    // Token list with offsets; a token ending in sentence punctuation
+    // (other than a known abbreviation) closes its segment.
+    const tokens = [...m[0].matchAll(/\S+/g)].map((t) => ({ w: t[0], at: m.index + t.index }));
+    const segments = [[]];
+    for (const t of tokens) {
+      segments[segments.length - 1].push(t);
+      if (/[.,;:!?]$/.test(t.w) && !CANDIDATE_ABBREV_RE.test(t.w)) segments.push([]);
+    }
+    for (let seg of segments) {
+      while (seg.length > 1 && CANDIDATE_LEAD_TRIM.has(seg[0].w.toLowerCase())) seg = seg.slice(1);
+      if (seg.length < 2) continue;
+      const words = seg.map((t) => t.w.replace(/[,;:!?]+$/, '').replace(/\.$/, (d) => (CANDIDATE_ABBREV_RE.test(seg[seg.length - 1].w) ? d : '')));
+      const name = words.join(' ');
+      if (CANDIDATE_REGULATORY_WORD_RE.test(name)) continue;
+      // Made ONLY of industry nouns with no corporate suffix ("Pest Control",
+      // "Lawn Care", "Termite Treatment") — a category, not a company name.
+      if (!CANDIDATE_BUSINESS_TAIL_RE.test(name)
+        && words.every((w) => CANDIDATE_CATEGORY_WORD_RE.test(w) || /^(?:of|and|&|the)$/i.test(w))) continue;
+      const industryName = CANDIDATE_INDUSTRY_RE.test(name) && CANDIDATE_INDUSTRY_TAIL_RE.test(name);
+      if (!industryName && !CANDIDATE_BUSINESS_TAIL_RE.test(name)) continue;
+      out.push({ name, index: seg[0].at });
+    }
+  }
+  return out;
+}
+
 function businessNameCandidates(draft, body, scanText) {
   const text = String(scanText || '');
   const headingLines = new Set(draftMetaText(draft).split('\n').map((l) => l.trim()).filter(Boolean));
@@ -1658,12 +1712,16 @@ function businessNameCandidates(draft, body, scanText) {
     blanked = blanked.replace(new RegExp(`\\b${escapeForNameRe(n)}\\b`, 'gi'), (m) => ' '.repeat(m.length));
   }
   const found = new Map(); // name → { sentence, inBody }
-  for (const re of [providerNameRe('g'), legalEntityRe('g')]) {
-    for (const m of blanked.matchAll(re)) {
-      const nm = m[1].trim().replace(/\s+/g, ' ');
+  const hits = [
+    ...broadCandidateRuns(blanked),
+    ...[...blanked.matchAll(legalEntityRe('g'))].map((m) => ({ name: m[1], index: m.index + m[0].indexOf(m[1]) })),
+  ];
+  {
+    for (const hit of hits) {
+      const nm = hit.name.trim().replace(/\s+/g, ' ');
       if (OWN_BRAND_RE.test(nm) || INSTITUTION_NAME_RE.test(nm)) continue;
-      const start = m.index + m[0].indexOf(m[1]);
-      const end = start + m[1].length;
+      const start = hit.index;
+      const end = start + hit.name.length;
       if (REGULATORY_LEAD_RE.test(nm.split(' ')[0])
         || REGULATORY_TAIL_RE.test(blanked.slice(end, end + 40))
         || REGULATORY_HEAD_RE.test(blanked.slice(Math.max(0, start - 40), start))) continue;
@@ -1674,7 +1732,7 @@ function businessNameCandidates(draft, body, scanText) {
       const inHeading = headingLines.has(text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd).trim());
       const prev = found.get(nm);
       if (prev && (prev.inBody || inHeading)) continue;
-      found.set(nm, { sentence: candidateSentence(text, start, m[1].length), inBody: !inHeading });
+      found.set(nm, { sentence: candidateSentence(text, start, hit.name.length), inBody: !inHeading });
     }
   }
   // Link destinations: provider-shaped slug/host tokens ("acme-pest-solutions").
