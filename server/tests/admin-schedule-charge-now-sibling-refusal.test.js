@@ -681,6 +681,34 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       expect(res.body).toMatchObject({ success: true, reused: true, invoiceId: 'inv-extras' });
     });
 
+    test('a bare $0 visit with a fully discounted own add-on (+50/-50) and a checkout extra still reuses on retry; a positive own line is refused', async () => {
+      mockDb.__svcRow = { ...SVC_ROW, estimated_price: 0, primary_line_price: 0, cust_billing_mode: 'monthly_membership', cust_monthly_rate: 74.7 };
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      mockDb.__existingInvoiceRow = {
+        id: 'inv-mixed', status: 'sent', total: 40, token: 'tok-mixed', scheduled_service_id: 'svc-lawn', payer_id: null,
+        line_items: [
+          { description: 'Add-on', quantity: 1, unit_price: 50, amount: 50 },
+          { description: 'Member discount', quantity: 1, unit_price: -50, amount: -50, stored_discount_source: 'scheduled_service' },
+          { description: 'Ant bait add-on', quantity: 1, unit_price: 40, amount: 40, source: 'checkout_extra' },
+        ],
+      };
+      let call = makeReqRes({});
+      await handler(call.req, call.res, call.next);
+      expect(call.res.body).toMatchObject({ success: true, reused: true, invoiceId: 'inv-mixed' });
+
+      mockDb.__existingInvoiceRow = {
+        ...mockDb.__existingInvoiceRow, id: 'inv-stale2', total: 169,
+        line_items: [
+          { description: 'Quarterly Pest Control', quantity: 1, unit_price: 129, amount: 129 },
+          { description: 'Ant bait add-on', quantity: 1, unit_price: 40, amount: 40, source: 'checkout_extra' },
+        ],
+      };
+      call = makeReqRes({});
+      await handler(call.req, call.res, call.next);
+      expect(call.res.status).toHaveBeenCalledWith(409);
+      expect(call.res.body).toMatchObject({ code: 'stale_invoice_on_zero_price' });
+    });
+
     // The lane this ruling does NOT touch: a monthly_membership visit's own
     // existing invoice is still reused normally, exactly as round-9 P1
     // always intended for a genuine 'none' verdict.

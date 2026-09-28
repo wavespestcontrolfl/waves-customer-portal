@@ -16682,15 +16682,21 @@ router.post('/:id/invoice', async (req, res, next) => {
       // collectible, matching the checkout sheet.
       const bareStampedZero = !svc.is_callback && isStampedZeroEstimate(svc.estimated_price)
         && !(svc.primary_line_price != null && Number(svc.primary_line_price) > 0);
-      // An extras-only invoice this route minted (every charged line is a
-      // marked checkout extra) is the visit's legitimate balance, so a
-      // retry or reopen still collects it; anything else is stale.
+      // An invoice this route minted on the $0 visit is its legitimate
+      // balance when everything that is NOT a checkout extra nets to $0 (the
+      // visit's own lines — e.g. a fully discounted add-on, +50/-50), so a
+      // retry or reopen still collects the extras; a positive net on the
+      // visit's own lines is a stale pre-reprice charge.
       let checkoutExtrasOnly = false;
       try {
         const rawLines = existing.line_items;
         const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
-        const charged = (Array.isArray(lines) ? lines : []).filter((li) => Number(li?.amount) > 0);
-        checkoutExtrasOnly = charged.length > 0 && charged.every((li) => li?.source === 'checkout_extra');
+        const isCheckoutLine = (li) => li?.source === 'checkout_extra' || li?.stored_discount_source === 'validated_checkout';
+        const ownLinesNetCents = (Array.isArray(lines) ? lines : [])
+          .filter((li) => !isCheckoutLine(li))
+          .reduce((sum, li) => sum + Math.round((Number(li?.amount) || 0) * 100), 0);
+        const hasCheckoutExtra = (Array.isArray(lines) ? lines : []).some((li) => li?.source === 'checkout_extra' && Number(li?.amount) > 0);
+        checkoutExtrasOnly = hasCheckoutExtra && ownLinesNetCents <= 0;
       } catch { checkoutExtrasOnly = false; }
       if (bareStampedZero && !checkoutExtrasOnly
         && !['paid', 'prepaid'].includes(existing.status) && invoiceAmountDue(existing) > 0) {
