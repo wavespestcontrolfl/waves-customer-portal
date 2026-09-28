@@ -62,6 +62,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -5409,13 +5410,6 @@ function SmsReportPreview({ data }) {
     ? (data.lawnAssessment.customerSummary || 'Lawn assessment is complete.')
     : (aiSummary?.headline || 'Service is complete.');
   const body = isLawn ? lawnAssessmentBody(data.lawnAssessment) : aiSummary?.body;
-  // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): data.previewPhoto is a
-  // SEPARATE, server-computed field (reports-public.js) — the first
-  // resolvable photo from the ungated data.photos array, but with its
-  // caption redacted for access codes before it ever reaches this
-  // customer-visible MMS preview copy. Never read data.photos directly here
-  // for the caption text.
-  const previewPhoto = data.reportPhotoContentEnabled ? (data.previewPhoto || null) : null;
   return (
     <div className="sms-preview-page">
       <style>{`
@@ -5495,21 +5489,6 @@ function SmsReportPreview({ data }) {
           color: #525252;
           font-size: 24px;
         }
-        .sms-preview-photo img {
-          width: 100%;
-          height: 420px;
-          object-fit: cover;
-          border-radius: 8px;
-          display: block;
-          border: .5px solid #d4d4d4;
-          box-sizing: border-box;
-        }
-        .sms-preview-photo p {
-          margin: 12px 0 0;
-          color: #525252;
-          font-size: 26px;
-          line-height: 1.35;
-        }
         .sms-preview-footer {
           margin-top: auto;
           border-top: .5px solid #d4d4d4;
@@ -5550,12 +5529,6 @@ function SmsReportPreview({ data }) {
           <div className="sms-preview-action">
             <div className="sms-preview-eyebrow">Recommended next step</div>
             <p>{actionText}</p>
-          </div>
-        )}
-        {previewPhoto && (
-          <div className="sms-preview-photo">
-            <img src={previewPhoto.url} alt="" />
-            {previewPhoto.caption && <p>{previewPhoto.caption}</p>}
           </div>
         )}
         <div className="sms-preview-footer">View full report from the link in this text.</div>
@@ -5671,6 +5644,13 @@ function LegacyReport({ data, token, glass = false }) {
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
+          {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
+              & Safety link too; they never mount the v1 footer. */}
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+              See every product we use and our safety protocol
+            </a>
+          </p>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
@@ -9504,6 +9484,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page. The footer renders on every report, so assessment-
+              and inspection-only visits get it too. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+            See every product we use and our safety protocol
+          </a>.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must

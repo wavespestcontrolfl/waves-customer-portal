@@ -5,13 +5,13 @@
  * store its photo-less output under the deterministic key).
  *
  * Also covers the third-round pre-push P1 (2026-09-28): a lawn visit's
- * report/preview can show a customer-visible lawn_assessment_photos row
- * (report-data.js appends these to the gallery/previewPhoto candidate for
- * serviceLine === 'lawn') even with ZERO service_photos rows, so the old
- * service_photos-only signature stayed unmoved while the shown photo
- * changed. Both report-data.js and this signature now resolve that set
- * through the SAME function, resolveLawnReportPhotos (report-photo-set.js)
- * — see the "shared resolver import wiring" describe block below.
+ * report can show a customer-visible lawn_assessment_photos row
+ * (report-data.js appends these to the gallery for serviceLine === 'lawn')
+ * even with ZERO service_photos rows, so the old service_photos-only
+ * signature stayed unmoved while the shown photo changed. Both
+ * report-data.js and this signature now resolve that set through the SAME
+ * function, resolveLawnReportPhotos (report-photo-set.js) — see the
+ * "shared resolver import wiring" describe block below.
  */
 const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
 
@@ -360,7 +360,7 @@ describe('report-data.js render path keeps the fail-SOFT [] behavior (pre-push P
   });
 });
 
-describe('shared resolver import wiring (so report-data.js and the preview-image cache-signature path cannot drift again)', () => {
+describe('shared resolver import wiring (so report-data.js and the PDF cache-signature path cannot drift again)', () => {
   const fs = require('fs');
   const path = require('path');
 
@@ -375,14 +375,14 @@ describe('shared resolver import wiring (so report-data.js and the preview-image
     expect(src).toMatch(/resolveLawnReportPhotos/);
   });
 
-  test('preview-image.js (the SMS-preview writer) imports the shared resolver transitively, through reportPhotoSetPdfSignature', () => {
-    // preview-image.js never queries lawn_assessment_photos itself — it
-    // keys its cache off reportPhotoSetPdfSignature, which is what now
-    // carries the lawn-photo identity. Asserting the require wiring here
-    // (rather than duplicating a lawn-photo scenario against the writer)
-    // is what keeps this path from drifting back to a service_photos-only
-    // signature without also updating report-data.js's own resolver.
-    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/preview-image.js'), 'utf8');
+  test('the PDF pipeline (pdf-queue.js) imports the shared, now lawn-aware signature transitively, through reportPhotoSetPdfSignature', () => {
+    // pdf-queue.js never queries lawn_assessment_photos itself — it keys its
+    // cache off reportPhotoSetPdfSignature, which is what now carries the
+    // lawn-photo identity. Asserting the require wiring here (rather than
+    // duplicating a lawn-photo scenario against the queue) is what keeps
+    // this path from drifting back to a service_photos-only signature
+    // without also updating report-data.js's own resolver.
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
     expect(src).toMatch(/require\(['"]\.\/photo-set-signature['"]\)/);
     expect(src).toMatch(/reportPhotoSetPdfSignature/);
   });

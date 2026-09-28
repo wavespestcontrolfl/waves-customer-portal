@@ -1,4 +1,14 @@
 /**
+ * NOTE (2026-09-28): the MMS-thumbnail feature that was going to read/write
+ * this column was pulled out of feat/report-photos-20260928 (six pre-push
+ * rounds kept finding new facets of it — signature, gate key, column
+ * window, lawn photos, fail-closed, broken image, imageResolutionFailures —
+ * and it drew scope away from the owner's actual ask, photos in the report
+ * STORY). This migration stays because it was already pushed and the
+ * preview DB already ran it (pushed migrations are frozen). The column is
+ * reserved for a follow-up MMS-thumbnail PR; no reader or writer in this
+ * codebase uses it right now.
+ *
  * The SMS/MMS preview image's cached row (service_report_notification_assets)
  * stores an opaque input_hash that mixes stable identity (recordId, token,
  * render version, the photo-gate + photo-set signature) with ephemeral

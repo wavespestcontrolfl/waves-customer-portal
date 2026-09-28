@@ -185,6 +185,7 @@ const {
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 
 const PDF_NAVY = '#1B2C5B';
@@ -1817,59 +1818,11 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    // Stored-identity match (owner pre-push P1s, 2026-09-28): several preview
-    // rows can exist for one record (rebuilds over time — a gate flip, a
-    // photo change, a render-version bump). Select the NEWEST row whose
-    // identity matches the CURRENT state in one query, rather than always
-    // taking the newest row and refusing it on any mismatch — an older row
-    // built under the SAME current state (e.g. the gate flipped on, then
-    // back off) is a perfectly valid image to serve, not a reason to 404
-    // while a newer, now-irrelevant row sits on top of it. Cheap when the
-    // gate is off: still one query, no extra query for the photo-set
-    // signature (only read when the gate is currently on). No row matching
-    // the current identity falls through to the SAME preview_not_found
-    // response the route already gives for no asset at all — this route has
-    // no rebuild path of its own, so it does not invent one here; the next
-    // completion/dispatch event rebuilds it.
-    const {
-      RENDER_VERSION: currentPreviewRenderVersion,
-      hasPhotoContentSignatureColumn,
-    } = require('../services/service-report/preview-image');
-    const currentPhotoGateOn = require('../config/feature-gates').reportPhotoContentLive();
-
-    // Rollout-window guard (owner pre-push P1, 2026-09-28), mirroring the
-    // writer's own: the query below references photo_content_signature
-    // unconditionally, which fails SQL entirely on the pre-migration schema.
-    // Column absent + gate ON: the writer refuses to store an unsigned
-    // gate-on row (see buildAndStoreSmsPreviewImage), so there is nothing
-    // correct to serve — 404 without querying, same response as "no asset".
-    // Column absent + gate OFF: query on service_record_id + asset_type +
-    // render_version only — every stored row is already a true gate-off
-    // image (the column simply doesn't exist yet), so no COALESCE predicate
-    // is needed.
-    const columnPresent = await hasPhotoContentSignatureColumn(db);
-    if (!columnPresent && currentPhotoGateOn) {
-      return res.status(404).json({ error: 'preview_not_found' });
-    }
-
-    let assetQuery = db('service_report_notification_assets')
+    const asset = await db('service_report_notification_assets')
       .where({
         service_record_id: service.id,
         asset_type: 'sms_preview_image',
-        render_version: currentPreviewRenderVersion,
-      });
-    if (columnPresent) {
-      const currentPhotoContentSignature = currentPhotoGateOn
-        ? `-pgon${await require('../services/service-report/photo-set-signature')
-          .reportPhotoSetPdfSignature(service.id, db).catch(() => '-phu')}`
-        : '';
-      // A legacy row from before photo_content_signature existed reads NULL;
-      // COALESCE only matches it to today's identity when the gate is ALSO
-      // off today (the safe direction this column's migration docstring
-      // describes — never wrongly served, worst case an extra rebuild).
-      assetQuery = assetQuery.andWhere(db.raw('COALESCE(photo_content_signature, ?) = ?', ['', currentPhotoContentSignature]));
-    }
-    const asset = await assetQuery
+      })
       .orderBy('created_at', 'desc')
       .first()
       .catch(() => null);
@@ -2380,31 +2333,6 @@ router.get('/:token/data', async (req, res, next) => {
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
       });
-      // GATE_REPORT_PHOTO_CONTENT (owner spec 2026-09-27): the sms_preview
-      // renderer (SmsReportPreview) reads this to decide whether to composite
-      // a photo thumbnail into the MMS preview image — v1Data.photos itself is
-      // ungated and already served on every mode, so the flag only controls
-      // that one additive render, never the existing gallery/PDF photos.
-      v1Data.reportPhotoContentEnabled = require('../config/feature-gates').reportPhotoContentLive();
-      // The ONE photo (first resolvable) the sms_preview card may composite —
-      // a deliberately separate, minimal field rather than reusing the raw
-      // v1Data.photos entry: its caption is redacted the same way every other
-      // free-text field in the generate-report grounding is (a tech caption
-      // is exactly as capable of carrying a gate/lockbox/alarm code as a
-      // notes field is), since this one rides into customer-visible MMS
-      // preview copy. v1Data.photos itself stays raw/ungated — the existing
-      // Field Photos section and PDF gallery are unaffected.
-      if (v1Data.reportPhotoContentEnabled) {
-        const eligiblePreviewPhoto = (v1Data.photos || []).find((p) => p && p.url);
-        v1Data.previewPhoto = eligiblePreviewPhoto
-          ? {
-            url: eligiblePreviewPhoto.url,
-            caption: eligiblePreviewPhoto.caption
-              ? require('../services/context-aggregator').redactAccessCodes(eligiblePreviewPhoto.caption)
-              : '',
-          }
-          : null;
-      }
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -2595,6 +2523,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
   doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
+  // Owner ask 2026-09-28: every report, legacy ones included, links to the
+  // public Products & Safety page. The URL prints in full for paper copies.
+  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();
