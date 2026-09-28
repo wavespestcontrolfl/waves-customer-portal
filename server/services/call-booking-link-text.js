@@ -742,6 +742,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
   const cutoff = new Date(now.getTime() - STAGING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const readyBy = new Date(now.getTime() - STAGING_GRACE_MINUTES * 60 * 1000);
   const calls = await conn('call_log')
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a sandbox test call is never texted
     .where('v2_extraction_status', 'valid')
     .where('created_at', '>=', cutoff)
     // The processor's own ownership fence (reschedule-link-promises.js's
@@ -1750,6 +1751,7 @@ const STALE_CLAIM_MS = 15 * 60 * 1000;
 async function recoverStaleClaims(conn, now) {
   const cutoff = new Date(now.getTime() - STALE_CLAIM_MS);
   const stale = await conn('call_log')
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a sandbox test call is never texted
     .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'claimed'", { key: METADATA_KEY })
     .whereRaw("(metadata->:key->>'claimed_at')::timestamptz <= :cutoff", { key: METADATA_KEY, cutoff })
@@ -1789,6 +1791,7 @@ async function sweep(conn = db, { now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
   const { staged, ineligible } = await stage(conn, { now });
   const due = await conn('call_log')
+    .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a sandbox test call is never texted
     .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'pending'", { key: METADATA_KEY })
     .whereRaw("(metadata->:key->>'send_at')::timestamptz <= :now", { key: METADATA_KEY, now })
