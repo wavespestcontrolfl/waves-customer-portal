@@ -97,7 +97,8 @@ export default function useModalFocus(active = true, onEscape = null) {
         ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
         : (currentIndex + 1) % focusable.length;
       event.preventDefault();
-      focusable[nextIndex].focus({ preventScroll: true });
+      // Tab must reveal off-screen controls within a scrollable dialog.
+      focusable[nextIndex].focus();
     };
 
     document.addEventListener('keydown', onKeyDown, true);
