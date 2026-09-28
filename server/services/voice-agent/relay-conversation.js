@@ -481,6 +481,16 @@ const VOICE_EFFORT = 'low';
 function voiceEffortFor(model) {
   return MODELS.anthropicAcceptsEffort(model, VOICE_EFFORT) ? VOICE_EFFORT : null;
 }
+// The `thinking` field this lane sends. Every model that can turn thinking
+// off gets `disabled` (dead air on a live call is the cost of thinking).
+// Thinking-always-on ids send their catalog `voice.thinking` floor when it is
+// `between_tools` (Sonnet 5.5: no up-front thinking; accepted at `low`), and
+// otherwise omit the field — adaptive, as Opus 5.5 has always run here.
+function voiceThinkingFor(model) {
+  if (!MODELS.anthropicThinkingAlwaysOn(model)) return { type: 'disabled' };
+  const meta = MODELS.MODEL_CATALOG[model];
+  return meta && meta.voice && meta.voice.thinking === 'between_tools' ? { type: 'between_tools' } : null;
+}
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.
 const RENDERER_VERSION = 'block-v1';
@@ -1057,6 +1067,7 @@ class RelayConversation {
     // Pinned once here, alongside the model, so the request build below
     // never re-derives it mid-call.
     this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
+    this._thinking = voiceThinkingFor(this.model);
     // What the stamps record: the effort actually sent, whichever provider
     // carries it (an OpenAI session's reasoning effort is not `_effort`).
     this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
@@ -3291,6 +3302,7 @@ class RelayConversation {
     this._provider = providerFor(model);
     this._effort = voiceEffortFor(model);
     this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(model);
+    this._thinking = voiceThinkingFor(model);
     this._stampedEffort = stampedEffortFor(this._provider, model, this._effort);
   }
 
@@ -3340,14 +3352,15 @@ class RelayConversation {
         {
           model: this.model,
           // Thinking-always-on ids reject `thinking: { type: 'disabled' }`
-          // and spend from max_tokens before the reply — raise the cap by
+          // (voiceThinkingFor sends their floor instead) and adaptive ones
+          // spend from max_tokens before the reply — raise the cap by
           // the same registry floor `anthropic-wire.js` uses elsewhere so
           // thinking cannot starve the spoken reply. Every other model's
           // request is byte-identical to before (this._thinkingAlwaysOn is
           // false for all of them, sandbox or not).
           max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
           system: this._systemBlocks,
-          ...(this._thinkingAlwaysOn ? {} : { thinking: { type: 'disabled' } }),
+          ...(this._thinking ? { thinking: this._thinking } : {}),
           // LIVE PHONE CALL. The default effort is `high`, which buys depth
           // this lane cannot spend: every extra second of deliberation is dead
           // air on an open line, and the work here is short receptionist turns

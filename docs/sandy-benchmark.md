@@ -194,7 +194,7 @@ wrong provider.
 
 `--candidate-model` may also be an Anthropic id whose thinking cannot be
 turned off (`MODELS.anthropicThinkingAlwaysOn` — Opus 5.5 and later, e.g.
-`claude-opus-5-5`). These never reach production inbound or the shared
+`claude-opus-5-5`, and Sonnet 5.5 and later, e.g. `claude-sonnet-5-5`). These never reach production inbound or the shared
 `VOICE_RELAY_MODEL`/`MODEL_VOICE` chain (`ALLOWED_OVERRIDE_MODEL_IDS`
 excludes them for exactly that reason — that lane always sends
 `thinking: { type: 'disabled' }`, which they reject), but every condition
@@ -202,8 +202,11 @@ here runs through the eval harness (`evalHarness: true`), the same context
 flag that admits a sandbox/benchmark OpenAI candidate — so the runner's
 allowlist check and `buildConditions` both accept them with **no feature
 gate**: unlike an OpenAI candidate, they are plain Anthropic, just a
-different request shape (no `thinking` field, `low` effort, `max_tokens`
-raised by the same floor `anthropic-wire.js` uses elsewhere). A candidate in
+different request shape (`low` effort; Opus 5.5 sends no `thinking` field
+with `max_tokens` raised by the same floor `anthropic-wire.js` uses
+elsewhere, while Sonnet 5.5 sends its catalog `voice.thinking` floor,
+`thinking: { type: 'between_tools' }` — no up-front thinking — at the plain
+cap). A candidate in
 this Set never sets `GATE_VOICE_RELAY_OPENAI`.
 
 ### Model-stamp verification (candidate conditions only)
