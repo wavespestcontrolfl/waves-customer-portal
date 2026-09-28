@@ -7,6 +7,7 @@ describe('agent-gap-reports', () => {
   let returningRows;
   let loggerMock;
   let sightings;
+  let storedNames;
 
   beforeEach(() => {
     jest.resetModules();
@@ -17,6 +18,7 @@ describe('agent-gap-reports', () => {
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
     sightings = [];
+    storedNames = {};
     const table = jest.fn((name) => {
       if (name === 'agent_gap_reports') {
         return {
@@ -38,6 +40,9 @@ describe('agent-gap-reports', () => {
       }
       if (name === 'agent_gap_report_sightings') {
         return { insert: jest.fn(async (row) => { sightings.push(row); }) };
+      }
+      if (name === 'customers' || name === 'leads') {
+        return { whereRaw: jest.fn(() => ({ select: jest.fn(async () => storedNames[name] || []) })) };
       }
       throw new Error(`Unexpected table ${name}`);
     });
@@ -268,12 +273,41 @@ describe('agent-gap-reports', () => {
       expect(insertedRows).toHaveLength(0);
     });
 
-    test('a tool name that does not exist is recorded as a missing capability', async () => {
+    test('a tool name the registry does not have is recorded as a missing capability', async () => {
       const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
+      const collector = createGapCollector({ source: 'intelligence-bar', isRegisteredTool: () => false });
       collector.toolResult('create_property', { error: 'no such tool', code: 'capability_unimplemented' }, true);
       await collector.flush({ reply: DECLINE });
-      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', closest_tool: 'create_property', summary: 'Asked for a tool that does not exist: create_property' });
+      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', closest_tool: 'create_property', summary: 'Asked for a tool the bar does not have: create_property' });
+    });
+
+    test("a registered tool refusing a case keeps the tool's own description, not 'does not exist'", async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar', isRegisteredTool: (name) => name === 'save_customer_estimate' });
+      collector.toolResult('save_customer_estimate', { error: 'Commercial estimates are not supported by this tool', code: 'capability_unimplemented' }, true);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows[0]).toMatchObject({ closest_tool: 'save_customer_estimate', attempted: 'The tool exists but does not support this case',
+        summary: 'save_customer_estimate: Commercial estimates are not supported by this tool' });
+    });
+
+    test('a stored customer or lead name is redacted in any case, with a lowercase street', async () => {
+      storedNames = { leads: [{ first_name: 'José', last_name: 'Synthwell' }] };
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'add josé at 12 palm row' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows[0].summary).toBe('add [name] at [address]');
+    });
+
+    test('nothing is written when the stored-name lookup fails', async () => {
+      const { createGapCollector } = load();
+      dbMock.mockImplementation((name) => { if (name === 'customers') throw Object.assign(new Error('down'), { code: 'ECONNRESET' }); return {}; });
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'add a second service address' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows).toHaveLength(0);
+      expect(dbMock.transaction).not.toHaveBeenCalled();
+      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] collector flush failed (ECONNRESET)');
     });
 
     test('the request customer names are redacted from a model-written search', async () => {

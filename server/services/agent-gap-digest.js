@@ -36,10 +36,11 @@ async function loadRecentGaps() {
   return listRecentGaps({ days: WINDOW_DAYS });
 }
 
+// Numbers, areas and counts only: a gap's description is model-written text
+// and stays in the bar ("show gap reports"), never in the email.
 function gapLine(row) {
-  const tried = row.attempted ? ` — tried: ${row.attempted}` : '';
-  const tool = row.closest_tool ? ` [${row.closest_tool}]` : '';
-  return `gap #${row.id} (${row.status}, seen ${row.seen_in_window}x this week, ${row.occurrences}x total): ${row.summary}${tried}${tool}`;
+  const tool = row.closest_tool ? `, closest tool ${row.closest_tool}` : '';
+  return `gap #${row.id} (${row.status}, ${row.domain || 'other'}${tool}): seen ${row.seen_in_window}x this week, ${row.occurrences}x total`;
 }
 
 // Pure composition: null = nothing worth an email (the common, quiet case).

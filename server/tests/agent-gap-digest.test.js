@@ -52,13 +52,15 @@ describe('composeAgentGapDigest', () => {
   test('an ACT subject counts the gaps and the body lists each one', () => {
     const rows = [gapRow({ id: 1, seen_in_window: 3, occurrences: 40 }), gapRow({ id: 2, summary: 'Second gap', closest_tool: 'send_sms', attempted: 'tried the sms tool' })];
     const composed = composeAgentGapDigest(rows);
-    expect(composed.text).toContain('gap #1 (new, seen 3x this week, 40x total)');
+    expect(composed.text).toContain('gap #1 (new, ops): seen 3x this week, 40x total');
+    // The description is model-written and stays in the bar, never the email.
+    expect(composed.text).not.toContain('Add a second service address');
     expect(composed.subject).toBe("ACT: 2 things the bar couldn't do this week");
     expect(composed.count).toBe(2);
     expect(composed.text).toContain('gap #1');
     expect(composed.text).toContain('gap #2');
-    expect(composed.text).toContain('[send_sms]');
-    expect(composed.text).toContain('tried the sms tool');
+    expect(composed.text).toContain('closest tool send_sms');
+    expect(composed.text).not.toContain('tried the sms tool');
   });
 
   test('singular subject for exactly one gap', () => {

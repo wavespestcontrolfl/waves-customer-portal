@@ -42,7 +42,9 @@ server itself observed in the tool loop:
 
 - its own `discover_capabilities` results, noting whether a tool a search
   surfaced later ran successfully;
-- a tool name that does not exist (`capability_unimplemented`).
+- `capability_unimplemented`: a tool name the registry does not have, or a
+  registered tool that does not support this case. The latter keeps the
+  tool's own description of the case.
 
 At the end of the request, `flush()` records those signals only when the reply
 told the operator the bar could not do something. The server cannot tell
@@ -52,11 +54,19 @@ noting whether a related tool ran. Broken tools are not gap reports: every
 tool call's outcome is already in `tool_health_events` (Tool Health). The platform
 prompt asks the model to search with a short, general description before
 declining, so that search becomes the gap's summary. That model-written text
-is cleaned with the shared `redactText` plus the request's resolved customer
-names and addresses. After that, a fixed rule replaces every capitalized word
-except acronyms, a short keep list (vendor names, plan tiers, days and months)
-and a leading verb, and it turns a house number with its street into
-`[address]`. UUIDs and record numbers are stripped too. Rows dedupe by a
+is cleaned in several passes:
+- the shared `redactText`, with the request's resolved customer names and
+  addresses;
+- any customer or lead first or last name stored in the database, in any
+  case (so "josé" is caught even when the request never resolved it);
+- street addresses in any case (a house number with a street type);
+- a fixed rule that replaces every other capitalized word except acronyms, a
+  short keep list (vendor names, plan tiers, days and months) and a leading
+  verb;
+- UUIDs and record numbers.
+
+If the stored-name lookup fails, nothing is written. The Monday email carries
+gap numbers, areas and counts only; the descriptions stay in the bar. Rows dedupe by a
 fingerprint of source, kind and the summary's word set. A recurrence bumps
 the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a
 domain or tool the first sighting lacked. It also writes one

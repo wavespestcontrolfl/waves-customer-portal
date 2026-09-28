@@ -1601,8 +1601,9 @@ function initScheduledJobs() {
   // or blocked action) in the last 7 days; a clean week sends nothing.
   // =========================================================================
   cron.schedule('15 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
     try {
-      await runExclusive('agent-gap-digest', async () => {
+      const lockRes = await runExclusive('agent-gap-digest', async () => {
         const { runAgentGapDigest } = require('./agent-gap-digest');
         const result = await runAgentGapDigest();
         logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
@@ -1614,6 +1615,17 @@ function initScheduledJobs() {
           throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
         }
       });
+      // A tick that got no DB connection returns { skipped } without running
+      // the job, and on the connection-acquire path without any job_health
+      // write: record the missed weekly run. recordMissedTick only writes when
+      // no start or success for this occurrence is already recorded within its
+      // 60 s tick window, so the slot-timeout path (which already recorded
+      // it) is not counted twice. lease_held means another instance ran this
+      // tick, which is not a miss.
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Weekly agent gap digest failed: ${err.message}`);
     }

@@ -2499,7 +2499,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     let writeFrontierBlocked = false;
     // Gap reports (server/services/agent-gap-reports.js): what the bar could
     // not do this request, for the owner's weekly review. Platform mode only.
-    const gapCollector = platformEnabled ? createGapCollector({ source: 'intelligence-bar' }) : null;
+    const gapCollector = platformEnabled
+      ? createGapCollector({ source: 'intelligence-bar', isRegisteredTool: name => ActionRegistry.actions.has(name) }) : null;
     // GATE_IB_TOOL_ACTIVITY (read at call time): operator-facing activity
     // lines — label + outcome + duration per tool call, never inputs or
     // results. Returned only when the gate is on; off = today's payload.

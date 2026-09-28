@@ -42,7 +42,10 @@ const KNOWN_DOMAINS = new Set(Object.values(policy).map((entry) => entry?.domain
 // A house number followed by capitalized street words ("12 Palm Row"),
 // including suffixes redactText's address pattern does not know.
 const STREET_RE = /\b\d{1,6}(?:\s+\p{Lu}[\p{L}'’-]*){1,4}/gu;
+// The same in any case, when the last word is a street type: "12 palm row".
+const STREET_ANY_CASE_RE = /\b\d{1,6}(?:\s+[\p{L}'’.-]+){1,3}?\s+(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|cir|circle|way|pl|place|blvd|boulevard|ter|terrace|row|loop|trl|trail|pkwy|parkway|hwy|highway|cv|cove|sq|square|plz|plaza|cres|crescent|xing|crossing|mnr|manor|hts|heights|grv|grove|bnd|bend|rdg|ridge|lndg|landing)\b\.?/giu;
 const CAPITALIZED_RE = /\p{Lu}[\p{L}'’-]*/gu;
+const NAME_TOKEN_RE = /\p{L}[\p{L}'’-]{2,}/gu;
 const ACRONYM_RE = /^[\p{Lu}\d]{2,6}$/u; // WDO, SMS, ACH, GA4 — kept
 // Capitalized words a general description may use without naming anyone:
 // services the bar integrates with, the Waves plan tiers, days and months.
@@ -109,7 +112,7 @@ function cleanText(value, names, { freeText = false } = {}) {
   // Contact patterns first, then the request's names: redactText replaces
   // names before emails, so a name inside an address would otherwise break
   // the email match and leave "[name]@domain" behind.
-  const redacted = redactText(redactText(withoutIds), { names });
+  const redacted = redactText(redactText(withoutIds), { names }).replace(STREET_ANY_CASE_RE, '[address]');
   const scrubbed = (freeText ? scrubProperNouns(redacted) : redacted).replace(LONG_NUMBER_RE, '[number]');
   const text = scrubbed.replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT);
   return text || null;
@@ -262,6 +265,27 @@ function namesFromTaskContext(taskContext) {
   return [...names];
 }
 
+// Customer and lead first/last names that appear in the texts, in any case —
+// the case-independent guard for a name the request never resolved ("add
+// josé at …"). Matched against the stored names, so a lowercase or
+// unresolved name is still caught.
+async function knownNamesIn(texts) {
+  const tokens = [...new Set(texts.flatMap((text) => String(text || '').toLowerCase().match(NAME_TOKEN_RE) || []))].slice(0, 100);
+  if (!tokens.length) return [];
+  const byName = (table) => db(table)
+    .whereRaw('lower(first_name) = ANY(?) OR lower(last_name) = ANY(?)', [tokens, tokens])
+    .select('first_name', 'last_name');
+  const rows = [...await byName('customers'), ...await byName('leads')];
+  const found = new Set();
+  for (const row of rows) {
+    for (const part of [row.first_name, row.last_name]) {
+      const lower = String(part || '').trim().toLowerCase();
+      if (tokens.includes(lower)) found.add(lower);
+    }
+  }
+  return [...found];
+}
+
 function searchAttempt(search) {
   if (!search.surfaced.size) return 'Searched the bar; no matching tool';
   return search.relatedToolRan
@@ -278,9 +302,10 @@ function searchAttempt(search) {
  * capability (issuing one) exists — so a declined request records every
  * search it made, each noting whether a related tool ran.
  */
-function createGapCollector({ source }) {
+function createGapCollector({ source, isRegisteredTool = () => false }) {
   const searches = []; // { query, domain, closestTool, surfaced:Set, relatedToolRan }
   const unknownTools = new Set();
+  const refusedCases = new Map(); // registered tool -> its own unsupported-case message
 
   function discovery(input, result) {
     const status = result?.status;
@@ -300,7 +325,11 @@ function createGapCollector({ source }) {
     if (!failed) {
       for (const search of searches) if (search.surfaced.has(name)) search.relatedToolRan = true;
     } else if (result?.code === 'capability_unimplemented') {
-      unknownTools.add(name);
+      // The same code means two things: the registry has no such tool, or a
+      // registered tool does not support this case (a commercial estimate
+      // revision). Keep the tool's own description of the latter.
+      if (isRegisteredTool(name)) refusedCases.set(name, result.error || 'This case is not supported');
+      else unknownTools.add(name);
     }
   }
 
@@ -310,7 +339,11 @@ function createGapCollector({ source }) {
       closestTool: search.closestTool, attempted: searchAttempt(search),
     }));
     for (const name of unknownTools) {
-      signals.push({ source, kind: 'missing_capability', summary: `Asked for a tool that does not exist: ${name}`, closestTool: name });
+      signals.push({ source, kind: 'missing_capability', summary: `Asked for a tool the bar does not have: ${name}`, closestTool: name });
+    }
+    for (const [name, message] of refusedCases) {
+      signals.push({ source, kind: 'missing_capability', summary: `${name}: ${message}`, closestTool: name,
+        attempted: 'The tool exists but does not support this case' });
     }
     return signals;
   }
@@ -320,7 +353,10 @@ function createGapCollector({ source }) {
       if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
       const signals = pendingSignals();
       if (!signals.length) return;
-      await writeGapRows(signals, { names: namesFromTaskContext(taskContext) });
+      // A failed name lookup throws into the catch below: nothing is written
+      // unscrubbed.
+      const stored = await knownNamesIn(signals.map((signal) => signal.summary));
+      await writeGapRows(signals, { names: [...namesFromTaskContext(taskContext), ...stored] });
     } catch (err) {
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
     }
@@ -338,5 +374,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, scrubProperNouns, DECLINE_RE },
+  _private: { prepareGapRow, scrubProperNouns, knownNamesIn, DECLINE_RE },
 };
