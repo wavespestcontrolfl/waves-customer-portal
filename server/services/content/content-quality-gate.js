@@ -1221,7 +1221,7 @@ function collectBodyImageOccurrences(body) {
   const out = [];
   let m;
   INLINE_IMAGE_RE.lastIndex = 0;
-  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || ''), url: String(m[2] || '').trim() });
+  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || ''), url: String(m[2] || '').trim(), form: 'inline' });
 
   const refDefs = require('./content-guardrails').markdownReferenceDefinitions(body);
   REFERENCE_IMAGE_RE.lastIndex = 0;
@@ -1229,7 +1229,7 @@ function collectBodyImageOccurrences(body) {
     const alt = String(m[1] || '');
     const label = String(m[2] || '').trim() || alt; // collapsed `![alt][]` resolves via alt
     const dest = refDefs.get(label.trim().toLowerCase());
-    if (dest) out.push({ alt, url: String(dest).trim() });
+    if (dest) out.push({ alt, url: String(dest).trim(), form: 'reference' });
   }
 
   RAW_IMG_TAG_RE.lastIndex = 0;
@@ -1237,16 +1237,56 @@ function collectBodyImageOccurrences(body) {
     const attrs = m[1] || '';
     const alt = attrValue(attrs, 'alt') || '';
     const src = attrValue(attrs, 'src');
-    if (src) out.push({ alt, url: src.trim() });
+    if (src) out.push({ alt, url: src.trim(), form: 'img' });
     const srcset = attrValue(attrs, 'srcset');
     if (srcset) {
       for (const entry of srcset.split(',')) {
         const url = entry.trim().split(/\s+/)[0];
-        if (url) out.push({ alt, url });
+        if (url) out.push({ alt, url, form: 'srcset' });
       }
     }
   }
   return out;
+}
+
+// Codex P1 (7th round): the gate must approve ONLY the placements the
+// publisher's re-hosting pass (astro-publisher rehostLicensedIdentification
+// Photos / matchLicensedPhotoLine) can actually re-host — a bare inline
+// markdown image or a src-only <img> tag, ALONE on its own line. Anything
+// else (mid-paragraph, reference-style, srcset) previously passed here and
+// then hard-failed BLOG_BODY_IMAGES_FAILED at publish, so a green gate did
+// not mean a publishable draft. These anchored patterns mirror the
+// publisher's own exactly; per-URL occurrence counts (not mere membership)
+// catch a URL used once standalone AND once inline.
+const STANDALONE_INLINE_IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
+const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b([^>]*)>\s*$/i;
+function standaloneImageUrlCounts(body) {
+  const counts = new Map();
+  for (const line of String(body || '').split('\n')) {
+    let url = null;
+    const inline = STANDALONE_INLINE_IMAGE_LINE_RE.exec(line);
+    if (inline) url = String(inline[2] || '').trim();
+    else {
+      const tag = STANDALONE_IMG_TAG_LINE_RE.exec(line);
+      if (tag && !attrValue(tag[1] || '', 'srcset')) url = (attrValue(tag[1] || '', 'src') || '').trim() || null;
+    }
+    if (url) counts.set(url, (counts.get(url) || 0) + 1);
+  }
+  return counts;
+}
+function firstUnpublishablePlacement(occurrences, body) {
+  const standalone = standaloneImageUrlCounts(body);
+  const seen = new Map();
+  for (const { url, form } of occurrences) {
+    if (form === 'reference' || form === 'srcset') {
+      return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
+    }
+    seen.set(url, (seen.get(url) || 0) + 1);
+  }
+  for (const [url, n] of seen) {
+    if ((standalone.get(url) || 0) < n) return { ok: false, reason: `identification_photo_not_standalone:${url}` };
+  }
+  return null;
 }
 
 function checkPhotoSlotsLicensedOnly(draft, brief) {
@@ -1259,10 +1299,13 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
   const body = String(draft.body || '');
-  for (const { alt, url } of collectBodyImageOccurrences(body)) {
+  const occurrences = collectBodyImageOccurrences(body);
+  for (const { alt, url } of occurrences) {
     const failure = validateSlotPhotoAttribution(byUrl.get(url), alt, url, body);
     if (failure) return failure;
   }
+  const placement = firstUnpublishablePlacement(occurrences, body);
+  if (placement) return placement;
   return { ok: true };
 }
 

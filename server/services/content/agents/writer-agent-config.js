@@ -472,7 +472,11 @@ look_alike — see licensed-photo-library.js).
 - When a slot DOES have a photo, embed it as a plain Markdown image
   ('![alt](url)') using that slot's 'photo.url' and 'photo.alt' EXACTLY as
   given, placed where the slot's 'caption' puts it in the prose (near the
-  passage identifying the pest / its sign / the look-alike). Directly below
+  passage identifying the pest / its sign / the look-alike). The image goes
+  ALONE ON ITS OWN LINE, with a blank line before and after — never inside
+  a sentence or paragraph, never as a reference-style image or an HTML
+  <img> tag (the publish gate rejects any other placement, because the
+  publisher can only re-host a standalone image). Directly below
   the image, credit the source with the license AND both links the CC
   license requires — never a bare credit/license STRING with no link:
   "Photo: [{credit}]({photo.source_page}) ([{license}]({photo.license_url}))"

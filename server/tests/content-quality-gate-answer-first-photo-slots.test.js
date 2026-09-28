@@ -462,7 +462,11 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
-  test('a reference-style image resolving to a licensed URL passes when alt/attribution match', () => {
+  // Codex P1 (7th round): a licensed reference-style image is now REJECTED
+  // at the gate (the publisher cannot re-host it, so approving it here only
+  // deferred the failure to publish time). Still resolved + attribution-
+  // checked first, so an unlicensed one keeps its more specific reason.
+  test('a reference-style image resolving to a licensed URL is rejected as an unsupported form (publisher cannot re-host it)', () => {
     const b = brief({
       voice_constraints: {
         photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
@@ -472,10 +476,11 @@ describe('checkPhotoSlotsLicensedOnly', () => {
       { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][pic]\n\n[pic]: https://upload.wikimedia.org/real-fire-ant.jpg' },
       b,
     );
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
   });
 
-  test('collapsed reference form (![alt][]) resolves via the alt text as the label', () => {
+  test('collapsed reference form (![alt][]) resolves via the alt text as the label, and is likewise rejected as unsupported', () => {
     const b = brief({
       voice_constraints: {
         photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
@@ -485,7 +490,48 @@ describe('checkPhotoSlotsLicensedOnly', () => {
       { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][]\n\n[fire ant]: https://upload.wikimedia.org/real-fire-ant.jpg' },
       b,
     );
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
+  });
+});
+
+// Codex P1 (7th round): the gate approves only placements the publisher's
+// re-hosting pass can actually re-host — standalone on its own line.
+describe('checkPhotoSlotsLicensedOnly — publishable placement', () => {
+  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
+  const b = () => brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: 'fire ant' }, flagged_for_human: false }] } });
+
+  test('a licensed image placed MID-PARAGRAPH fails with a clear reason (it would never be re-hosted)', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: `See the photo ![fire ant](${PHOTO_URL}) below.` },
+      b(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
+  });
+
+  test('the same licensed URL used once standalone AND once inline still fails (counted per occurrence)', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: `![fire ant](${PHOTO_URL})\n\nAgain: ![fire ant](${PHOTO_URL}) here.` },
+      b(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
+  });
+
+  test('a standalone inline image and a standalone <img> tag both pass', () => {
+    for (const body of [`Intro.\n\n![fire ant](${PHOTO_URL})\n\nMore.`, `Intro.\n\n<img src="${PHOTO_URL}" alt="fire ant">\n\nMore.`]) {
+      expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body }, b()).ok).toBe(true);
+    }
+  });
+
+  test('a standalone <img> carrying a srcset is rejected as unsupported (the publisher re-hosts src only)', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: `<img src="${PHOTO_URL}" srcset="${PHOTO_URL} 2x" alt="fire ant">` },
+      b(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^identification_photo_unsupported_form:srcset:/);
   });
 });
 
