@@ -138,5 +138,7 @@ describe('memberOneOffDiscount awaits the percent-exclusion catalog prime (Codex
     const result = await ibBookingProposal('cust-1', BED_BUG_VARIANT.name, undefined);
     expect(result).toMatchObject({ price: 200, discountId: null });
     expect(db.raw).toHaveBeenCalled();
-  });
+    // Generous timeout: the first require of tools.js is slow on a loaded
+    // machine, and the 5 ms prime delay is not what this bounds.
+  }, 30000);
 });
