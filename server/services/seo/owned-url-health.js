@@ -133,7 +133,14 @@ async function collectCitedOwnedUrls({ database = db, windowDays = CITATION_WIND
 function nodeGet(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_RESPONSE_BYTES } = {}) {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    // req.setTimeout only bounds socket INACTIVITY (a gap with no data at
+    // all) — a response trickling one byte every few seconds would never
+    // trip it and could hold this fetch, and with it the whole runExclusive
+    // sweep and every alert waiting on it, open indefinitely (codex pre-push
+    // audit finding). This is a hard ceiling on the TOTAL request instead,
+    // cleared as soon as the request settles any other way.
+    const deadline = setTimeout(() => { req?.destroy(new Error('timeout')); done({ error: 'timeout' }); }, timeoutMs);
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(deadline); resolve(v); } };
     let parsed;
     try { parsed = new URL(url); } catch { return done({ error: 'invalid_url' }); }
     const mod = parsed.protocol === 'http:' ? http : https;
@@ -168,7 +175,7 @@ function nodeGet(url, { timeoutMs = FETCH_TIMEOUT_MS, maxBytes = MAX_RESPONSE_BY
     } catch (err) {
       return done({ error: err.message || 'request_failed' });
     }
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout'))); // socket-inactivity backstop
     req.on('error', (err) => done({ error: err.message || 'network_error' }));
     req.end();
   });
@@ -399,12 +406,12 @@ async function postOwnedUrlHealthDigest(bad) {
     '',
     ...rows.map((r) => `- ${r.url} -> ${r.verdict}${r.finalUrl && r.finalUrl !== r.url ? ` (final: ${r.finalUrl})` : ''} · cited ${r.citationCount}x · checked ${r.lastCheckedOn}`),
     '',
-    `Dashboard: ${adminPortalUrl()}/admin/seo?tab=llm`,
+    `Dashboard: ${adminPortalUrl()}/admin/seo?workspace=authority&view=backlinks`,
   ].join('\n');
   const html = [
     `<p><strong>${bad.length}</strong> owned URL(s) cited by AI answer engines in the last ${CITATION_WINDOW_DAYS} days failed their health check:</p>`,
     `<ul style="margin:0 0 12px 18px;padding:0;">${rows.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.url)} &rarr; <strong>${esc(r.verdict)}</strong>${r.finalUrl && r.finalUrl !== r.url ? ` (final: ${esc(r.finalUrl)})` : ''} &middot; cited ${r.citationCount}x &middot; checked ${esc(r.lastCheckedOn)}</li>`).join('')}</ul>`,
-    `<p><a href="${esc(adminPortalUrl())}/admin/seo?tab=llm">Open the SEO dashboard</a></p>`,
+    `<p><a href="${esc(adminPortalUrl())}/admin/seo?workspace=authority&view=backlinks">Open the SEO dashboard</a></p>`,
   ].join('\n');
 
   if (typeof sendgrid.isConfigured === 'function' && !sendgrid.isConfigured()) {
@@ -424,7 +431,7 @@ async function postOwnedUrlHealthDigest(bad) {
       subject,
       html,
       text,
-      link: '/admin/seo?tab=llm',
+      link: '/admin/seo?workspace=authority&view=backlinks',
       metadata: { bad: bad.length },
       dedupeKey: OPS_DIGEST_KEY,
       refreshOnDedupe: true,
