@@ -347,6 +347,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           .where('is_active', true)
           .first();
       }
+      // AI-assistant referral (seed: 20260928030000_ai_assistant_lead_source).
+      // Without this the leadSource.source==='ai_assistant' bucket never
+      // resolves a lead_source_id — it would carry the correct funnel display
+      // name (SOURCE_NAMES) but lose the admin source badge/filter and trip
+      // the unattributed-leads alert (codex pre-push P1).
+      if (!sourceRecord && leadSource.source === 'ai_assistant') {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'ai_assistant')
+          .where('is_active', true)
+          .first();
+      }
       if (!sourceRecord && leadSource.source === 'facebook') {
         // Match the Facebook row for the right channel: paid ad clicks
         // (fbclid/_fbc or utm cpc → channel 'paid') resolve to the paid
