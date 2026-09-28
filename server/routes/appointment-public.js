@@ -1163,3 +1163,13 @@ module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = n
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
   return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
 };
+// The link-preview card (services/link-preview-metadata.js) shows the same
+// state verdict AND the same arrival window the page renders — the VISIT's
+// canonical window when grouped, so every link to one stop previews one
+// arrival promise.
+module.exports.previewForVisit = async function previewForVisit(svc, now = new Date()) {
+  const info = svc?.visit_id ? await visitServicesFor(svc) : {};
+  if (info.visitUnknown) return { state: 'not_available', arrivalWindow: null };
+  const { state } = pageStateForGroup(svc, info, now);
+  return { state, arrivalWindow: arrivalWindowLabel(info.visit?.windowStart || hhmm(svc.window_start)) };
+};

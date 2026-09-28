@@ -25,7 +25,6 @@ const {
   loadServiceReportCardContent,
   loadServiceReportPageMetadata,
 } = require('./report-page-metadata');
-const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 
 const OG_IMAGE_WIDTH = 1200;
 const OG_IMAGE_HEIGHT = 630;
@@ -165,22 +164,21 @@ async function resolveAppointment(token) {
   if (!svc || svc.customer_deleted_at) return null;
   // The date/window only goes on the card when the page itself would render
   // this visit as upcoming — a cancelled, completed, past, or pending-rebook
-  // row still carries its OLD slot, which must never preview as booked.
-  let upcoming = false;
+  // row still carries its OLD slot, which must never preview as booked — and
+  // the window is the page's own (the visit's canonical one when grouped).
+  let preview = null;
   try {
-    const { pageStateForVisit } = require('../routes/appointment-public');
-    upcoming = (await pageStateForVisit(svc)).state === 'upcoming';
+    const { previewForVisit } = require('../routes/appointment-public');
+    preview = await previewForVisit(svc);
   } catch (err) {
     logger.warn(`[link-preview] appointment state check failed: ${err.message}`);
   }
   const headline = titleCaseServiceType(svc.service_type);
-  if (!upcoming) {
+  if (!preview || preview.state !== 'upcoming') {
     return { eyebrow: 'APPOINTMENT', headline, subline: 'View your visit details' };
   }
   const date = formatReportDate(svc.scheduled_date);
-  const range = arrivalWindowRange(svc.window_start);
-  const window = range ? formatSmsTimeRange(range) : null;
-  const subline = [date, window && window !== range ? window : null].filter(Boolean).join(' · ') || null;
+  const subline = [date, preview.arrivalWindow].filter(Boolean).join(' · ') || null;
   return { eyebrow: 'APPOINTMENT', headline, subline };
 }
 

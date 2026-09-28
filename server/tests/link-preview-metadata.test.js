@@ -8,10 +8,12 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn(), debug: jest.fn() }));
-jest.mock('../routes/appointment-public', () => ({ pageStateForVisit: jest.fn(async () => ({ state: 'upcoming' })) }));
+jest.mock('../routes/appointment-public', () => ({
+  previewForVisit: jest.fn(async () => ({ state: 'upcoming', arrivalWindow: '9:00 AM - 11:00 AM' })),
+}));
 
 const db = require('../models/db');
-const { pageStateForVisit } = require('../routes/appointment-public');
+const { previewForVisit } = require('../routes/appointment-public');
 const {
   FIXED_CARDS,
   matchLinkPreviewRoute,
@@ -128,8 +130,22 @@ describe('appointment / reschedule cards (scheduled_services.reschedule_token)',
     expect(content.subline).toMatch(/September 26, 2026/);
   });
 
+  test('the window is the page\'s own (a grouped visit\'s canonical window), not the token row\'s start', async () => {
+    previewForVisit.mockResolvedValueOnce({ state: 'upcoming', arrivalWindow: '8:00 AM - 10:00 AM' });
+    mockTables({
+      'scheduled_services as s': chainable({
+        first: {
+          id: 2, status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-10-02', window_start: '10:30',
+          service_type: 'Mosquito Control', customer_deleted_at: null,
+        },
+      }),
+    });
+    const content = await resolveCardContent('appointment', 'a'.repeat(64));
+    expect(content.subline).toBe('October 2, 2026 · 8:00 AM - 10:00 AM');
+  });
+
   test('a visit the page would not show as upcoming keeps its old slot off the card', async () => {
-    pageStateForVisit.mockResolvedValueOnce({ state: 'pending_rebook' });
+    previewForVisit.mockResolvedValueOnce({ state: 'pending_rebook', arrivalWindow: '9:00 AM - 11:00 AM' });
     mockTables({
       'scheduled_services as s': chainable({
         first: {

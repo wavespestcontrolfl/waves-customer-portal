@@ -18,6 +18,8 @@ const { COLORS, getLogoPngBuffer } = require('./social-card-renderer');
 
 const OG_WIDTH = 1200;
 const OG_HEIGHT = 630;
+// Text column width: the headline must end clear of the mascot badge.
+const HEADLINE_MAX_WIDTH = 580;
 
 const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
 let fonts = null;
@@ -52,7 +54,8 @@ function outline(font, text, size, tracking = 0) {
   return { d: parts.join(''), width: Math.max(0, x - tracking) };
 }
 
-// Greedy word wrap by measured width; null when it needs more than maxLines.
+// Greedy word wrap by measured width. Null when it needs more than maxLines
+// OR any line (a single long word included) is wider than maxW.
 function wrapMeasured(font, text, size, maxW, maxLines) {
   const lines = [];
   let current = '';
@@ -62,17 +65,38 @@ function wrapMeasured(font, text, size, maxW, maxLines) {
     else { lines.push(current); current = word; }
   }
   if (current) lines.push(current);
-  return lines.length <= maxLines ? lines : null;
+  if (lines.length > maxLines) return null;
+  return lines.every((line) => outline(font, line, size).width <= maxW) ? lines : null;
 }
 
 // Largest headline size (phone thumbnails show this card at ~1/4 scale, so
-// bigger is better) that still fits in two lines.
+// bigger is better) whose every line fits in two lines of maxW. A word too
+// long for even the smallest step is scaled down until its line fits.
 function fitHeadline(font, text, maxW) {
-  for (const size of [150, 132, 116, 100, 88, 76]) {
+  for (const size of [150, 132, 116, 100, 88, 76, 64, 56, 48]) {
     const lines = wrapMeasured(font, text, size, maxW, 2);
     if (lines) return { size, lines };
   }
-  return { size: 64, lines: (wrapMeasured(font, text, 64, maxW, 99) || [text]).slice(0, 2) };
+  const size = 48;
+  const words = text.split(' ');
+  const lines = [words.slice(0, Math.ceil(words.length / 2)).join(' '), words.slice(Math.ceil(words.length / 2)).join(' ')].filter(Boolean);
+  const widest = Math.max(...lines.map((line) => outline(font, line, size).width));
+  return { size: Math.max(12, Math.floor((size * maxW) / widest)), lines };
+}
+
+// Subline at 44px, or smaller until it fits. "October 2, 2026 · 9:00 AM -
+// 11:00 AM" reads better as a date line and a time line than wrapped
+// mid-range, when each part fits on its own.
+function fitSubline(font, text, maxW) {
+  if (!text) return { size: 44, lines: [] };
+  for (const size of [44, 38, 32, 26]) {
+    const parts = text.split(' · ');
+    if (parts.length === 2 && parts.every((part) => outline(font, part, size).width <= maxW)) return { size, lines: parts };
+    const lines = wrapMeasured(font, text, size, maxW, 2);
+    if (lines) return { size, lines };
+  }
+  const widest = outline(font, text, 26).width;
+  return { size: Math.max(10, Math.floor((26 * maxW) / widest)), lines: [text] };
 }
 
 // Renders the card SVG (everything but the logo, which is composited on top).
@@ -83,22 +107,22 @@ function renderLinkPreviewSvg({ eyebrow, headline, subline } = {}) {
   const H = OG_HEIGHT;
   const f = loadFonts();
   const x = 80;
-  const textW = 580;
+  const textW = HEADLINE_MAX_WIDTH;
 
   const eyebrowText = cleanText(eyebrow, 40).toUpperCase() || 'WAVES PEST CONTROL';
   const headlineText = (cleanText(headline, 80) || 'Waves Pest Control').toUpperCase();
   const sublineText = cleanText(subline, 120);
 
-  const eb = outline(f.eyebrow, eyebrowText, 30, 2.5);
+  // The pill never runs past the text column (a long label shrinks).
+  let ebSize = 30;
+  let eb = outline(f.eyebrow, eyebrowText, ebSize, 2.5);
+  while (eb.width + 56 > textW && ebSize > 10) {
+    ebSize -= 2;
+    eb = outline(f.eyebrow, eyebrowText, ebSize, 2.5);
+  }
   const hl = fitHeadline(f.headline, headlineText, textW);
-  const slSize = 44;
-  // "October 2, 2026 · 9:00 AM - 11:00 AM" reads better as a date line and
-  // a time line than wrapped mid-range, when each part fits on its own.
-  const parts = sublineText.split(' · ');
-  const partsFit = parts.length === 2 && parts.every((part) => outline(f.subline, part, slSize).width <= textW + 40);
-  const slLines = !sublineText ? []
-    : partsFit ? parts
-      : (wrapMeasured(f.subline, sublineText, slSize, textW + 40, 2) || [sublineText]);
+  const slMaxW = textW + 40;
+  const { size: slSize, lines: slLines } = fitSubline(f.subline, sublineText, slMaxW);
 
   const pillH = 60;
   const pillW = Math.round(eb.width + 56);
@@ -113,7 +137,7 @@ function renderLinkPreviewSvg({ eyebrow, headline, subline } = {}) {
 
   const shapes = [
     `<rect x="${x}" y="${top}" width="${pillW}" height="${pillH}" rx="${pillH / 2}" fill="${COLORS.gold}"/>`,
-    `<path transform="translate(${x + 28} ${top + pillH / 2 + 11})" d="${eb.d}" fill="${COLORS.blueDeeper}"/>`,
+    `<path transform="translate(${x + 28} ${Math.round(top + pillH / 2 + ebSize * 0.36)})" d="${eb.d}" fill="${COLORS.blueDeeper}"/>`,
   ];
   let y = top + pillH + gapAfterPill;
   for (const text of hl.lines) {
@@ -162,8 +186,10 @@ async function renderLinkPreviewJpeg(content = {}) {
 }
 
 module.exports = {
+  HEADLINE_MAX_WIDTH,
   OG_WIDTH,
   OG_HEIGHT,
   renderLinkPreviewSvg,
   renderLinkPreviewJpeg,
+  _test: { fitHeadline, fitSubline, outline, loadFonts },
 };

@@ -397,6 +397,23 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
     expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
   });
+
+  test('previewForVisit gives the link-preview card the page\'s state and the VISIT\'s arrival window', async () => {
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async () => [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, window_start: '09:00:00', window_end: '10:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, window_start: '10:00:00', window_end: '11:00:00' },
+        ],
+        first: async () => (table === 'appointment_reminders' ? { service_type: 'Quarterly Pest Control' } : null),
+      };
+      return api;
+    });
+    // member b starts at 10:00, but the stop's promise is the 9:00 window
+    expect(await appointmentRouter.previewForVisit({ id: 'b', visit_id: 'v1', status: 'pending', window_start: '10:00' }))
+      .toEqual({ state: 'upcoming', arrivalWindow: '9:00 AM - 11:00 AM' });
+  });
 });
 
 describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
