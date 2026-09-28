@@ -2977,9 +2977,20 @@ async function fetchAndVerifyLicensedPhoto(url, slug) {
   assertLicensedPhotoUrlAllowed(url, slug);
   let res;
   try {
-    res = await fetch(url, { redirect: 'follow' });
+    // Codex P1 (4th round): 'follow' transparently chases ANY 3xx to
+    // whatever host it names — including an internal/private address —
+    // with no re-check against the allowlist, so the pre-fetch host check
+    // above proved nothing about where the bytes actually came from.
+    // 'manual' means the redirect is never taken at all; any 3xx (or the
+    // resulting opaqueredirect response) is a hard failure instead of a
+    // followed hop, so the allowlist check on the ORIGINAL url is the
+    // only host this function ever actually contacts.
+    res = await fetch(url, { redirect: 'manual' });
   } catch (fetchErr) {
     throw licensedPhotoError(slug, url, `could not be fetched: ${fetchErr.message}`);
+  }
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+    throw licensedPhotoError(slug, url, `redirected (HTTP ${res.status || 'opaque'}) — redirects are never followed for a licensed-photo fetch`);
   }
   if (!res.ok) throw licensedPhotoError(slug, url, `fetch failed (HTTP ${res.status})`);
   const contentType = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();

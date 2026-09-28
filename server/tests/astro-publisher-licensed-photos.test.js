@@ -123,7 +123,9 @@ describe('rehostLicensedIdentificationPhotos', () => {
 
     const result = await rehostLicensedIdentificationPhotos({ body, slug: 'fire-ant-id', brief: photoSlotsBrief(), mdx: true });
 
-    expect(global.fetch).toHaveBeenCalledWith(LICENSED_URL, expect.objectContaining({ redirect: 'follow' }));
+    // 'manual' (not 'follow'): a redirect must never be transparently
+    // chased to an unvalidated host (Codex P1, 4th round).
+    expect(global.fetch).toHaveBeenCalledWith(LICENSED_URL, expect.objectContaining({ redirect: 'manual' }));
     expect(result.files).toHaveLength(1);
     expect(result.files[0].path).toBe('public/images/blog/fire-ant-id/body-1.webp');
     expect(Buffer.isBuffer(result.files[0].buffer)).toBe(true);
@@ -318,5 +320,19 @@ describe('assertLicensedPhotoUrlAllowed / fetchAndVerifyLicensedPhoto — host a
     const res = { body: { getReader: () => ({ read: async () => { if (sent) return { done: true, value: undefined }; sent = true; return { done: false, value: chunk }; }, cancel: async () => {} }) } };
     const out = await readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, 'fire-ant-id', 'https://upload.wikimedia.org/x.jpg');
     expect(out.toString()).toBe('hello');
+  });
+
+  // Codex P1 (4th round): redirect:'follow' would transparently chase a
+  // 3xx to an unvalidated host with no re-check — fetchAndVerifyLicensedPhoto
+  // must reject any redirect outright instead of following it.
+  test('fetchAndVerifyLicensedPhoto rejects a 3xx redirect response instead of following it', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 302, type: 'default', headers: { get: () => null } });
+    await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
+    expect(global.fetch).toHaveBeenCalledWith(LICENSED_URL, expect.objectContaining({ redirect: 'manual' }));
+  });
+
+  test('fetchAndVerifyLicensedPhoto rejects an opaqueredirect response', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 0, type: 'opaqueredirect', headers: { get: () => null } });
+    await expect(fetchAndVerifyLicensedPhoto(LICENSED_URL, 'fire-ant-id')).rejects.toMatchObject({ code: 'BLOG_BODY_IMAGES_FAILED' });
   });
 });
