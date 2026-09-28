@@ -2046,7 +2046,7 @@ describe('#5194 round 4', () => {
     if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
     jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
   });
-  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', rodent_trapping: 'Rodent Trapping', rodent_exclusion: 'Rodent Exclusion & Trapping', pest_general_quarterly: 'General Pest Control (Quarterly)' };
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', rodent_trapping: 'Rodent Trapping', rodent_exclusion: 'Rodent Exclusion & Trapping', pest_general_quarterly: 'General Pest Control (Quarterly)', wdo_inspection: 'WDO Inspection' };
   const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
 
   test('serviceIdentityFor: a named service picks the MATCHING scheduled visit, not the first one; several visits with none named is uncertain', async () => {
@@ -2059,6 +2059,15 @@ describe('#5194 round 4', () => {
     await expect(serviceIdentityFor('The ants came back', { upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-01' }] })).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', certain: true });
     await expect(serviceIdentityFor('When can you come?', { upcomingServices: [], serviceHistory: [] })).resolves.toMatchObject({ serviceType: null, certain: true, reason: 'engine_default' });
     await expect(serviceIdentityFor('Can you add rodent exclusion Tuesday?', two)).resolves.toMatchObject({ serviceType: 'Rodent Exclusion Only', certain: true, reason: 'new_booking' });
+    // explicitly distinct work beside a same-family visit is NEW work (audit P1)
+    const monitoring = { upcomingServices: [{ type: 'Rodent Monitoring (Monthly)', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('We need rat trapping at the house', monitoring)).resolves.toMatchObject({ serviceType: 'Rodent Trapping', reason: 'new_booking' });
+    const termite = { upcomingServices: [{ type: 'Termite Bait Station System', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('Can I schedule a WDO inspection?', termite)).resolves.toMatchObject({ serviceType: 'WDO Inspection', reason: 'new_booking' });
+    // …but a reschedule of the existing visit in that family stays about the visit
+    await expect(serviceIdentityFor('Can we move my rodent trapping visit?', monitoring)).resolves.toMatchObject({ serviceType: 'Rodent Monitoring (Monthly)', reason: 'named_scheduled_visit' });
+    // a family-level request with a visit in that family is about the visit
+    await expect(serviceIdentityFor('What times do you have for pest control?', { upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }] })).resolves.toMatchObject({ serviceType: 'Quarterly Pest + Termite Bait Station', reason: 'named_scheduled_visit' });
   });
 
   test('an uncertain identity WITHHOLDS OPEN TIMES (no availability call, no section); an estimate pins it', async () => {

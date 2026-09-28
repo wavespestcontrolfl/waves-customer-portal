@@ -477,6 +477,12 @@ const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
   rodent_bait: ['rodent_monitoring', 'rodent_bait'],
 });
 async function requestedServiceType(inboundMessage) {
+  return (await resolveRequestedService(inboundMessage))?.name || null;
+}
+// { name, explicit }: `explicit` is true for work named specifically
+// (an inspection, one-time/initial pest, rodent trapping/exclusion) as
+// opposed to a family-level request ("pest control", "lawn service").
+async function resolveRequestedService(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
   try {
@@ -518,7 +524,7 @@ async function requestedServiceType(inboundMessage) {
       const row = await resolveServiceType(catalogKey);
       if (!row?.name) continue;
       if (row.is_archived === true || row.is_active === false) continue; // retired rows never price a booking
-      return String(row.name);
+      return { name: String(row.name), explicit: Boolean(explicit || rodentWork) };
     }
     return null;
   } catch (err) {
@@ -568,12 +574,17 @@ function serviceFamilyOf(serviceName) {
 async function serviceIdentityFor(inboundMessage, context) {
   const text = String(inboundMessage || '');
   const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type);
-  const requested = await requestedServiceType(text);
-  if (requested) {
+  const resolved = await resolveRequestedService(text);
+  if (resolved) {
+    const requested = resolved.name;
+    const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
     const family = serviceFamilyOf(requested);
     const scheduled = family ? upcoming.find((s) => SERVICE_FAMILY_ALIASES[family].test(String(s.type))) : null;
-    if (scheduled) return { serviceType: String(scheduled.type), certain: true, reason: 'named_scheduled_visit' };
-    const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
+    // Explicitly distinct work (trapping while monitoring is scheduled, a
+    // WDO inspection while treatment is scheduled) is NEW work unless the
+    // message is about the existing visit (audit P1); a family-level
+    // request ("pest control?") with a visit in that family is about it.
+    if (scheduled && (aboutExisting || !resolved.explicit)) return { serviceType: String(scheduled.type), certain: true, reason: 'named_scheduled_visit' };
     if (!aboutExisting) return { serviceType: requested, certain: true, reason: 'new_booking' };
   }
   if (upcoming.length === 1) return { serviceType: String(upcoming[0].type), certain: true, reason: 'single_upcoming' };
@@ -592,8 +603,10 @@ async function newBookingServiceType(inboundMessage, context) {
   // had (Codex #5194 r1): "the mosquitoes came back" is a callback on the
   // completed combined visit, never a new standalone booking.
   if (EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text)) return null;
-  const requested = await requestedServiceType(text);
+  const resolvedNb = await resolveRequestedService(text);
+  const requested = resolvedNb?.name || null;
   if (!requested) return null;
+  if (resolvedNb.explicit) return requested; // explicitly distinct work is new even beside a same-family visit
   // Already on the calendar? Compared by service FAMILY (Codex #5194 r2):
   // "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
   // Termite Bait Station" share the pest family even though no first word
