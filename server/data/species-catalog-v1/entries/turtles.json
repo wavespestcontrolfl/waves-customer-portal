@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e96a764791fc95236cc20f35a22a118bac99cdf7761400c6040fc0839dbbecef"
     },
     "slug": "gopher-tortoise",
     "common_name": "Gopher Tortoise",
@@ -40,7 +41,7 @@
       {
         "slug": "armadillo",
         "difference": "Gopher tortoise burrows are one wide half-moon opening with a sandy apron; armadillo digging is many small, scattered cone-shaped holes.",
-        "next_photo": "A wide photo of the hole or burrow shape — one wide half-moon opening versus several small round holes.",
+        "next_photo": "From a safe distance, get a wide photo of the hole or burrow shape — one wide half-moon opening versus several small round holes.",
         "photo_can_confirm": true
       }
     ],

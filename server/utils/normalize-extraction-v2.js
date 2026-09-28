@@ -258,6 +258,20 @@ function normalizeServiceRequestPricing(serviceRequest) {
   return result;
 }
 
+// agreed_slot_words (schema 1.17.0) rides on the confirmed_start_at
+// evidence quote as verbatim words — pass each key through the same
+// whitespace cleanup as every other captured string, without altering the
+// object's null/non-null shape (day and period may each be null; hour
+// never is once the object itself is non-null).
+function normalizeAgreedSlotWords(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    day: cleanText(value.day),
+    hour: cleanText(value.hour),
+    period: cleanText(value.period),
+  };
+}
+
 function normalizeExtractionV2(extraction) {
   if (!extraction || typeof extraction !== 'object') return extraction;
 
@@ -268,6 +282,9 @@ function normalizeExtractionV2(extraction) {
     ...(extraction.scheduling ? { scheduling: {
       ...extraction.scheduling,
       proposed_start_at: cleanText(extraction.scheduling.proposed_start_at),
+      moved_appointment_date: cleanText(extraction.scheduling.moved_appointment_date),
+      moved_appointment_words: cleanText(extraction.scheduling.moved_appointment_words),
+      agreed_slot_words: normalizeAgreedSlotWords(extraction.scheduling.agreed_slot_words),
     } } : {}),
     ...(extraction.secondary_contact !== undefined
       ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }

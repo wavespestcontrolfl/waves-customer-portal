@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({
   ...jest.requireActual('../config/feature-gates'),
-  isEnabled: jest.fn((gate) => gate === 'estimateCommercialGlass'),
+  isEnabled: jest.fn((gate) => gate === 'estimateCommercialGlass' || gate === 'estimateDocPdf'),
   gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
@@ -111,6 +111,50 @@ describe('GET /:token/data — proposal line projection', () => {
       // Unit-less lines do not grow a null field.
       expect(lines[1]).not.toHaveProperty('unit');
       expect(lines[1]).toMatchObject({ quantity: 1, unitPrice: 95, amount: 95 });
+    });
+  });
+
+  test('document mode classifies retained disabled itemization independently of the ordinary current rows', async () => {
+    dbRows.estimates = {
+      ...estimateRow(),
+      id: 'est-disabled-termite',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      estimate_data: {
+        lineItems: [{ displayName: 'Pest Control', monthlyPrice: 55 }],
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        proposal: {
+          enabled: false,
+          buildings: [{
+            name: 'Service location',
+            note: 'Retained inspection scope',
+            lineItems: [{ description: 'Termite trenching', unitPrice: 1200, frequency: 'one_time', taxable: false }],
+          }],
+        },
+      },
+    };
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/unitprojectiontoken/data?mode=pdf`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      // The ordinary page policy still sees current pest pricing. Document
+      // mode carries its own explicit verdict for the different normalized
+      // rows it renders.
+      expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
+      expect(body.proposal.noGuaranteeClaims).toBe(true);
+      expect(body.proposal.enabled).toBe(false);
+      expect(body.proposal.synthesized).toBe(false);
+      expect(body.proposal.buildings[0]).toMatchObject({
+        name: 'Service location',
+        note: 'Retained inspection scope',
+      });
+      expect(body.proposal.buildings[0].lineItems).toEqual([
+        expect.objectContaining({ description: 'Termite trenching', unitPrice: 1200, amount: 1200 }),
+      ]);
+      expect(body.documentRender).toBe(true);
     });
   });
 });

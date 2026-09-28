@@ -467,7 +467,7 @@ describe('Codex #4737 r5 P1: the booking is bound to the validated location', ()
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
-    const fence = src.indexOf('await lockCustomerComms(trx, custId);');
+    const fence = src.indexOf('for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);');
     const check = src.indexOf('if (callbackVisit?.expectedLocation) {', fence);
     const insert = src.indexOf("await trx('self_booked_appointments').insert({", fence);
     expect(check).toBeGreaterThan(fence);

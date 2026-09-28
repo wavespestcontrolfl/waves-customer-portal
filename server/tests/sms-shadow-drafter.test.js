@@ -110,6 +110,7 @@ describe('sms shadow drafter — response parsing', () => {
       intended_actions: [],
       auto_send_safe: true,
       missing_info: null,
+      offered_times: [],
     });
   });
 
@@ -168,6 +169,30 @@ describe('sms shadow drafter — response parsing', () => {
     expect(parseShadowResponse('no json here at all')).toBeNull();
     expect(parseShadowResponse('{"intended_actions":[]}')).toBeNull(); // missing reply
     expect(parseShadowResponse('{"reply": 7}')).toBeNull(); // non-string reply
+  });
+
+  describe('offered_times — the structural offered-slot declaration (owner-directed fix)', () => {
+    test('absent field → empty array, not undefined', () => {
+      expect(parseShadowResponse('{"reply":"hi"}').offered_times).toEqual([]);
+    });
+
+    test('a well-formed entry passes through', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"How about Tuesday 9-11?","offered_times":[{"date":"Tuesday, September 29","window":"9:00 AM - 11:00 AM"}]}'
+      );
+      expect(parsed.offered_times).toEqual([{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }]);
+    });
+
+    test('a malformed entry (non-string date/window, or missing one) is dropped, not crashed on', () => {
+      const parsed = parseShadowResponse(
+        '{"reply":"hi","offered_times":[{"date":42,"window":"9-11"},{"date":"Tuesday"},{},"not an object"]}'
+      );
+      expect(parsed.offered_times).toEqual([]);
+    });
+
+    test('a non-array offered_times → empty array', () => {
+      expect(parseShadowResponse('{"reply":"hi","offered_times":"Tuesday 9-11"}').offered_times).toEqual([]);
+    });
   });
 
   test('empty reply is a valid "no reply warranted" draft', () => {
@@ -755,11 +780,14 @@ describe('sms shadow drafter — structural unsendability', () => {
   });
 });
 
-describe('sealed-lane dispatch budget (08-15 tuning)', () => {
-  test('pinned sealed drafts dispatch with maxTokens 1000, the :sealed suffix, and no fallback', async () => {
+describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', () => {
+  test('pinned sealed drafts dispatch with maxTokens 2000, the :sealed suffix, and no fallback', async () => {
     // 600 truncated 2-4 sealed-exam legs/day in prod ("unparseable
     // (response truncated at max_tokens=600)") — pin the raised budget so
-    // a silent revert can't reintroduce false provider failures.
+    // a silent revert can't reintroduce false provider failures. Raised
+    // again 600 -> 2000 on 2026-09-26: Sonnet 5 thinks by default and
+    // thinking spends from this same cap ahead of the ~270-token real
+    // draft (10 of 71 live calls were hitting 600, overflow was thinking).
     jest.resetModules();
     const dispatched = [];
     jest.doMock('../services/llm/call', () => ({
@@ -774,12 +802,12 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     jest.dontMock('../services/llm/call');
     expect(dispatched).toHaveLength(1);
     // r46: sealed legs measure the LIVE cap — the exam gates live behavior.
-    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].payload.maxTokens).toBe(2000);
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+:sealed$/);
     expect(dispatched[0].policy.fallback).toBeUndefined();
   });
 
-  test('live drafts keep the 600 cap — it is the composer card\'s last length guard (codex #3423 r2)', async () => {
+  test('live drafts keep the same cap as the sealed exam — it still gates real draft length before comms-lint\'s segment check (codex #3423 r2)', async () => {
     jest.resetModules();
     const dispatched = [];
     jest.doMock('../services/llm/call', () => ({
@@ -793,7 +821,7 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     await drafter.generateDraftOnce({}, 'sys', 'user', MODELS.ROUTES.smsDraftDefault, { pinned: false });
     jest.dontMock('../services/llm/call');
     expect(dispatched).toHaveLength(1);
-    expect(dispatched[0].payload.maxTokens).toBe(600);
+    expect(dispatched[0].payload.maxTokens).toBe(2000);
     expect(dispatched[0].policy.name).toMatch(/^smsShadow:[a-z]+$/);
     expect(dispatched[0].policy.fallback).toBeTruthy();
   });

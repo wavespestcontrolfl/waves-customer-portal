@@ -17,7 +17,8 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: (...args) => mockIsEnab
 
 const mockInsert = jest.fn();
 const mockLoggerWarn = jest.fn();
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: (...args) => mockLoggerWarn(...args), error: jest.fn() }));
+const mockLoggerInfo = jest.fn();
+jest.mock('../services/logger', () => ({ info: (...args) => mockLoggerInfo(...args), warn: (...args) => mockLoggerWarn(...args), error: jest.fn() }));
 jest.mock('../models/db', () => {
   const db = jest.fn();
   // The route writes through ONE parameterized upsert: capture its SQL and
@@ -103,6 +104,7 @@ beforeEach(async () => {
   mockIsEnabled.mockReturnValue(true);
   mockInsert.mockClear();
   mockLoggerWarn.mockClear();
+  mockLoggerInfo.mockClear();
   mockFellThrough.mockClear();
   // Unless a test says otherwise, every path is on its site's sitemap.
   mockFetchSitemapPaths.mockReset();
@@ -457,6 +459,46 @@ describe('only posts the site actually publishes count', () => {
     expect(w.sql).toMatch(/WHERE blog_read_depth_daily\.count < \?/);
     expect(w.cap).toBe(DAILY_BUCKET_CAP);
     expect(DAILY_BUCKET_CAP).toBe(2000);
+  });
+});
+
+describe('sitemap outages are logged once, with the site key only', () => {
+  const POST_PATH = GOOD_BODY.p;
+  const { isLivePath } = require('../routes/public-blog-read-depth')._private;
+
+  test('an unreadable sitemap warns once per outage, however often it is retried', async () => {
+    mockFetchSitemapPaths.mockResolvedValue(null);
+    const t0 = 5000000;
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0)).toBe(false);
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 5 * 60 * 1000)).toBe(false);
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 10 * 60 * 1000)).toBe(false);
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const [line] = mockLoggerWarn.mock.calls[0];
+    expect(line).toContain('wavespestcontrol.com');
+    expect(line).toContain('its beacons are dropped');
+    expect(line).not.toContain(POST_PATH);
+  });
+
+  test('recovery is logged once, and a later outage warns again against the last good list', async () => {
+    const t0 = 6000000;
+    mockFetchSitemapPaths.mockResolvedValue(null);
+    await isLivePath('wavespestcontrol.com', POST_PATH, t0);
+    mockFetchSitemapPaths.mockResolvedValue(new Set([POST_PATH]));
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 5 * 60 * 1000)).toBe(true);
+    expect(mockLoggerInfo).toHaveBeenCalledTimes(1);
+    expect(mockLoggerInfo.mock.calls[0][0]).toContain('wavespestcontrol.com');
+    mockFetchSitemapPaths.mockResolvedValue(null);
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 7 * 60 * 60 * 1000)).toBe(true);
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(2);
+    expect(mockLoggerWarn.mock.calls[1][0]).toContain('counting against the last good list');
+  });
+
+  test('a sitemap that always loads logs nothing', async () => {
+    mockFetchSitemapPaths.mockResolvedValue(new Set([POST_PATH]));
+    await isLivePath('wavespestcontrol.com', POST_PATH, 8000000);
+    await isLivePath('wavespestcontrol.com', POST_PATH, 8000000 + 7 * 60 * 60 * 1000);
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
+    expect(mockLoggerInfo).not.toHaveBeenCalled();
   });
 });
 

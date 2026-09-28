@@ -120,6 +120,22 @@ function anthropicAcceptsEffort(model, level) {
 // inert for today's traffic.
 const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
 
+// NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
+// thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
+// `thinking: { type: 'disabled' }` — the voice-relay override tests and the
+// live inbound/sandbox chain both rely on picking it with that literal still
+// sent. Opus 5.5 and later minors/majors (5-5, 5-6, 6, 7, …), plus Fable and
+// Mythos, are the ones that 400 on it outright. One id shape, so a future
+// Opus minor needs a change here only, never at either call site that reads
+// this.
+const ANTHROPIC_THINKING_REQUIRED_RE = /^claude-opus-5-[0-9]|^claude-opus-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+// What a CALLER needs to know before building a request: can `thinking` be
+// sent as `{ type: 'disabled' }` at all? The two voice-relay lanes that
+// always send it check this before picking a model.
+function anthropicThinkingAlwaysOn(model) {
+  return ANTHROPIC_THINKING_REQUIRED_RE.test(String(model || ''));
+}
+
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
 // deleted. Each const below reads `process.env.X || DEFAULTS.KEY`.
@@ -289,6 +305,13 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.
 // shown disabled).
 const MODEL_CATALOG = {
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // Opus 5.5 (see the flip-order note atop this file) — thinking is always
+  // on (anthropicThinkingAlwaysOn), and most direct tier callers size
+  // max_tokens for a no-thinking reply, so like Fable it is offered only to
+  // DEEP / EXTREME selectors (deep.js sizes and strips thinking). `voice`
+  // admits it to the voice relay's sandbox / eval-harness thinking-on path
+  // (relay-conversation.js) — never production inbound or collections.
+  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'adaptive' } },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Fable's thinking blocks + refusal semantics are handled only by
@@ -297,10 +320,23 @@ const MODEL_CATALOG = {
   'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
   'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   'gpt-6-astra': { label: 'GPT-6 Astra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  // `voice` marks a model eligible for the gated voice-relay OpenAI adapter
+  // (server/services/voice-agent/relay-openai-client.js) AND carries its
+  // per-model Responses `reasoning.effort` — one place for both, so the
+  // adapter never hardcodes a model id (CLAUDE.md AI rule 1). Voice-relay
+  // sessions always run this lane's `low`-equivalent: minimal thinking on a
+  // live phone call. See relay-openai-client.js for how `voice.reasoning` is
+  // read and applied; a model with no `voice` key is never offered to
+  // VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL / a benchmark
+  // --candidate-model, gate or no gate.
+  // The GPT-6 line's efforts start at 'low' ('none' 400s — see
+  // services/llm/call.js), so its voice entries take 'low'; GPT-5.6 keeps 'none'.
+  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'low' } },
+  // Released 2026-09-22. No vision leg documented yet — text only.
+  'gpt-6-luna': { label: 'GPT-6 Luna', provider: 'openai', caps: ['text'], status: 'current', voice: { reasoning: 'low' } },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
+  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
   'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },
@@ -471,6 +507,8 @@ module.exports = {
   ANTHROPIC_EFFORT_CAPABLE_RE,
   anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
+  ANTHROPIC_THINKING_REQUIRED_RE,
+  anthropicThinkingAlwaysOn,
   DEEP,
   EXTREME,
   FLAGSHIP,

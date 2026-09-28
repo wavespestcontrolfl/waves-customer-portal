@@ -24,8 +24,11 @@ jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hello ${vars.first_name} — reply with your address${vars.callback_clause}.`),
 }));
 jest.mock('../config/twilio-numbers', () => ({
-  findByNumber: jest.fn((n) => (n === '+19412166229' || n === '+19413529161' ? { id: 'bradenton' } : null)),
+  findByNumber: jest.fn((n) => (
+    n === '+19412166229' || n === '+19413529161' || n === '+19412975749' ? { id: 'bradenton' } : null
+  )),
   isTechLine: jest.fn((n) => n === '+19413529161'),
+  isStaffForwardNumber: jest.fn((n) => n === '+19415550199'),
 }));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({ ok: true })),
@@ -285,8 +288,17 @@ describe('eligibleNewProspect', () => {
     expect(eligibleNewProspect({ ...BASE, customerId: 'cust-1', createdCustomerFromCall: false })).toBe(false);
   });
 
-  it('excludes outbound calls (inbound-only consent basis)', () => {
+  it('excludes outbound calls (inbound-only consent basis) by default', () => {
     expect(eligibleNewProspect({ ...BASE, isOutbound: true })).toBe(false);
+  });
+
+  it('an eligible outbound return call (owner ruling 2026-09-26) passes the same as inbound', () => {
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true })).toBe(true);
+  });
+
+  it('outboundEligible never overrides the other eligibility checks', () => {
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true, doNotContactRequested: true })).toBe(false);
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true, customerId: 'cust-1', createdCustomerFromCall: false })).toBe(false);
   });
 
   it('caller asked not to be contacted on the call — never eligible for the text', () => {
@@ -311,6 +323,69 @@ describe('callbackClause / window helpers', () => {
   it('window check follows ET hours', () => {
     expect(_private.withinSendWindowET(IN_WINDOW)).toBe(true);
     expect(_private.withinSendWindowET(OUT_OF_WINDOW)).toBe(false);
+  });
+});
+
+// Codex pre-push r1 P1 on PR #5012: callback_clause and the sms fromNumber
+// were rendered from call.to_phone unconditionally — on an outbound return
+// call that is the CUSTOMER'S OWN number (or, on a lead-webhook-auto-bridge
+// call, the staff cell the bridge dialed first). outboundWavesCallerId
+// resolves the real Waves-managed line the customer actually saw instead.
+describe('outboundWavesCallerId (owner ruling 2026-09-26: never the customer or a staff/tech cell)', () => {
+  const { outboundWavesCallerId } = _private;
+
+  it('an ordinary outbound call: the line WE dialed FROM (call.from_phone), never to_phone', () => {
+    expect(outboundWavesCallerId({
+      direction: 'outbound', from_phone: '+19412975749', to_phone: '+19415550101',
+    })).toBe('+19412975749');
+  });
+
+  it('a lead-webhook-auto-bridge call: the lead-leg caller ID from bridge metadata, never to_phone (the staff cell)', () => {
+    expect(outboundWavesCallerId({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19412975749', // the admin-leg caller ID — irrelevant here
+      to_phone: '+19415993489', // Adam's cell — must never be exposed
+      metadata: { type: 'lead_auto_bridge', leadPhone: '+19415550101', bridgeCallerId: '+19412975749' },
+    })).toBe('+19412975749');
+  });
+
+  it('a bridge call whose metadata is a JSON string (as persisted) still resolves', () => {
+    expect(outboundWavesCallerId({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      to_phone: '+19415993489',
+      metadata: JSON.stringify({ bridgeCallerId: '+19412975749' }),
+    })).toBe('+19412975749');
+  });
+
+  it('an unregistered candidate (or an unresolvable bridge) returns null, never a raw number', () => {
+    expect(outboundWavesCallerId({ direction: 'outbound', from_phone: '+19415550101' })).toBeNull();
+    expect(outboundWavesCallerId({
+      direction: 'outbound', source: 'lead-webhook-auto-bridge', metadata: {},
+    })).toBeNull();
+  });
+
+  it('never a tech line or a staff-forward cell, even if from_phone/bridgeCallerId happened to be one', () => {
+    expect(outboundWavesCallerId({ direction: 'outbound', from_phone: '+19413529161' })).toBeNull();
+    expect(outboundWavesCallerId({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      metadata: { bridgeCallerId: '+19415550199' },
+    })).toBeNull();
+  });
+
+  it('never the AI toll-free line, even though findByNumber reports it as a valid location (codex pre-push r2 P1)', () => {
+    const TN = require('../config/twilio-numbers');
+    TN.tollFree = { number: '+18559260203' };
+    TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
+    expect(outboundWavesCallerId({ direction: 'outbound', from_phone: '+18559260203' })).toBeNull();
+    TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
+    expect(outboundWavesCallerId({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      metadata: { bridgeCallerId: '+18559260203' },
+    })).toBeNull();
   });
 });
 
@@ -354,6 +429,37 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ fromNumber: '+19412166229' }),
     }));
+  });
+
+  it('an OUTBOUND return call renders callback_clause and fromNumber from the Waves line, NEVER the customer\'s own number (codex pre-push r1 P1)', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    const outboundCall = { ...CALL, direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE };
+    await sendDroppedCallAddressRequest({ ...sendArgs(), call: outboundCall });
+    expect(renderSmsTemplate).toHaveBeenCalledWith('dropped_call_address_request', expect.objectContaining({
+      callback_clause: ' at (941) 297-5749',
+    }), expect.any(Object));
+    const sent = sendCustomerMessage.mock.calls.pop()[0];
+    expect(sent.metadata.fromNumber).toBe('+19412975749');
+    expect(sent.metadata.fromNumber).not.toBe(PHONE);
+  });
+
+  it('an OUTBOUND lead-webhook-auto-bridge return call never exposes the staff cell in to_phone', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    const bridgeCall = {
+      ...CALL,
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19412975749',
+      to_phone: '+19415993489', // Adam's cell — the bridge's admin leg
+      metadata: { type: 'lead_auto_bridge', leadPhone: PHONE, bridgeCallerId: '+19412975749' },
+    };
+    await sendDroppedCallAddressRequest({ ...sendArgs(), call: bridgeCall });
+    expect(renderSmsTemplate).toHaveBeenCalledWith('dropped_call_address_request', expect.objectContaining({
+      callback_clause: ' at (941) 297-5749',
+    }), expect.any(Object));
+    const sent = sendCustomerMessage.mock.calls.pop()[0];
+    expect(sent.metadata.fromNumber).toBe('+19412975749');
+    expect(sent.metadata.fromNumber).not.toBe('+19415993489');
   });
 
   it('quiet hours — skips BEFORE any claim, one-shot not consumed', async () => {

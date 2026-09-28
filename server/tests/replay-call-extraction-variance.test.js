@@ -775,6 +775,72 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  // scheduling.caller_accepted_slot / moved_appointment_date (schema
+  // 1.16.0): they decide whether the reschedule applier moves a visit and
+  // which one, so a model that drifts on either must show in the replay.
+  describe('reschedule agreement variance coverage', () => {
+    test('caller_accepted_slot and moved_appointment_date are registered as high-severity fields', () => {
+      expect(FIELD_GROUPS.high).toEqual(expect.arrayContaining(['caller_accepted_slot', 'moved_appointment_date']));
+    });
+
+    test('caller_accepted_slot treats a missing value as not accepted, like agent_committed_booking', () => {
+      expect(normalizeField('caller_accepted_slot', null)).toBe(false);
+      expect(normalizeField('caller_accepted_slot', true)).toBe(true);
+      const variances = compareFlatFields({ caller_accepted_slot: null }, { caller_accepted_slot: false }, true);
+      expect(variances.find((v) => v.field === 'caller_accepted_slot')).toBeUndefined();
+    });
+
+    test('compareFlatFields reports a high-severity variance when the moved appointment changes', () => {
+      const variances = compareFlatFields({ moved_appointment_date: '2026-09-24' }, { moved_appointment_date: '2026-12-24' }, true);
+      expect(variances.find((v) => v.field === 'moved_appointment_date')).toMatchObject({ severity: 'high' });
+    });
+  });
+
+  // scheduling.agreed_slot_words / scheduling.moved_appointment_words
+  // (schema 1.17.0): the reschedule applier checks these verbatim words
+  // against their evidence quotes instead of parsing speech, so a model
+  // that drifts on either must show in the replay just like the fields
+  // they ride alongside.
+  describe('agreed-slot and moved-appointment verbatim-words variance coverage', () => {
+    test('agreed_slot_words and moved_appointment_words are registered as high-severity fields', () => {
+      expect(FIELD_GROUPS.high).toEqual(expect.arrayContaining(['agreed_slot_words', 'moved_appointment_words']));
+    });
+
+    test('agreed_slot_words normalizes to a day|hour|period signature, case- and whitespace-insensitive', () => {
+      expect(normalizeField('agreed_slot_words', null)).toBeNull();
+      expect(normalizeField('agreed_slot_words', { day: 'Thursday', hour: 'Two', period: null })).toBe('thursday|two|');
+      expect(normalizeField('agreed_slot_words', { day: '  Thursday ', hour: 'two', period: null }))
+        .toBe(normalizeField('agreed_slot_words', { day: 'thursday', hour: 'Two', period: null }));
+    });
+
+    test('agreed_slot_words with no hour normalizes to null (never a false positive on a malformed value)', () => {
+      expect(normalizeField('agreed_slot_words', { day: 'Thursday', hour: '', period: null })).toBeNull();
+    });
+
+    test('compareFlatFields reports a high-severity variance when the agreed slot words change', () => {
+      const variances = compareFlatFields(
+        { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+        { agreed_slot_words: { day: 'Thursday', hour: 'three', period: null } },
+        true
+      );
+      expect(variances.find((v) => v.field === 'agreed_slot_words')).toMatchObject({ severity: 'high' });
+    });
+
+    test('compareFlatFields reports a high-severity variance when the moved-appointment words change', () => {
+      const variances = compareFlatFields(
+        { moved_appointment_words: 'the 24th' },
+        { moved_appointment_words: 'the 25th' },
+        true
+      );
+      expect(variances.find((v) => v.field === 'moved_appointment_words')).toMatchObject({ severity: 'high' });
+    });
+
+    test('moved_appointment_words treats a missing value as null, not a variance against an empty string', () => {
+      const variances = compareFlatFields({ moved_appointment_words: null }, { moved_appointment_words: undefined }, true);
+      expect(variances.find((v) => v.field === 'moved_appointment_words')).toBeUndefined();
+    });
+  });
+
   // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
   // miss 2026-09-25, call 6fee5f34): without these in FIELD_GROUPS, a model
   // that stops catching (or starts hallucinating) the disclaim would go

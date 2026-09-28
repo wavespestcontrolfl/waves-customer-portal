@@ -101,6 +101,20 @@ describe('listOwnerQueue', () => {
     expect(after.cards.every((x) => x.domain.agent_state === 'ready_to_acquire' && x.decidable === false)).toBe(true);
   });
 
+  // Codex P2 2026-09-28 (#5125 round 10): after a rollback relabels a
+  // citation-only domain's `source`, only source_detail / enrichment still say
+  // discovery-only. The card must read them too — otherwise it recomputes an
+  // AUTO_* level and treats the bridge's OWNER_* row as stale.
+  test('a rollback-relabeled ai_citation domain keeps its owner-only card: durable provenance reaches the card', async () => {
+    // auto_free_acquisition on: an ordinary domain would be AUTO_FREE (no card) —
+    // only the discovery-only provenance makes this execution OWNER_FREE.
+    const { db } = await parked({ policy: { auto_free_acquisition: true }, domain: { source: 'legacy_unknown', source_detail: 'ai_citation:listing https://example.org/sarasota-pest-control' } });
+    const { cards } = await Q.listOwnerQueue(db);
+    expect(cards.length).toBeGreaterThan(0);
+    const exec = cards[0].rows.find((r) => r.dimension === 'execution');
+    expect(exec).toMatchObject({ level: 'OWNER_FREE', action: 'acquire', approvable: true, why_not: null });
+  });
+
   test('a domain the owner rejected / is watching shows no cards; rows and placements are untouched', async () => {
     const { db, d } = await parked();
     expect((await Q.listOwnerQueue(db)).cards).toHaveLength(N);

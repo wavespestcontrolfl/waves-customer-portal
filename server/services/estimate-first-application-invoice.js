@@ -46,7 +46,7 @@ async function itemizeFirstApplication({ estimateId, customerId, scheduledServic
   }));
 }
 
-async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { lockRows = false } = {}) {
+async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { lockRows = false, noWait = false } = {}) {
   const sourceEstimateId = svc?.source_estimate_id;
   const customerId = svc?.customer_id;
   const scheduledDate = dateOnly(svc?.scheduled_date);
@@ -56,6 +56,23 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { l
   // LATEST committed row versions and holds them to commit — a plain select
   // classifies snapshot statuses that a concurrent refund/cancel/restore
   // can invalidate before the caller acts (codex #3456 hardening).
+  //
+  // `noWait` (codex round-6 P1, pre-push): a caller that took the
+  // estimate.deposit.ledger advisory lock (estimate-deposits.js) BEFORE
+  // this row lock — the schedule mint's own sibling recheck
+  // (scheduled-invoice-mint.js) does exactly this to close the 'none'/
+  // 'none' double-mint race — can otherwise deadlock against
+  // withInvoiceDepositSettlement, which locks THIS SAME invoice row first
+  // and only afterward requests that same ledger lock (the established
+  // "invoice row before ledger lock" order documented on
+  // acquireEstimateDepositLedgerLock). NOWAIT breaks that cycle: instead of
+  // blocking (and potentially deadlocking) on a row someone else holds,
+  // this throws immediately (Postgres 55P03) and the caller's own
+  // catch-all treats ANY lookup failure as `{ status: 'error' }` — a
+  // retryable refusal, never a silent double-mint. Default false keeps
+  // every other lockRows:true caller (completion's own re-check) byte-
+  // identical — it does not take the ledger lock first, so it has no
+  // reason to fail fast here.
   let query = conn('invoices as i')
     .join('scheduled_services as first_visit', 'i.scheduled_service_id', 'first_visit.id')
     .where('i.customer_id', customerId)
@@ -71,7 +88,7 @@ async function findFirstApplicationInvoiceForEstimateService(svc, conn = db, { l
     .whereNot('i.status', 'void')
     .orderBy('i.created_at', 'desc')
     .select('i.*');
-  if (lockRows) query = query.forUpdate('i');
+  if (lockRows) query = noWait ? query.forUpdate('i').noWait() : query.forUpdate('i');
   const rows = await query;
 
   // A canceled/cancelled match must not end the scan (codex #3456 P1): the

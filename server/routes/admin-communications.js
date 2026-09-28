@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const {
   draftIdSql,
   draftReplyToMessageIdSql,
@@ -122,6 +123,8 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         'ad.customer_id',
         'ad.sms_log_id',
         'ad.suggested_message',
+        'ad.input_snapshot',
+        'ad.prompt_version',
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
@@ -168,6 +171,73 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
         return null;
       }
+    }
+
+    // OPEN TIMES send-time recheck (Codex P2): a draft built with an OPEN
+    // TIMES section stores the exact windows it quoted plus the lookup
+    // inputs (input_snapshot.open_times_snapshot, written by
+    // sms-shadow-drafter / estimate-conversion-agent at draft time). This is
+    // the shared choke point for BOTH /sms (immediate send) and
+    // /schedule-sms (queue-time verification) — a card can sit in review up
+    // to 48h, or be scheduled for later, and the calendar never re-checks
+    // itself. Only windows still present in the OUTGOING body are rechecked
+    // (a reviewer's correction that drops every quoted window needs no
+    // recheck; an edit that reformats or re-dates one refuses — see
+    // planOpenTimesRecheck); a gone slot, a fetch error, or a timeout all fail closed,
+    // reusing the same supersede-and-refuse mechanism as the staleness check
+    // above rather than inventing a new one.
+    let openTimesSnapshot = null;
+    if (decision.input_snapshot) {
+      try {
+        const parsedSnapshot = typeof decision.input_snapshot === 'string'
+          ? JSON.parse(decision.input_snapshot)
+          : decision.input_snapshot;
+        openTimesSnapshot = parsedSnapshot?.open_times_snapshot || null;
+      } catch (_e) { openTimesSnapshot = null; }
+    }
+    if (openTimesSnapshot?.quotedWindows?.length) {
+      // Codex r2 P2: an EDITED body (reformatted time, changed day) cannot be
+      // matched to its snapshot by exact text — planOpenTimesRecheck fails
+      // closed on any edit that is not a clean keep-or-drop of each pair.
+      const { openTimesStillOffered, planOpenTimesRecheck } = require('../services/sms-shadow-drafter');
+      const plan = planOpenTimesRecheck({ snapshot: openTimesSnapshot, outgoingBody, originalBody: decision.suggested_message });
+      if (plan.action === 'refuse') {
+        logger.info(`[agent-review] decision ${decision.id} open-times unverifiable after edit (${plan.reason}) — refusing send`);
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+        return null;
+      }
+      if (plan.action === 'recheck') {
+        const recheck = await openTimesStillOffered({
+          city: openTimesSnapshot.lookup?.city || null,
+          customerId: openTimesSnapshot.lookup?.customerId || null,
+          estimateId: openTimesSnapshot.lookup?.estimateId || null,
+          ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+          quotedWindows: plan.quotedWindows,
+        });
+        if (!recheck.ok) {
+          logger.info(`[agent-review] decision ${decision.id} open-times stale (${recheck.reason}) — refusing send`);
+          await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+          return null;
+        }
+      }
+    }
+
+    // Follow-up SLA phrase recheck (Codex r3 P2): a draft's relative SLA
+    // wording ("within the hour" / "by 9 AM this morning"/"tomorrow
+    // morning") is frozen at generation, but an Agent Review card can sit
+    // up to 48h before this immediate-send verification runs — the same
+    // choke point as the open-times recheck above, covering both /sms
+    // (immediate send) and /schedule-sms (queue-time verification). Refuse
+    // rather than rewrite: the reviewer approved specific wording, and a
+    // phrase that no longer matches the current 8am/8pm ET window needs a
+    // fresh look, not a silent substitution.
+    // Scoped to drafts that recorded an escalation (Codex r5): the phrases
+    // are ordinary English, so wording alone never refuses a send.
+    const { followupPromiseIsStale } = require('../services/sms-followup-sla');
+    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version, body: outgoingBody })) {
+      logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
+      await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+      return null;
     }
     return decision;
   } catch (verifyErr) {
@@ -1046,6 +1116,31 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // codex #5018 pre-push P2: a consultation link can ride this composer
+      // send (a pasted URL, or one the operator typed in) without the
+      // phone-locked handoff call-booking-link-text.js's own worker holds —
+      // linkSentRecently only sees committed sms_log rows and excludes
+      // unresolved reservations, so a composer send racing the worker's
+      // final check could reach Twilio alongside the automated one. The
+      // SAME phone lock admin-leads.js's manual send already uses
+      // (lockSmsPhone, matching applyInboundOptout's own key) serializes
+      // the two. Applied to every composer SMS to this route, not only
+      // consultation-carrying ones — it is a phone lock only, so manual
+      // semantics (staff can always send, no delivered-link block) are
+      // unconditionally unchanged either way, and narrowing it to just the
+      // consultation-carrying sends would add conditional complexity for
+      // no behavioral difference.
+      withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+        await lockSmsPhone(trx, to);
+        return dispatch(trx);
+      }),
+      // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
+      // transaction sms_log insert so linkSentRecently (the race target
+      // named in the comment above) sees the evidence before the phone
+      // lock releases. Safe: this handoff takes only the advisory
+      // lockSmsPhone above — no row lock (customers, leads, etc.) is held
+      // before the insert takes sms_log's customer_id FK KEY SHARE.
+      logInHandoff: true,
       providerHandoffReservation: reservationId
         ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
           reservationId,
@@ -2076,6 +2171,11 @@ router.get('/agent-draft', async (req, res, next) => {
         // card must show WHY a draft was flagged (it may have been demoted
         // from auto-send), never present it as clean.
         lintFailures: Array.isArray(input?.comms_lint) ? input.comms_lint : [],
+        // Codex r3 P1: the actions this draft promises (payment link,
+        // booking, escalation…) — persisted on the snapshot by
+        // publishSuggestion — so the reviewer sees them before sending,
+        // never only the prose that promises them.
+        intendedActions: Array.isArray(input?.intended_actions) ? input.intended_actions : [],
         createdAt: row.created_at,
       },
     });

@@ -61,7 +61,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -114,7 +114,7 @@ const CompanionCompletions = require('../services/service-report/companion-compl
 // — shared by /complete, /schedule-followup, and the shared status writer's
 // cancellation re-park hook. Route-local copies drifted (Codex r1–r2 on
 // PR #3091 found four leak shapes between them).
-const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert, TWO_TREATMENT_PACKAGE_KEYS } = require('../services/typed-followup-obligation');
+const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert } = require('../services/typed-followup-obligation');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
@@ -2500,7 +2500,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       companionFindings = null,
       activityScore = null,
       activityScoreSource = null,
-      nextStepChips = null,
+      // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
+      // nextStepChips is deliberately not destructured from the request
+      // body: a pre-deploy tab that still submits it is accepted (extra
+      // body keys are simply ignored) and never read.
       completionTelemetry = null,
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
@@ -2514,6 +2517,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
+      // The visit identity the client's form was built against (customer,
+      // property, catalog service, type, date, address) — OPTIONAL. Sent by
+      // the tech Fast Complete sheet; re-checked on the locked row below.
+      expectedVisit = null,
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -3172,7 +3179,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
       : null;
     let typedFindings = null;
-    let typedChips = [];
     let typedActivityScore = null;
     let typedScoreSource = null;
     // Typed validation runs AFTER the idempotency claim (Codex P2): a retry
@@ -3317,28 +3323,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             },
           };
         }
-        const chipsValidation = ActivityIndicators.validateNextStepChips(
-          nextStepChips, typedFindingsType, structuredFindings.values || {},
-          // Visit 1 of a two-treatment package owes the included follow-up
-          // regardless of findings — "No action needed" would land in the
-          // immutable report beside a completion response demanding the
-          // second visit (Codex r3). Visit 2 (followup_included) may say it.
-          {
-            packageFollowupPending: TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
-              && svc.followup_included !== true,
-          },
-        );
-        if (!chipsValidation.ok) {
-          return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
-        }
-        // Owner spec: trapping reports always end with a clear next action.
-        if (ActivityIndicators.nextStepRequiredForType(typedFindingsType) && !chipsValidation.chips.length) {
-          return {
-            status: 422,
-            body: { error: 'Select at least one next step.', code: 'next_step_required' },
-          };
-        }
-        typedChips = chipsValidation.chips;
+        // The "Next steps" chip picker/requirement was retired (owner ruling
+        // 2026-09-27) — Recommendations is now the single tech-advice field.
+        // A pre-deploy tab that still submits nextStepChips has the field
+        // accepted and ignored — it is never read from the request body.
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
         // Every customer-facing free-text surface on a typed report gets the
@@ -3398,9 +3386,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
 
         // Activity score: strict integer 0-5 or null (same contract as
-        // clientPestRating). Gauge types require a score on a completed
-        // visit — derived prefill fills it when the tech didn't touch the
-        // picker.
+        // clientPestRating). Tech-set-only gauge types (no derive mapping)
+        // require a score on a completed visit; a derive-mapped type has no
+        // separate gauge any more (owner ruling 2026-09-26) and is scored
+        // from the findings field alone, absent when that field is empty.
         if (activityScore != null
           && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
           return {
@@ -3410,7 +3399,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         if (typedIndicator) {
           const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
-          if (activityScore != null) {
+          if (typedIndicator.derive) {
+            // Derive-mapped: the findings field is the only activity input
+            // (owner ruling 2026-09-26). A score still submitted by a tab
+            // loaded before the gauge was removed is obsolete, never
+            // authoritative — ignore it and use the derived value (or none).
+            typedActivityScore = derived ? derived.score : null;
+            typedScoreSource = derived ? 'derived' : null;
+          } else if (activityScore != null) {
             typedActivityScore = activityScore;
             typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
               ? 'derived'
@@ -3419,6 +3415,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             typedActivityScore = derived.score;
             typedScoreSource = 'derived';
           } else {
+            // Tech-set-only gauge (no findings field to derive from — the
+            // derive-mapped case is handled above) — still required on a
+            // completed visit.
             return {
               status: 422,
               body: {
@@ -3427,14 +3426,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               },
             };
           }
+          // Owner ruling 2026-09-26: a type with a derive mapping has no
+          // separate gauge on the completion panel any more — the score
+          // always comes from the findings field above. An empty findings
+          // value means no indicator this visit (typedActivityScore stays
+          // null), never a validation failure.
           // The FINAL score (pinned or derived) must agree with the
           // findings at the cleared boundary — the headline follows the
           // score while areas/chip checks key off the select, so a
           // crossing override would publish a self-contradicting report
-          // (Codex P2).
-          const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
-            typedFindingsType, typedFindings.values, typedActivityScore,
-          );
+          // (Codex P2). Only meaningful once a score exists.
+          const scoreConsistency = typedActivityScore == null
+            ? { ok: true }
+            : ActivityIndicators.validateActivityScoreConsistency(
+              typedFindingsType, typedFindings.values, typedActivityScore,
+            );
           if (!scoreConsistency.ok) {
             return {
               status: 422,
@@ -4191,6 +4197,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       perApplicationFee: svc.cust_per_application_fee,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
+      // Codex round 4 P1: without this, a fully-discounted $0 per-application
+      // visit (estimated_price 0, positive primary_line_price) fell back to
+      // per_application_fee here and billed the acceptance fee on completion
+      // — contradicting the schedule prediction and Charge Now, which both
+      // already pass primaryLinePrice.
+      primaryLinePrice: svc.primary_line_price,
     });
     // The inspection-credit amount is resolved from the LOCKED row inside
     // the completion transaction (below), never from this pre-lock read: a
@@ -5355,6 +5367,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // Identity drift on the LOCKED row, for a client that sent the
+          // visit identity its form was built against: a visit moved to
+          // another customer/property, reclassified, or rescheduled after
+          // the form loaded must not take that form's treatment record. Same
+          // comparison the recap path runs (pest-recap.js).
+          if (expectedVisit && lockedSvcRow
+            && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
+            throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -6194,7 +6215,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceData.typedReportSnapshot = ActivityIndicators.buildTypedReportSnapshot({
               projectType: typedFindingsType,
               values: typedFindings.values,
-              nextStepChips: typedChips,
               serviceKey: completionProfile?.serviceKey || null,
               serviceLabel: completionProfile?.serviceName || svc.service_type || null,
               visitSequence: typedVisitSequence,
@@ -6251,7 +6271,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const companionSnapshot = ActivityIndicators.buildTypedReportSnapshot({
                 projectType: companion.type,
                 values: companion.values,
-                nextStepChips: companion.chips,
                 serviceKey: completionProfile?.serviceKey || null,
                 // The companion section speaks for ITS work, not the whole
                 // combined service — null falls back to the type's own label
@@ -7399,6 +7418,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The invoice this closeout was issued for is no longer this visit\'s live invoice — the visit stays open.',
             code: 'issued_invoice_not_reusable',
+          } });
+        }
+        if (err && err.code === 'visit_identity_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
+            code: 'visit_identity_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
@@ -8636,6 +8662,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const c = siblingFirstApplication.canceledSetupFee;
               terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };
               completionTerminalIncludedSetupFee = true;
+            } else if (!existingCompletionInvoice) {
+              // Owner ruling — REFUSE AFTER A VOID (billing-lane.js
+              // combinedInvoiceVoidedWithoutLiveReplacement's own header):
+              // findFirstApplicationInvoiceForEstimateService's own query
+              // EXCLUDES 'void' entirely, so a voided combined
+              // first-application invoice — and a canceled recognized one
+              // with no setup-fee line — are BOTH invisible to it and to
+              // the canceledSetupFee check above, indistinguishable from
+              // "nothing was ever minted for this trip." An UNPRICED,
+              // estimate-linked, sibling-eligible visit (never the PRICED
+              // reserved row itself — completing or charging IT bills the
+              // combined amount once, which is correct, and the office
+              // handles the rest by hand) must never auto-mint the
+              // per-application fee for a trip whose combined invoice
+              // died. Reuses the EXISTING terminal-invoice park/alert
+              // machinery above — no new completion-side mint/split logic.
+              const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+                || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+              if (isSiblingCoverageEligibleVisit({
+                sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
+              })) {
+                const voidedCombined = await combinedInvoiceVoidedWithoutLiveReplacement(svc, db);
+                if (voidedCombined) {
+                  terminalCompletionInvoice = {
+                    id: voidedCombined.id, invoice_number: voidedCombined.invoice_number, status: voidedCombined.status,
+                  };
+                }
+              }
             }
           }
         }
@@ -11766,6 +11820,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
+            const noticeLegs = (failResult.channelResults || failResult.deduped === true)
+              && require('./messaging/billing-prior-delivery').settledLegTimes(failResult);
+            const noticeSentAt = failResult.deduped ? noticeLegs?.eventAt : new Date();
             // Send-window hold: the decline is deliberately independent of
             // completion messaging — when the operator skipped the separate
             // completion SMS, this notice is the ONLY carrier of the failure
@@ -11814,7 +11871,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
             }
             recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
-            if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+            if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt =
+              noticeSentAt?.toISOString() || recordStructuredNotes.paymentFailedNoticeSentAt;
             else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
             await mergeRecordNotesKeys(record.id, {
               paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
@@ -11846,10 +11904,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // for a concurrent sender to claim and re-send.
               try {
                 invoice = await DeclineNoticeInvoiceService.markDeliverySent(invoice.id, {
-                  sms: true,
+                  sms: noticeLegs ? noticeLegs.smsAccepted : true,
+                  email: noticeLegs?.emailAccepted || false,
                   source: 'payment_failed_notice',
                   payUrl,
                   claimToken: declineSendClaim.invoice.send_claim_token,
+                  deduped: failResult.deduped === true,
+                  eventVisibleAt: noticeSentAt,
+                  smsEventVisibleAt: noticeLegs?.smsAccepted && !noticeLegs.freshSms ? noticeLegs.smsAt : undefined,
+                  emailEventVisibleAt: noticeLegs?.emailAccepted && !noticeLegs.freshEmail ? noticeLegs.emailAt : undefined,
                 });
               } catch (statusErr) {
                 logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);

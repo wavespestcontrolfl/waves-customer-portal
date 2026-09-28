@@ -532,6 +532,10 @@ html[data-glass-theme] .waves-ask-card { display: grid !important; grid-template
 html[data-glass-theme] .waves-ask-title { margin: 0 !important; }
 html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 16px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
 html[data-glass-theme] .waves-ask-form { display: grid !important; grid-template-columns: minmax(0, 1fr) auto !important; gap: 12px !important; align-items: center !important; }
+/* Portal assistance starts compact so each tab leads with its own task. */
+html[data-glass-theme] .waves-ask-card[data-portal-ask] { padding: 8px 12px !important; margin: 0 !important; }
+html[data-glass-theme] [data-portal-ask] summary::-webkit-details-marker { display: none; }
+html[data-glass-theme] [data-portal-ask] details[open] > summary { margin-bottom: 12px; }
 html[data-glass-theme] .waves-ask-form input { width: 100%; min-height: 48px !important; padding: 12px 16px !important; font-size: 16px !important; border: 1px solid rgba(4, 57, 94, 0.16) !important; border-radius: 10px !important; background: rgba(255, 255, 255, 0.8) !important; color: #04395E !important; outline: none; box-sizing: border-box; }
 html[data-glass-theme] .waves-ask-eyebrow { display: block !important; }
 html[data-glass-theme] .waves-ask-form button { min-height: 48px !important; padding: 0 20px !important; font-size: 15px !important; border: 0; border-radius: 10px !important; color: #04395E !important; cursor: pointer; }
@@ -557,6 +561,15 @@ html[data-glass-theme] .waves-ask-answer {
   color: #04395E;
   font-size: 16px;
   line-height: 1.5;
+}
+/* AW-06 (Answer usefulness): several answer builders join recorded facts /
+   next actions with "\n" (e.g. report-assistant.js's answerAppliedToday,
+   answerNextSteps, answerFindings; project-report-assistant.js's
+   answerFindings/answerTreatment) so they read as separate lines instead of
+   one run-on sentence. Plain text collapses "\n" to a space by default —
+   pre-line preserves those breaks while still collapsing runs of spaces. */
+html[data-glass-theme] .waves-ask-answer-text {
+  white-space: pre-line;
 }
 html[data-glass-theme] .waves-ask-dismiss {
   flex: 0 0 auto;
