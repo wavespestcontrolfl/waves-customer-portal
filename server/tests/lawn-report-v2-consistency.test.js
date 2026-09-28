@@ -364,6 +364,12 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       .map((question) => ask(question)), (answers) => {
       for (const answer of answers) expect(answer).toMatch(CONFIRM);
     }],
+    // PR #5258 round 2: any question naming watering is a watering question
+    // unless the word is incidental.
+    ['P1 keep / leave watering requests carry the aftercare task', () => ['Can I leave the sprinklers off?', 'Is it okay to leave irrigation off?', 'Am I supposed to keep the sprinklers off?']
+      .map((question) => ask(question)), (answers) => {
+      for (const answer of answers) expect(answer).toMatch(CONFIRM);
+    }],
   ])('%s', async (_finding, run, check) => check(await run()));
 });
 

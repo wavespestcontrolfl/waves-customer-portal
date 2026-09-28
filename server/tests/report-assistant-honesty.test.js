@@ -414,6 +414,11 @@ describe('watering questions answer with the weekly plan when the report carries
     const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
     expect(answer).not.toMatch(/each zone|another cycle|normal schedule/);
     expect(answer).toContain('Keep mowing at 3.5 inches.');
+    // A watering noun with no watering action is not a directive (round 2).
+    for (const keep of ['Watch the sprinkler area for recurring mushrooms.', 'Replace the damaged controller battery.', 'Set a timer to inspect the treated area tomorrow.']) {
+      const other = { ...withAftercare(HELD, 'recommendation'), recommendations: [keep] };
+      expect(answerServiceReportQuestion({ question: 'What should I do next?', data: other })).toContain(keep);
+    }
     // A zone or cycle outside the controller sense is not a watering directive.
     for (const keep of ['A second visit breaks the flea life cycle.', 'Treat the weed zone by the fence.', 'Mow on a 5-day cycle.', 'Resume your normal mowing schedule.']) {
       const other = { ...withAftercare(HELD, 'recommendation'), recommendations: [keep] };
@@ -424,10 +429,19 @@ describe('watering questions answer with the weekly plan when the report carries
   test.each([
     ['What can we do to move the appointment?', 'next_visit'],
     ['What action did you take after you spotted fungus?', 'findings'],
+    ['What action was taken after you spotted fungus?', 'findings'],
+    ['What can I do to confirm my appointment?', 'next_visit'],
+    ['What do I do about my next appointment?', 'next_visit'],
+    ['What could we do to get an earlier appointment?', 'next_visit'],
     ['Any action needed for what you spotted?', 'next_steps'],
   ])('"%s" routes to %s (PR #5258 P2)', (question, topic) => {
     const data = withAftercare(REVIEW, 'none');
     expect(routeServiceReportQuestion({ question, data, nextAppointment: { scheduled_date: '2026-10-05' } }).topic).toBe(topic);
+  });
+
+  test('a word that only starts with "water" is not watering (PR #5258 round 2)', () => {
+    const data = { ...withAftercare(HELD, 'none'), reportV2: { aftercare: HELD, water: { weekPlan: { title: 'This week: run once', detail: 'One cycle.' } } } };
+    expect(routeServiceReportQuestion({ question: 'Should I waterproof the deck?', data }).topic).not.toBe('watering');
   });
 
   test.each(['Is the irrigation meter broken?', 'What caused the irrigation leak?'])('incidental irrigation noun "%s" never gets the re-entry answer (PR #5258 P2)', (question) => {

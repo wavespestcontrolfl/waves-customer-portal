@@ -37,58 +37,40 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
-// A question whose ask is watering itself: an auxiliary or modal and its
-// subject (the customer, the lawn, "it"), then only need / permission /
-// voice words before the watering verb — active ("May I water?", "Do I need
-// to water?") or passive ("Should the lawn be watered?", "Is it getting
-// watered?", "Does it need water?"). Any other word between them ("Did you
-// find mushrooms by the sprinkler?") leaves the question its own intent, and
-// water as a noun modifier ("Is it water damage?") is not a watering ask.
-const WATERING_ASK_SRC = String.raw`(?:should|shall|can|could|may|might|must|would|will|do|does|did|is|are|was|were|am|has|have)\s+(?:i|we|you|it|they|(?:the|my|our|your)\s+(?:lawn|grass|yard|turf|zones?|sprinklers?))\s+(?:(?:still|also|even|really|ever|already|be|get|getting|being|been|need|needs|have|has|to|allowed|okay|ok|fine|alright|all\s+right|safe)\s+){0,4}`;
-const INCIDENTAL_WATER_NOUN_SRC = String.raw`(?!\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?)\b)`;
-const WATERING_TERM_SRC = String.raw`(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b${INCIDENTAL_WATER_NOUN_SRC}`;
-const WATERING_QUESTION_SRC = String.raw`\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:${WATERING_ASK_SRC})?|${WATERING_ASK_SRC})${WATERING_TERM_SRC}`
-  + String.raw`|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b`;
-// Watering-schedule topics asked without a verb ("What's my watering
-// schedule?", "Any irrigation changes this week?", "What run time?") and
-// system activation requests ("Can I turn my sprinklers back on?", "Should I
-// switch irrigation back on?", "May I start the sprinkler system?", "Can I
-// start watering?"). An activation verb must govern the system, so a bare
-// noun ("water damage", "the irrigation meter") is never a request.
-const WATERING_TOPIC_SRC = String.raw`\b(?:watering|irrigation|sprinklers?)\s+(?:plan|schedule|advice|instructions?|directions?|restrictions?|changes?|guidance|settings?|days?)\b|\brun\s?times?\b`;
-const WATERING_ACTIVATION_SRC = String.raw`\b(?:turn|switch|start|restart|resume|enable|run|put|kick)\s+(?:(?:back\s+)?on\s+)?(?:(?:the|my|our|your)\s+)?(?:sprinklers?|irrigation|water(?:ing)?|zones?)\b${INCIDENTAL_WATER_NOUN_SRC}`;
-// Watering-change requests ("Should I adjust my irrigation?", "Can I reduce
-// irrigation?", "Can I increase watering?", "Should I turn off the
-// sprinklers?", "Should I water less?") ask to change exactly what an
-// aftercare restriction governs. The change verb must govern the watering
-// itself, so "adjust the water heater" or "reduce water damage" stays out.
-const WATERING_ADJUST_SRC = String.raw`\b(?:adjust|reduce|increase|decrease|lower|raise|change|cut(?:\s+back(?:\s+on)?)?|skip|stop|pause|limit|delay|hold\s+off\s+on|(?:turn|shut|switch)\s+off)\s+(?:(?:the|my|our|your)\s+)?(?:(?:lawn|yard|grass)\s+)?(?:watering|irrigation|sprinklers?|water\s+(?:schedule|times?|days?)|run\s?times?|zones?)\b${INCIDENTAL_WATER_NOUN_SRC}|\bwater(?:ing)?\s+(?:less|more)\b`;
-// The same activation / change asked with the system as the subject
-// ("Can the sprinklers be turned back on?", "Should the irrigation stay
-// off?", "When can watering be resumed?", "Can my sprinklers run tonight?").
-const WATERING_SYSTEM_SRC = String.raw`(?:(?:the|my|our|your)\s+)?(?:sprinklers?|irrigation|watering|zones?|(?:sprinkler|irrigation)\s+(?:system|schedule|timer|controller))`;
-const WATERING_PASSIVE_SRC = String.raw`\b${WATERING_SYSTEM_SRC}\s+(?:(?:still|also|now|ever)\s+)?(?:be|get|go|stay|remain|come)\s+(?:(?:turned|switched|kicked|put)\s+(?:back\s+)?(?:on|off)|(?:back\s+)?on|off|(?:re)?started|resumed|enabled|run|adjusted|reduced|increased|decreased|lowered|raised|changed|cut\s+back|paused|stopped|skipped|delayed|limited)\b`
-  + String.raw`|\b(?:can|could|should|may|might|must|will|would|do|does)\s+${WATERING_SYSTEM_SRC}\s+(?:(?:still|also|now)\s+)?(?:run|resume|restart|come\s+(?:back\s+)?on|turn\s+(?:back\s+)?on)\b`;
-// A watering REQUEST — a watering question, a verbless schedule topic, an
-// activation or a change — never an incidental noun ("Is this water
-// damage?", "Is the irrigation meter broken?").
-const WATERING_REQUEST_RE = new RegExp(
-  `${WATERING_QUESTION_SRC}|${WATERING_TOPIC_SRC}|${WATERING_ACTIVATION_SRC}|${WATERING_ADJUST_SRC}|${WATERING_PASSIVE_SRC}`,
-);
-// Recommendation copy that tells the customer to change watering ("Increase
-// irrigation to twice this week", "Water deeply before noon", "Avoid
-// overwatering"), including controller language with no watering noun ("Run
-// each zone for 20 minutes", "Add another cycle this week", "Resume the
-// normal schedule tomorrow"). A zone or cycle counts only in that controller
-// sense, so "Treat the weed zone" or a pest's life cycle stays. Standing or
-// pooling water and water damage are not watering changes either.
-const WATERING_RECOMMENDATION_RE = /(?<!\b(?:standing|pooling|pooled|surface)\s)\b(?:(?:over|under)-?)?(?:water(?:ing|ed|s)?|irrigat\w*|sprinklers?|run\s?times?)\b(?!\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?)\b)|\b(?:run|water|each|every|per|all)\s+(?:(?:the|each|every|your)\s+)?zones?\b|\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b|\b(?:another|extra|additional|one|two|second|irrigation|watering|sprinkler)\s+cycles?\b|\b(?:normal|regular|usual|weekly)\s+schedule\b|\b(?:controller|timer|rain\s+sensor)s?\b/i;
+// A watering question is any question naming watering — the safe default,
+// since a watering hold or unverified aftercare instruction must reach every
+// one of them ("Can I leave the sprinklers off?", "Should the lawn be
+// watered?"). Only incidental phrases are taken out first: water or
+// irrigation as a noun modifier ("water damage", "the irrigation meter"),
+// standing water, and a location ("mushrooms by the sprinkler"). Exact word
+// forms, so "waterproof" is not watering.
+const WATERING_WORD_RE = /\b(?:water|waters|watered|watering|irrigat\w*|sprinklers?|run\s?times?)\b/;
+const INCIDENTAL_WATERING_PHRASE_RE = new RegExp([
+  String.raw`\b(?:water|irrigation|sprinkler)\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|pipes?|valves?|heads?|boxes?|heaters?|softeners?|filters?|bowls?|features?|issues?|problems?)\b`,
+  String.raw`\b(?:standing|pooling|pooled|surface|salt|rain)\s+water\b`,
+  String.raw`\b(?:by|near|around|at|under|beside|next\s+to|close\s+to|along)\s+(?:the|my|a|your|our)\s+(?:sprinklers?|sprinkler\s+(?:heads?|lines?|zones?|area)|irrigation\s+(?:zones?|heads?|lines?|area))\b`,
+].join('|'), 'g');
+// Recommendation copy that tells the customer to change watering: watering
+// as the action ("Water deeply before noon", "Avoid overwatering", "Irrigate
+// twice weekly") or a change verb governing the system ("Increase irrigation
+// to twice this week", "Run each zone for 20 minutes", "Add another cycle",
+// "Resume the normal schedule"). A watering noun alone is not a directive
+// ("Watch the sprinkler area for mushrooms", "Replace the controller
+// battery"), nor is standing water or water damage.
+const WATERING_RECOMMENDATION_RE = new RegExp([
+  String.raw`(?<!\b(?:standing|pooling|pooled|surface|salt|rain)\s)\b(?:(?:over|under)-?)?water(?:s|ed|ing)?\b(?!\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?|heaters?|softeners?|filters?|bowls?|features?)\b)`,
+  String.raw`\birrigat(?:e|es|ed|ing)\b`,
+  String.raw`\b(?:run|increase|reduce|decrease|lower|raise|adjust|add|cut(?:\s+back(?:\s+on)?)?|skip|limit|change|resume|restart|turn|shut|stop|pause|program|keep|leave)\s+(?:(?:the|your|each|every|all|an?|one|another|extra|additional|back|on|off)\s+){0,3}(?:irrigation|sprinklers?|zones?|cycles?|controller|run\s?times?|(?:watering|irrigation|normal|regular|usual)\s+schedule)\b`,
+  String.raw`\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b`,
+  String.raw`\brun\s?times?\b`,
+].join('|'), 'i');
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
 // do not turn it into a findings recap. "…, do you know what they are?" asks
-// Waves, not the customer; so does "What action did you take…?".
-const WAVES_ACTION_SRC = String.raw`(?!\s+(?:did|do|does|will|would|have|has|had)\s+(?:you|they|waves|y'?all|(?:the|your)\s+tech\w*)\b)`;
+// Waves, not the customer; so does "What action did you take…?" or "What
+// action was taken…?".
+const WAVES_ACTION_SRC = String.raw`(?!s?\s+(?:(?:did|do|does|will|would|have|has|had)\s+(?:you|they|waves|y'?all|(?:the|your)\s+tech\w*)\b|(?:(?:was|were|is|are|has\s+been|have\s+been|had\s+been|got|being)\s+)?(?:taken|done|performed|completed)\b))`;
 const CUSTOMER_ACTION_RE = new RegExp(String.raw`\b(?:i|we)\b[^?.!]{0,24}\b(?:do|handle)\b(?!\s+you\b)|\baction\b${WAVES_ACTION_SRC}|\bnext\s+steps?\b`);
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
@@ -148,12 +130,12 @@ function isReentryIntent(q) {
 const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
-const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do|what\s+action${WAVES_ACTION_SRC}|next\s+step)\b`);
+const ADVICE_RE = new RegExp(String.raw`\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+(?:do|can|could)\s+(?:i|we)\s+do(?![^?.!]*\b(?:appointments?|appts?|visits?|schedul\w*|reschedul\w*)\b)|what\s+action${WAVES_ACTION_SRC}|next\s+step)\b`);
 // Explicit scheduling/appointment wording. Shared by the treatment guard
 // below (codex #4839 round-4 P2 4109926457: "What are you applying at my
 // next appointment?" must reach the appointment answer, not treatment) and
 // the appointment branch itself, so the two can never drift apart.
-const SCHEDULING_REQUEST_RE = /\b(?:schedul\w*|reschedul\w*|book\w*|when\s+is|what\s+time|what\s+day|move\s+my|(?:move|change|push|switch)\s+(?:the|our|this|my\s+next)\s+(?:appointment|appt|visit|service)|cancel\w*)\b/;
+const SCHEDULING_REQUEST_RE = /\b(?:schedul\w*|reschedul\w*|book\w*|when\s+is|what\s+time|what\s+day|move\s+my|cancel\w*)\b/;
 const APPOINTMENT_RE = /\b(appointment|appt|schedule|scheduled|next service|next visit)\b/;
 // Pressure/score words apply to any report (pest pressure or lawn score).
 const TREND_CORE_RE = /\b(pressure|trend|trending|better|worse|score|index|improving)\b/;
@@ -798,7 +780,7 @@ function routeServiceReportQuestion({
     && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
   // Every watering branch below — the unresolved-aftercare task, the
   // credited watering-in, the weekly plan — reads this one intent.
-  const wateringIntent = WATERING_REQUEST_RE.test(q) || zoneRuntimeIntent;
+  const wateringIntent = WATERING_WORD_RE.test(q.replace(INCIDENTAL_WATERING_PHRASE_RE, ' ')) || zoneRuntimeIntent;
 
   const rules = questionRoutingRules({
     data, nextAppointment, weekPlan, aftercare, wateringIntent,
