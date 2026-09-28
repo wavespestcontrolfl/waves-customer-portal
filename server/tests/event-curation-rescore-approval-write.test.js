@@ -154,4 +154,11 @@ describe('revalidateStaleRescoreCandidate clears the assessment and curated_at (
     expect(calls[0].score_breakdown).toBeNull();
     expect(calls[0].curation_note).toBe('content changed');
   });
+
+  test('is pinned to the fetched version, so a concurrent reset (manual_hold) is left intact', async () => {
+    const { whereRawCalls } = wireDb();
+    const fetched = { id: 'row-3', updated_at: new Date('2026-09-27T09:00:00Z'), curated_at: new Date('2026-09-27T06:15:00Z') };
+    await revalidateStaleRescoreCandidate(fetched, 'content changed');
+    expect(whereRawCalls.map((c) => c.bindings[0])).toEqual([fetched.updated_at, fetched.curated_at]);
+  });
 });

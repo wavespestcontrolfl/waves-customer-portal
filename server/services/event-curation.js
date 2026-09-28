@@ -573,9 +573,13 @@ function hasContentChangedSinceCuration(row) {
  * concurrent operator decision always wins.
  */
 async function revalidateStaleRescoreCandidate(row, note) {
+  // Pinned to the fetched version like applyRescore: a concurrent write (an
+  // operator's reset with its manual_hold, a fresh pull) leaves the row as-is.
   await db('events_raw')
     .where({ id: row.id, admin_status: 'pending' })
     .whereNull('merged_into')
+    .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+    .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at])
     .update({
       editorial_score: null,
       score_breakdown: null,
