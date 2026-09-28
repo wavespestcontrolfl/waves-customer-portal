@@ -752,7 +752,27 @@ function payloadWithNameFallback(payload = {}) {
   return { ...payload, first_name: 'there' };
 }
 
-function renderTemplate({ template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null } = {}) {
+// The service-chrome unsubscribe footer names WHAT the reader is
+// unsubscribing from — it was hardcoded to "referral emails" for the one
+// template that first used the service_pinned_v1 pin (referral.invite), so
+// a later pinned template on a different marketing_* stream (nurture.
+// expired_1 on marketing_nurture) rendered the same false "from referral
+// emails" line (Fable review P1-1 on #5252). Keyed on suppression group,
+// not template_key, so any future pinned template gets a truthful label
+// without another hardcoded special case.
+const UNSUBSCRIBE_FOOTER_LABELS = {
+  marketing_referral: 'referral emails',
+  marketing_nurture: 'these follow-ups',
+};
+function unsubscribeFooterLabelFor(suppressionGroupKey) {
+  const key = String(suppressionGroupKey || '').toLowerCase();
+  return UNSUBSCRIBE_FOOTER_LABELS[key] || 'these emails';
+}
+
+function renderTemplate({
+  template, version, payload: rawPayload = {}, unsubscribeUrl = null, modeOverride = null,
+  suppressionGroupKeyOverride = null,
+} = {}) {
   if (!template || !version) throw new Error('template and version required');
   const missingPayload = requiredPayloadMissing(template, rawPayload);
   const payload = payloadWithNameFallback(rawPayload);
@@ -786,7 +806,7 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   // the wrapper swap. unsubscribeUrl is only resolved for marketing-stream
   // sends, so plain service emails are unaffected.
   const unsubFooterHtml = unsubscribeUrl
-    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from referral emails.`
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from ${escapeHtml(unsubscribeFooterLabelFor(suppressionGroupKeyOverride || template?.suppression_group_key))}.`
     : null;
   const footerNote = mode === 'marketing'
     ? null
@@ -1351,6 +1371,7 @@ async function sendTemplate({
     modeOverride: pinsServiceChrome
       ? 'service'
       : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
+    suppressionGroupKeyOverride: effectiveSuppressionGroupKey,
   });
   if (rendered.missingPayload.length) {
     const err = new Error(`Missing required variables: ${rendered.missingPayload.join(', ')}`);
