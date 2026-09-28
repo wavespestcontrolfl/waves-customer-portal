@@ -287,6 +287,14 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
   });
 
+  test('the date-window scans have an index leading with service_date', async () => {
+    const { rows } = await trx.raw(
+      "SELECT indexdef FROM pg_indexes WHERE tablename = 'service_records' AND indexname = 'service_records_service_date_idx'",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/\(service_date\)/);
+  });
+
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
     const cust = await customer();
     // Visit A: 5 days ago — its 14-day follow-up window hasn't closed yet,
