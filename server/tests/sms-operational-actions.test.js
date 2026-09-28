@@ -842,7 +842,9 @@ describe('Owner ruling 2026-09-28: a same-day-only ask about TODAY gets an end-o
         .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
     });
 
-  test.each(['Can you come today or tomorrow?', 'Come today, else Friday', 'Can you stop by today and Friday?'])(
+  test.each(['Can you come today or tomorrow?', 'Come today, else Friday', 'Can you stop by today and Friday?',
+    // Codex #5170 r1 P2: a bare later alternative STATED_TIMING alone would miss.
+    'Can you come today or next visit?', 'Come today, otherwise whenever works', 'Skip today or next time is fine'])(
     '"%s" states more than same-day timing, so it keeps the legacy undated behavior', (quote) => {
       const at = parseETDateTime('2040-03-12T10:00');
       expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: null, due_basis: null });

@@ -216,6 +216,12 @@ const SAME_DAY_TIMING = new RegExp([
 // STATED_TIMING on what is left (Codex conventions keep the stateful global
 // regex out of resolveDueDeadline's own module-level .test() calls).
 const SAME_DAY_TIMING_STRIP = new RegExp(SAME_DAY_TIMING.source, 'gi');
+// An alternative offered beside the same-day timing ("today or next visit",
+// "today, otherwise whenever") names a later option STATED_TIMING may not
+// recognize on its own (a bare "next visit" needs a preposition there), so
+// any alternative keeps the legacy undated row: a same-day deadline would
+// bell before the option the customer allowed (Codex #5170 r1 P2).
+const SAME_DAY_ALTERNATIVE = /\b(?:or|else|otherwise|either|unless)\b|\bnext (?:visit|appointment|service|time)\b/i;
 
 // Outcomes a visit-only fact may reach without anyone needing to act: the
 // duration verdict itself and the scope/authority guards that can run before
@@ -477,6 +483,7 @@ function resolveDueDeadline(item, messageCreatedAt) {
     const sameDayRemainderClear = (text) => !STATED_TIMING.test(String(text || '').replace(SAME_DAY_TIMING_STRIP, ' '));
     const sameDayOnly = !unresolvedClock
       && SAME_DAY_TIMING.test(strippedQuote) && sameDayRemainderClear(strippedQuote)
+      && !SAME_DAY_ALTERNATIVE.test(strippedQuote) && !SAME_DAY_ALTERNATIVE.test(String(item.due_text || ''))
       && sameDayRemainderClear(item.due_text);
     if (!sameDayOnly) return { due_at: null, due_basis: null };
     const messageDate = new Date(messageCreatedAt);
