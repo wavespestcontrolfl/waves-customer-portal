@@ -4035,63 +4035,34 @@ class AutonomousRunner {
    *   page_type/file_path (blog vs. page meta contract).
    */
   async _buildQualityGateContext(brief, draft, { refreshLiveFrontmatter = null } = {}) {
-    const sitemap = getSitemap();
     const ctx = {};
-    const checkSitemapBeforePublish = ['refresh_existing_page'].includes(brief.action_type);
-    if (sitemap && draft.url && checkSitemapBeforePublish) {
-      const has = await sitemap.hasUrl(draft.url).catch(() => null);
-      if (has) ctx.sitemapHasUrl = has.present;
-    }
+    if (brief.action_type !== 'refresh_existing_page') return { ctx, gateBrief: brief };
+    const targetUrl = brief.target_url || brief.page_url || draft.url;
+    const sitemapHas = await refreshSitemapPresence(draft.url);
+    if (sitemapHas !== null) ctx.sitemapHasUrl = sitemapHas;
     // Hydrate the live page body so the quality gate's improvement_over_prior
     // hard check has a prior version to compare against. Without this every
     // refresh fails that check (no_previous_version_to_compare) and can never
     // publish. On load failure we leave previousVersion unset → the hard
     // check fails closed and the refresh routes to review (safe).
-    let gateBrief = brief;
-    if (brief.action_type === 'refresh_existing_page') {
-      const publisher = getAstroPublisher();
-      if (publisher?.loadExistingPageBody) {
-        const prior = await publisher
-          .loadExistingPageBody(brief.target_url || brief.page_url || draft.url)
-          .catch((err) => {
-            logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
-            return null;
-          });
-        if (prior) ctx.previousVersion = prior;
-      }
-      // publishRefresh ships the LIVE frontmatter, so the gate classifies
-      // the refresh (answer-first / licensed-photo checks) by the live
-      // post_type / page_type, not the draft's (Codex r2 on #5216) — the
-      // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
-      // (holds the refresh to the identification checks).
-      if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
-      else ctx.liveFrontmatterUnavailable = true;
-      // The durable customer-question marker: the page itself carries no
-      // page type (not in the blog schema), but the run ledger records
-      // which run first published it (Codex r8 on #5216). A failed read
-      // makes the gate fail closed on a page that opens on the box.
-      const questionLedger = await publishedAsCustomerQuestion(brief.target_url || brief.page_url || draft.url);
-      if (questionLedger === null) ctx.liveQuestionLedgerUnavailable = true;
-      else ctx.liveIsCustomerQuestion = questionLedger;
-      // Same resolved-target derivation as the metadata lane: page_type
-      // 'refresh' says nothing about the target, and a refresh that
-      // rewrites a blog post's meta_description must keep the full blog
-      // meta-completeness contract. Resolution failure fails CLOSED to
-      // the stricter blog contract — such a target cannot publish anyway.
-      let targetPageType = 'supporting-blog';
-      let targetFilePath = null;
-      try {
-        const resolved = publisher?.resolveExistingAstroFileForTarget
-          ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
-          : null;
-        if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
-        if (resolved?.path) targetFilePath = String(resolved.path);
-      } catch (_) { /* keep the stricter blog contract */ }
-      // target_file_path lets the citability comparison signal skip legacy
-      // .md targets, which publishRefresh cannot give an MDX component.
-      gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
-    }
-    return { ctx, gateBrief };
+    const publisher = getAstroPublisher();
+    const prior = await loadRefreshPriorBody(publisher, targetUrl);
+    if (prior) ctx.previousVersion = prior;
+    // publishRefresh ships the LIVE frontmatter, so the gate classifies
+    // the refresh (answer-first / licensed-photo checks) by the live
+    // post_type / page_type, not the draft's (Codex r2 on #5216) — the
+    // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
+    // (holds the refresh to the identification checks).
+    if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
+    else ctx.liveFrontmatterUnavailable = true;
+    // The durable customer-question marker: the page itself carries no
+    // page type (not in the blog schema), but the run ledger records
+    // which run first published it (Codex r8 on #5216). A failed read
+    // makes the gate fail closed on a page that opens on the box.
+    const questionLedger = await publishedAsCustomerQuestion(targetUrl);
+    if (questionLedger === null) ctx.liveQuestionLedgerUnavailable = true;
+    else ctx.liveIsCustomerQuestion = questionLedger;
+    return { ctx, gateBrief: { ...brief, ...(await refreshTargetFields(publisher, targetUrl)) } };
   }
 
   // Load + JSONB-parse the brief the reviewed run was generated against
@@ -5105,6 +5076,45 @@ function firstReturnedId(rows) {
     if (id) return id;
   }
   return null;
+}
+
+// Quality-gate context pieces for a refresh (_buildQualityGateContext).
+// Sitemap presence of the draft URL; null when there is no sitemap/URL or
+// the read fails.
+async function refreshSitemapPresence(url) {
+  const sitemap = getSitemap();
+  if (!sitemap || !url) return null;
+  const has = await sitemap.hasUrl(url).catch(() => null);
+  return has ? has.present : null;
+}
+
+// The live page body the refresh is compared against; null on failure.
+async function loadRefreshPriorBody(publisher, targetUrl) {
+  if (!publisher?.loadExistingPageBody) return null;
+  return publisher.loadExistingPageBody(targetUrl).catch((err) => {
+    logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
+    return null;
+  });
+}
+
+// Same resolved-target derivation as the metadata lane: page_type 'refresh'
+// says nothing about the target, and a refresh that rewrites a blog post's
+// meta_description must keep the full blog meta-completeness contract.
+// Resolution failure fails CLOSED to the stricter blog contract — such a
+// target cannot publish anyway. target_file_path lets the citability
+// comparison signal skip legacy .md targets, which publishRefresh cannot
+// give an MDX component.
+async function refreshTargetFields(publisher, targetUrl) {
+  let targetPageType = 'supporting-blog';
+  let targetFilePath = null;
+  try {
+    const resolved = publisher?.resolveExistingAstroFileForTarget
+      ? await publisher.resolveExistingAstroFileForTarget(targetUrl)
+      : null;
+    if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+    if (resolved?.path) targetFilePath = String(resolved.path);
+  } catch { /* keep the stricter blog contract */ }
+  return { target_page_type: targetPageType, target_file_path: targetFilePath };
 }
 
 /**

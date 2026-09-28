@@ -304,3 +304,16 @@ describe('connector comparisons use the catalog\'s organism names', () => {
   });
 });
 
+// Codex r1 on #5272 ("Keep bare "like" comparison phrases fail-closed").
+describe('bare "like" stays comparison-shaped', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['bugs like fire ants', null],
+    ['insects like huntsman spiders', null],
+    ['what do fire ants look like', 'fire ant'],
+    ['what do fire ants look like in Florida?', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+

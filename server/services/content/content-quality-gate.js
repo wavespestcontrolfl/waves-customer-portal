@@ -1321,6 +1321,7 @@ const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|sting
 // this is the fail-closed backstop for whatever reaches this check
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
+const REFERENCE_DEFINITION_LINE_RE = /^ {0,3}\[[^\]]+\]:\s*\S/;
 const BOX_PHONE_RE = /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/;
 const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
 function checkCtaAfterVerdictBox(draft, brief, context) {
@@ -1340,7 +1341,7 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   // Same sales-copy detectors the blog meta gate uses; "call a licensed
   // pro" style advice is not sales copy.
   const boxText = `${attrValue(boxMatch[0], 'verdict') || ''} ${attrValue(boxMatch[0], 'recommendation') || ''}`;
-  if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText)) {
+  if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText) || BARE_PHONE_DIGITS_RE.test(boxText)) {
     return { ok: false, reason: 'sales_pitch_inside_verdict_box' };
   }
   ANY_MD_LINK_RE.lastIndex = 0;
@@ -1378,8 +1379,10 @@ function validateLibraryPhoto(photo, alt, url, renderedBody, line) {
     return null;
   }
   const lines = renderedBody.split('\n');
+  // Blank lines and non-rendered reference definitions ("[photo]: /images/…"
+  // for a reference-style image) are skipped (Codex r1 on #5272).
   let next = line + 1;
-  while (next < lines.length && !lines[next].trim()) next += 1;
+  while (next < lines.length && (!lines[next].trim() || REFERENCE_DEFINITION_LINE_RE.test(lines[next]))) next += 1;
   if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo)) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
   return null;
 }

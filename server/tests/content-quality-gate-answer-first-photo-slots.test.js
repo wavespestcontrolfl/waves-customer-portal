@@ -787,3 +787,18 @@ describe('Codex r8: each photo credit sits directly below its image', () => {
   });
 });
 
+// ── Codex r1 on #5272 ────────────────────────────────────────────────
+describe('#5272 r1: compact phone numbers in the box, reference-style credits', () => {
+  test.each([
+    ['verdict="Yes, they sting." recommendation="Text 9412975749 for help."'],
+    ['verdict="Yes, they sting." recommendation="Call +19412975749."'],
+  ])('%s is a pitch', (props) => {
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body: `<BottomLineBox ${props} />\n\nMore.` }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a reference definition between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][pest]\n\n[pest]: ${PHOTO_URL}\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+});
+

@@ -195,11 +195,11 @@ function escapeRegExp(value) {
 // and a safety post must never show a licensed-but-wrong species as THE
 // pest. Deliberately broad; a false trigger only sends a slot to a human.
 // These words are unambiguous comparison constructions on their own, so
-// any occurrence anywhere in the topic fails it closed. `looks?\s+like`
-// here only ever sees a NON-terminal occurrence — a terminal one (the
-// ordinary "what do X look like" identification phrasing) is already
+// any occurrence anywhere in the topic fails it closed. Bare `like` is one
+// of them ("bugs like fire ants", Codex r1 on #5272): only the terminal
+// "what do X look like" identification phrase is exempt, and it is already
 // stripped from comparisonTestText below before this runs (Codex r5/r7).
-const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|looks?\s+like|look-?alikes?|difference|differences|comparisons?)\b/i;
+const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?)\b/i;
 // A hyphenated "-like" suffix ("ant-like insects") is the same look-alike
 // construction without the word "look" — still a comparison, not an
 // identification of the named species itself.
@@ -233,16 +233,14 @@ function organismHeadNouns(entry) {
     .map((name) => (String(name || '').toLowerCase().match(/[a-z]+/g) || []).pop())
     .filter((head) => head && head.length >= 3 && !NON_PEST_HEAD_WORDS.has(head));
 }
+// Read through the canonical, cached catalog module (species-catalog.js
+// listEntries) — never a second parse of the entry files (Codex r1 on
+// #5272).
 function loadCatalogPestHeads() {
   try {
-    const fs = require('fs');
-    const path = require('path');
-    const dir = path.join(__dirname, '../../data/species-catalog-v1/entries');
     const heads = new Set();
-    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json'))) {
-      const data = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-      const entries = Array.isArray(data) ? data : (data.entries || data.species || []);
-      for (const entry of entries) for (const head of organismHeadNouns(entry)) heads.add(head);
+    for (const entry of require('../species-catalog').listEntries({ kind: 'organism' })) {
+      for (const head of organismHeadNouns(entry)) heads.add(head);
     }
     return heads.size ? heads : null;
   } catch {
