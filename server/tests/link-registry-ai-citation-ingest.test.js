@@ -114,6 +114,29 @@ describe('aggregateCitations (pure)', () => {
     expect(aggregateCitations([mention({ cited_urls: [] })], [])).toEqual([]);
     expect(aggregateCitations([mention({ cited_urls: null })], [])).toEqual([]);
   });
+
+  // Codex P1 2026-09-28: a host that carries citations under TWO different
+  // categories (forbes.com: an eligible /home-improvement/ page beside an
+  // ineligible /sites/ article) must aggregate identically whichever URL a
+  // run happens to see first — the category can never depend on row order.
+  test('a host cited under two different categories aggregates BOTH, order-independent', () => {
+    const homeImprovement = 'https://www.forbes.com/home-improvement/pest-control/best-companies/';
+    const sitesArticle = 'https://www.forbes.com/sites/someauthor/2026/09/01/pest-control-stocks/';
+    const forward = aggregateCitations([mention({ cited_urls: [sitesArticle, homeImprovement] })], []);
+    const reverse = aggregateCitations([mention({ cited_urls: [homeImprovement, sitesArticle] })], []);
+    for (const out of [forward, reverse]) {
+      expect(out).toHaveLength(2);
+      const editorial = out.find((d) => d.category === 'editorial');
+      const other = out.find((d) => d.category === 'other');
+      expect(editorial).toMatchObject({ host: 'forbes.com', category: 'editorial', citationCount: 1 });
+      expect(editorial.sampleUrls).toEqual([homeImprovement]);
+      expect(other).toMatchObject({ host: 'forbes.com', category: 'other', citationCount: 1 });
+      expect(other.sampleUrls).toEqual([sitesArticle]);
+    }
+    // and the two orderings produce the SAME result, not just the same shape
+    expect(forward.map((d) => [d.host, d.category, d.citationCount]).sort())
+      .toEqual(reverse.map((d) => [d.host, d.category, d.citationCount]).sort());
+  });
 });
 
 describe('citationDetail', () => {

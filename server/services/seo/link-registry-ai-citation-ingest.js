@@ -63,11 +63,23 @@ function sinceDate(now, lookbackDays) {
  * seo_llm_mention_queries table (id, query, city, service, active). Every
  * question a domain was cited under is attached, deduped by benchmark id (or
  * the raw query text when it isn't a benchmark question).
+ *
+ * Aggregated by (host, category) — NEVER by host alone (Codex P1
+ * 2026-09-28): classifyUrl is deterministic per URL, but a single host CAN
+ * legitimately carry citations under two different categories (a Forbes
+ * `/sites/...` article beside a `/home-improvement/...` one; a Facebook
+ * profile post beside its business Page). Grouping by host alone would make
+ * the aggregate's category depend on which URL this run happened to see
+ * first — order-dependent output from an input with no ordering guarantee,
+ * and it would silently fold an ineligible URL's evidence into an eligible
+ * category (or the reverse). Keeping (host, category) separate is exact
+ * regardless of row order, and the one place that cares about "the same
+ * host twice" (ensureDomain) is naturally idempotent about it.
  */
 function aggregateCitations(rows, queryRows) {
   const queryById = new Map((queryRows || []).map((q) => [q.id, q]));
   const benchmarkByQuery = new Map(benchmark.questions.map((q) => [q.query, q]));
-  const domains = new Map();
+  const groups = new Map();
   for (const row of rows || []) {
     const urls = cleanUrls(row.cited_urls);
     if (!urls.length) continue;
@@ -83,13 +95,14 @@ function aggregateCitations(rows, queryRows) {
     for (const url of urls) {
       const c = classifyUrl(url);
       if (!c) continue; // unparseable — never counted, never enqueued
-      if (!domains.has(c.host)) {
-        domains.set(c.host, {
+      const key = `${c.host}::${c.category}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
           host: c.host, category: c.category, rule: c.rule, citationCount: 0,
           sampleUrls: [], platforms: new Set(), locallyRelevant: false, questions: new Map(),
         });
       }
-      const agg = domains.get(c.host);
+      const agg = groups.get(key);
       agg.citationCount += 1;
       if (agg.sampleUrls.length < MAX_SAMPLE_URLS && !agg.sampleUrls.includes(url)) agg.sampleUrls.push(url);
       agg.platforms.add(row.llm_platform || 'unknown');
@@ -98,7 +111,7 @@ function aggregateCitations(rows, queryRows) {
       if (!agg.questions.has(qKey)) agg.questions.set(qKey, question);
     }
   }
-  return [...domains.values()].map((d) => ({ ...d, platforms: [...d.platforms].sort(), questions: [...d.questions.values()] }));
+  return [...groups.values()].map((d) => ({ ...d, platforms: [...d.platforms].sort(), questions: [...d.questions.values()] }));
 }
 
 /** readMeasuredMentions(db, { since }) → the measured rows this feeder classifies. */
@@ -125,7 +138,8 @@ function citationDetail(d) {
  *       inserted, touched, existing, candidates: [{domain, category, rule,
  *       citationCount, platforms, sampleUrls, locallyRelevant, questions, existing?}] }
  * - scanned: measured seo_llm_mentions rows read.
- * - domains: distinct cited hosts classified (every category, owned included).
+ * - domains: distinct (host, category) pairs classified (every category, owned
+ *   included — a host cited under two categories counts as two here).
  * - byCategory: a count per category — the run's classification summary.
  * - enqueued: how many (listing + editorial) candidates this run sends/would send.
  * - dryRun: one whereIn on seo_link_domains to split would-insert vs existing; no writes.
