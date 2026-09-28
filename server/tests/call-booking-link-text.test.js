@@ -1077,12 +1077,22 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
     expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
   });
 
-  test('a live-customer lookup failure fails closed (no customerId), never throws', async () => {
+  // codex #5018 r15/r16 P1 follow-up: this used to catch the linked
+  // customer's own created_at lookup and read a transient failure as "no
+  // customerId" — silently proceeding to hasPriorContact and, on that
+  // narrowed evidence, potentially stamping the PERMANENT
+  // outbound_without_prior_contact skip on nothing but a DB hiccup. Now
+  // propagates, exactly like every other prior-contact probe in this
+  // describe block (see 'a probe failure PROPAGATES...' below) — never
+  // resolves, and hasPriorContact (and so the outbound_without_prior_contact
+  // stamp) is never reached at all.
+  test('a live-customer lookup failure propagates — never resolved, never stamped outbound_without_prior_contact', async () => {
     hasPriorContact.mockResolvedValue(false);
     const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-broken', metadata: {} };
     const conn = jest.fn(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
-    await expect(outboundPriorContactMissing(conn, call)).resolves.toBe(true);
-    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
+    await expect(outboundPriorContactMissing(conn, call)).rejects.toThrow('db down');
+    expect(hasPriorContact).not.toHaveBeenCalled();
+    await expect(outboundStagingReason(conn, call)).rejects.toThrow('db down');
   });
 
   // codex pre-push P1 regression, preserved from the original first_contact_at

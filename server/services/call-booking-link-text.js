@@ -388,8 +388,20 @@ async function outboundPriorContactMissing(conn, call) {
   const { hasPriorContact } = require('./outbound-call-reason');
   const { resolveCallContactPhone, outboundPriorContactCustomerId } = require('./call-recording-processor');
   const before = callStartedAt(call) || new Date(call.created_at);
+  // codex #5018 r15/r16 P1 follow-up: the earlier `.catch(() => null)` here
+  // turned a transient failure of THIS lookup into "customer created at an
+  // unknown time," which outboundPriorContactCustomerId's own predatesCall()
+  // reads no differently from a customer that genuinely never existed —
+  // silently permitting an outbound_without_prior_contact stamp on nothing
+  // but a DB hiccup, and permanently (this lane stamps that reason at most
+  // once per call; there is no retry once it is written). Left to
+  // propagate now, exactly like every OTHER prior-contact probe below and
+  // the doc comment two paragraphs down already promised: staging's own
+  // per-call catch (see stage()) leaves the row undecided rather than
+  // wrongly stamped, and both dispatch/neverSendRecheck already treat an
+  // uncaught throw here as retryable, never a permanent skip.
   const callCustomerCreatedAt = call.customer_id
-    ? (await conn('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at').catch(() => null))?.created_at || null
+    ? (await conn('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at'))?.created_at || null
     : null;
   // conn (codex #5018 pre-push P1): thread the caller's own held connection
   // through hasPriorContact's probes — during dispatchClaimedCall/
