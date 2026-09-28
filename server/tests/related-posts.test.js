@@ -362,6 +362,47 @@ describe('candidateFromRegistryRow', () => {
     });
   });
 
+  // Codex #4984 r7 P2: a republish at the same URL flags the row
+  // astro_changed_since_sync (content-registry.js's astro-item/no-db-match
+  // branch — the SAME lineage as astro_only, never db_changed_since_sync,
+  // which only a DB-matched row reaches and the blog_posts query already
+  // covers) while its live-status fields stay accurate until the next sync.
+  test('accepts an astro_changed_since_sync row exactly like astro_only, provided it is still published/present/live/indexable', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'astro_changed_since_sync',
+    })).toMatchObject({
+      path: '/termite/direct-astro-post/',
+      service: 'termite',
+      targetSites: ['wavespestcontrol.com'],
+      workflowStatus: 'published',
+      astroStatus: 'live',
+      pathVerified: true,
+    });
+  });
+
+  test('still rejects an astro_changed_since_sync row that is no longer live/present/published/indexable', () => {
+    for (const override of [
+      { live_status: 'missing' },
+      { astro_status: 'draft' },
+      { workflow_status: 'draft' },
+      { noindex_detected: true },
+    ]) {
+      expect(candidateFromRegistryRow({
+        ...liveAstroOnly,
+        reconciliation_status: 'astro_changed_since_sync',
+        ...override,
+      })).toBeNull();
+    }
+  });
+
+  test('rejects db_changed_since_sync — that status is only reachable from a DB-matched row the blog_posts query already covers', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'db_changed_since_sync',
+    })).toBeNull();
+  });
+
   test.each([
     ['missing', {}],
     ['empty', { domains: [] }],
