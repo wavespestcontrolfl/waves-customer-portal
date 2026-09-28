@@ -438,9 +438,12 @@ function withCacheBreakpoint(messages) {
 // route: behind GATE_IB_CANCEL_APPOINTMENT (ibCancelAppointmentLive()),
 // proposePendingWrite computes the impact fresh, refuses a non-simple visit
 // (card_cancel_refusals — a card fee agreement, a card payment on the
-// invoice, an estimate deposit, or a possible plan make-up visit; the bar
-// cancels SIMPLE visits only, everything else goes to Dispatch) or a
-// not-found/unreadable appointment, and otherwise pins the impact onto
+// invoice, an estimate deposit, a possible plan make-up visit, or a
+// grouped visit (row.visit_id set — Codex round-4 P2: cancelling one
+// member can detach or dissolve the group via visit-groups.js's
+// handleChildTerminal, a side effect this card does not disclose); the bar
+// cancels SIMPLE, UNGROUPED visits only, everything else goes to Dispatch)
+// or a not-found/unreadable appointment, and otherwise pins the impact onto
 // params._frozen_cancellation_impact and preview.cancellation so the card
 // renders it and the contract hash covers it (authorization-contract.js's
 // cancel_appointment branch, already wired by PR A). /confirm-action only
@@ -469,22 +472,37 @@ function withCacheBreakpoint(messages) {
 // merged-slot survivor (Codex round-2 P1) AND whether an appointment_
 // reminders row currently exists (Codex round-3 P1b — the reminder self-
 // healer can insert one before commit), is mutable and never grounds
-// 'none'), plus a human-readable appointment window (Codex round-3 P1 —
-// so two same-day visits for the same customer are distinguishable on the
-// card; prefers the stored time_window label, falls back to formatting
-// window_start/window_end), plus identity_fingerprint (the visit's FULL
-// identity — window/customer/technician/visit-group, reusing proposal-
-// pins.js's normalizeAppointmentPin/appointmentPinFingerprint, the same
-// pin reschedule_appointment trusts — so a same-day window move or a
-// repoint to a differently-owned but identically-named customer is drift
-// too, even though the display facts alone would read identical, Codex
-// round-2 P1). That fingerprint is re-verified TWICE at confirm: once by
-// the pre-check below (computeCancelAppointmentImpact, outside any lock)
-// and once more by tools.js cancelAppointment itself, which locks the
-// scheduled_services row FOR UPDATE inside its own mutation transaction
-// and recomputes the fingerprint from what THAT lock sees before
-// transitioning anything (Codex round-3 P1a — closes the race in the gap
-// between the pre-check's read and the transaction's own commit). Gate off
+// 'none'), plus a human-readable appointment window (Codex round-3/round-4
+// P1 — so two same-day visits for the same customer are distinguishable on
+// the card; prefers formatting the AUTHORITATIVE window_start/window_end
+// bounds — every mover of the row writes these — and falls back to the
+// legacy time_window label only when no bounds are stored at all, since
+// the label is never kept in sync by a reschedule, tools.js ~3517), plus
+// the visit's effective service address (Codex round-4 P1 —
+// switchAppointmentProperty can move a visit to a different saved
+// property than the customer's primary one; the stamped service_address_*
+// columns on the row, falling back to the customer's primary address for
+// a legacy unstamped row), plus identity_fingerprint (a hash over EVERY
+// scheduled_services column bar a tiny denylist of columns that churn for
+// unrelated operational reasons — route_order, the stops-ahead display
+// cache, updated_at — appointment-cancel-impact.js's computeRowFingerprint;
+// so a same-day window move, a property switch, a recurrence-flag change,
+// or a repoint to a differently-owned but identically-named customer is
+// drift too, even though the display facts alone would read identical.
+// Replaces an earlier hand-picked identity subset — proposal-pins.js's
+// normalizeAppointmentPin/appointmentPinFingerprint — that rounds 2
+// through 4 of review each found one more relevant column missing from,
+// a non-converging pattern the whole-row fingerprint closes structurally).
+// That fingerprint is re-verified TWICE at confirm: once by the pre-check
+// below (computeCancelAppointmentImpact, outside any lock) and once more
+// by tools.js cancelAppointment itself, which locks the scheduled_services
+// row FOR UPDATE inside its own mutation transaction and recomputes the
+// fingerprint from what THAT lock sees before transitioning anything
+// (Codex round-3 P1a — closes the race in the gap between the pre-check's
+// read and the transaction's own commit); the same locked read also
+// re-derives the plan-reseed and grouped-visit refusal verdicts directly
+// (Codex round-4 P1/P2), rather than relying only on the fingerprint
+// match to imply them. Gate off
 // (default) is byte-identical to before this lane: every cancel_appointment
 // proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
 // and cancels happen from the Dispatch screen, which owns the waiver and

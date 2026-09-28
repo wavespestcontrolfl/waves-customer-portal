@@ -500,6 +500,32 @@ test('cancel_appointment: no window on the row omits the clause — byte-identic
   }));
 });
 
+// Codex round-4 P1: switch_appointment_property can move a visit to a
+// DIFFERENT saved property than the customer's primary one — the address
+// (pinned automatically as part of preview.cancellation.appointment) tells
+// the operator which house this cancels, not just which customer.
+test('cancel_appointment: the effective service address is rendered when present', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), appointment: { ...synthCancellationBase().appointment, address: '123 Main St, Bradenton, FL, 34209' } } },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester at 123 Main St, Bradenton, FL, 34209',
+  }));
+});
+
+test('cancel_appointment: no address on the row omits the clause', () => {
+  const c = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: synthCancellationBase() },
+  });
+  expect(c.effects).toContainEqual(expect.objectContaining({
+    kind: 'operational',
+    label: 'Cancel pest_control on 2026-10-02 for Synthia Tester',
+  }));
+});
+
 // Two visits, same date, same customer, different window: the hash must
 // never collide (mirrors the identity_fingerprint drift guarantee — the
 // CARD itself must show operators the difference, not just refuse silently

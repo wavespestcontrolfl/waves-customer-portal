@@ -556,8 +556,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // The window is shown so two same-day visits for the same customer are
     // distinguishable on the card (Codex round-3 P1) — pinned automatically,
     // since it rides on preview.cancellation.appointment (the impact object
-    // cancelImpactsMatch already compares whole).
-    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.window ? `, ${a.window}` : ''}${a.customer_name ? ` for ${a.customer_name}` : ''}`, {
+    // cancelImpactsMatch already compares whole). The address is shown too
+    // (Codex round-4 P1): switch_appointment_property can move a visit to a
+    // DIFFERENT saved property than the customer's primary one, so naming
+    // only the customer would leave the operator guessing which house this
+    // cancels — also pinned automatically, same reasoning.
+    push('operational', `Cancel ${a.service_type || 'visit'} on ${a.scheduled_date || '?'}${a.window ? `, ${a.window}` : ''}${a.customer_name ? ` for ${a.customer_name}` : ''}${a.address ? ` at ${a.address}` : ''}`, {
       before: a.status || null, after: 'cancelled',
     });
     // Wording states what the rails GUARANTEE, not the best case: a charge

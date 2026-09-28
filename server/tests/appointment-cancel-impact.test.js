@@ -93,7 +93,7 @@ test('fee applies: an in-window held card hold wins outright', async () => {
 
   expect(impact.appointment).toEqual({
     id: 'svc-synthetic-1', status: 'confirmed', scheduled_date: '2026-10-02',
-    service_type: 'pest_control', customer_name: 'Synthia Tester', window: null,
+    service_type: 'pest_control', customer_name: 'Synthia Tester', window: null, address: null,
   });
   expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', blocked_by_invoice: false });
   // The appointment rail was never even asked — the hold answered outright.
@@ -232,24 +232,28 @@ test('invoices carry the deposit credit the void would restore', async () => {
   expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
-describe('appointment.window (Codex round-3 P1: show the visit\'s time so same-day visits are distinguishable)', () => {
+describe('appointment.window (Codex round-3/round-4 P1: show the visit\'s time so same-day visits are distinguishable, from the AUTHORITATIVE bounds)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
     mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
   };
 
-  test('prefers the stored time_window label verbatim — the SAME field reschedule_appointment already renders', async () => {
+  // Codex round-4 P1: the IB reschedule writer (tools.js ~3517) updates
+  // window_start/window_end on every move but does NOT also rewrite the
+  // legacy time_window label — a stale label must never win over the
+  // bounds that actually moved.
+  test('prefers formatting window_start–window_end over a stale stored time_window label', async () => {
     noCard();
     mockAppointmentRow = { ...mockAppointmentRow, time_window: 'Morning', window_start: '13:00:00', window_end: '15:00:00' };
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
-    expect(impact.appointment.window).toBe('Morning');
+    expect(impact.appointment.window).toBe('1:00 PM–3:00 PM');
   });
 
-  test('falls back to formatting window_start–window_end (bare TIME columns) when time_window is absent', async () => {
+  test('falls back to the stored time_window label only when no window_start bound is stored at all', async () => {
     noCard();
-    mockAppointmentRow = { ...mockAppointmentRow, time_window: null, window_start: '08:00:00', window_end: '11:30:00' };
+    mockAppointmentRow = { ...mockAppointmentRow, time_window: 'Morning', window_start: null, window_end: null };
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
-    expect(impact.appointment.window).toBe('8:00 AM–11:30 AM');
+    expect(impact.appointment.window).toBe('Morning');
   });
 
   test('window_start only (no window_end): a single formatted time', async () => {
@@ -267,7 +271,43 @@ describe('appointment.window (Codex round-3 P1: show the visit\'s time so same-d
   });
 });
 
-describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment identity, not just the display facts)', () => {
+describe('appointment.address (Codex round-4 P1: show the visit\'s effective service address, since switchAppointmentProperty can move it off the customer\'s primary)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('prefers the stamped service_address_* columns on the row', async () => {
+    noCard();
+    mockAppointmentRow = {
+      ...mockAppointmentRow,
+      service_address_line1: '123 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34209',
+      customer_address_line1: '999 Other Rd', customer_city: 'Sarasota', customer_state: 'FL', customer_zip: '34231',
+    };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.address).toBe('123 Main St, Bradenton, FL, 34209');
+  });
+
+  test('falls back to the customer\'s primary address when the row has no stamped service address (legacy row)', async () => {
+    noCard();
+    mockAppointmentRow = {
+      ...mockAppointmentRow,
+      service_address_line1: null,
+      customer_address_line1: '999 Other Rd', customer_city: 'Sarasota', customer_state: 'FL', customer_zip: '34231',
+    };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.address).toBe('999 Other Rd, Sarasota, FL, 34231');
+  });
+
+  test('no address anywhere: null, not a broken string', async () => {
+    noCard();
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.appointment.address).toBeNull();
+  });
+});
+
+describe('identity_fingerprint (Codex round-2 through round-4 P1s: pin the WHOLE scheduled_services row, not a hand-picked subset)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
     mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -334,6 +374,39 @@ describe('identity_fingerprint (Codex round-2 P1: pin the COMPLETE appointment i
     mockAppointmentRow = { ...mockAppointmentRow };
     const b = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(a.identity_fingerprint).toBe(b.identity_fingerprint);
+  });
+
+  // Codex round-4 STRUCTURAL fix: pin the WHOLE row (bar a tiny denylist)
+  // instead of a hand-picked column subset, so a future column that turns
+  // out to matter needs no hand-added entry to be caught as drift.
+  test('changes when an arbitrary column NOT on the denylist changes, even one no display fact or refusal reads today', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, internal_notes: 'first note' };
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockAppointmentRow = { ...mockAppointmentRow, internal_notes: 'a different note' };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.identity_fingerprint).not.toBe(before.identity_fingerprint);
+  });
+
+  // The denylist itself (appointment-cancel-impact.js's
+  // ROW_FINGERPRINT_DENYLIST): each entry is operational churn unrelated to
+  // what cancelling this visit does, so changing ONLY a denylisted column
+  // must NOT drift-refuse an otherwise-unchanged, still-pending card.
+  test.each([
+    ['updated_at', { updated_at: '2026-10-01T00:00:00.000Z' }, { updated_at: '2026-10-02T12:00:00.000Z' }],
+    ['route_order', { route_order: 3 }, { route_order: 7 }],
+    ['stops_ahead_min_shown + stops_ahead_shown_date', { stops_ahead_min_shown: 2, stops_ahead_shown_date: '2026-10-01' }, { stops_ahead_min_shown: 1, stops_ahead_shown_date: '2026-10-02' }],
+    // A concurrent operator's note append (tools.js's own SQL-side
+    // concat_ws is designed to let this survive, Codex round-1 P1) must not
+    // block an otherwise-unchanged pending cancel either.
+    ['notes', { notes: 'first note' }, { notes: 'a different note from another operator' }],
+  ])('does NOT change when only %s changes (denylisted — pure operational churn)', async (_label, beforeFields, afterFields) => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, ...beforeFields };
+    const before = await computeCancelAppointmentImpact('svc-synthetic-1');
+    mockAppointmentRow = { ...mockAppointmentRow, ...afterFields };
+    const after = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(after.identity_fingerprint).toBe(before.identity_fingerprint);
   });
 });
 
@@ -457,6 +530,31 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple 
     mockCreditPreview.mockResolvedValue([{ id: 'offer-1', amount: 75, would_reverse: true, deferred: false }]);
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'inspection_credit']);
+  });
+
+  // Codex round-4 P2: cancelling a grouped visit's row runs
+  // visit-groups.js's handleChildTerminal (detach or dissolve the group) —
+  // a side effect this card never disclosed. Refusing it outright means
+  // the bar never has a grouped visit to reach that side effect from.
+  test('a grouped visit (visit_id set) is refused even with an otherwise plain visit', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, visit_id: 'visit-grp-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['grouped_visit']);
+  });
+
+  test('a plain, ungrouped visit (visit_id null) has no grouped_visit refusal', async () => {
+    noCard();
+    mockAppointmentRow = { ...mockAppointmentRow, visit_id: null };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual([]);
+  });
+
+  test('grouped_visit sorts alongside the other refusal codes', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
+    mockAppointmentRow = { ...mockAppointmentRow, visit_id: 'visit-grp-1' };
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'grouped_visit']);
   });
 });
 

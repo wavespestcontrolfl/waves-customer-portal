@@ -3646,7 +3646,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an invoice that would still hold money after the cancellation, a redeemed inspection-credit offer, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an invoice that would still hold money after the cancellation, a redeemed inspection-credit offer, an estimate deposit, a plan make-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 // The follow-through's per-target pin for a cancel confirmed against a frozen
 // impact (see cancelAppointment); null when nothing was pinned.
@@ -3808,18 +3808,43 @@ async function cancelAppointment(input, actionContext = {}) {
       // a reschedule racing to commit AFTER this point blocks on the lock
       // until this transaction resolves, and one that already committed
       // BEFORE it is caught by the fingerprint recompute below — then
-      // refuse before transitioning anything if the SAME identity
-      // fingerprint (proposal-pins.js normalizeAppointmentPin +
-      // appointmentPinFingerprint — the identical pin
-      // appointment-cancel-impact.js computed at proposal time) no longer
-      // matches what the operator approved.
+      // refuse before transitioning anything if the SAME whole-row
+      // fingerprint (appointment-cancel-impact.js's computeRowFingerprint
+      // — every scheduled_services column bar its own tiny denylist, the
+      // identical fingerprint computed at proposal time) no longer matches
+      // what the operator approved. Replaces the earlier hand-picked
+      // normalizeAppointmentPin/appointmentPinFingerprint identity subset
+      // (proposal-pins.js) — rounds 2 through 4 of review each found one
+      // more column that subset missed (identity, then property, then
+      // recurrence flags, then the window label, then visit_id); pinning
+      // the whole row closes that class of gap structurally.
       if (input._frozen_cancellation_impact) {
         const lockedRow = await trx('scheduled_services').where('id', appointment_id).forUpdate().first();
         if (!lockedRow) throw new Error('__cancel_target_missing__');
-        const { normalizeAppointmentPin, appointmentPinFingerprint } = require('./proposal-pins');
-        const lockedFingerprint = appointmentPinFingerprint(normalizeAppointmentPin(lockedRow));
-        if (lockedFingerprint !== input._frozen_cancellation_impact.identity_fingerprint) {
+        const { computeRowFingerprint } = require('../appointment-cancel-impact');
+        if (computeRowFingerprint(lockedRow) !== input._frozen_cancellation_impact.identity_fingerprint) {
           throw new Error('__cancel_identity_drift__');
+        }
+        // Explicit reseed-eligibility recheck FROM THE LOCKED ROW (Codex
+        // round-4 P1): the whole-row fingerprint match above already
+        // implies this (recurring_parent_id/is_callback/followup_included/
+        // is_recurring are all part of the pinned row, unlike the identity
+        // subset this replaced), but a card-approved cancel refuses on the
+        // committed row's OWN eligibility verdict rather than only on
+        // fingerprint equality — the same discipline as the grouped-visit
+        // check below, decided on the row that is about to be transitioned,
+        // not inferred from a hash.
+        const { cancelMayReseedPlan } = require('../recurring-series-cancel-reseed');
+        if (cancelMayReseedPlan(lockedRow)) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // Grouped-visit refusal, same discipline (Codex round-4 P2): the
+        // proposal/pre-check already refuse a grouped visit via
+        // card_cancel_refusals ('grouped_visit'), so a frozen pin can only
+        // reach here already ungrouped — this is the same belt-and-
+        // suspenders recheck on the row that will actually commit.
+        if (lockedRow.visit_id) {
+          throw new Error('__cancel_card_refused__');
         }
       }
       await transitionJobStatus({
@@ -3862,6 +3887,9 @@ async function cancelAppointment(input, actionContext = {}) {
     }
     if (err && err.message === '__cancel_target_missing__') {
       return { error: 'Appointment not found — nothing was changed.' };
+    }
+    if (err && err.message === '__cancel_card_refused__') {
+      return { error: CARD_CANCEL_REFUSED_MESSAGE };
     }
     if (err && err.message && err.message.includes('not in state')) {
       return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };

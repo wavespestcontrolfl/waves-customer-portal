@@ -52,9 +52,17 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockComputeImpact = jest.fn();
+// computeRowFingerprint is NOT mocked (jest.requireActual) — the round-3/4
+// P1a lock recheck (tools.js cancelAppointment) computes this same whole-row
+// fingerprint over whatever row its FOR UPDATE lock reads, so this suite
+// proves the REAL fingerprint function, not a stand-in for it.
 jest.mock('../services/appointment-cancel-impact', () => {
   const actual = jest.requireActual('../services/appointment-cancel-impact');
-  return { computeCancelAppointmentImpact: (...a) => mockComputeImpact(...a), cancelImpactsMatch: actual.cancelImpactsMatch };
+  return {
+    computeCancelAppointmentImpact: (...a) => mockComputeImpact(...a),
+    cancelImpactsMatch: actual.cancelImpactsMatch,
+    computeRowFingerprint: actual.computeRowFingerprint,
+  };
 });
 
 const mockFollowThrough = jest.fn(async () => ({ settled: 1 }));
@@ -62,7 +70,16 @@ jest.mock('../services/visit-cancellation-followthrough', () => ({
   runVisitCancellationFollowThrough: (...a) => mockFollowThrough(...a),
 }));
 const mockReseed = jest.fn(async () => {});
-jest.mock('../services/recurring-series-cancel-reseed', () => ({ runPostCancelSeriesReseed: (...a) => mockReseed(...a) }));
+// cancelMayReseedPlan defaults to false (the plain-visit case every
+// pre-existing test in this suite assumes) — the round-4 P1 explicit
+// under-lock recheck (tools.js cancelAppointment) calls this directly, so
+// the mock must export it alongside runPostCancelSeriesReseed or that call
+// throws (a bare object replacement would otherwise leave it undefined).
+const mockCancelMayReseedPlan = jest.fn(() => false);
+jest.mock('../services/recurring-series-cancel-reseed', () => ({
+  runPostCancelSeriesReseed: (...a) => mockReseed(...a),
+  cancelMayReseedPlan: (...a) => mockCancelMayReseedPlan(...a),
+}));
 jest.mock('../services/typed-followup-obligation', () => ({ handleFollowupChildCancellation: jest.fn(async () => {}) }));
 
 const mockTransitionJobStatus = jest.fn();
@@ -72,12 +89,13 @@ jest.mock('../services/job-status', () => ({
 }));
 
 const { executeTool } = require('../services/intelligence-bar/tools');
-// REAL implementation (not mocked) — the commit path's round-3 P1a lock
-// recheck (tools.js cancelAppointment) computes this same fingerprint over
-// whatever row its FOR UPDATE lock reads, so FROZEN's own fingerprint below
-// must be the ACTUAL value for the default mockApptRow shape, or every
-// "matches" test would spuriously drift-refuse against a fake string.
-const { normalizeAppointmentPin, appointmentPinFingerprint } = require('../services/intelligence-bar/proposal-pins');
+// REAL implementation (not mocked) — the commit path's round-3/4 P1a lock
+// recheck (tools.js cancelAppointment) computes this same whole-row
+// fingerprint over whatever row its FOR UPDATE lock reads, so FROZEN's own
+// fingerprint below must be the ACTUAL value for the default mockApptRow
+// shape, or every "matches" test would spuriously drift-refuse against a
+// fake string.
+const { computeRowFingerprint } = jest.requireActual('../services/appointment-cancel-impact');
 
 // The exact shape beforeEach assigns to mockApptRow — kept as its own
 // constant (not read from the mutable `mockApptRow` let) so FROZEN's
@@ -89,6 +107,7 @@ const DEFAULT_APPT_ROW = {
   scheduled_date: '2026-10-02',
   service_type: 'pest_control',
   notes: null,
+  visit_id: null,
 };
 
 const FROZEN = {
@@ -97,20 +116,21 @@ const FROZEN = {
   invoices: [{ id: 'inv-1', invoice_number: 'WPC-2026-9001', status: 'sent', total: 89, credit_applied: 0 }],
   inspection_credit_reversal: null,
   card_cancel_refusals: [],
-  // Codex round-2 P1: the full appointment identity (window/customer/tech —
-  // see appointment-cancel-impact.js's loadAppointmentFacts), hashed. The
-  // display facts above (status/scheduled_date/service_type/customer_name)
-  // can read identical for a same-day window move or a same-named repoint —
-  // this is what actually catches it. The REAL fingerprint for
-  // DEFAULT_APPT_ROW, so it matches what the round-3 P1a lock recheck
-  // (tools.js) actually computes when mockApptRow is unchanged.
-  identity_fingerprint: appointmentPinFingerprint(normalizeAppointmentPin(DEFAULT_APPT_ROW)),
+  // Codex round-2 through round-4 P1s: the WHOLE row, hashed (bar the tiny
+  // denylist — see appointment-cancel-impact.js's ROW_FINGERPRINT_DENYLIST).
+  // The display facts above (status/scheduled_date/service_type/
+  // customer_name) can read identical for a same-day window move or a
+  // same-named repoint — this is what actually catches it. The REAL
+  // fingerprint for DEFAULT_APPT_ROW, so it matches what the round-3/4 P1a
+  // lock recheck (tools.js) actually computes when mockApptRow is unchanged.
+  identity_fingerprint: computeRowFingerprint(DEFAULT_APPT_ROW),
 };
 
 beforeEach(() => {
   jest.clearAllMocks();
   capturedNotesUpdate = null;
   mockApptRow = { ...DEFAULT_APPT_ROW };
+  mockCancelMayReseedPlan.mockReturnValue(false);
   // transitionJobStatus is only reached once the drift check clears — throw
   // a distinctive sentinel so a passing-through test can assert we GOT
   // there without modeling the rest of the (pre-existing, unrelated) commit
@@ -246,6 +266,77 @@ describe('round-3 P1a: the FINAL identity recheck runs INSIDE the mutation trans
     const transitionIdx = cancelFn.indexOf('await transitionJobStatus({');
     expect(lockIdx).toBeGreaterThan(-1);
     expect(transitionIdx).toBeGreaterThan(lockIdx);
+  });
+});
+
+// Codex round-4 P1/P2: the plan-reseed eligibility verdict AND the
+// grouped-visit refusal are recomputed EXPLICITLY from the locked row —
+// not only inferred from the whole-row fingerprint matching (which, given
+// the current fingerprint, would already refuse as identity drift the
+// instant either column differs from the frozen proposal). This is
+// deliberate defense-in-depth: the row the commit is about to transition
+// decides its own eligibility, rather than the commit trusting that a
+// fingerprint match implies it. Modeled here as a proposal-side impact
+// that (hypothetically, via a bug or a future refactor) froze `[]`
+// refusals despite the row already being reseed-eligible/grouped — the
+// under-lock recheck must still catch it independently, on a row whose
+// fingerprint DOES match the frozen one (so this exercises the explicit
+// recheck itself, not the separate identity-drift path already covered
+// above).
+describe('round-4 P1/P2: reseed eligibility and grouped-visit membership are rechecked explicitly under the row lock, independent of the fingerprint match', () => {
+  test('a reseed-eligible locked row is REFUSED before commit, even with a matching fingerprint and no frozen refusal', async () => {
+    const row = { ...DEFAULT_APPT_ROW, recurring_parent_id: 'plan-1' };
+    const frozen = { ...FROZEN, identity_fingerprint: computeRowFingerprint(row) };
+    mockApptRow = row;
+    mockComputeImpact.mockResolvedValue(frozen); // pre-check sees no drift, no refusal
+    mockCancelMayReseedPlan.mockReturnValue(true);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: frozen,
+    }, {});
+
+    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+    // Decided on the LOCKED row, not the pre-transaction read.
+    expect(mockCancelMayReseedPlan).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-synthetic-1' }));
+  });
+
+  test('a grouped locked row (visit_id set) is REFUSED before commit, even with a matching fingerprint and no frozen refusal', async () => {
+    const row = { ...DEFAULT_APPT_ROW, visit_id: 'visit-grp-1' };
+    const frozen = { ...FROZEN, identity_fingerprint: computeRowFingerprint(row) };
+    mockApptRow = row;
+    mockComputeImpact.mockResolvedValue(frozen);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: frozen,
+    }, {});
+
+    expect(result.error).toMatch(/can only be cancelled from the Dispatch screen/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(mockFollowThrough).not.toHaveBeenCalled();
+  });
+
+  test('the locked row is neither reseed-eligible nor grouped: proceeds to commit, as before', async () => {
+    mockComputeImpact.mockResolvedValue(FROZEN);
+    mockCancelMayReseedPlan.mockReturnValue(false);
+    mockTransitionJobStatus.mockResolvedValue(undefined);
+    const result = await executeTool('cancel_appointment', {
+      appointment_id: 'svc-synthetic-1',
+      _frozen_cancellation_impact: FROZEN,
+    }, {});
+
+    expect(result.success).toBe(true);
+    expect(mockTransitionJobStatus).toHaveBeenCalledTimes(1);
+  });
+
+  test('no frozen pin: the under-lock reseed/grouped recheck is a no-op (today\'s only real caller)', async () => {
+    mockCancelMayReseedPlan.mockReturnValue(true);
+    mockApptRow = { ...mockApptRow, visit_id: 'visit-grp-1' };
+    mockTransitionJobStatus.mockRejectedValue(new Error('__reached_transition__'));
+    const result = await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
+    expect(mockCancelMayReseedPlan).not.toHaveBeenCalled();
+    expect(result.error).toBe('__reached_transition__');
   });
 });
 
