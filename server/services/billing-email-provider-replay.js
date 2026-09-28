@@ -3,6 +3,16 @@ const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-
 const { billingEmailReplayEligible } = require('./messaging/billing-email-replay-eligibility');
 
 const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
+const PREVISIT_SUPERSEDED_REASONS = new Set([
+  'previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed',
+]);
+const PREVISIT_SUPERSEDED_AUTHORITY = new Set(['BILLING_PREFERENCES_CHANGED', 'EMAIL_RECIPIENT_CHANGED']);
+
+function previsitAuthoritySuperseded(context, contracted, state) {
+  return contracted && context.source_entry_point === 'previsit_balance_reminder'
+    && PREVISIT_SUPERSEDED_AUTHORITY.has(state.boundaryBlock?.code)
+    && !state.providerPreparationStarted && !state.handoffStarted;
+}
 
 function clean(value) {
   return String(value || '').trim();
@@ -147,12 +157,14 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
       const verdict = await receiptOptOut(context, database)
         || (contracted ? await billingEmailReplayEligible(context, database) : { eligible: true });
       if (verdict?.eligible !== true) {
+        const requote = context.source_entry_point === 'previsit_balance_reminder'
+          && PREVISIT_SUPERSEDED_REASONS.has(verdict?.reason);
         return {
           ok: false,
-          // Preserve main's definitely-unsent, resendable refusal contract.
-          code: verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
+          code: requote ? 'BILLING_REPLAY_REQUOTE_REQUIRED'
+            : verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
           reason: verdict?.reason || 'Billing replay is no longer eligible',
-          retryable: verdict?.retryable === true,
+          retryable: !requote && verdict?.retryable === true,
         };
       }
       return providerBoundary && typeof providerBoundaryCheck === 'function'
@@ -163,6 +175,9 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
   });
 
   if (state.providerAccepted === true) return { handled: true, allowed: true };
+  if (previsitAuthoritySuperseded(context, contracted, state)) {
+    return refusal({ ...state.boundaryBlock, code: 'BILLING_REPLAY_REQUOTE_REQUIRED', retryable: false });
+  }
   return refusal(state.boundaryBlock || {
     retryable: true,
     code: 'BILLING_REPLAY_RECHECK_FAILED',

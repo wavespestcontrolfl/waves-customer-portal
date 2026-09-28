@@ -297,6 +297,10 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
+    if (meta?.source_entry_point === 'previsit_balance_reminder') {
+      const verdict = await require('../previsit-balance-reminder').previsitReplayQuoteEligible(meta, database);
+      return verdict.ok === true ? { eligible: true } : refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
+    }
     const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, annualPrepayReminderRefusal,
       invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {

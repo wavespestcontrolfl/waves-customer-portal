@@ -12,8 +12,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "25b8b90d3e49c4787573b43593a4369d703e6c0f83868e47b94d57bcc816e709"
     },
     "slug": "white-grub",
     "common_name": "White Grub",
@@ -330,8 +331,9 @@
       "https://ask.ifas.ufl.edu/publication/IN361"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Re-read UF/IFAS EDIS IN361/EENY204 (Mizell) directly and confirmed: overwintering movement indoors happens progressively later moving south (October in Michigan, November-January in north Florida); the document never separately characterizes south/southwest Florida's aggregation frequency. Range stays 'occasional' and peak_months (Dec-Feb) is used only as a reasonable extension of that same documented north-to-south gradient further south -- neither is claimed as a confirmed SWFL figure."
+      "status": "owner_approved",
+      "notes": "Re-read UF/IFAS EDIS IN361/EENY204 (Mizell) directly and confirmed: overwintering movement indoors happens progressively later moving south (October in Michigan, November-January in north Florida); the document never separately characterizes south/southwest Florida's aggregation frequency. Range stays 'occasional' and peak_months (Dec-Feb) is used only as a reasonable extension of that same documented north-to-south gradient further south -- neither is claimed as a confirmed SWFL figure. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "56b067ef6f474a61c0c71a41b028784c8f5c0d3464be60944c65d6994624c509"
     },
     "role": "nuisance",
     "risk": "irritant",
@@ -447,8 +449,9 @@
       "https://ask.ifas.ufl.edu/publication/IN327"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look. Generic ladybug/ladybird names resolve to the shared lady-beetles subgroup; this entry requires a native qualifier."
+      "status": "owner_approved",
+      "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look. Generic ladybug/ladybird names resolve to the shared lady-beetles subgroup; this entry requires a native qualifier. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "af6ca4785ca618b2914793f540cb8d00a3824e632fa1f0e75b31c044965941d2"
     },
     "role": "beneficial",
     "risk": "low",
@@ -568,8 +571,9 @@
       "https://ask.ifas.ufl.edu/publication/IN156"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Range in SWFL marked occasional; it's naturally present and also released commercially, but homeowners rarely notice or report it, so confidence is moderate."
+      "status": "owner_approved",
+      "notes": "Range in SWFL marked occasional; it's naturally present and also released commercially, but homeowners rarely notice or report it, so confidence is moderate. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "36acc4d2c10a779d7959689ea5271248ad6fb80d8e559d7da689af55ef1c6562"
     },
     "role": "beneficial",
     "risk": "low",
@@ -790,8 +794,9 @@
       "https://ask.ifas.ufl.edu/publication/IN759"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Re-checked UF/IFAS EDIS IN759 directly this session: it covers appearance, horns and handling but gives no Florida regional frequency or abundance data for Strategus species at all -- not even statewide. Range is kept at 'occasional', this catalog's standard cautious default when no frequency source exists, rather than asserted as a confirmed figure."
+      "status": "owner_approved",
+      "notes": "Re-checked UF/IFAS EDIS IN759 directly this session: it covers appearance, horns and handling but gives no Florida regional frequency or abundance data for Strategus species at all -- not even statewide. Range is kept at 'occasional', this catalog's standard cautious default when no frequency source exists, rather than asserted as a confirmed figure. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "6c66f1d2ca150490964f61fb7cfd411bd0133bc35fcea7013073a933fc090cb5"
     },
     "role": "harmless_visitor",
     "risk": "low",
@@ -895,8 +900,9 @@
       "https://ask.ifas.ufl.edu/publication/IN242"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Re-fetched UF/IFAS EDIS IN242 directly this session: it confirms the species occurs in Florida and documents a real late-May Florida collection record, though not a peak-month range. peak_months (May-Jul) anchors on that Florida record, broadly corroborated (not confirmed) by a general, non-Florida-specific source (Animal Diversity Web) describing June-July adult abundance. No SWFL-specific data exists, but this is the best Florida-anchored basis available, so season_basis moves from 'unverified' to 'observed' rather than being left fully unresolved."
+      "status": "owner_approved",
+      "notes": "Re-fetched UF/IFAS EDIS IN242 directly this session: it confirms the species occurs in Florida and documents a real late-May Florida collection record, though not a peak-month range. peak_months (May-Jul) anchors on that Florida record, broadly corroborated (not confirmed) by a general, non-Florida-specific source (Animal Diversity Web) describing June-July adult abundance. No SWFL-specific data exists, but this is the best Florida-anchored basis available, so season_basis moves from 'unverified' to 'observed' rather than being left fully unresolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "ebe64c2b8fa29dca478f13c2c144310f344ba404639e47418a815b5fd94adde4"
     },
     "role": "beneficial",
     "risk": "low",
@@ -1012,8 +1018,9 @@
       "https://journals.flvc.org/edis/article/view/118865"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "d8189366e1efa8a45ce70cac6b55dc5321d298b3bad824a0f4b270abf3953be9"
     },
     "role": "beneficial",
     "risk": "low",
@@ -1124,8 +1131,9 @@
       "https://ask.ifas.ufl.edu/topics/carabidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Generic family-level entry; Florida hosts many ground beetle species with varied size/color, so traits describe the common pattern homeowners see rather than one species. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match."
+      "status": "owner_approved",
+      "notes": "Generic family-level entry; Florida hosts many ground beetle species with varied size/color, so traits describe the common pattern homeowners see rather than one species. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "f146f784ef70a6a86123dd8cd51375cab99300b788a6b6d028052d202ec026c2"
     },
     "role": "beneficial",
     "risk": "defensive",
@@ -1701,8 +1709,9 @@
       "https://journals.flvc.org/edis/article/view/112502"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Returned to draft after removing the generic 'billbug' and 'billbugs' aliases, which cannot identify this hunting billbug subspecies; owner re-approval is required."
+      "status": "owner_approved",
+      "notes": "Returned to draft after removing the generic 'billbug' and 'billbugs' aliases, which cannot identify this hunting billbug subspecies; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "217f9e14cd8d7397c8b4ea31ff53afe8a158dd3fdce1fbb5d5e5e058e23827f1"
     },
     "role": "lawn_pest",
     "risk": "low",

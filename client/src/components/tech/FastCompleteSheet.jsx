@@ -6,7 +6,7 @@
 // for what is, in practice, a quick targeted treatment.
 //
 // Records only what the application record needs for the HOUSE PEST MIX
-// (Taurus SC, Talstar P, surfactant — lib/pest-default-mix.js): which of
+// (Taurus SC, Atticus Talak 7.9 F, LESCO 90/10 surfactant — lib/pest-default-mix.js): which of
 // those went down, their amounts and rates, pests targeted, where, how, and
 // the activity seen when the server keeps a tech rating. Any other product
 // goes through the full completion screen, which owns per-product

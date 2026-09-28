@@ -297,6 +297,32 @@ describe('late-payment checker email sidecar', () => {
     expect(activityInsert.insert).not.toHaveBeenCalled();
   });
 
+  test.each([
+    [{ sent: false, deliveryOutcome: 'uncertain', deferred: true, retryable: true, bellPersisted: true }, false],
+    [{ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }, true],
+  ])('settles a committed current App bell after native/audit failure: %j', async (appResult, throws) => {
+    const occurredAt = new Date('2026-05-20T14:00:00Z');
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00Z' };
+    if (throws) sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit acknowledgement lost'), { providerOutcome: appResult }));
+    else sendCustomerMessage.mockResolvedValueOnce(appResult);
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {}, occurred_at: occurredAt }));
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(4).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: null } })],
+      notification_prefs: [chain({ first: { billing_channels: ['push'] } })],
+    });
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(result).toMatchObject({ notified: 1, skipped: 0 });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(activityInsert.insert).toHaveBeenCalled();
+    expect(activityInsert.insert.mock.calls[0][0]).not.toHaveProperty('created_at');
+  });
+
   test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
     const invoice = {
       id: 'inv-1',

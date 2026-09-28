@@ -44,7 +44,13 @@ const MATCH_RULES = [
     programKey: 'cockroach',
     visit: 2,
     reason: 'american_roach_exterior',
+    // The catalog names the exterior-species knockdown "Initial Native Roach
+    // Knockdown Service" (pest_initial_palmetto_knockdown); without these it
+    // fell through to the generic cockroach rule and the German interior
+    // cleanout visit (Codex/pre-push audit on #5049).
+    serviceKeys: ['pest_initial_palmetto_knockdown'],
     terms: [
+      'native roach',
       'american roach',
       'large roach',
       'large roach knockdown',

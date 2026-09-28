@@ -100,8 +100,9 @@
       "https://en.wikipedia.org/wiki/Anisomorpha_buprestoides"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Peak months (fall mating season) are from general knowledge, not directly cited."
+      "status": "owner_approved",
+      "notes": "Peak months (fall mating season) are from general knowledge, not directly cited. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "9f6547a330f700c70b5472ec0c5dddda0a64892fd1e0df9564de3ea49eb9e3bb"
     },
     "role": "harmless_visitor",
     "risk": "irritant",
@@ -203,8 +204,9 @@
       "https://en.wikipedia.org/wiki/Stagmomantis_carolina"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names mantises explicitly)."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names mantises explicitly). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "473e3608b4f6588da59c27f89c1ef635f0ac1b22de0b405047bd9a8b3aa07e6b"
     },
     "role": "beneficial",
     "risk": "defensive",
@@ -310,8 +312,9 @@
       "https://en.wikipedia.org/wiki/Dragonfly"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names large dragonflies explicitly)."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names large dragonflies explicitly). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "07349f126a0c2fe6ad981ead7800872cacf671543b78eca2749e95bb29f9e45a"
     },
     "role": "beneficial",
     "risk": "defensive",
@@ -532,8 +535,9 @@
       "https://en.wikipedia.org/wiki/Cicada"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5eebf8deb759197f65b601cf4542dbf4cc799f6976769e4ab72610a8ed600355"
     },
     "role": "harmless_visitor",
     "risk": "low",
@@ -645,8 +649,9 @@
       "https://en.wikipedia.org/wiki/Antlion"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Bite risk to people is extremely rare per the source (one documented case); flagged bites:true for honesty but framed as low-concern in copy/safety_line."
+      "status": "owner_approved",
+      "notes": "Bite risk to people is extremely rare per the source (one documented case); flagged bites:true for honesty but framed as low-concern in copy/safety_line. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "12c5eca5275029c30f1d05aca9affd93883e32ceb5b52d324201317a951aff7d"
     },
     "role": "beneficial",
     "risk": "defensive",

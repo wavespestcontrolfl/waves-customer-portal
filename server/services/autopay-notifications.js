@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 const db = require('../models/db');
 const logger = require('./logger');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
@@ -68,7 +69,7 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
       result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: err.message };
     }
     if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
-    if (result.deliveryOutcome === 'accepted') {
+    if (billingLegDeliveryState(channel, result)) {
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
         amountCents,
         details: { charge_date: chargeDate, channel },

@@ -777,8 +777,9 @@
       "https://ask.ifas.ufl.edu/publication/IN144"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Entry covers the several common household carpet beetle species (Anthrenus, Attagenus) collectively. Confirmed via UF/IFAS EDIS IN873 (Common Carpet Beetle): \"may also cause dermatitis when human skin comes in contact with shed larval skins.\" IN144 (Black Carpet Beetle) adds that people in close contact may have allergic reactions to beetle fragments, cast skins or dust. Safety line kept as contact/handling-based irritation, not a bite or sting."
+      "status": "owner_approved",
+      "notes": "Entry covers the several common household carpet beetle species (Anthrenus, Attagenus) collectively. Confirmed via UF/IFAS EDIS IN873 (Common Carpet Beetle): \"may also cause dermatitis when human skin comes in contact with shed larval skins.\" IN144 (Black Carpet Beetle) adds that people in close contact may have allergic reactions to beetle fragments, cast skins or dust. Safety line kept as contact/handling-based irritation, not a bite or sting. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "cb8513d724b04862f351706bd079768106317ca25bd31202057fa34b6223b289"
     },
     "role": "nuisance",
     "risk": "irritant",
@@ -896,8 +897,9 @@
       "https://ask.ifas.ufl.edu/ig090"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-223/IG090, \"Clothes Moths\" (covers the webbing clothes moth as the most commonly encountered species). It confirms adult size (1/4 to 1/2 inch), golden/yellowish coloring with unspotted wings, and larvae that are white with a dark head and are stationary, feeding in one spot under a silk tube (unlike the portable-case-making behavior of the related case-making clothes moth). Traits corrected accordingly (removed an inaccurate 'portable case' description that actually applies to the other species). No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim is resolved."
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-223/IG090, \"Clothes Moths\" (covers the webbing clothes moth as the most commonly encountered species). It confirms adult size (1/4 to 1/2 inch), golden/yellowish coloring with unspotted wings, and larvae that are white with a dark head and are stationary, feeding in one spot under a silk tube (unlike the portable-case-making behavior of the related case-making clothes moth). Traits corrected accordingly (removed an inaccurate 'portable case' description that actually applies to the other species). No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim is resolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "74ced610aaa5fb85aad1e8c0e24c7b56d5d4dc79368dd5c7c705f7a6b0c67356"
     },
     "role": "nuisance",
     "risk": "low",
