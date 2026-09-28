@@ -54,15 +54,9 @@ const FINAL_NOTICE_CAUSES = {
 async function alertFinalNoticeMissed(message, cause) {
   if (!isFinalSenderRenderedEmail(message) || !message?.id) return;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return;
-  const db = require('../models/db');
   const logger = require('./logger');
   const dedupeKey = `billing-final-notice-missed:${message.id}`;
   try {
-    const existing = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .first('id');
-    if (existing) return;
     const customerId = String(message.recipient_type || '').toLowerCase() === 'customer' ? message.recipient_id || null : null;
     await require('./notification-service').notifyAdmin(
       'alert',
@@ -70,7 +64,9 @@ async function alertFinalNoticeMissed(message, cause) {
       `A final ${message.template_key} email was not delivered (${FINAL_NOTICE_CAUSES[cause] || cause}) and will not be re-sent; no later reminder follows. Contact the customer directly.`,
       {
         link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
-        metadata: { dedupeKey, customer_id: customerId, original_message_id: message.id, template_key: message.template_key, cause },
+        // notifyAdmin's own dedupe (advisory lock + metadata key): once per email.
+        dedupeKey,
+        metadata: { customer_id: customerId, original_message_id: message.id, template_key: message.template_key, cause },
       },
     );
   } catch (err) {

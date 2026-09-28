@@ -338,7 +338,7 @@ describe('attemptRecovery codex-fix behaviors', () => {
     expect(finalAlerts).toHaveLength(final ? 1 : 0);
     if (final) {
       expect(finalAlerts[0][2]).toContain('Contact the customer directly');
-      expect(finalAlerts[0][3].metadata).toMatchObject({ dedupeKey: 'billing-final-notice-missed:orig1', cause: 'bounced' });
+      expect(finalAlerts[0][3]).toMatchObject({ dedupeKey: 'billing-final-notice-missed:orig1', metadata: { cause: 'bounced' } });
     }
   });
 
