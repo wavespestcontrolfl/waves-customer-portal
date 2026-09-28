@@ -164,6 +164,7 @@ const SPANISH_COORDINATED_PREDICATE_STEM = '(?:revis|confirm|avis|prepar|verific
 const SPANISH_COORDINATED_PREDICATE_ENDING = '(?:o|as|a|amos|áis|an|e|es|emos|éis|en|é|aste|ó|aron|í|iste|ió|imos|ieron|aba|abas|ábamos|aban|ía|ías|íamos|ían|aré|arás|ará|aremos|aréis|arán|eré|erás|erá|eremos|eréis|erán|iré|irás|irá|iremos|iréis|irán)';
 const SPANISH_COORDINATED_STAFF_PREDICATE_RE = new RegExp(`^(?:(?:va(?:n|mos)?\\s+a\\s+${SPANISH_COORDINATED_PREDICATE_STEM}(?:ar|er|ir))|${SPANISH_COORDINATED_PREDICATE_STEM}${SPANISH_COORDINATED_PREDICATE_ENDING}|(?:hago|hace(?:mos|n)?|hizo|hicieron|tengo|tiene(?:n)?|estoy|est[aá](?:n|bamos)?|qued[oó]|queda(?:n)?|pongo|pone(?:mos|n)?|doy|da(?:mos|n)?|pido|pide(?:n)?|pidi[oó]|pidieron))(?![a-záéíóúñü])`, 'i');
 const SPANISH_EXTERNAL_STAFF_QUALIFIER_RE = /^(?:municipal|estatal|federal|regional|provincial|distrital|nacional|comarcal|gubernamental|extern[oa]|intern[oa]|privad[oa]|p[uú]blic[oa]|corporativ[oa]|administrativ[oa]|comercial|institucional|departamental)(?:\s|$)/i;
+const SPANISH_CASED_PROPER_NAME_RE = /^(?:(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+|[A-ZÁÉÍÓÚÑ]{2,})(?:\s+(?:de|del|la|las|los|y|[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+|[A-ZÁÉÍÓÚÑ]{2,}))*)$/;
 
 function spanishStaffPrefix(actor) {
   const phrase = String(actor || '').trim();
@@ -180,6 +181,7 @@ function spanishActorPhraseKind(actor) {
   if (wavesIdentity) return !wavesIdentity[1] || spanishProperNamePhrase(wavesIdentity[1]) ? 'staff' : 'other';
   const namedStaff = /(?:t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])$/i.test(staff.prefix);
   if (namedStaff && !SPANISH_EXTERNAL_STAFF_QUALIFIER_RE.test(staff.identity)
+      && SPANISH_CASED_PROPER_NAME_RE.test(staff.identity)
       && spanishProperNamePhrase(staff.identity)) return 'staff';
   return 'other';
 }
@@ -187,22 +189,27 @@ function spanishActorPhraseKind(actor) {
 function spanishCoordinatedStaffKind(clause) {
   const staff = spanishStaffPrefix(clause);
   if (!staff) return null;
+  const words = staff.identity.split(/\s+/);
+  const predicateAt = words.findIndex((_, index) => (
+    SPANISH_COORDINATED_STAFF_PREDICATE_RE.test(words.slice(index).join(' '))
+  ));
+  if (predicateAt >= 0) {
+    return spanishActorPhraseKind([staff.prefix, ...words.slice(0, predicateAt)].join(' '));
+  }
   if (/^de\s+Waves\b/i.test(staff.identity)) return 'staff';
   if (/^(?:de|del)\b/i.test(staff.identity)) return 'other';
-  const predicate = staff.identity.replace(/^local\s+/i, '');
-  if (SPANISH_COORDINATED_STAFF_PREDICATE_RE.test(predicate)) return 'staff';
-  return /(?:t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])$/i.test(staff.prefix) ? null : 'other';
+  return 'other';
 }
 
 function spanishCoordinatedSubject(beforeClaim) {
   const conjunction = beforeClaim.match(/\by\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\s+)?$/i);
   if (!conjunction) return null;
   const clause = beforeClaim.slice(0, conjunction.index).split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
-  const staffKind = spanishCoordinatedStaffKind(clause);
-  if (staffKind) return staffKind;
   const namedSubject = SPANISH_COORDINATED_NAMED_SUBJECT_RE.exec(clause)?.[1];
   const namedKind = spanishActorPhraseKind(namedSubject);
   if (namedKind) return namedKind;
+  const staffKind = spanishCoordinatedStaffKind(clause);
+  if (staffKind) return staffKind;
   const subject = clause.match(SPANISH_CLAUSE_SUBJECT_RE)?.[1]
     || clause.match(new RegExp(`^\\s*(${SPANISH_NAME_WORD})\\b`, 'i'))?.[1];
   if (!subject) return null;
@@ -826,7 +833,7 @@ const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(
 // then a SECOND hour. A lone Spanish number elsewhere (a count, a price, a
 // house number) never sits in that exact shape, so it never collides.
 const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
-const SPANISH_QUALITATIVE_VISIT_TIME_RE = /\b(?:a\s+(?:primera|[uú]ltima)\s+hora(?:\s+(?:de\s+la\s+(?:mañana|tarde|noche)|del\s+d[ií]a))?|a\s+media\s+(?:mañana|tarde)|al\s+(?:amanecer|anochecer|(?:principio|comienzo|inicio|final|cierre)\s+del\s+d[ií]a))\b/i;
+const SPANISH_QUALITATIVE_VISIT_TIME_RE = /\b(?:(?:(?:a|para)\s+la\s+hora|antes|despu[eé]s)\s+(?:del\s+(?:desayuno|almuerzo)|de\s+la\s+(?:comida|cena)|de\s+(?:desayunar|almorzar|comer|cenar))|durante\s+(?:el\s+(?:desayuno|almuerzo)|la\s+(?:comida|cena))|a\s+(?:primera|[uú]ltima)\s+hora(?:\s+(?:de\s+la\s+(?:mañana|tarde|noche)|del\s+d[ií]a))?|a\s+media\s+(?:mañana|tarde)|al\s+(?:amanecer|anochecer|(?:principio|comienzo|inicio|final|cierre)\s+del\s+d[ií]a))\b/i;
 
 // A time or date wherever it appears: a clock time, a calendar date, a
 // weekday with a part of day, a window between two hours, or an hour that
@@ -3138,9 +3145,11 @@ const ENGLISH_EVIDENCE_WORDS = [
   'processed', 'entered', 'created', 'captured', 'reservice', 'reservation', 'successful', 'successfully',
   'proposal', 'proposals', 'deliver', 'delivers', 'delivered', 'delivering', 'delivery',
   'callback', 'callbacks', 'promise', 'promises', 'promised', 'promising',
+  'message', 'messages',
   'approve', 'approves', 'approved', 'approving', 'approval',
   'arrange', 'arranges', 'arranged', 'arranging', 'arrangement',
   'guarantee', 'guarantees', 'guaranteed', 'guaranteeing',
+  'acknowledge', 'acknowledges', 'acknowledged', 'acknowledging', 'acknowledgement', 'acknowledgment', 'acknowledgements', 'acknowledgments',
   // Contractions ("Don't worry.", "It's done.") and short replies.
   "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
   "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",
