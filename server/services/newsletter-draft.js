@@ -933,9 +933,9 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
       // spreading — only the DB-locked eventUrl below may render as a link.
       ...sanitizeCommentaryFields(ev),
       eventId: row.id,
-      // The locked occurrence instant, persisted on the send
-      // (event_occurrences) so the sender stamps the date the email shows.
-      startAt: startAt ? startAt.toISOString() : null,
+      // The locked occurrence, persisted on the send (event_occurrences) so
+      // the sender stamps the date the email shows.
+      startAt: row.start_at,
       date,
       dateStr,
       timeStr,
@@ -1997,6 +1997,22 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   return { send, draft };
 }
 
+/**
+ * Occurrence snapshot for a send's event list: { [eventId]: start_at ISO },
+ * read when the list is saved. Written together with event_ids by every
+ * Compose save (POST / PATCH /sends), because the Compose client renders the
+ * email from the events' current dates and saves minutes later; the sender
+ * stamps last_featured_occurrence_at from it.
+ */
+async function snapshotEventOccurrences(knex, eventIds) {
+  const ids = (Array.isArray(eventIds) ? eventIds : []).map(String).filter(Boolean);
+  if (!ids.length) return JSON.stringify({});
+  const rows = await knex('events_raw').whereIn('id', ids).select('id', 'start_at');
+  return JSON.stringify(Object.fromEntries(rows
+    .filter((r) => r.start_at)
+    .map((r) => [String(r.id), new Date(r.start_at).toISOString()])));
+}
+
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
@@ -2027,13 +2043,14 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     // send (the row itself may be advanced in place before delivery).
     event_occurrences: JSON.stringify(Object.fromEntries((draft.events || [])
       .filter((e) => e.eventId && e.startAt)
-      .map((e) => [String(e.eventId), e.startAt]))),
+      .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]))),
   }).returning('*');
   return send;
 }
 
 module.exports = {
   INTERACTIVE_DRAFT_TIMEOUT_MS,
+  snapshotEventOccurrences,
   resolveIssueReference,
   createNewsletterDraft,
   persistNewsletterDraft,

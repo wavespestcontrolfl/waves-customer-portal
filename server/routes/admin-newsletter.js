@@ -38,7 +38,9 @@ const {
 } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
-const { createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS } = require('../services/newsletter-draft');
+const {
+  createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS, snapshotEventOccurrences,
+} = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
   filterPreviouslyFeaturedIdentities,
@@ -613,6 +615,7 @@ router.post('/sends', async (req, res, next) => {
       created_by: req.technicianId || null,
       auto_share_social: autoShareSocial !== false,
       event_ids: JSON.stringify(safeEventIds),
+      event_occurrences: await snapshotEventOccurrences(db, safeEventIds),
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -723,6 +726,8 @@ router.patch('/sends/:id', async (req, res, next) => {
       newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       event_ids: nextEventIds,
+      // The occurrence snapshot moves with the event list.
+      ...(eventIds !== undefined ? { event_occurrences: await snapshotEventOccurrences(db, JSON.parse(nextEventIds)) } : {}),
       updated_at: new Date(),
       ...(invalidatesProof ? {
         status: 'draft',
