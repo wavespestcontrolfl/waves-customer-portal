@@ -69,32 +69,33 @@ function enabled() {
 // reads chronologically and the "+N more" tail drops the latest stops. A
 // visit whose window starts after the send time (an evening stop) hasn't
 // happened yet, so it is left out; a visit with no window is kept.
-async function findOpenVisitsToday(now) {
+async function findOpenVisitsToday(now, technicianId = null) {
   const today = etDateString(now);
   const { hour, minute } = etParts(now);
   const nowHHMM = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-  return db('scheduled_services as s')
+  let query = db('scheduled_services as s')
     .join('technicians as t', 's.technician_id', 't.id')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.scheduled_date', today)
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
     .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
-    .orderBy('s.window_start', 'asc')
-    .select(
-      's.id as visit_id',
-      's.visit_id as stop_id',
-      's.status',
-      's.window_start',
-      's.service_type',
-      's.technician_id',
-      't.name as tech_name',
-      't.employment_status',
-      't.field_dispatchable',
-      't.phone as tech_phone',
-      'c.first_name as cust_first_name',
-      'c.last_name as cust_last_name',
-    );
+    .orderBy('s.window_start', 'asc');
+  if (technicianId) query = query.where('s.technician_id', technicianId);
+  return query.select(
+    's.id as visit_id',
+    's.visit_id as stop_id',
+    's.status',
+    's.window_start',
+    's.service_type',
+    's.technician_id',
+    't.name as tech_name',
+    't.employment_status',
+    't.field_dispatchable',
+    't.phone as tech_phone',
+    'c.first_name as cust_first_name',
+    'c.last_name as cust_last_name',
+  );
 }
 
 // Flat rows -> one entry per technician, in first-seen (= earliest window)
@@ -170,10 +171,13 @@ function clock12(value) {
   return `${hour12}:${String(m).padStart(2, '0')} ${meridiem}`;
 }
 
+// Plain " - " separators: a middle dot or em dash is outside GSM-7 and would
+// force the whole text into UCS-2 (twice the segments, and long UCS-2 texts
+// have gone missing on handsets — see the GSM normalizer's notes).
 function visitLine(visit) {
-  const time = clock12(visit.windowStart) || '—';
+  const time = clock12(visit.windowStart) || 'No time';
   const services = (visit.serviceTypes || []).join(' + ') || 'Service';
-  const line = `${time} · ${customerLabel(visit)} · ${services}`;
+  const line = `${time} - ${customerLabel(visit)} - ${services}`;
   return NOT_STARTED.has(visit.status) ? `${line} (not started)` : line;
 }
 
@@ -272,6 +276,13 @@ async function smsNudge(tech, cell, message, etDate) {
       // OWNER_SMS_DISABLED still silences it (checked separately).
       allowOwnerSms: true,
     });
+    // OWNER_SMS_DISABLED / the SMS gate answer success:true + suppressed:
+    // nothing reached the phone, so the slot goes back for a later retry.
+    if (result?.suppressed) {
+      logger.info(`[tech-open-visit-nudge] text suppressed for ${tech.id}`);
+      await releaseClaim(tech.id, etDate);
+      return false;
+    }
     if (!result || result.success !== false) return true;
     logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.code || 'refused'}`);
     if (definitelyNotSent(result.deliveryOutcome)) await releaseClaim(tech.id, etDate);
@@ -309,6 +320,23 @@ async function pushNudge(tech, visits, etDate) {
   return false;
 }
 
+// Re-read this tech's open stops at the send boundary: a visit finished or
+// reassigned, or a phone changed, after the sweep read must not be listed or
+// texted to the old recipient. Nothing left open gives the slot back.
+async function deliverNudge(techId, etDate, now) {
+  const live = groupByTechnician(await findOpenVisitsToday(now, techId))
+    .find((g) => g.tech.id === String(techId));
+  if (!live || !isAssignable(live.tech)) {
+    logger.info(`[tech-open-visit-nudge] skip ${techId}: nothing open at send time`);
+    await releaseClaim(techId, etDate);
+    return false;
+  }
+  const cell = ownerCell(live.tech);
+  return cell
+    ? smsNudge(live.tech, cell, buildMessage(live.visits), etDate)
+    : pushNudge(live.tech, live.visits, etDate);
+}
+
 /**
  * Runs the whole sweep once: gate check, today's open visits grouped by
  * technician, eligibility + phone filtering, per-technician dedupe claim,
@@ -343,7 +371,6 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       skipped += 1;
       continue;
     }
-    const cell = ownerCell(tech);
     const message = buildMessage(visits);
     let claimed;
     try {
@@ -362,10 +389,7 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
       continue;
     }
 
-    const delivered = cell
-      ? await smsNudge(tech, cell, message, etDate)
-      : await pushNudge(tech, visits, etDate);
-    if (delivered) sent += 1;
+    if (await deliverNudge(tech.id, etDate, now)) sent += 1;
     else skipped += 1;
   }
 
@@ -390,5 +414,6 @@ module.exports = {
     definitelyNotSent,
     pushNudge,
     smsNudge,
+    deliverNudge,
   },
 };

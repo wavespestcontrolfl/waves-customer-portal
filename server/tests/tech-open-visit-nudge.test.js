@@ -218,8 +218,8 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
     await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
     const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
     expect(lines[0]).toContain('Tap to close out:');
-    expect(lines[1]).toBe('9:00 AM · Ana R. · Pest Control');
-    expect(lines[2]).toBe('11:00 AM · Bo L. · Pest Control (not started)');
+    expect(lines[1]).toBe('9:00 AM - Ana R. - Pest Control');
+    expect(lines[2]).toBe('11:00 AM - Bo L. - Pest Control (not started)');
   });
 
   test('a visit whose window starts after the send time (an evening stop) is left out; no window is kept', async () => {
@@ -407,7 +407,7 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
     const lines = TwilioService.sendSMS.mock.calls[0][1].split('\n');
     expect(lines[0]).toContain('Waves: 2 visits from today are still open');
     // One member started → the stop is started (no "(not started)").
-    expect(lines[1]).toBe('9:00 AM · Ana R. · Pest Control + Lawn Care');
+    expect(lines[1]).toBe('9:00 AM - Ana R. - Pest Control + Lawn Care');
     expect(lines).toHaveLength(3);
     const payload = JSON.parse(notifChain.insert.mock.calls[0][0].payload);
     expect(payload.visit_ids).toEqual(['v1', 'v2', 'v3']);
@@ -465,5 +465,79 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
 
     TwilioService.sendSMS.mockResolvedValueOnce({ success: false, deliveryOutcome: 'uncertain', error: 'timeout' });
     expect(await run()).toBe(false);
+  });
+});
+
+describe('send boundary and GSM-7 (Codex r1 comment)', () => {
+  beforeEach(() => { process.env[GATE] = 'true'; });
+
+  test('the text is GSM-7 only — no middle dot or em dash forcing UCS-2', async () => {
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a', windowStart: null })];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      return chain();
+    });
+    await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    const body = TwilioService.sendSMS.mock.calls[0][1];
+    expect(body).not.toMatch(/[·—–]/);
+    expect(body).toContain('No time - Ana R. - Pest Control');
+  });
+
+  test('a text suppressed by OWNER_SMS_DISABLED gives the slot back and is not counted as sent', async () => {
+    TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'owner-sms-disabled', suppressed: true });
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    const notifChains = [];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
+  });
+
+  test('re-read at send time: a stop closed after the sweep is dropped from the text', async () => {
+    const sweep = [
+      visitRow({ id: 'v1', techId: 'tech-a', custFirst: 'Ana', custLast: 'Ruiz', windowStart: '09:00:00' }),
+      visitRow({ id: 'v2', techId: 'tech-a', custFirst: 'Bo', custLast: 'Lee', windowStart: '11:00:00' }),
+    ];
+    const atSend = [sweep[1]]; // v1 completed between the sweep and the send
+    let reads = 0;
+    const visitChains = [];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') {
+        reads += 1;
+        const c = chain({ select: jest.fn().mockResolvedValue(reads === 1 ? sweep : atSend) });
+        visitChains.push(c);
+        return c;
+      }
+      return chain();
+    });
+    await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    const body = TwilioService.sendSMS.mock.calls[0][1];
+    expect(body).toContain('Waves: 1 visit from today are still open');
+    expect(body).toContain('Bo L.');
+    expect(body).not.toContain('Ana R.');
+    // The send-time read is scoped to this technician.
+    expect(visitChains[1].where).toHaveBeenCalledWith('s.technician_id', 'tech-a');
+  });
+
+  test('re-read at send time: nothing left open → no text, slot given back', async () => {
+    const sweep = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    let reads = 0;
+    const notifChains = [];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') {
+        reads += 1;
+        return chain({ select: jest.fn().mockResolvedValue(reads === 1 ? sweep : []) });
+      }
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
   });
 });
