@@ -161,6 +161,28 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(question.id);
   });
 
+  test('overlapping claims are serialized: two concurrent claimers take one same-route row, never both', async () => {
+    await mockPg('opportunity_queue').insert([questionArticle(), categorySeed()]);
+    // Hold the claim lock from another session so both claimers start and
+    // queue up at the same moment, then release it.
+    const holder = await mockPg.client.acquireConnection();
+    try {
+      await holder.query('BEGIN');
+      await holder.query("SELECT pg_advisory_xact_lock(hashtext('opportunity_queue_claim'))");
+      let settled = 0;
+      const claims = [queue.claimNext({ minScore: 0 }), queue.claimNext({ minScore: 0 })]
+        .map((p) => p.then((r) => { settled += 1; return r; }));
+      await new Promise((r) => setTimeout(r, 150));
+      expect(settled).toBe(0); // both are waiting on the lock, not racing
+      await holder.query('COMMIT');
+      const results = await Promise.all(claims);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(await mockPg('opportunity_queue').where({ status: 'claimed' }).count('* as n').first()).toEqual({ n: '1' });
+    } finally {
+      await mockPg.client.releaseConnection(holder);
+    }
+  });
+
   test('unrelated routes and rows without a question are unaffected', async () => {
     await mockPg('opportunity_queue').insert([
       questionArticle({ status: 'claimed', claimed_at: new Date() }),

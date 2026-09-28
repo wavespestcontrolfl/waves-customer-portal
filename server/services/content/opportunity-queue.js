@@ -223,7 +223,15 @@ class OpportunityQueue {
     // See aeoQuestionLaneOpen — gate-off question rows are unclaimable.
     const whereAeoQuestionGate = aeoQuestionLaneOpen() ? '' : `AND bucket <> 'aeo_question_gap'`;
 
-    const result = await db.raw(
+    // Claims are serialized: the route fence below is a NOT EXISTS over OTHER
+    // rows, and FOR UPDATE SKIP LOCKED locks only the chosen row — two
+    // overlapping claims could each miss the other's uncommitted claim of a
+    // same-route row. The transaction-scoped advisory lock is taken in its
+    // own statement first, so the claim statement's snapshot is read after
+    // any earlier claim committed. Held only for this one UPDATE.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_queue_claim'))");
+      return trx.raw(
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
@@ -271,7 +279,8 @@ class OpportunityQueue {
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
-    );
+      );
+    });
     const row = result.rows?.[0];
     if (row) logger.info(`[opportunity-queue] claimed ${row.id} (${row.bucket}/${row.action_type}, score ${row.score}) by ${claimedBy}`);
     return row ? parseRow(row) : null;

@@ -18,6 +18,8 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn();
+  // claimNext runs its lock + claim in one transaction; the trx is the db.
+  fn.transaction = jest.fn((cb) => cb(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -107,7 +109,7 @@ describe('claimNext lifetime attempt budget', () => {
 
     await queue.claimNext({});
 
-    const [sql, bindings] = db.raw.mock.calls[0];
+    const [sql, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).toMatch(/attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count \+ 1 END/);
     expect(sql).toMatch(/attempt_count < \?::int/);
     expect(bindings[1]).toBe(5);
@@ -120,7 +122,7 @@ describe('claimNext lifetime attempt budget', () => {
 
     await queue.claimNext({});
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(bindings[1]).toBe(3);
   });
 
@@ -352,7 +354,7 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
 
       await queue.claimNext({});
 
-      const [sql] = db.raw.mock.calls[0];
+      const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
       expect(sql).toContain(`AND bucket <> 'listicle_family'`);
     } finally {
       spy.mockRestore();
@@ -365,7 +367,7 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
 
     await queue.claimNext({}); // dev-open gates: lane open
 
-    const [sql] = db.raw.mock.calls[0];
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).not.toContain(`bucket <> 'listicle_family'`);
   });
 
@@ -420,7 +422,7 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     db.mockImplementation(() => chain());
     db.raw.mockResolvedValue({ rows: [] });
     await queue.claimNext({});
-    expect(db.raw.mock.calls[0][0]).toContain(`AND bucket <> 'aeo_question_gap'`);
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).toContain(`AND bucket <> 'aeo_question_gap'`);
     const q = peekChain();
     db.mockImplementation(() => q);
     await queue.peek({});
@@ -432,7 +434,7 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     db.mockImplementation(() => chain());
     db.raw.mockResolvedValue({ rows: [] });
     await queue.claimNext({});
-    const [sql] = db.raw.mock.calls[0];
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM opportunity_queue route_fence/);
     expect(sql).toMatch(/route_fence\.bucket = 'aeo_question_gap' OR opportunity_queue\.bucket = 'aeo_question_gap'/);
     expect(sql).toContain("intercept_brief'->>'slug'");
@@ -447,7 +449,7 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     db.mockImplementation(() => chain());
     db.raw.mockResolvedValue({ rows: [] });
     await queue.claimNext({});
-    expect(db.raw.mock.calls[0][0]).not.toContain(`bucket <> 'aeo_question_gap'`);
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).not.toContain(`bucket <> 'aeo_question_gap'`);
     const q = peekChain();
     db.mockImplementation(() => q);
     await queue.peek({});
