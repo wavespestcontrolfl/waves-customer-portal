@@ -7,6 +7,17 @@
  * validation, storage and the two tables (visit_prep_submissions,
  * visit_prep_photos) — server/routes/appointment-public.js is the only
  * caller today. Sends nothing to anyone.
+ *
+ * Two invariants from a pre-push audit of the first cut:
+ * - The late `recheck` (persistLocked, below) runs on the WRITE's own
+ *   transaction, never the global pool — the caller already holds a
+ *   connection plus the stop's advisory lock, and a second global-pool
+ *   query from inside that hold is how concurrent uploads exhaust the pool.
+ * - Per-stop counts (visitPrepSummary/stopMemberIds) resolve CURRENT
+ *   scheduled_services membership at read time. `visit_prep_submissions
+ *   .visit_id` is written as a point-in-time record only — visit-groups can
+ *   attach/detach/regroup rows after the fact, so it is NEVER read back for
+ *   counting.
  */
 
 const db = require('../models/db');
@@ -125,21 +136,38 @@ function capReached(summary, adding = 1) {
     || summary.photoCount + adding > VISIT_PREP_LIMITS.photosPerVisit;
 }
 
-// Per-STOP counts: a grouped visit (svc.visit_id set) counts every
-// submission/photo recorded against ANY member of that stop; an ungrouped
-// row counts only its own scheduled_service_id. `conn` lets a caller pass a
+// The stop's CURRENT member scheduled_service_ids (Finding 2, pre-push
+// audit): resolved fresh from scheduled_services on every call, never from
+// visit_prep_submissions.visit_id — visit-groups can attach, detach, or
+// regroup rows without touching old submissions, so reading the SNAPSHOTTED
+// visit_id back would let photos silently drop off (or stay charged to) a
+// stop that has since changed. A grouped visit (svc.visit_id set) counts
+// every scheduled_services row CURRENTLY sharing that visit_id, in ANY
+// status — deliberately not narrowed to live/open rows, so the cap stays
+// conservative even for a member that just went en_route or terminal —
+// always including svc.id itself (it may not have committed its own
+// visit_id yet in a caller's in-memory copy); ungrouped, just [svc.id].
+async function stopMemberIds(svc, conn) {
+  if (!svc?.visit_id) return svc?.id ? [svc.id] : [];
+  const rows = await conn('scheduled_services').where({ visit_id: svc.visit_id }).select('id');
+  const ids = rows.map((r) => r.id);
+  if (svc.id && !ids.includes(svc.id)) ids.push(svc.id);
+  return ids;
+}
+
+// Per-STOP counts over the CURRENT member set (see stopMemberIds).
+// `visit_prep_photos.scheduled_service_id` is denormalized specifically so
+// this needs no join back through submissions. `conn` lets a caller pass a
 // transaction so the locked cap re-count reads consistent data.
 async function visitPrepSummary(svc, conn = db) {
-  const scopeColumn = svc?.visit_id ? 'visit_id' : 'scheduled_service_id';
-  const scopeValue = svc?.visit_id || svc?.id;
+  const ids = await stopMemberIds(svc, conn);
+  if (ids.length === 0) {
+    return { photoCount: 0, photosRemaining: VISIT_PREP_LIMITS.photosPerVisit, submissionCount: 0 };
+  }
 
   const [submissionRow, photoRow] = await Promise.all([
-    conn('visit_prep_submissions').where(scopeColumn, scopeValue).count('id as count').first(),
-    conn('visit_prep_photos as p')
-      .join('visit_prep_submissions as s', 'p.submission_id', 's.id')
-      .where(`s.${scopeColumn}`, scopeValue)
-      .count('p.id as count')
-      .first(),
+    conn('visit_prep_submissions').whereIn('scheduled_service_id', ids).count('id as count').first(),
+    conn('visit_prep_photos').whereIn('scheduled_service_id', ids).count('id as count').first(),
   ]);
 
   const photoCount = Number(photoRow?.count || 0);
@@ -254,7 +282,11 @@ async function uploadAll(scheduledServiceId, prepared) {
 async function persistLocked(trx, {
   uploaded, recheck, topic, locationOnProperty, note, entry,
 }) {
-  const current = await recheck();
+  // Called with OUR OWN transaction (Finding 1, pre-push audit) — recheck
+  // must do every read on this connection, never the global pool, or two
+  // concurrent locked writers can exhaust the pool waiting on each other's
+  // recheck while each already holds a connection plus the stop lock.
+  const current = await recheck(trx);
   if (!current) {
     throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
   }
@@ -275,6 +307,10 @@ async function persistLocked(trx, {
 
   const [submission] = await trx('visit_prep_submissions').insert({
     scheduled_service_id: current.id,
+    // Recorded as a snapshot of the stop at submission time ONLY — never
+    // read back for counting (Finding 2, pre-push audit; see
+    // visitPrepSummary/stopMemberIds above, which resolve current
+    // membership from scheduled_services instead).
     visit_id: current.visit_id || null,
     customer_id: current.customer_id,
     property_id: current.property_id || null,
@@ -337,11 +373,12 @@ async function withStopLock(svcId, fn) {
  * @param {string} [opts.topic]
  * @param {string} [opts.locationOnProperty]
  * @param {string} opts.entry
- * @param {() => Promise<object|null>} opts.recheck  called under the stop
- *   lock; must return the CURRENT eligible visit row (same shape as `svc`,
- *   at least id/customer_id/property_id/visit_id) or null when the visit is
- *   no longer eligible. REQUIRED — the caller (appointment-public.js) owns
- *   the eligibility rule and must not let this service go stale.
+ * @param {(trx: object) => Promise<object|null>} opts.recheck  called under
+ *   the stop lock WITH THAT TRANSACTION (never the global pool — see the
+ *   file header); must return the CURRENT eligible visit row (same shape as
+ *   `svc`, at least id/customer_id/property_id/visit_id) or null when the
+ *   visit is no longer eligible. REQUIRED — the caller (appointment-public.js)
+ *   owns the eligibility rule and must not let this service go stale.
  * @returns {Promise<{ created: boolean, summary: { photoCount, photosRemaining, submissionCount } }>}
  */
 async function createVisitPrepSubmission({
@@ -385,6 +422,6 @@ module.exports = {
   visitPrepSummary,
   createVisitPrepSubmission,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds,
   },
 };

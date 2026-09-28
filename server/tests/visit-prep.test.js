@@ -34,8 +34,12 @@ function chain(table) {
   const api = {};
   let countMode = null;
   api.where = () => api;
+  api.whereIn = () => api;
   api.join = () => api;
-  api.select = async () => (table === 'visit_prep_photos' ? [] : []);
+  // No scheduled_services rows by default: stopMemberIds falls back to
+  // [svc.id] (see its own "always including svc.id" fallback), so an
+  // ungrouped/simple grouped test never needs to stub this.
+  api.select = async () => [];
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
   api.first = async () => {
     queries.push({ table, countMode });
@@ -140,21 +144,55 @@ describe('capReached — the ONE cap rule (route pre-check and the locked check 
   });
 });
 
-describe('visitPrepSummary — per-STOP scoping', () => {
+describe('visitPrepSummary / stopMemberIds — counts follow CURRENT stop membership', () => {
   beforeEach(() => { queries.length = 0; mockDb.mockClear(); mockDb.mockImplementation((table) => chain(table)); });
 
-  test('an ungrouped visit scopes counts by scheduled_service_id', async () => {
+  test('an ungrouped visit scopes counts by scheduled_service_id, no scheduled_services lookup needed', async () => {
     const summary = await visitPrepSummary({ id: 'svc-1', visit_id: null });
     expect(summary).toEqual({ photoCount: 0, photosRemaining: 6, submissionCount: 0 });
     expect(mockDb).toHaveBeenCalledWith('visit_prep_submissions');
+    expect(mockDb).toHaveBeenCalledWith('visit_prep_photos');
+    expect(mockDb).not.toHaveBeenCalledWith('scheduled_services');
   });
 
-  test('a grouped visit (visit_id set) scopes by visit_id, not the row id', async () => {
+  test('stopMemberIds resolves CURRENT scheduled_services membership, not any stored visit_id on submissions', async () => {
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'scheduled_services') {
+        api.select = async () => [{ id: 'svc-1' }, { id: 'svc-2' }];
+      }
+      return api;
+    });
+    const ids = await visitPrep._internal.stopMemberIds({ id: 'svc-1', visit_id: 'visit-9' }, mockDb);
+    expect(ids.sort()).toEqual(['svc-1', 'svc-2']);
+  });
+
+  test('stopMemberIds always includes svc.id even if the fresh membership read somehow omits it', async () => {
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'scheduled_services') api.select = async () => [{ id: 'svc-2' }];
+      return api;
+    });
+    const ids = await visitPrep._internal.stopMemberIds({ id: 'svc-1', visit_id: 'visit-9' }, mockDb);
+    expect(ids.sort()).toEqual(['svc-1', 'svc-2']);
+  });
+
+  test('a grouped visit counts submissions/photos across every CURRENT member id, via whereIn (no join)', async () => {
+    const seen = { submissionIds: null, photoIds: null };
+    mockDb.mockImplementation((table) => {
+      const api = chain(table);
+      if (table === 'scheduled_services') api.select = async () => [{ id: 'svc-1' }, { id: 'svc-2' }];
+      const originalWhereIn = api.whereIn;
+      api.whereIn = (col, ids) => {
+        if (table === 'visit_prep_submissions') seen.submissionIds = ids;
+        if (table === 'visit_prep_photos') seen.photoIds = ids;
+        return originalWhereIn.call(api, col, ids);
+      };
+      return api;
+    });
     await visitPrepSummary({ id: 'svc-1', visit_id: 'visit-9' });
-    // Both queries ran (submissions count + the photos join) — the
-    // scope-column choice itself is exercised end-to-end in the route and
-    // Postgres suites; here we just prove no query blew up on a grouped row.
-    expect(queries.length).toBeGreaterThanOrEqual(2);
+    expect(seen.submissionIds.sort()).toEqual(['svc-1', 'svc-2']);
+    expect(seen.photoIds.sort()).toEqual(['svc-1', 'svc-2']);
   });
 
   test('photosRemaining floors at zero, never negative', async () => {
@@ -162,7 +200,8 @@ describe('visitPrepSummary — per-STOP scoping', () => {
       const api = {};
       let mode = null;
       api.where = () => api;
-      api.join = () => api;
+      api.whereIn = () => api;
+      api.select = async () => [];
       api.count = () => { mode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
       api.first = async () => ({ count: mode === 'photos' ? 9 : 1 });
       return api;
@@ -295,6 +334,18 @@ describe('createVisitPrepSubmission', () => {
     });
     expect(result.created).toBe(true);
     expect(inserted[0]).toMatchObject({ customer_id: 'cust-RECHECKED', property_id: 'prop-RECHECKED', visit_id: 'visit-RECHECKED' });
+  });
+
+  test('recheck is called with the SAME transaction the write uses (Finding 1) — never the global pool', async () => {
+    const recheckSpy = jest.fn(async () => RECURRING_SVC);
+    const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
+    await createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: recheckSpy });
+    expect(recheckSpy).toHaveBeenCalledTimes(1);
+    // mockDb.transaction = async (fn) => fn(mockDb) — the trx IS the global
+    // mock object here, so this proves recheck receives the SAME connection
+    // the write's own transaction callback runs on, not a bare re-require
+    // of the plain db module.
+    expect(recheckSpy).toHaveBeenCalledWith(mockDb);
   });
 
   test('retries VISIT_STOP_MOVED up to twice, then answers PREP_NOT_AVAILABLE', async () => {

@@ -386,5 +386,133 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
         await realDb('scheduled_services').where({ id: svcId }).del();
       }
     });
+
+    test('photos added to a SOLO visit still count after it is grouped into a stop: membership is read from scheduled_services, not the stored visit_id', async () => {
+      const { visitPrepSummary } = require('../services/visit-prep');
+      let customerId; let svcAId; let svcBId; let visitId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId: svcAId } = await fixtureSvc(trx, { scheduled_date: '2099-03-01' }));
+        svcBId = randomUUID();
+        await trx('scheduled_services').insert({
+          id: svcBId, customer_id: customerId, scheduled_date: '2099-03-01',
+          service_type: 'lawn_care', status: 'confirmed', is_recurring: true,
+        });
+        // Four photos on A while it is still SOLO (submission visit_id = null).
+        const submissionId = randomUUID();
+        await trx('visit_prep_submissions').insert({
+          id: submissionId, scheduled_service_id: svcAId, visit_id: null,
+          customer_id: customerId, entry: 'appointment_page',
+        });
+        for (let i = 0; i < 4; i += 1) {
+          await trx('visit_prep_photos').insert({
+            id: randomUUID(), submission_id: submissionId, scheduled_service_id: svcAId,
+            s3_key: `visitprep/regroup-seed-${i}.jpg`, mime_type: 'image/jpeg', byte_size: 100,
+            image_sha256: sha256(jpegBytes(`regroup-seed-${i}`)), photo_index: i,
+          });
+        }
+        // Now the office groups A and B into one stop. Old submissions are
+        // NOT touched (visit-groups never rewrites them).
+        visitId = randomUUID();
+        await trx('service_visits').insert({
+          id: visitId, customer_id: customerId, scheduled_date: '2099-03-01',
+          stop_base_key: `${customerId}:2099-03-01`, stop_seq: 1, status: 'open', created_by: 'test',
+        });
+        await trx('scheduled_services').whereIn('id', [svcAId, svcBId]).update({ visit_id: visitId });
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+
+      try {
+        const svcB = { id: svcBId, customer_id: customerId, property_id: null, visit_id: visitId };
+        // B's summary sees A's four pre-grouping photos.
+        expect((await visitPrepSummary(svcB)).photoCount).toBe(4);
+        // 4 + 3 = 7 > 6: refused at the stop level even though B itself has none.
+        await expect(createVisitPrepSubmission({
+          svc: svcB, entry: 'appointment_page', recheck: async () => svcB,
+          files: ['x', 'y', 'z'].map((k) => ({ buffer: jpegBytes(`regroup-new-${k}`), mimetype: 'image/jpeg' })),
+        })).rejects.toMatchObject({ statusCode: 409, code: 'PREP_CAP_REACHED' });
+        // 4 + 2 = 6: exactly at the cap succeeds.
+        const ok = await createVisitPrepSubmission({
+          svc: svcB, entry: 'appointment_page', recheck: async () => svcB,
+          files: ['p', 'q'].map((k) => ({ buffer: jpegBytes(`regroup-new-${k}`), mimetype: 'image/jpeg' })),
+        });
+        expect(ok.created).toBe(true);
+        expect(ok.summary).toMatchObject({ photoCount: 6, photosRemaining: 0 });
+      } finally {
+        await realDb('scheduled_services').whereIn('id', [svcAId, svcBId]).del();
+        await realDb('service_visits').where({ id: visitId }).del();
+      }
+    });
+
+    test('a member moved OUT of a stop takes its photos with it and no longer counts toward the old stop', async () => {
+      const { visitPrepSummary } = require('../services/visit-prep');
+      let fixture;
+      const trx = await database.transaction();
+      try {
+        fixture = await fixtureGroupedStop(trx);
+        const seed = async (svcId, n, tag) => {
+          const submissionId = randomUUID();
+          await trx('visit_prep_submissions').insert({
+            id: submissionId, scheduled_service_id: svcId, visit_id: fixture.visitId,
+            customer_id: fixture.customerId, entry: 'appointment_page',
+          });
+          for (let i = 0; i < n; i += 1) {
+            await trx('visit_prep_photos').insert({
+              id: randomUUID(), submission_id: submissionId, scheduled_service_id: svcId,
+              s3_key: `visitprep/${tag}-${i}.jpg`, mime_type: 'image/jpeg', byte_size: 100,
+              image_sha256: sha256(jpegBytes(`${tag}-${i}`)), photo_index: i,
+            });
+          }
+        };
+        await seed(fixture.svcAId, 2, 'moved-a');
+        await seed(fixture.svcBId, 1, 'moved-b');
+        // Detach A from the stop; its submissions still carry the OLD visit_id.
+        await trx('scheduled_services').where({ id: fixture.svcAId }).update({ visit_id: null });
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+
+      try {
+        const svcA = { id: fixture.svcAId, customer_id: fixture.customerId, property_id: null, visit_id: null };
+        const svcB = { id: fixture.svcBId, customer_id: fixture.customerId, property_id: null, visit_id: fixture.visitId };
+        expect((await visitPrepSummary(svcA))).toMatchObject({ photoCount: 2, submissionCount: 1 });
+        expect((await visitPrepSummary(svcB))).toMatchObject({ photoCount: 1, submissionCount: 1 });
+      } finally {
+        await realDb('scheduled_services').whereIn('id', [fixture.svcAId, fixture.svcBId]).del();
+        await realDb('service_visits').where({ id: fixture.visitId }).del();
+      }
+    });
+
+    test('the recheck receives the write transaction itself, never the pool', async () => {
+      let customerId; let svcId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId } = await fixtureSvc(trx));
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+      try {
+        const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
+        let seen = null;
+        const result = await createVisitPrepSubmission({
+          svc, entry: 'appointment_page',
+          files: [{ buffer: jpegBytes('trx-recheck'), mimetype: 'image/jpeg' }],
+          recheck: async (conn) => { seen = conn; return svc; },
+        });
+        expect(result.created).toBe(true);
+        expect(seen).not.toBeNull();
+        expect(seen).not.toBe(realDb);
+        expect(seen.isTransaction).toBe(true);
+      } finally {
+        await realDb('scheduled_services').where({ id: svcId }).del();
+      }
+    });
   });
 });

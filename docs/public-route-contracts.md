@@ -2450,9 +2450,10 @@ grouped/ungrouped state the GET computes is `'upcoming'`, the token's
 membership is known (not `visitUnknown`), `customers.active === true`, the
 visit is recurring-lineage (a one-time visit is out of scope for this lane),
 and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
-it yet — same invariant the confirm write enforces; this whole derivation is
-ONE function, `deriveVisitPrepEligibility`, shared with the late recheck
-below so the rule can never drift between the two reads) — THEN a cheap,
+it yet — same invariant the confirm write enforces; the eligibility RULE
+is one function, `visitPrepEligibility`, that both this pre-check and the
+late recheck below feed — only the way `state` is READ differs, see below)
+— THEN a cheap,
 unlocked cap pre-check (409 `PREP_CAP_REACHED` via the shared `capReached()`
 rule — the visit already has 3 submissions, or one more photo would push it
 past 6) that runs BEFORE multer ever buffers a byte. ONLY THEN does `multer`
@@ -2473,9 +2474,19 @@ objects for that request deleted) — and ONLY THEN does the write take the
 CANONICAL stop lock (`visit-groups.js`'s `lockStopForRow`, the same
 advisory lock every other stop writer takes, retried up to twice on a
 concurrent stop move before answering `PREP_NOT_AVAILABLE`) and re-run,
-under that lock, on FRESH state: (1) a late recheck — the SAME
-`deriveVisitPrepEligibility` the pre-check used, reloaded via `loadByToken`
-and refused (`PREP_NOT_AVAILABLE`, nothing written) if the row is gone, its
+under that lock, on FRESH state: (1) a late recheck, run ENTIRELY on the
+write's own transaction connection (never the global pool — a locked
+writer already holds a connection plus the stop's advisory lock, and a
+second pool checkout from inside that hold is how concurrent uploads
+exhaust the pool): the row is reloaded with `loadByToken(token, trx)`, a
+grouped visit's live members are read with `visit-groups.js`'s
+`openMembers(trx, visit_id)` (the confirm path's own locked-membership
+read) and judged by the SAME pure rules the page applies
+(`membersOneStop`, `groupedState`, `pageState` precedence) — NOT via
+`visitServicesFor`, which resolves member labels through other
+global-pool services the recheck needs none of — and the result feeds the
+same `visitPrepEligibility` rule; refused (`PREP_NOT_AVAILABLE`, nothing
+written) if the row is gone, its
 customer deleted, it is no longer the row the pre-check saw, or it is no
 longer eligible (a status change — en route, cancelled, a grouped sibling
 moving the stop's state — landing between the two reads); (2) the dedupe
@@ -2486,8 +2497,14 @@ the unique index; a photo found to already exist is dropped and its
 just-uploaded object deleted — an all-duplicate resubmit writes nothing and
 answers 200 (idempotent); (3) the real cap re-count (`capReached()` again,
 with the actual number of new photos), which a GROUPED visit computes
-across every member of the stop (by `visit_id`), so two members racing to
-add photos to the same stop can never together exceed the cap — the loser
+across every `scheduled_services` row CURRENTLY sharing the stop's
+`visit_id` — membership is resolved fresh from `scheduled_services` at
+count time, never from the `visit_id` stored on a submission (visit-groups
+attaches, detaches and regroups rows without rewriting old submissions, so
+that column is a point-in-time record only) — so two members racing to
+add photos to the same stop can never together exceed the cap, photos added
+before a visit was grouped still count against the stop, and a member moved
+out of a stop takes its photos with it — the loser
 gets 409 `PREP_CAP_REACHED` and its uploaded object is deleted. `property_id`,
 `customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
 row, never the pre-lock read and never the request body. The response is

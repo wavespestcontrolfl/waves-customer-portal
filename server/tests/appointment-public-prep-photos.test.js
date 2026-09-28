@@ -25,6 +25,8 @@ const mockConvertHeicToJpeg = jest.fn();
 const mockUploadFunnelPhotoToS3 = jest.fn();
 const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
 const mockLockStopForRow = jest.fn(async (trx, id) => id);
+const mockOpenMembers = jest.fn(async () => []);
+const mockBuildServiceLabel = jest.fn(async (id, name) => name || 'service');
 
 jest.mock('../services/heic-to-jpeg', () => ({
   convertHeicToJpeg: (...args) => mockConvertHeicToJpeg(...args),
@@ -44,14 +46,23 @@ jest.mock('../services/photos', () => ({
 // against real Postgres in visit-prep-postgres.test.js and unit-tested in
 // visit-prep.test.js. Here it's a controllable stand-in so this file can
 // focus on the route's guard chain and response shape.
+// openMembers is mocked too (Finding 1): the locked recheck reads live
+// membership through it instead of visitServicesFor, on the write's own
+// transaction — controllable per test rather than re-deriving the real
+// peek/lock/verify plumbing this route-level fake already skips for
+// lockStopForRow.
 jest.mock('../services/visit-groups', () => ({
   lockStopForRow: (...args) => mockLockStopForRow(...args),
+  openMembers: (...args) => mockOpenMembers(...args),
+  // Pure connectivity rule the pre-check's membersOneStop applies; a
+  // grouped pre-check needs it to answer true to reach the write at all.
+  windowedMembersConnected: () => true,
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/tech-photo', () => ({ resolveTechPhotoUrl: jest.fn().mockResolvedValue(null) }));
 jest.mock('../services/appointment-reminders', () => ({
   ...jest.requireActual('../services/appointment-reminders'),
-  buildServiceLabel: jest.fn(async (id, name) => name || 'service'),
+  buildServiceLabel: (...args) => mockBuildServiceLabel(...args),
 }));
 
 let dbState;
@@ -68,6 +79,7 @@ function chain(table) {
   const api = {};
   let countMode = null;
   api.where = () => api;
+  api.whereIn = () => api;
   api.whereNotIn = () => api;
   api.whereNot = () => api;
   api.orderBy = () => api;
@@ -87,6 +99,10 @@ function chain(table) {
   };
   api.select = async () => {
     if (table === 'scheduled_services' && dbState.membersThrow) throw new Error('members lookup failed');
+    // visitServicesFor's PRE-CHECK member query only — the locked recheck's
+    // member read goes through the separately-mocked openMembers, never
+    // this table (Finding 1: the recheck must not call visitServicesFor).
+    if (table === 'scheduled_services' && dbState.groupedMembersForPreCheck) return dbState.groupedMembersForPreCheck;
     if (table === 'visit_prep_photos') return dbState.existingHashes.map((h) => ({ image_sha256: h }));
     return [];
   };
@@ -147,6 +163,7 @@ function resetDbState(overrides = {}) {
     photoCount: 0,
     existingHashes: [],
     membersThrow: false,
+    groupedMembersForPreCheck: null,
     inserted: { submissions: [], photos: [] },
     ...overrides,
   };
@@ -378,6 +395,33 @@ describe('POST /api/public/appointment/:token/photos', () => {
       // cleaned up rather than left orphaned in storage.
       expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
       expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('grouped stop: a sibling going en_route between the pre-check and the write is refused under the lock, and the locked read uses the write connection only', async () => {
+    const members = [
+      { id: 'svc-1', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1' },
+      { id: 'svc-2', service_type: 'lawn_care', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-01-01', window_start: '10:00:00', window_end: '11:00:00', technician_id: 'tech-1' },
+    ];
+    resetDbState({ svcRow: { ...dbStateSvc(), visit_id: 'visit-1', technician_id: 'tech-1' }, groupedMembersForPreCheck: members });
+    // The pre-check (page read) sees a live two-member stop; under the lock
+    // the live set shows the sibling already en route.
+    mockOpenMembers.mockResolvedValue([members[0], { ...members[1], status: 'en_route' }]);
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(dbState.inserted.photos).toHaveLength(0);
+      expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+      // The locked membership read went through openMembers ON THE WRITE'S
+      // OWN CONNECTION (this fake's transaction IS mockDb) ...
+      expect(mockOpenMembers).toHaveBeenCalledTimes(1);
+      expect(mockOpenMembers).toHaveBeenCalledWith(mockDb, 'visit-1');
+      // ... and label resolution (visitServicesFor's global-pool work) ran
+      // for the pre-check's two members only — never again for the recheck.
+      expect(mockBuildServiceLabel).toHaveBeenCalledTimes(2);
     });
   });
 

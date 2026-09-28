@@ -216,8 +216,14 @@ function confirmRaceVerdict(row) {
   return confirmed && !!row?.customer_confirmed ? 'idempotent_success' : 'changed';
 }
 
-async function loadByToken(token) {
-  return db('scheduled_services as s')
+// `conn` defaults to the global pool for every existing caller (the GET
+// page, calendar.ics, confirm); visit-prep.js's late recheck passes its own
+// transaction instead (Finding 1, pre-push audit) — a locked writer must
+// never wait on the global pool for a connection while it already holds
+// one plus the stop's advisory lock, or concurrent uploads can exhaust the
+// pool with every lock holder stuck waiting on its own recheck.
+async function loadByToken(token, conn = db) {
+  return conn('scheduled_services as s')
     .where('s.reschedule_token', token)
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .leftJoin('technicians as t', 's.technician_id', 't.id')
@@ -237,8 +243,8 @@ async function loadByToken(token) {
       't.name as tech_name',
       't.photo_url as tech_photo_url',
       't.photo_s3_key as tech_photo_s3_key',
-      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
-      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+      conn.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+      conn.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
     );
 }
 
@@ -1180,10 +1186,19 @@ const visitPrepUpload = multer({
   },
 });
 
-// The eligibility derivation for an ALREADY-LOADED token row — the ONE
-// function both the pre-multer guard and the service's late recheck (via
-// reloadEligibleVisitPrepRow below) call, so the rule is computed in
-// exactly one place and can never drift between the two reads.
+// The pre-multer guard's eligibility derivation, over the GLOBAL pool — the
+// same page read the GET route uses (visitServicesFor, which also resolves
+// each member's customer-facing service label through buildServiceLabel and
+// other global-pool services). This is a cheap, advisory-only read; it does
+// NOT share its query path with the locked recheck below (Finding 1,
+// pre-push audit: a locked writer reading through the global pool while it
+// already holds a connection + the stop's advisory lock can starve the pool
+// under concurrent uploads). Both paths still end in the ONE eligibility
+// RULE, `visitPrep.visitPrepEligibility({ svc, state, visitUnknown,
+// dispatchOwnedUnreviewed })` — only how `state`/`visitUnknown` are READ
+// differs: this one via the page's own visitServicesFor, the locked recheck
+// via reloadEligibleVisitPrepRow below (openMembers on the write's own
+// transaction).
 async function deriveVisitPrepEligibility(svc) {
   const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
   const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
@@ -1195,20 +1210,51 @@ async function deriveVisitPrepEligibility(svc) {
   });
 }
 
-// Reload the token's CURRENT row and re-derive eligibility with the SAME
-// function above. Returns null when the row is missing, its customer is
-// deleted, it is no longer the SAME row `expectedId` names (this route
-// never re-mints the token, so a mismatch means something is badly wrong),
-// or eligibility is false; otherwise the current row. Passed to
-// visit-prep.js as its `recheck`, called under the canonical stop lock —
+// The locked recheck (Finding 1): every read here runs on `trx` — the
+// SAME transaction/connection the write already holds along with the stop's
+// advisory lock — never the global pool. Reloads the row via loadByToken(…,
+// trx); for a grouped visit, reads the live member set with
+// visit-groups.js's openMembers(trx, visit_id) (the confirm path's own
+// locked-membership read, membersMatchShown, precedent) instead of
+// visitServicesFor — that helper resolves per-member service LABELS through
+// other global-pool services this recheck needs none of. The SAME pure
+// rules the page applies then decide state: fewer than 2 live members is
+// solo (exactly how visitServicesFor treats it), members no longer forming
+// ONE stop (membersOneStop) is visitUnknown, and a real stop's state comes
+// from groupedState(members) — fed through pageStateForGroup's own
+// row-state-outranks-the-group precedence, so a terminal/unknown token row
+// still wins exactly as it does on the page. Returns null when the row is
+// missing, its customer is deleted, it is no longer the SAME row
+// `expectedId` names (this route never re-mints the token, so a mismatch
+// means something is badly wrong), or the resulting eligibility is false;
+// otherwise the current row. Passed to visit-prep.js as its `recheck(trx)` —
 // eligibility can change between the pre-multer read and the write (the
 // visit can go en route, get cancelled, or a grouped sibling can push the
-// stop's state), and this is the one place that re-proves it.
-async function reloadEligibleVisitPrepRow(token, expectedId) {
-  const svc = await loadByToken(token);
+// stop's state), and this is the one place that re-proves it, on the
+// connection that already owns the lock.
+async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
+  const svc = await loadByToken(token, trx);
   if (!svc || svc.customer_deleted_at) return null;
   if (expectedId && String(svc.id) !== String(expectedId)) return null;
-  const eligibility = await deriveVisitPrepEligibility(svc);
+
+  let visitUnknown = false;
+  let visitInfo = {};
+  if (svc.visit_id) {
+    const { openMembers } = require('../services/visit-groups');
+    const members = await openMembers(trx, svc.visit_id);
+    if (members.length >= 2) {
+      if (!membersOneStop(members)) {
+        visitUnknown = true;
+      } else {
+        const { state, phase } = groupedState(members);
+        visitInfo = { visit: { state, phase } };
+      }
+    }
+  }
+  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
+  const eligibility = visitPrep.visitPrepEligibility({
+    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
   return eligibility.eligible ? svc : null;
 }
 
@@ -1271,8 +1317,10 @@ router.post(
         locationOnProperty: req.body?.locationOnProperty,
         entry: 'appointment_page',
         // Re-proves eligibility on FRESH state under visit-prep.js's stop
-        // lock — the write's actual authority, not this pre-check.
-        recheck: () => reloadEligibleVisitPrepRow(token, expectedId),
+        // lock — the write's actual authority, not this pre-check. Called
+        // with the write's own transaction (Finding 1) — never the global
+        // pool.
+        recheck: (trx) => reloadEligibleVisitPrepRow(token, expectedId, trx),
       });
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing
