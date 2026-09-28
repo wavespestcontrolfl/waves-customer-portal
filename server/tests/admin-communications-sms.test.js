@@ -3421,7 +3421,8 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     return {
       id: 'dec-1', customer_id: 'cust-A', sms_log_id: null,
       suggested_message: 'Sorry about that — someone will follow up within the hour.',
-      input_snapshot: JSON.stringify({}),
+      // the draft recorded its promised follow-up (Codex r5: wording alone never refuses)
+      input_snapshot: JSON.stringify({ intended_actions: [{ type: 'escalate', note: 'followup_promised' }] }),
       inbound_created_at: null, sms_from_phone: '+15551234567', sms_to_phone: null, customer_phone: null,
       ...overrides,
     };
@@ -3481,6 +3482,20 @@ describe('/sms — follow-up SLA phrase send-time recheck (Codex r3 P2)', () => 
     });
     expect(sendCustomerMessage).toHaveBeenCalled();
     expect(claimUpdates.some((u) => u.status === 'accepted')).toBe(true);
+    expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
+  });
+
+  test('the SAME stale wording on a draft that recorded NO escalation sends normally — "within the hour" is ordinary English (Codex r5)', async () => {
+    jest.useFakeTimers(FAKE_TIMERS_OPTS);
+    jest.setSystemTime(new Date('2026-09-28T01:30:00.000Z')); // 21:30 ET, outside the window
+    const claimUpdates = [];
+    const body = 'Your technician is nearby and should arrive within the hour.';
+    mockDb({ decision: decisionRow({ suggested_message: body, input_snapshot: JSON.stringify({ intended_actions: [] }) }), claimUpdates });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { agentDraft: body, body });
+      expect(res.status).toBe(200);
+    });
+    expect(sendCustomerMessage).toHaveBeenCalled();
     expect(require('../services/sms-suggest-mode').supersedeStaleDecision).not.toHaveBeenCalled();
   });
 

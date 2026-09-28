@@ -28,4 +28,26 @@ function slaPhraseStatus(body, now = new Date()) {
   return present.every((p) => p.toLowerCase() === current) ? 'current' : 'stale';
 }
 
-module.exports = { SLA_PHRASES, replyPromisesFollowup, slaPhraseStatus };
+// Did THIS draft promise an office follow-up? (Codex r5) The phrases are
+// common English — a reviewed reply can truthfully say a technician arrives
+// "within the hour" — so the send seams never judge a body by wording
+// alone. A promised follow-up is one the draft recorded: the decision's
+// persisted intended_actions carry an escalate action (the real-answers
+// prompt adds {"type":"escalate","note":"followup_promised"} with the SLA
+// phrase). Accepts the input_snapshot as an object or its JSON string.
+function draftPromisedFollowup(inputSnapshot) {
+  let snap = inputSnapshot;
+  if (typeof snap === 'string') {
+    try { snap = JSON.parse(snap); } catch { return false; }
+  }
+  const actions = snap && Array.isArray(snap.intended_actions) ? snap.intended_actions : [];
+  return actions.some((a) => a && a.type === 'escalate');
+}
+
+// The one question both send seams ask: is this an escalated draft whose
+// follow-up phrase has gone stale for the current ET window?
+function followupPromiseIsStale({ inputSnapshot, body, now = new Date() }) {
+  return draftPromisedFollowup(inputSnapshot) && slaPhraseStatus(body, now) === 'stale';
+}
+
+module.exports = { SLA_PHRASES, replyPromisesFollowup, slaPhraseStatus, draftPromisedFollowup, followupPromiseIsStale };

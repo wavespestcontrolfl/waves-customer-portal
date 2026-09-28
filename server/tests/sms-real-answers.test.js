@@ -1567,3 +1567,41 @@ describe('replyBindsDeclaredDays — single-pass day binding (Codex r4)', () => 
     expect(replyBindsDeclaredDays('I will confirm and get back to you.', [])).toBe(true);
   });
 });
+
+
+describe('follow-up promise staleness is scoped to drafts that recorded an escalation (Codex r5)', () => {
+  const { draftPromisedFollowup, followupPromiseIsStale } = require('../services/sms-followup-sla');
+  const NIGHT = new Date('2026-09-30T01:00:00Z'); // 21:00 ET
+  const DAY = new Date('2026-09-29T14:00:00Z'); // 10:00 ET
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+
+  test('draftPromisedFollowup: an escalate action in the persisted snapshot (object or JSON string); nothing else', () => {
+    expect(draftPromisedFollowup(promised)).toBe(true);
+    expect(draftPromisedFollowup(JSON.stringify(promised))).toBe(true);
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'send_payment_link' }] })).toBe(false);
+    expect(draftPromisedFollowup({})).toBe(false);
+    expect(draftPromisedFollowup(null)).toBe(false);
+    expect(draftPromisedFollowup('not json')).toBe(false);
+  });
+
+  test('stale only when BOTH hold: the draft escalated AND its phrase no longer matches the window', () => {
+    const body = 'Someone will follow up within the hour.';
+    expect(followupPromiseIsStale({ inputSnapshot: promised, body, now: NIGHT })).toBe(true);
+    expect(followupPromiseIsStale({ inputSnapshot: promised, body, now: DAY })).toBe(false);
+    expect(followupPromiseIsStale({ inputSnapshot: { intended_actions: [] }, body: 'Your technician should arrive within the hour.', now: NIGHT })).toBe(false);
+  });
+});
+
+describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Codex r5)', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  test('a $95 BALANCE does not back "your $95 payment went through" when no payment is on file', () => {
+    const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('You currently owe $95.', context)).toBe(false);
+  });
+  test('a reply that states both, each backed by its own fact → grounded', () => {
+    const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
+    expect(replyQuotesUngroundedAmount('We received your $95 payment; your remaining balance is $120.50.', context)).toBe(false);
+  });
+});

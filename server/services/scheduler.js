@@ -4039,8 +4039,13 @@ function initScheduledJobs() {
             let slaStale = false;
             if (!anchorStale && !amountsStale && !openTimesStale) {
               try {
-                const { slaPhraseStatus } = require('./sms-followup-sla');
-                if (slaPhraseStatus(msg.message_body) === 'stale') slaStale = true;
+                // Scoped to drafts that recorded an escalation (Codex r5):
+                // wording alone never blocks a scheduled reply.
+                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const slaDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot');
+                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, body: msg.message_body })) slaStale = true;
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 slaStale = true;

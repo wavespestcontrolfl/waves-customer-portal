@@ -731,14 +731,24 @@ function offerSpanInText(text, day, window) {
 // the estimate-review lane reused only hasPriceQuote and threw away every
 // grounded v12 answer). true when the reply carries an amount the facts
 // block did not authorize, or price grammar the extractor cannot verify.
+// Language that states what is OWED or charged on an ongoing basis.
+const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 function replyQuotesUngroundedAmount(reply, context) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
+  // Amounts are authorized by MEANING, not just by number (Codex r5): a
+  // balance, invoice or dues figure backs a statement about what is owed,
+  // and a payment-history figure backs a payment acknowledgement. Pooling
+  // them let "your $95 payment went through" pass on a $95 balance with no
+  // payment on file.
+  const owedLanguage = AMOUNT_OWED_RE.test(reply);
   const authorizedCents = new Set([
-    context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-    context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-    ...require('./context-aggregator').authorizedDuesCents(context),
+    ...(owedLanguage ? [
+      context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
+      context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
+      ...require('./context-aggregator').authorizedDuesCents(context),
+    ] : []),
     // Payment-history amounts authorize ONLY a payment acknowledgement
     // (Codex r4: a zero-balance account with a recent $95 payment must not
     // let "your balance is $95" through). Same ack grammar as the

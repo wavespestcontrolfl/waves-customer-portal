@@ -229,8 +229,10 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // rather than rewrite: the reviewer approved specific wording, and a
     // phrase that no longer matches the current 8am/8pm ET window needs a
     // fresh look, not a silent substitution.
-    const { slaPhraseStatus } = require('../services/sms-followup-sla');
-    if (slaPhraseStatus(outgoingBody) === 'stale') {
+    // Scoped to drafts that recorded an escalation (Codex r5): the phrases
+    // are ordinary English, so wording alone never refuses a send.
+    const { followupPromiseIsStale } = require('../services/sms-followup-sla');
+    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, body: outgoingBody })) {
       logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
       await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       return null;
