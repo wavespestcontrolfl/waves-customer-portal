@@ -1299,14 +1299,20 @@ export default function ServiceReportDocument({ data, token }) {
                                 server omits `report_copy` entirely when the
                                 gate is off or the product has no approved
                                 wording. "Also labeled for" describes the
-                                LABEL, never this visit's treatment. */}
+                                LABEL, never this visit's treatment.
+                                pets_kids runs through the SAME
+                                sanitizeReentryCopy backstop as the "Label
+                                safety" line above — belt-and-suspenders on
+                                top of the server-side payload-boundary sweep
+                                (reports-public.js), same re-entry-adjacent
+                                claim, same compliance pass. */}
                             {product.report_copy && (
                               <>
                                 <div><strong style={{ color: INK, fontWeight: 600 }}>How it works:</strong> {product.report_copy.how_it_works}</div>
                                 {product.report_copy.also_labeled_for && (
                                   <div><strong style={{ color: INK, fontWeight: 600 }}>Also labeled for:</strong> {product.report_copy.also_labeled_for}</div>
                                 )}
-                                <div><strong style={{ color: INK, fontWeight: 600 }}>Pets &amp; kids:</strong> {product.report_copy.pets_kids}</div>
+                                <div><strong style={{ color: INK, fontWeight: 600 }}>Pets &amp; kids:</strong> {sanitizeReentryCopy(product.report_copy.pets_kids)}</div>
                               </>
                             )}
                             {/* Legacy lawn reports (no reportV2) carry approved
