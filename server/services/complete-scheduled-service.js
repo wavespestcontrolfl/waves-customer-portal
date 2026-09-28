@@ -10315,7 +10315,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // sibling lookups above ran before the mint lock, and the stamp can
         // land in between. Both mint lanes below run this right after the
         // visit row lock (see refuseCoveredMemberMintInTrx).
-        const coveredMemberMintGuard = svc.source_estimate_id
+        // Same shape gate as every other sibling-coverage check (pre-push P1
+        // on 645ccccaee): a callback or always-free visit is never refused.
+        const coveredMemberMintGuard = isSiblingCoverageEligibleVisit({
+          sourceEstimateId: svc.source_estimate_id, hasOwnPrice: false, isCallback: svc.is_callback, serviceType: svc.service_type,
+        })
           ? (trx) => refuseCoveredMemberMintInTrx(trx, svc.id)
           : null;
         const mintOptions = {
