@@ -403,7 +403,7 @@ function searchParseOpts(config, now = new Date()) {
 
 async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, timeOfDay }) {
   const booking = require('./booking');
-  const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey } = booking._internals;
+  const { resolveBookingCoords, buildBookingAvailability, normalizeBookingServiceKey, bookInsertionOffersLive } = booking._internals;
 
   let lat = svc.latitude != null ? parseFloat(svc.latitude) : null;
   let lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
@@ -445,6 +445,19 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     // Self-serve surface — a new target starting within the notice window
     // (owner ruling 2026-09-23) can't be offered or committed.
     selfServeNotice: true,
+    // Mid-route insertion (owner 2026-09-28; docs/public-route-contracts.md):
+    // this is the ONLY picker on the page — GET, the AI find-slots search,
+    // and the commit route's own anti-forgery re-check all funnel through
+    // here — so it reads the same canonical policy /book's self-booking
+    // offers do (routes/booking.js's bookInsertionOffersLive). Offering a
+    // slot BETWEEN two existing stops is safe here only because the
+    // single-visit commit (SmartRebooker.reschedule, below) now certifies
+    // and persists that exact position under the tech-day lock the same
+    // way createSelfBooking does; a big-pull-forward commit re-anchors the
+    // whole series through rescheduleSeries instead, which stays
+    // append-only — a slot offered here that turns out to need reanchoring
+    // simply re-validates and refuses at commit like any other stale offer.
+    capacityPlacement: bookInsertionOffersLive(),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
@@ -818,6 +831,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             seriesPolicy: 'single',
             travelGap: true,
+            // Single-visit ONLY — see buildAvailabilityForService above.
+            capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
           }

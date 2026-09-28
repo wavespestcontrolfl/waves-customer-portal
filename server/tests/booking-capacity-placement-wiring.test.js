@@ -4,10 +4,22 @@
  * createSelfBooking does that, and only while GATE_BOOK_CAPACITY_COMMIT is
  * live — so exactly the callers below pass `capacityPlacement:
  * bookInsertionOffersLive()` into buildBookingAvailability (booking.js), and
- * exactly the callers whose own commit does NOT persist a route order
- * (public reschedule — SmartRebooker clears route_order on a move; the
+ * exactly the callers whose own commit does NOT persist a route order (the
  * voice agent — relay-booking.js/relay-tools.js insert with no route_order)
  * omit it and stay append-only.
+ *
+ * Public reschedule joined the certified-order group in a later change, same
+ * day: its single-visit commit (SmartRebooker.reschedule → rescheduleOnce,
+ * services/rebooker.js) now runs the SAME prepareArrivalCapacity /
+ * verifyArrivalCapacity / persistArrivalOrder sequence createSelfBooking
+ * does, gated on the caller passing `capacityPlacement: true` AND
+ * bookInsertionOffersLive() read fresh at commit — so its picker
+ * (buildAvailabilityForService, the one picker behind GET, find-slots, and
+ * the commit route's own anti-forgery re-check) now passes
+ * `capacityPlacement: bookInsertionOffersLive()` too. A big-pull-forward
+ * re-anchor still commits through rescheduleSeries, which always nulls
+ * route_order on a move — that call never receives capacityPlacement and
+ * stays append-only. See docs/public-route-contracts.md.
  *
  * Round 2 (Codex P1, same PR): bookCapacityCommitLive() alone wasn't the
  * right condition either — it doesn't also require GATE_SCHEDULING_CAPACITY,
@@ -107,11 +119,28 @@ describe('inspection-public.js — commits through createSelfBooking (phase 2)',
   });
 });
 
-describe('reschedule-public.js — commits through SmartRebooker, which clears route_order on a move', () => {
-  test('buildAvailabilityForService never passes capacityPlacement — stays append-only', () => {
-    const src = read('../routes/reschedule-public.js');
+describe('reschedule-public.js — single-visit commit persists the certified order (owner 2026-09-28); series stays append-only', () => {
+  const src = read('../routes/reschedule-public.js');
+
+  test('buildAvailabilityForService (the ONE picker — GET, find-slots, and the commit re-check) passes capacityPlacement: bookInsertionOffersLive()', () => {
     const call = callAfter(src, 'async function buildAvailabilityForService');
-    expect(call).not.toContain('capacityPlacement');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
+  });
+
+  test('the single-visit commit (SmartRebooker.reschedule) opts in with capacityPlacement: true — its own commit (rescheduleOnce) persists the certified order under this flag', () => {
+    const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
+    expect(singleIdx).toBeGreaterThan(-1);
+    const singleEnd = src.indexOf('\n        );', singleIdx);
+    expect(singleEnd).toBeGreaterThan(singleIdx);
+    expect(src.slice(singleIdx, singleEnd)).toContain('capacityPlacement: true');
+  });
+
+  test('the series re-anchor commit (SmartRebooker.rescheduleSeries) never sets capacityPlacement — rescheduleSeries always nulls route_order on a move, so an inserted offer there would commit unnumbered', () => {
+    const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
+    const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
+    expect(seriesIdx).toBeGreaterThan(-1);
+    expect(singleIdx).toBeGreaterThan(seriesIdx);
+    expect(src.slice(seriesIdx, singleIdx)).not.toContain('capacityPlacement');
   });
 });
 
