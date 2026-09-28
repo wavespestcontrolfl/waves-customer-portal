@@ -25,7 +25,7 @@ const source = (message_body, direction = 'inbound') => ({
 });
 const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
-  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, answered_by_payment: false, ...extra,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
@@ -72,7 +72,7 @@ describe('SMS operational evidence and ownership', () => {
   test('outbound staff promise is tracked; outgoing profile guesses are not facts', () => {
     const message = source("I'll send the estimate. The controller is on the side of the house", 'outbound');
     const result = groundExtraction(extracted([
-      obligation("I'll send the estimate", { basis: 'promise' }),
+      obligation("I'll send the estimate", { basis: 'promise', promise_firm: true }),
     ], [fact()]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.facts).toEqual([]);
@@ -81,17 +81,19 @@ describe('SMS operational evidence and ownership', () => {
   test('a subjectless "Will …" staff declaration is a promise, not a question', () => {
     const message = source('Will call you tomorrow at 9am', 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: true, kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.obligations[0]).toMatchObject({ due_at: '2040-03-11T13:00:00.000Z', timing_unverified: false });
   });
 
   test.each(['Should I call you tomorrow at 9am?', 'Should I call you tomorrow at 9am', 'Want me to call you tomorrow at 9am',
-    'Need us to call you tomorrow at 9am', 'Will we call you tomorrow at 9am'])('an outbound question cannot be recorded as a promise: %s', (body) => {
+    'Need us to call you tomorrow at 9am', 'Will we call you tomorrow at 9am'])('an outbound question the extraction marks as no firm promise is not recorded: %s', (body) => {
+    // Staff-promise plan (2026-09-28): the extraction judges a staff text's
+    // firmness (promise_firm); a question or offer is never a firm promise.
     const message = source(body, 'outbound');
     const result = groundExtraction(extracted([obligation('call you tomorrow at 9am', {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: false, kind: 'callback', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result).toMatchObject({ obligations: [], dropped: 1 });
   });
@@ -152,7 +154,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = "I'll send the reschedule link shortly";
     const message = source(quote, 'outbound');
     const result = groundExtraction(extracted([obligation(quote, {
-      kind: 'send_reschedule_link', basis: 'promise', description: quote,
+      kind: 'send_reschedule_link', basis: 'promise', promise_firm: true, description: quote,
     })]), { message, properties });
     expect(result.obligations).toHaveLength(1);
     expect(result.obligations[0]).toMatchObject({ kind: 'send_reschedule_link', basis: 'promise' });
@@ -186,7 +188,7 @@ describe('SMS operational evidence and ownership', () => {
   test('tomorrow without a clock time does not acquire a model-invented time', () => {
     const message = source("I'll call tomorrow", 'outbound');
     const result = groundExtraction(extracted([obligation(message.message_body, {
-      basis: 'promise', kind: 'callback', due_text: 'tomorrow', due_at: '2040-03-11T09:00:00-04:00',
+      basis: 'promise', promise_firm: true, kind: 'callback', due_text: 'tomorrow', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result.obligations[0]).toMatchObject({ due_text: 'tomorrow', due_at: null });
   });
@@ -696,6 +698,88 @@ describe('private profile writes', () => {
     expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text only please' }), context)).toBe('apply');
     expect(factVerdict(fact({ field: 'contact_preference', value: 'email', quote: 'Text only please' }), context))
       .toBe('preference_uncertain');
+  });
+});
+
+describe('Owner-approved staff-promise plan (2026-09-28): a promise staff texted is read by the extraction, kept whatever its wording, and due at the end of the day it names', () => {
+  // 2040-03-10 is a Saturday (EST); DST starts Sunday 2040-03-11.
+  const staff = (body) => source(body, 'outbound');
+  const promise = (quote, extra = {}) => obligation(quote, { basis: 'promise', promise_firm: true, kind: 'other', ...extra });
+
+  test('a firm promise in a conversational staff text is kept: the customer-instruction word and question checks do not apply', () => {
+    const message = staff("Not a problem, we'll adjust. How have the mosquitoes been?");
+    expect(groundExtraction(extracted([promise("we'll adjust")]), { message, properties }).obligations).toHaveLength(1);
+    // An offer or a question is not a promise: the extraction says so, and it is dropped.
+    expect(groundExtraction(extracted([promise("we'll adjust", { promise_firm: false })]), { message, properties }).obligations).toEqual([]);
+    const offer = staff('Are you around today? You want me to swing by?');
+    expect(groundExtraction(extracted([promise('You want me to swing by', { promise_firm: false })]), { message: offer, properties }).obligations).toEqual([]);
+    // A customer's text keeps every existing check: negated wording still drops its ask.
+    const customer = source('Not today, but please send the estimate');
+    expect(groundExtraction(extracted([obligation('please send the estimate')]), { message: customer, properties }).obligations).toEqual([]);
+  });
+
+  test('a staff promise whose words do not name its type is kept as a general promise; a customer ask is still dropped', () => {
+    const message = staff("Hey, I'll stop by today");
+    const kept = groundExtraction(extracted([promise("I'll stop by today", { kind: 'technician_follow_up' })]), { message, properties }).obligations;
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ kind: 'other', basis: 'promise' });
+    // A named type stays: "the estimate" is an estimate.
+    const named = staff("I'll send the estimate today");
+    expect(groundExtraction(extracted([promise("I'll send the estimate today", { kind: 'send_estimate' })]), { message: named, properties })
+      .obligations[0]).toMatchObject({ kind: 'send_estimate' });
+    const ask = source('Can you stop by today');
+    expect(groundExtraction(extracted([obligation('Can you stop by today', { kind: 'technician_follow_up' })]), { message: ask, properties })
+      .obligations).toEqual([]);
+  });
+
+  test.each([
+    ['the day it names, quoted', 'gonna knock out your spray tomorrow', 'tomorrow', '2040-03-11', '2040-03-11'],
+    ["the text's own day", "I'll stop by today", 'today', '2040-03-10', '2040-03-10'],
+    ['fourteen days out', "we'll be back in two weeks", 'in two weeks', '2040-03-24', '2040-03-24'],
+    ['a day before the text', "I'll stop by tomorrow", 'tomorrow', '2040-03-09', null],
+    ['more than fourteen days out', "I'll stop by next month", 'next month', '2040-03-25', null],
+    ['a date that does not exist', "I'll stop by tomorrow", 'tomorrow', '2040-02-30', null],
+    ['timing that is not quoted', "I'll stop by soon", 'Wednesday', '2040-03-14', null],
+    ['no timing words at all', "I'll stop by", null, '2040-03-11', null],
+  ])('due_date: %s', (_label, body, dueText, dueDate, expected) => {
+    const message = staff(body);
+    const [kept] = groundExtraction(extracted([promise(body, { due_text: dueText, due_date: dueDate })]), { message, properties }).obligations;
+    expect(kept.due_date).toBe(expected);
+  });
+
+  test('due_date is never taken with a clock in the text, nor for a customer ask', () => {
+    const clocked = staff("I'll be there tomorrow at 3pm");
+    expect(groundExtraction(extracted([promise("I'll be there tomorrow at 3pm", { due_text: 'tomorrow at 3pm', due_date: '2040-03-11' })]),
+      { message: clocked, properties }).obligations[0].due_date).toBeNull();
+    const ask = source('Please send the estimate tomorrow');
+    expect(groundExtraction(extracted([obligation('Please send the estimate tomorrow', { due_text: 'tomorrow', due_date: '2040-03-11' })]),
+      { message: ask, properties }).obligations[0].due_date).toBeNull();
+  });
+
+  test('a promise naming a day is due 8 PM ET that day (DST-correct); within an hour of the text, 9 AM ET the next day', () => {
+    const item = (extra) => ({ party: 'waves', basis: 'promise', kind: 'other', quote: "I'll stop by tomorrow", due_text: 'tomorrow', ...extra });
+    // Sent Saturday 10 AM EST, due Sunday 8 PM EDT (00:00Z Monday).
+    expect(resolveDueDeadline(item({ due_date: '2040-03-11' }), '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: '2040-03-12T00:00:00.000Z', due_basis: 'default_kind' });
+    // "Tonight", sent 7:30 PM EST: under an hour to 8 PM, so 9 AM EDT Sunday.
+    expect(resolveDueDeadline(item({ quote: "I'll stop by tonight", due_text: 'tonight', due_date: '2040-03-10' }), '2040-03-11T00:30:00Z'))
+      .toEqual({ due_at: '2040-03-11T13:00:00.000Z', due_basis: 'default_kind' });
+    // A stated clock still wins.
+    expect(resolveDueDeadline(item({ due_date: '2040-03-11', due_at: '2040-03-11T19:00:00.000Z' }), '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: '2040-03-11T19:00:00.000Z', due_basis: 'stated' });
+    // A customer ask never takes due_date: its stated timing keeps the existing rules (undated here).
+    expect(resolveDueDeadline({ ...item({ due_date: '2040-03-11' }), basis: 'request', quote: 'Can you stop by tomorrow' }, '2040-03-10T15:00:00Z'))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test("the extraction is told the text's ET day and the staff-promise rules", () => {
+    const prompt = buildPrompt({ message: staff("I'll stop by tomorrow") });
+    expect(prompt).toContain('The CURRENT message was sent on Saturday, 2040-03-10 (America/New_York).');
+    for (const phrase of ['promise_firm is true only for a promise (basis promise) its sender committed to outright',
+      'Never extract a status update or arrival estimate', 'due_date, for a promise only, is the calendar day',
+      '"This weekend" is that weekend\'s Sunday; "next week" is next week\'s Friday']) {
+      expect(prompt).toContain(phrase);
+    }
   });
 });
 
@@ -1492,6 +1576,8 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     // A promise Waves made is kept by doing it, never by a later reply: the model judges it.
     expect(await verifySmsFulfillment({ ...ask, description: "we'll get the prep guide today", sms_context: { ...ask.sms_context, basis: 'promise' } },
       { records: [reply('thanks', '2040-03-11T15:00:00Z', 'Thanks!')], failures: [] })).toMatchObject({ verdict: 'open' });
+    // The check is told a promise is kept only by doing it, on the day it named.
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('A promise Waves made (sms_context.basis promise) is fulfilled only by a record of Waves doing what it promised');
     // No basis recorded (intake always stamps one): it fails toward the model, never the shortcut.
     const { basis: _basis, ...noBasis } = ask.sms_context;
     await verifySmsFulfillment({ ...ask, sms_context: noBasis }, { records: [first], failures: [] });
