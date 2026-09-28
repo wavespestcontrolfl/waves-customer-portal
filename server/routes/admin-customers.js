@@ -36,6 +36,16 @@ const {
   clearLineTypeOnPhoneChange,
   normalizeAdminAddressInput,
 } = require('../utils/intake-normalize');
+const {
+  PREFS_FIELD_SCHEMAS,
+  ALLOWED_FIELDS: PREFS_ALLOWED_FIELDS,
+  longText: prefsLongText,
+  validatePrefsBody: validatePrefsBodyWithSchemas,
+  camelToSnake: prefsCamelToSnake,
+  transformKeys: prefsTransformKeys,
+  customerQualifiesForLawnInches,
+  normalizeUpdatesForStorage: normalizePrefsUpdatesForStorage,
+} = require('../services/property-preferences-schema');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -4452,6 +4462,124 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
       .sort();
     logger.info(`[customers] notification_prefs updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
     res.json({ success: true, notificationPrefs: prefs });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/admin/customers/:id/property-preferences
+//
+// Staff-facing counterpart to the customer portal's PUT /api/property/
+// preferences (server/routes/property.js): lets office staff view AND edit
+// a customer's Access & Preferences (gate/lockbox codes, pets, scheduling,
+// irrigation, mowing, HOA, access/special notes) from Customer 360 →
+// Property. Shares the SAME field schemas, ALLOWED_FIELDS allowlist and
+// per-field validator as the portal route (services/property-preferences-
+// schema.js) so the two writers can never accept or reject a field
+// differently — plus two staff-only fields the portal never exposes
+// (chemical sensitivity is collected at intake/by a technician, not
+// self-served).
+//
+// Deliberately narrower than the portal PUT:
+//   - No customer notification of any kind (no account.updated email) —
+//     this is staff correcting/recording the file, not the customer
+//     editing their own preferences.
+//   - No irrigation_confirmed_fields ledger participation: that ledger
+//     means "the CUSTOMER re-affirmed this setting is still right for the
+//     current home after a move" (server/services/irrigation-schedule-
+//     confirmation.js) — a staff edit is not that affirmation, so it is
+//     left untouched here (the customer's next portal save still confirms
+//     it normally).
+//   - Field names only in the log/audit trail, never gate/lockbox/garage
+//     code VALUES in the clear.
+const ADMIN_ONLY_PREFS_FIELD_SCHEMAS = {
+  chemicalSensitivities: Joi.boolean(),
+  chemicalSensitivityDetails: prefsLongText,
+};
+const ADMIN_ONLY_PREFS_ALLOWED_FIELDS = ['chemical_sensitivities', 'chemical_sensitivity_details'];
+const ADMIN_PREFS_FIELD_SCHEMAS = { ...PREFS_FIELD_SCHEMAS, ...ADMIN_ONLY_PREFS_FIELD_SCHEMAS };
+const ADMIN_PREFS_ALLOWED_FIELDS = [...PREFS_ALLOWED_FIELDS, ...ADMIN_ONLY_PREFS_ALLOWED_FIELDS];
+
+router.put('/:id/property-preferences', requireAdmin, async (req, res, next) => {
+  try {
+    const { value, rejected, presentCount } = validatePrefsBodyWithSchemas(ADMIN_PREFS_FIELD_SCHEMAS, req.body);
+    if (presentCount > 0 && rejected.length === presentCount) {
+      // Every field in the request failed validation — nothing to save.
+      // Mirrors the portal route's contract for this case (per-field detail,
+      // not only a joined string).
+      return res.status(400).json({
+        error: rejected.map((r) => r.message).join('; '),
+        rejected,
+      });
+    }
+
+    const snakeBody = prefsTransformKeys(value, prefsCamelToSnake);
+    const updates = {};
+    for (const field of ADMIN_PREFS_ALLOWED_FIELDS) {
+      if (field in snakeBody) updates[field] = snakeBody[field];
+    }
+
+    // Same Weekly-Inches eligibility gate as the portal write: never persist
+    // irrigation_inches_per_week for a customer who wouldn't otherwise see
+    // the field (GH codex P2 on #3557 — a swallowed lookup error must fail
+    // the save, not silently drop/clear the value with a 200).
+    if ('irrigation_inches_per_week' in updates) {
+      const customer = await db('customers').where({ id: req.params.id }).first();
+      let eligible;
+      try {
+        eligible = await customerQualifiesForLawnInches(customer || {});
+      } catch (err) {
+        logger.warn(`[customers:${req.params.id}] property_preferences lawn evidence lookup failed: ${err.message}`);
+        return res.status(503).json({ error: "Couldn't verify this customer's lawn service just now — please try again." });
+      }
+      if (!eligible) delete updates.irrigation_inches_per_week;
+    }
+
+    normalizePrefsUpdatesForStorage(updates);
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    // Same advisory-lock key/order the portal PUT and the customer-edit
+    // route's address sync already take on this customer — one shared lock
+    // order across every property_preferences writer avoids an AB-BA
+    // deadlock between them (codex #3565 gh-r38/r39).
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(req.params.id)],
+      );
+      const current = await trx('property_preferences')
+        .where({ customer_id: req.params.id })
+        .first();
+      if (current) {
+        await trx('property_preferences')
+          .where({ customer_id: req.params.id })
+          .update({ ...updates, updated_at: trx.fn.now() });
+      } else {
+        await trx('property_preferences').insert({ customer_id: req.params.id, ...updates });
+      }
+    });
+
+    const preferences = await db('property_preferences')
+      .where({ customer_id: req.params.id })
+      .first();
+
+    const loggedFields = Object.keys(updates).sort();
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId || null,
+      action: 'customer.property_preferences.updated',
+      resource_type: 'customer',
+      resource_id: req.params.id,
+      // Field NAMES only — gate/lockbox/garage codes and other sensitive
+      // values never ride in audit metadata or logs in the clear.
+      metadata: { fields: loggedFields },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent') || null,
+    }).catch((err) => logger.warn(`[customers:${req.params.id}] property_preferences audit failed: ${err.message}`));
+    logger.info(`[customers] property_preferences updated for ${req.params.id}: ${JSON.stringify({ fields: loggedFields })}`);
+
+    res.json({ success: true, preferences, saved: true, ...(rejected.length ? { rejected } : {}) });
   } catch (err) { next(err); }
 });
 

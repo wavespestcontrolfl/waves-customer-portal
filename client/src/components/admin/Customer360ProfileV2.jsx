@@ -6614,6 +6614,617 @@ function CustomerProfileServices({
   );
 }
 
+// ─── Access & Preferences (property_preferences) — view + admin edit ─────
+// Field lists mirror server/services/property-preferences-schema.js
+// (PREFS_FIELD_SCHEMAS / ALLOWED_FIELDS) plus the two staff-only fields
+// (chemicalSensitivities/chemicalSensitivityDetails) that route also
+// accepts. Keep these in sync if a field is added there.
+const ACCESS_PREFS_DAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const ACCESS_PREFS_PREFERRED_DAY_OPTIONS = [
+  ["no_preference", "No preference"],
+  ["monday", "Monday"],
+  ["tuesday", "Tuesday"],
+  ["wednesday", "Wednesday"],
+  ["thursday", "Thursday"],
+  ["friday", "Friday"],
+];
+const ACCESS_PREFS_PREFERRED_TIME_OPTIONS = [
+  ["no_preference", "No preference"],
+  ["early_morning", "Early morning"],
+  ["morning", "Morning"],
+  ["midday", "Midday"],
+  ["afternoon", "Afternoon"],
+];
+const ACCESS_PREFS_CONTACT_OPTIONS = [
+  ["text", "Text"],
+  ["call", "Call"],
+  ["email", "Email"],
+];
+const ACCESS_PREFS_MOWING_TIME_OPTIONS = [
+  ["", "Not set"],
+  ["morning", "Morning"],
+  ["midday", "Midday"],
+  ["afternoon", "Afternoon"],
+  ["varies", "Varies"],
+];
+const ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS = [
+  ["spray", "Spray"],
+  ["drip", "Drip"],
+  ["rotor", "Rotor"],
+];
+
+function accessPrefsOptionLabel(options, value) {
+  const hit = options.find(([key]) => key === String(value ?? ""));
+  return hit ? hit[1] : null;
+}
+
+// Renders one key/value row; empty/missing important values read as a
+// muted "Not set" instead of the row disappearing, so staff can see what's
+// missing at a glance rather than assume it was never asked.
+function AccessPrefRow({ label, value, muted }) {
+  const isEmpty =
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    (Array.isArray(value) && value.length === 0);
+  return (
+    <div className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2">
+      {" "}
+      <span className="text-ink-secondary flex-shrink-0">{label}</span>{" "}
+      <span
+        className={cn(
+          "text-right max-w-[220px] break-words",
+          isEmpty ? "text-ink-tertiary italic" : "text-zinc-900",
+        )}
+      >
+        {isEmpty ? "Not set" : Array.isArray(value) ? value.join(", ") : value}
+      </span>{" "}
+    </div>
+  );
+}
+
+function AccessPrefsSubheading({ children }) {
+  return (
+    <div className="text-ui-caption font-medium text-ink-secondary mt-3 mb-1 first:mt-0">
+      {children}
+    </div>
+  );
+}
+
+// Multi-select pill toggle for day lists (watering/mowing) and the
+// irrigation system-type vocabulary — stores/reads the exact canonical keys
+// the server schema validates (Mon..Sun / spray|drip|rotor), matching the
+// customer portal's own pill picker.
+function AccessPrefsPillToggle({ options, value, onChange, disabled }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const key = Array.isArray(opt) ? opt[0] : opt;
+        const label = Array.isArray(opt) ? opt[1] : opt;
+        const active = value.includes(key);
+        return (
+          <button
+            key={key}
+            type="button"
+            disabled={disabled}
+            aria-pressed={active}
+            onClick={() =>
+              onChange(
+                active ? value.filter((v) => v !== key) : [...value, key],
+              )
+            }
+            className={cn(
+              "px-2.5 py-1 rounded-sm text-ui-label border-hairline u-focus-ring",
+              active
+                ? "bg-zinc-900 text-white border-zinc-900"
+                : "bg-white text-ink-secondary border-zinc-300 hover:bg-zinc-50",
+            )}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function AccessPrefsField({ label, error, children }) {
+  return (
+    <label className="block">
+      <div className="ui-label text-ink-secondary mb-1">{label}</div>
+      {children}
+      {error && (
+        <div className="mt-1 text-ui-caption text-alert-fg">{error}</div>
+      )}
+    </label>
+  );
+}
+
+const ACCESS_PREFS_INPUT_CLASS =
+  "w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
+const ACCESS_PREFS_TEXTAREA_CLASS =
+  "w-full px-2.5 py-2 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
+
+function accessPrefsDraftFromRow(prefs = {}) {
+  return {
+    neighborhoodGateCode: prefs.neighborhood_gate_code || "",
+    propertyGateCode: prefs.property_gate_code || "",
+    garageCode: prefs.garage_code || "",
+    lockboxCode: prefs.lockbox_code || "",
+    sideGateAccess: prefs.side_gate_access || "",
+    parkingNotes: prefs.parking_notes || "",
+    accessNotes: prefs.access_notes || "",
+    petCount: prefs.pet_count ?? 0,
+    petDetails: prefs.pet_details || "",
+    petsSecuredPlan: prefs.pets_secured_plan || "",
+    preferredDay: prefs.preferred_day || "no_preference",
+    preferredTime: prefs.preferred_time || "no_preference",
+    contactPreference: prefs.contact_preference || "text",
+    blackoutStart: dateInputValue(prefs.blackout_start),
+    blackoutEnd: dateInputValue(prefs.blackout_end),
+    irrigationControllerLocation: prefs.irrigation_controller_location || "",
+    irrigationZones:
+      prefs.irrigation_zones === null || prefs.irrigation_zones === undefined
+        ? ""
+        : String(prefs.irrigation_zones),
+    irrigationInchesPerWeek:
+      prefs.irrigation_inches_per_week === null ||
+      prefs.irrigation_inches_per_week === undefined
+        ? ""
+        : String(prefs.irrigation_inches_per_week),
+    irrigationRunMinutes:
+      prefs.irrigation_run_minutes === null ||
+      prefs.irrigation_run_minutes === undefined
+        ? ""
+        : String(prefs.irrigation_run_minutes),
+    irrigationScheduleNotes: prefs.irrigation_schedule_notes || "",
+    wateringDays: Array.isArray(prefs.watering_days)
+      ? prefs.watering_days
+      : [],
+    irrigationSystemType: Array.isArray(prefs.irrigation_system_type)
+      ? prefs.irrigation_system_type
+      : prefs.irrigation_system_type
+        ? [prefs.irrigation_system_type]
+        : [],
+    rainSensor: !!prefs.rain_sensor,
+    irrigationIssues: prefs.irrigation_issues || "",
+    mowingDays: Array.isArray(prefs.mowing_days) ? prefs.mowing_days : [],
+    mowingTimeOfDay: prefs.mowing_time_of_day || "",
+    mowingNotes: prefs.mowing_notes || "",
+    hoaName: prefs.hoa_name || "",
+    hoaCompany: prefs.hoa_company || "",
+    hoaPhone: prefs.hoa_phone || "",
+    hoaEmail: prefs.hoa_email || "",
+    hoaRestrictions: prefs.hoa_restrictions || "",
+    hoaLawnHeight: prefs.hoa_lawn_height || "",
+    hoaSignageRules: prefs.hoa_signage_rules || "",
+    hoaTimingRestrictions: prefs.hoa_timing_restrictions || "",
+    hoaInspectionPeriod: prefs.hoa_inspection_period || "",
+    chemicalSensitivities: !!prefs.chemical_sensitivities,
+    chemicalSensitivityDetails: prefs.chemical_sensitivity_details || "",
+    specialInstructions: prefs.special_instructions || "",
+  };
+}
+
+function accessPrefsSavePayload(draft) {
+  const numOrNull = (v) =>
+    v === "" || v === null || v === undefined ? null : Number(v);
+  return {
+    neighborhoodGateCode: draft.neighborhoodGateCode,
+    propertyGateCode: draft.propertyGateCode,
+    garageCode: draft.garageCode,
+    lockboxCode: draft.lockboxCode,
+    sideGateAccess: draft.sideGateAccess,
+    parkingNotes: draft.parkingNotes,
+    accessNotes: draft.accessNotes,
+    petCount: Number(draft.petCount) || 0,
+    petDetails: draft.petDetails,
+    petsSecuredPlan: draft.petsSecuredPlan,
+    preferredDay: draft.preferredDay,
+    preferredTime: draft.preferredTime,
+    contactPreference: draft.contactPreference,
+    blackoutStart: draft.blackoutStart || "",
+    blackoutEnd: draft.blackoutEnd || "",
+    irrigationControllerLocation: draft.irrigationControllerLocation,
+    irrigationZones: numOrNull(draft.irrigationZones),
+    irrigationInchesPerWeek: numOrNull(draft.irrigationInchesPerWeek),
+    irrigationRunMinutes: numOrNull(draft.irrigationRunMinutes),
+    irrigationScheduleNotes: draft.irrigationScheduleNotes,
+    wateringDays: draft.wateringDays,
+    irrigationSystemType: draft.irrigationSystemType,
+    rainSensor: !!draft.rainSensor,
+    irrigationIssues: draft.irrigationIssues,
+    mowingDays: draft.mowingDays,
+    mowingTimeOfDay: draft.mowingTimeOfDay,
+    mowingNotes: draft.mowingNotes,
+    hoaName: draft.hoaName,
+    hoaCompany: draft.hoaCompany,
+    hoaPhone: draft.hoaPhone,
+    hoaEmail: draft.hoaEmail,
+    hoaRestrictions: draft.hoaRestrictions,
+    hoaLawnHeight: draft.hoaLawnHeight,
+    hoaSignageRules: draft.hoaSignageRules,
+    hoaTimingRestrictions: draft.hoaTimingRestrictions,
+    hoaInspectionPeriod: draft.hoaInspectionPeriod,
+    chemicalSensitivities: !!draft.chemicalSensitivities,
+    chemicalSensitivityDetails: draft.chemicalSensitivityDetails,
+    specialInstructions: draft.specialInstructions,
+  };
+}
+
+function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
+
+  const set = (key) => (value) =>
+    setDraft((prev) => ({ ...(prev || {}), [key]: value }));
+
+  const openEdit = () => {
+    setDraft(accessPrefsDraftFromRow(prefs));
+    setFieldErrors({});
+    setErr("");
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setDraft(null);
+    setFieldErrors({});
+    setErr("");
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setErr("");
+    try {
+      const response = await adminFetch(
+        `/admin/customers/${customerId}/property-preferences`,
+        {
+          method: "PUT",
+          body: JSON.stringify(accessPrefsSavePayload(draft)),
+        },
+      );
+      if (response?.rejected?.length) {
+        const map = {};
+        response.rejected.forEach((r) => {
+          map[r.field] = r.message;
+        });
+        setFieldErrors(map);
+        setErr(
+          `${response.rejected.length} field${response.rejected.length > 1 ? "s" : ""} could not be saved — fix and try again. Everything else was saved.`,
+        );
+      } else {
+        setEditing(false);
+        setDraft(null);
+      }
+      await onSaved?.();
+    } catch (e) {
+      const rejected = e?.body?.rejected;
+      if (Array.isArray(rejected) && rejected.length) {
+        const map = {};
+        rejected.forEach((r) => {
+          map[r.field] = r.message;
+        });
+        setFieldErrors(map);
+      }
+      setErr(e.message || "Failed to save property preferences");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    const p = prefs || {};
+    return (
+      <div>
+        {" "}
+        <div className="flex items-center justify-between mb-2">
+          <SectionTitle className="mb-0">Access &amp; Preferences</SectionTitle>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={openEdit}
+              aria-label="Edit Access &amp; Preferences"
+              className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+            >
+              Edit
+            </button>
+          )}
+        </div>
+        <AccessPrefsSubheading>Access</AccessPrefsSubheading>
+        <AccessPrefRow label="Property/Yard Gate" value={p.property_gate_code} />
+        <AccessPrefRow
+          label="Neighborhood Gate"
+          value={p.neighborhood_gate_code}
+        />
+        <AccessPrefRow label="Garage Code" value={p.garage_code} />
+        <AccessPrefRow label="Lockbox Code" value={p.lockbox_code} />
+        <AccessPrefRow label="Side Gate" value={p.side_gate_access} />
+        <AccessPrefRow label="Parking Notes" value={p.parking_notes} />
+        <AccessPrefRow label="Access Notes" value={p.access_notes} />
+
+        <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
+        <AccessPrefRow label="Pet Count" value={p.pet_count || null} />
+        <AccessPrefRow label="Pet Details" value={p.pet_details} />
+        <AccessPrefRow label="Pets Secured Plan" value={p.pets_secured_plan} />
+
+        <AccessPrefsSubheading>Scheduling</AccessPrefsSubheading>
+        <AccessPrefRow
+          label="Preferred Day"
+          value={accessPrefsOptionLabel(
+            ACCESS_PREFS_PREFERRED_DAY_OPTIONS,
+            p.preferred_day,
+          )}
+        />
+        <AccessPrefRow
+          label="Preferred Time"
+          value={accessPrefsOptionLabel(
+            ACCESS_PREFS_PREFERRED_TIME_OPTIONS,
+            p.preferred_time,
+          )}
+        />
+        <AccessPrefRow
+          label="Contact Preference"
+          value={accessPrefsOptionLabel(
+            ACCESS_PREFS_CONTACT_OPTIONS,
+            p.contact_preference,
+          )}
+        />
+        {(p.blackout_start || p.blackout_end) && (
+          <AccessPrefRow
+            label="Blackout Dates"
+            value={`${dateInputValue(p.blackout_start) || "?"} – ${dateInputValue(p.blackout_end) || "?"}`}
+          />
+        )}
+
+        <AccessPrefsSubheading>Lawn &amp; Irrigation</AccessPrefsSubheading>
+        <AccessPrefRow
+          label="Irrigation System Type"
+          value={
+            Array.isArray(p.irrigation_system_type)
+              ? p.irrigation_system_type
+              : p.irrigation_system_type
+                ? [p.irrigation_system_type]
+                : []
+          }
+        />
+        <AccessPrefRow
+          label="Inches / Week"
+          value={p.irrigation_inches_per_week}
+        />
+        <AccessPrefRow
+          label="Run Minutes / Zone"
+          value={p.irrigation_run_minutes}
+        />
+        <AccessPrefRow label="Watering Days" value={p.watering_days} />
+        <AccessPrefRow
+          label="Controller Location"
+          value={p.irrigation_controller_location}
+        />
+        <AccessPrefRow label="Zones" value={p.irrigation_zones} />
+        <AccessPrefRow
+          label="Rain Sensor"
+          value={p.rain_sensor ? "Yes" : "No"}
+        />
+        <AccessPrefRow label="Irrigation Notes" value={p.irrigation_schedule_notes} />
+        <AccessPrefRow label="Mowing Days" value={p.mowing_days} />
+        <AccessPrefRow
+          label="Mowing Time"
+          value={accessPrefsOptionLabel(
+            ACCESS_PREFS_MOWING_TIME_OPTIONS,
+            p.mowing_time_of_day,
+          ) || null}
+        />
+        <AccessPrefRow label="Mowing Notes" value={p.mowing_notes} />
+
+        {(p.hoa_name || p.hoa_company) && (
+          <>
+            <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
+            <AccessPrefRow label="HOA Name" value={p.hoa_name} />
+            <AccessPrefRow label="HOA Company" value={p.hoa_company} />
+            <AccessPrefRow label="HOA Phone" value={p.hoa_phone} />
+            <AccessPrefRow label="HOA Email" value={p.hoa_email} />
+            <AccessPrefRow label="Lawn Height Rule" value={p.hoa_lawn_height} />
+            <AccessPrefRow label="Restrictions" value={p.hoa_restrictions} />
+          </>
+        )}
+
+        <AccessPrefsSubheading>Health &amp; Safety</AccessPrefsSubheading>
+        <AccessPrefRow
+          label="Chemical Sensitivities"
+          value={p.chemical_sensitivities ? "Yes" : "No"}
+        />
+        {p.chemical_sensitivities && (
+          <AccessPrefRow
+            label="Sensitivity Details"
+            value={p.chemical_sensitivity_details}
+          />
+        )}
+        <AccessPrefRow label="Special Instructions" value={p.special_instructions} />
+      </div>
+    );
+  }
+
+  const d = draft || accessPrefsDraftFromRow(prefs);
+  return (
+    <div>
+      {" "}
+      <div className="flex items-center justify-between mb-2">
+        <SectionTitle className="mb-0">Access &amp; Preferences</SectionTitle>
+      </div>
+      {err && (
+        <div className="mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
+          {err}
+        </div>
+      )}
+      <div className="space-y-3">
+        <AccessPrefsSubheading>Access</AccessPrefsSubheading>
+        <AccessPrefsField label="Property/Yard Gate" error={fieldErrors.propertyGateCode}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.propertyGateCode} onChange={(e) => set("propertyGateCode")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Neighborhood Gate" error={fieldErrors.neighborhoodGateCode}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.neighborhoodGateCode} onChange={(e) => set("neighborhoodGateCode")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Garage Code" error={fieldErrors.garageCode}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.garageCode} onChange={(e) => set("garageCode")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Lockbox Code" error={fieldErrors.lockboxCode}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.lockboxCode} onChange={(e) => set("lockboxCode")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Side Gate" error={fieldErrors.sideGateAccess}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.sideGateAccess} onChange={(e) => set("sideGateAccess")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Parking Notes" error={fieldErrors.parkingNotes}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.parkingNotes} onChange={(e) => set("parkingNotes")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Access Notes" error={fieldErrors.accessNotes}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.accessNotes} onChange={(e) => set("accessNotes")(e.target.value)} />
+        </AccessPrefsField>
+
+        <AccessPrefsSubheading>Pets</AccessPrefsSubheading>
+        <AccessPrefsField label="Pet Count" error={fieldErrors.petCount}>
+          <Input type="number" min="0" max="20" className={ACCESS_PREFS_INPUT_CLASS} value={d.petCount} onChange={(e) => set("petCount")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Pet Details" error={fieldErrors.petDetails}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.petDetails} onChange={(e) => set("petDetails")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Pets Secured Plan" error={fieldErrors.petsSecuredPlan}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.petsSecuredPlan} onChange={(e) => set("petsSecuredPlan")(e.target.value)} />
+        </AccessPrefsField>
+
+        <AccessPrefsSubheading>Scheduling</AccessPrefsSubheading>
+        <AccessPrefsField label="Preferred Day" error={fieldErrors.preferredDay}>
+          <Select className={ACCESS_PREFS_INPUT_CLASS} value={d.preferredDay} onChange={(e) => set("preferredDay")(e.target.value)}>
+            {ACCESS_PREFS_PREFERRED_DAY_OPTIONS.map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </Select>
+        </AccessPrefsField>
+        <AccessPrefsField label="Preferred Time" error={fieldErrors.preferredTime}>
+          <Select className={ACCESS_PREFS_INPUT_CLASS} value={d.preferredTime} onChange={(e) => set("preferredTime")(e.target.value)}>
+            {ACCESS_PREFS_PREFERRED_TIME_OPTIONS.map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </Select>
+        </AccessPrefsField>
+        <AccessPrefsField label="Contact Preference" error={fieldErrors.contactPreference}>
+          <Select className={ACCESS_PREFS_INPUT_CLASS} value={d.contactPreference} onChange={(e) => set("contactPreference")(e.target.value)}>
+            {ACCESS_PREFS_CONTACT_OPTIONS.map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </Select>
+        </AccessPrefsField>
+        <div className="grid grid-cols-2 gap-2">
+          <AccessPrefsField label="Blackout Start" error={fieldErrors.blackoutStart}>
+            <Input type="date" className={ACCESS_PREFS_INPUT_CLASS} value={d.blackoutStart} onChange={(e) => set("blackoutStart")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="Blackout End" error={fieldErrors.blackoutEnd}>
+            <Input type="date" className={ACCESS_PREFS_INPUT_CLASS} value={d.blackoutEnd} onChange={(e) => set("blackoutEnd")(e.target.value)} />
+          </AccessPrefsField>
+        </div>
+
+        <AccessPrefsSubheading>Lawn &amp; Irrigation</AccessPrefsSubheading>
+        <AccessPrefsField label="Irrigation System Type" error={fieldErrors.irrigationSystemType}>
+          <AccessPrefsPillToggle options={ACCESS_PREFS_IRRIGATION_TYPE_OPTIONS} value={d.irrigationSystemType} onChange={set("irrigationSystemType")} />
+        </AccessPrefsField>
+        <div className="grid grid-cols-2 gap-2">
+          <AccessPrefsField label="Inches / Week" error={fieldErrors.irrigationInchesPerWeek}>
+            <Input type="number" min="0" max="5" step="0.1" className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationInchesPerWeek} onChange={(e) => set("irrigationInchesPerWeek")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="Run Minutes / Zone" error={fieldErrors.irrigationRunMinutes}>
+            <Input type="number" min="1" max="240" className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationRunMinutes} onChange={(e) => set("irrigationRunMinutes")(e.target.value)} />
+          </AccessPrefsField>
+        </div>
+        <AccessPrefsField label="Watering Days" error={fieldErrors.wateringDays}>
+          <AccessPrefsPillToggle options={ACCESS_PREFS_DAY_KEYS} value={d.wateringDays} onChange={set("wateringDays")} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Controller Location" error={fieldErrors.irrigationControllerLocation}>
+          <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationControllerLocation} onChange={(e) => set("irrigationControllerLocation")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Zones" error={fieldErrors.irrigationZones}>
+          <Input type="number" min="0" max="100" className={ACCESS_PREFS_INPUT_CLASS} value={d.irrigationZones} onChange={(e) => set("irrigationZones")(e.target.value)} />
+        </AccessPrefsField>
+        <div className="flex items-center justify-between py-1">
+          <span className="ui-label text-ink-secondary">Rain Sensor</span>
+          <Switch checked={!!d.rainSensor} onChange={(val) => set("rainSensor")(val)} />
+        </div>
+        <AccessPrefsField label="Irrigation Notes" error={fieldErrors.irrigationScheduleNotes}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.irrigationScheduleNotes} onChange={(e) => set("irrigationScheduleNotes")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Irrigation Issues" error={fieldErrors.irrigationIssues}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.irrigationIssues} onChange={(e) => set("irrigationIssues")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Mowing Days" error={fieldErrors.mowingDays}>
+          <AccessPrefsPillToggle options={ACCESS_PREFS_DAY_KEYS} value={d.mowingDays} onChange={set("mowingDays")} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Mowing Time" error={fieldErrors.mowingTimeOfDay}>
+          <Select className={ACCESS_PREFS_INPUT_CLASS} value={d.mowingTimeOfDay} onChange={(e) => set("mowingTimeOfDay")(e.target.value)}>
+            {ACCESS_PREFS_MOWING_TIME_OPTIONS.map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </Select>
+        </AccessPrefsField>
+        <AccessPrefsField label="Mowing Notes" error={fieldErrors.mowingNotes}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.mowingNotes} onChange={(e) => set("mowingNotes")(e.target.value)} />
+        </AccessPrefsField>
+
+        <AccessPrefsSubheading>HOA</AccessPrefsSubheading>
+        <div className="grid grid-cols-2 gap-2">
+          <AccessPrefsField label="HOA Name" error={fieldErrors.hoaName}>
+            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaName} onChange={(e) => set("hoaName")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="HOA Company" error={fieldErrors.hoaCompany}>
+            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaCompany} onChange={(e) => set("hoaCompany")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="HOA Phone" error={fieldErrors.hoaPhone}>
+            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaPhone} onChange={(e) => set("hoaPhone")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="HOA Email" error={fieldErrors.hoaEmail}>
+            <Input type="email" className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaEmail} onChange={(e) => set("hoaEmail")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="Lawn Height Rule" error={fieldErrors.hoaLawnHeight}>
+            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaLawnHeight} onChange={(e) => set("hoaLawnHeight")(e.target.value)} />
+          </AccessPrefsField>
+          <AccessPrefsField label="Inspection Period" error={fieldErrors.hoaInspectionPeriod}>
+            <Input className={ACCESS_PREFS_INPUT_CLASS} value={d.hoaInspectionPeriod} onChange={(e) => set("hoaInspectionPeriod")(e.target.value)} />
+          </AccessPrefsField>
+        </div>
+        <AccessPrefsField label="Restrictions" error={fieldErrors.hoaRestrictions}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.hoaRestrictions} onChange={(e) => set("hoaRestrictions")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Signage Rules" error={fieldErrors.hoaSignageRules}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.hoaSignageRules} onChange={(e) => set("hoaSignageRules")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Timing Restrictions" error={fieldErrors.hoaTimingRestrictions}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.hoaTimingRestrictions} onChange={(e) => set("hoaTimingRestrictions")(e.target.value)} />
+        </AccessPrefsField>
+
+        <AccessPrefsSubheading>Health &amp; Safety</AccessPrefsSubheading>
+        <div className="flex items-center justify-between py-1">
+          <span className="ui-label text-ink-secondary">Chemical Sensitivities</span>
+          <Switch checked={!!d.chemicalSensitivities} onChange={(val) => set("chemicalSensitivities")(val)} />
+        </div>
+        <AccessPrefsField label="Sensitivity Details" error={fieldErrors.chemicalSensitivityDetails}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.chemicalSensitivityDetails} onChange={(e) => set("chemicalSensitivityDetails")(e.target.value)} />
+        </AccessPrefsField>
+        <AccessPrefsField label="Special Instructions" error={fieldErrors.specialInstructions}>
+          <Textarea rows={2} className={ACCESS_PREFS_TEXTAREA_CLASS} value={d.specialInstructions} onChange={(e) => set("specialInstructions")(e.target.value)} />
+        </AccessPrefsField>
+      </div>
+      <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">
+        <Button variant="secondary" size="sm" onClick={cancelEdit} disabled={saving}>
+          Cancel
+        </Button>
+        <Button size="sm" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving..." : "Save"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function CustomerProfileProperty({
   embedded,
   recipientDetails,
@@ -6718,34 +7329,12 @@ function CustomerProfileProperty({
         </div>{" "}
         <div>
           {" "}
-          <SectionTitle>Access &amp; Preferences</SectionTitle>
-          {[
-            ["Property Gate Code", prefs.property_gate_code],
-            ["Neighborhood Gate", prefs.neighborhood_gate_code],
-            ["Parking Instructions", prefs.parking_instructions],
-            ["Interior Access", prefs.interior_access_instructions],
-            ["Pet Details", prefs.pet_details],
-            ["Chemical Sensitivities", prefs.chemical_sensitivities],
-            ["Preferred Time", prefs.preferred_service_time],
-            ["Preferred Tech", prefs.preferred_technician],
-            ["Special Instructions", prefs.special_instructions],
-          ].map(
-            ([label, val]) =>
-              val && (
-                <div
-                  key={label}
-                  className="flex justify-between py-1 text-ui-label border-b border-hairline border-zinc-200/60 gap-2"
-                >
-                  {" "}
-                  <span className="text-ink-secondary flex-shrink-0">
-                    {label}
-                  </span>{" "}
-                  <span className="text-zinc-900 text-right max-w-[200px] break-words">
-                    {val}
-                  </span>{" "}
-                </div>
-              ),
-          )}
+          <AccessPreferencesSection
+            customerId={customerId}
+            isAdmin={isAdmin}
+            prefs={prefs}
+            onSaved={handlePropertyChanged}
+          />
         </div>{" "}
       </div>{" "}
     </div>
