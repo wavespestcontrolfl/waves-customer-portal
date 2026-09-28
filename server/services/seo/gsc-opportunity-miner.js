@@ -54,6 +54,11 @@
  *                       content terms. Emits refresh_existing_page whose
  *                       draft adds self-contained answer blocks (gated
  *                       behind GATE_ANSWER_GAP_MINING).
+ *   aeo_question_gap    identify/decision/cost AEO benchmark question whose
+ *                       TARGET page ≥N engines don't cite: refresh the live
+ *                       target with the question as an answer block, else
+ *                       one new article (gated behind
+ *                       GATE_AEO_QUESTION_GAP_MINING, ≤2 per run).
  *   link_boost          derived (not mined): every ctr_rewrite/decay_refresh
  *                       page also gets an add_internal_links companion so
  *                       underperformers receive inbound links, not just a
@@ -73,7 +78,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
-const { observationDate, asJsonArray, isMeasuredAnswer, ownedCitations } = require('./aeo-measurement');
+const { observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
+const aeoBenchmark = require('../../data/aeo-benchmark-v1.json');
 const { isEntityQuestion } = require('./aeo-entity-facts');
 const { geoBlockReason } = require('../content/topic-targeting-gate');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
@@ -328,7 +334,7 @@ function gscOpportunityScore(bucket, position, impressionsBoost) {
   if (bucket === 'local_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'seasonal_rising') return Math.round(W * 0.7 * impressionsBoost);
   if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
-  if (bucket === 'aeo_gap') return Math.round(W * 0.8 * impressionsBoost);
+  if (bucket === 'aeo_gap' || bucket === 'aeo_question_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'answer_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'listicle_family') return Math.round(W * 0.7 * impressionsBoost);
   return 0;
@@ -413,6 +419,11 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
     if (city && service) return 'create_or_refresh_city_service_page';
     return 'new_supporting_blog';
   }
+  // aeo_question_gap: a live benchmark target page gets the question as an
+  // answer block (ANSWER-GAP MODE); a missing target gets one article that
+  // answers the single question. Never a city-service page — the question
+  // is not the city page's intent.
+  if (bucket === 'aeo_question_gap') return page_url ? 'refresh_existing_page' : 'new_supporting_blog';
   // answer_gap is page-anchored by construction (mined from query→page rows);
   // without a target page there is nothing to add answer blocks to.
   if (bucket === 'answer_gap') {
@@ -1116,9 +1127,15 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
         || opportunity.bucket === 'answer_gap'
       ? WEIGHTS.refreshLift
       : 0,
+    // aeo_question_gap multiplies the engines-missing strength by GSC
+    // demand: AI evidence alone adds nothing to RANK (the miner pins a
+    // qualifying thin-demand question at its action floor instead), so a
+    // question only ranks high when its target page has real GSC demand.
     aeoGap: opportunity.bucket === 'aeo_gap'
       ? Math.round(WEIGHTS.aeoGap * (extraSignals.gapStrength ?? 1))
-      : 0,
+      : opportunity.bucket === 'aeo_question_gap'
+        ? Math.round(WEIGHTS.aeoGap * (extraSignals.gapStrength ?? 1) * impressionsBoost(extraSignals.impressions || 0))
+        : 0,
   };
   // Penalties surface in later steps (the decision router applies
   // serpMismatch against live SERP profiles); no bucket pre-applies one
@@ -1128,6 +1145,204 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
 
   const total = Object.values(breakdown).reduce((a, b) => a + b, 0) - penalty;
   return { total, breakdown: { ...breakdown, _penalty: penalty } };
+}
+
+// ── aeo_question_gap (pure, test-friendly) ───────────────────────────
+//
+// aeo_gap folds answer-engine absence into ONE city×service opportunity, so
+// a benchmark question with no city ("German cockroaches in my Florida
+// home") is dropped and a decision/cost question ("termite treatment vs a
+// termite bond in Sarasota") dissolves into the generic city page. This
+// bucket keeps the QUESTION as the unit: identify/decision/cost benchmark
+// questions (provider questions stay aeo_gap's; entity questions are
+// identity gaps, not page gaps) whose TARGET page enough engines do not
+// cite. Owner-approved 2026-09-28 ("the auto-seeder"): the gap feeds the
+// existing autonomous pipeline — a live target is refreshed with the
+// question as an answer block (answer_gap's unanswered_queries contract),
+// a missing target gets one article.
+
+const AEO_QUESTION_GAP_BUCKET = 'aeo_question_gap';
+const AEO_QUESTION_GAP_INTENTS = new Set(['identify', 'decision', 'cost']);
+// Benchmark / managed-query service labels → the miner's vocabulary.
+const AEO_SERVICE_ALIAS = { 'pest control': 'pest', 'lawn care': 'lawn', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
+
+function aeoServiceFor(label, query) {
+  return (label && (AEO_SERVICE_ALIAS[String(label).toLowerCase()] || String(label).toLowerCase()))
+    || inferServiceFromQuery(query);
+}
+
+function envIntAtLeast(name, fallback, min) {
+  const n = Number.parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+function aeoQuestionGapQuestions(questions = []) {
+  return questions.filter((q) => q && q.id && q.query && q.target_path
+    && AEO_QUESTION_GAP_INTENTS.has(q.intent) && !isEntityQuestion(q.query));
+}
+
+function hubTargetUrl(targetPath) {
+  try { return new URL(String(targetPath), `https://www.${HUB_DOMAIN}`).href; } catch { return null; }
+}
+
+// One row per question and TARGET: a repaired target_path (the benchmark
+// allows it without changing the prompt) is new work, while the same
+// question/target never re-enters once the queue froze it (done / skipped /
+// claimed / pending_review — persistAll's upsert guard).
+function aeoQuestionGapDedupeKey(question) {
+  return [AEO_QUESTION_GAP_BUCKET, question.id, routeIdentity(hubTargetUrl(question.target_path)) || '_'].join('::');
+}
+
+function urlHost(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; }
+}
+
+// Per question and engine (llm_platform): attributable answer days in the
+// window, and whether ANY of them linked the TARGET page. Another owned page
+// being cited does not close the gap — the target is what the brief edits.
+// An engine counts only after minDays attributable days; the question
+// qualifies when at least minEngines of those never cited the target.
+// Third-party domains and competitor names are EVIDENCE for reviewers only.
+function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEngines = 3 } = {}) {
+  const byQuery = new Map(questions.map((q) => [q.query, q]));
+  const perQuestion = new Map();
+  for (const r of rows) {
+    const q = byQuery.get(r.query);
+    if (!q || !r.llm_platform || !isMeasuredAnswer(r)) continue;
+    if (!perQuestion.has(q.id)) perQuestion.set(q.id, new Map());
+    const engines = perQuestion.get(q.id);
+    let e = engines.get(r.llm_platform);
+    if (!e) {
+      e = { platform: r.llm_platform, models: new Set(), days: new Set(), targetCited: false, otherOwned: 0, domains: new Map(), competitors: new Set() };
+      engines.set(r.llm_platform, e);
+    }
+    e.days.add(observationDate(r.check_date));
+    if (r.model_version) e.models.add(r.model_version);
+    const owned = ownedCitations(r);
+    if (owned.some((u) => citationMatchesPage(u, q.target_path))) e.targetCited = true;
+    else if (owned.length) e.otherOwned += 1;
+    for (const u of cleanUrls(r.cited_urls)) {
+      if (isOwnedUrl(u)) continue;
+      const host = urlHost(u);
+      if (host) e.domains.set(host, (e.domains.get(host) || 0) + 1);
+    }
+    for (const c of asJsonArray(r.competitors_mentioned)) if (c?.name) e.competitors.add(c.name);
+  }
+
+  const gaps = [];
+  for (const q of questions) {
+    const engines = perQuestion.get(q.id);
+    if (!engines) continue;
+    const observed = [...engines.values()].filter((e) => e.days.size >= minDays);
+    const missing = observed.filter((e) => !e.targetCited);
+    if (missing.length < minEngines) continue;
+    const domains = new Map();
+    const competitors = new Set();
+    for (const e of missing) {
+      for (const [d, n] of e.domains) domains.set(d, (domains.get(d) || 0) + n);
+      for (const c of e.competitors) competitors.add(c);
+    }
+    gaps.push({
+      question: q,
+      engines_missing: missing
+        .map((e) => ({ platform: e.platform, models: [...e.models].sort(), observation_days: e.days.size, other_owned_pages_cited: e.otherOwned }))
+        .sort((a, b) => a.platform.localeCompare(b.platform)),
+      engines_citing_target: observed.filter((e) => e.targetCited).map((e) => e.platform).sort(),
+      engines_observed: observed.length,
+      gap_strength: Number((missing.length / observed.length).toFixed(2)),
+      third_party_domains: [...domains]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 5)
+        .map(([domain, citations]) => ({ domain, citations })),
+      competitors_mentioned: [...competitors].sort(),
+    });
+  }
+  return gaps;
+}
+
+// Scores through scoreOpportunity: GSC impressions on the target page drive
+// rank, scaled by the engines-missing strength. The AI evidence is what
+// QUALIFIES the question, so a qualifying question whose GSC demand is too
+// thin to clear its action's floor is pinned AT that floor (the lowest
+// admissible rank) — admitted, but never above a GSC opportunity that
+// earned its place. score_floor_pinned also keeps the facts boost off it.
+function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
+  const q = gap.question;
+  const page_url = liveUrl || null;
+  // A refresh takes city/service from the TARGET URL (answer_gap's rule: a
+  // question-derived city on a non-city page would attach wrong-city facts
+  // to the edit); a new article takes the benchmark's labels.
+  const service = (page_url && inferServiceFromUrl(page_url)) || aeoServiceFor(q.service, q.query);
+  const city = page_url ? inferCityFromUrl(page_url) : (normalizeCity(q.city) || inferCityFromQuery(q.query));
+  const signal = {
+    impressions,
+    benchmark_id: q.id,
+    intent: q.intent,
+    target_path: q.target_path,
+    target_live: !!page_url,
+    engines_missing: gap.engines_missing,
+    engines_citing_target: gap.engines_citing_target,
+    engines_observed: gap.engines_observed,
+    gap_strength: gap.gap_strength,
+    third_party_domains: gap.third_party_domains,
+    competitors_mentioned: gap.competitors_mentioned,
+    demand_basis: impressionsBoost(impressions) > 0 ? 'gsc' : 'ai_evidence_only',
+  };
+  // Live target → the refresh agent's ANSWER-GAP MODE (same key and entry
+  // shape answer_gap uses; the question is the one query to answer).
+  if (page_url) {
+    signal.unanswered_queries = [{
+      query: q.query,
+      impressions,
+      source: AEO_QUESTION_GAP_BUCKET,
+      benchmark_id: q.id,
+      engines_missing: gap.engines_missing.map((e) => e.platform),
+    }];
+  }
+  const opp = { bucket: AEO_QUESTION_GAP_BUCKET, query: q.query, page_url, service, city, signal_metadata: signal };
+  const { total, breakdown } = scoreOpportunity(opp, { position: 20, impressions, gapStrength: gap.gap_strength });
+  opp.action_type = actionForOpportunity(opp);
+  let score = total;
+  if (opp.action_type !== 'do_not_publish') {
+    const floor = persistFloorFor(opp);
+    if (total < floor) {
+      breakdown.aiEvidenceFloor = floor - total;
+      score = floor;
+      signal.score_floor_pinned = true;
+    }
+  }
+  opp.score = score;
+  opp.score_breakdown = breakdown;
+  opp.dedupe_key = aeoQuestionGapDedupeKey(q);
+  return opp;
+}
+
+// Highest score first, at most `cap`. Before the cap (so they never burn a
+// slot): frozen keys, do_not_publish demotions, and refreshes of a page
+// that another row is editing or recently edited (fencedPages: in-flight
+// page edits under a DIFFERENT key, or one done inside the cooldown; null =
+// lookup failed → no refresh this run), that this batch already edits
+// (batchRefreshPages), or that an earlier pick this run targets.
+function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), fencedPages = new Map(), batchRefreshPages = new Set() } = {}) {
+  const ordered = [...opps].sort((a, b) => b.score - a.score
+    || b.signal_metadata.gap_strength - a.signal_metadata.gap_strength
+    || String(a.signal_metadata.benchmark_id).localeCompare(String(b.signal_metadata.benchmark_id)));
+  const out = [];
+  const pages = new Set();
+  for (const o of ordered) {
+    if (out.length >= cap) break;
+    if (o.action_type === 'do_not_publish' || occupiedKeys.has(o.dedupe_key)) continue;
+    if (o.page_url) {
+      if (fencedPages === null) continue;
+      const id = routeIdentity(o.page_url);
+      const holders = fencedPages.get(id);
+      if (holders && [...holders].some((k) => k !== o.dedupe_key)) continue;
+      if (batchRefreshPages.has(id) || pages.has(id)) continue;
+      pages.add(id);
+    }
+    out.push(o);
+  }
+  return out;
 }
 
 // ── link-boost derivation (pure) ─────────────────────────────────────
@@ -1679,6 +1894,15 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, { periodDays, exemptQueries: sweepExemptQueries.no_content_yet })],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
+      // After answer_gap by list order: a page this batch already edits is
+      // not refreshed again for a benchmark question the same run. The
+      // floor test allows for the facts boost applied after mining.
+      ['aeo_question_gap', () => this.mineAeoQuestionGaps(since, {
+        batchRefreshPages: new Set(Object.values(buckets).flat()
+          .filter((o) => o.page_url && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
+            && (o.score ?? 0) + WEIGHTS.factsReady >= persistFloorFor(o))
+          .map((o) => routeIdentity(o.page_url))),
+      })],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
       // fence the family refreshes — two buckets must not queue
       // independently claimable edits of one page (their dedupe keys
@@ -2046,6 +2270,9 @@ class GscOpportunityMiner {
     for (const opp of opportunities) {
       if (opp.action_type !== 'refresh_existing_page') continue;
       if (!opp.city || !opp.service) continue;
+      // An aeo_question_gap row admitted on AI evidence sits AT its floor
+      // by design; a boost would lift it over GSC-backed work.
+      if (opp.signal_metadata?.score_floor_pinned) continue;
       const ready = await this._factsReadyFor(opp.service, opp.city, factsReadyCache);
       if (!ready) continue;
       opp.score += WEIGHTS.factsReady;
@@ -2906,18 +3133,13 @@ class GscOpportunityMiner {
       return [];
     }
 
-    // Map a probe's managed service label onto the miner's service vocabulary.
-    const SERVICE_ALIAS = { 'pest control': 'pest', 'lawn care': 'lawn', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
-    const resolveService = (qService, query) =>
-      (qService && (SERVICE_ALIAS[qService.toLowerCase()] || qService.toLowerCase())) || inferServiceFromQuery(query);
-
     // Group by city×service. Entity-cohort questions ask ABOUT Waves rather
     // than for a provider in a city; their misses are identity gaps, not
     // page-coverage gaps, so they never seed a city×service opportunity.
     const groups = new Map();
     for (const r of rows.filter(r => isMeasuredAnswer(r) && !isEntityQuestion(r.query))) {
       const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
-      const service = resolveService(r.q_service, r.query);
+      const service = aeoServiceFor(r.q_service, r.query);
       if (!city || !service) continue;
       const key = `${ownPageKey(service, city)}|${r.llm_platform}|${r.model_version}`;
       let g = groups.get(key);
@@ -3141,6 +3363,169 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     return out;
+  }
+
+  /**
+   * aeo_question_gap — see the pure helpers (evaluateAeoQuestionGaps and
+   * friends) for the rules. Dark behind GATE_AEO_QUESTION_GAP_MINING (read
+   * at call time). Target existence comes from the live hub sitemap the
+   * local_gap bucket already reads (cached per process); an unreadable
+   * sitemap emits nothing — reading a live target as missing would draft
+   * a duplicate article. A live target must also be an editable Astro
+   * content file (bounded probe, see _aeoRefreshTargetEditable); a tool
+   * page is skipped rather than answered with a competing article.
+   * Knobs: AEO_GAP_MIN_DAYS (shared with aeo_gap),
+   * AEO_QUESTION_GAP_MIN_ENGINES (3), AEO_QUESTION_GAP_MAX_PER_RUN (2; 0
+   * disables), AEO_QUESTION_GAP_COOLDOWN_DAYS (28: a page edited that
+   * recently is not refreshed again for another question).
+   */
+  async mineAeoQuestionGaps(since, { batchRefreshPages = new Set() } = {}) {
+    if (!isEnabled('aeoQuestionGapMining')) return [];
+    const minDays = envIntAtLeast('AEO_GAP_MIN_DAYS', 3, 1);
+    const minEngines = envIntAtLeast('AEO_QUESTION_GAP_MIN_ENGINES', 3, 1);
+    const cap = envIntAtLeast('AEO_QUESTION_GAP_MAX_PER_RUN', 2, 0);
+    const cooldownDays = envIntAtLeast('AEO_QUESTION_GAP_COOLDOWN_DAYS', 28, 0);
+    if (cap === 0) return [];
+
+    const questions = aeoQuestionGapQuestions(aeoBenchmark.questions);
+    let rows;
+    try {
+      rows = await this._loadAeoQuestionObservations(since, questions.map((q) => q.query));
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: observations read failed: ${err.message}`);
+      return [];
+    }
+    const gaps = evaluateAeoQuestionGaps(rows, questions, { minDays, minEngines });
+    if (!gaps.length) return [];
+
+    let live;
+    try {
+      live = await this._liveHubRoutes();
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: live sitemap unavailable (${err.message}) — no questions emitted this run`);
+      return [];
+    }
+    const impressions = await this._hubPageImpressionsByRoute(since).catch((err) => {
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: target impressions read failed: ${err.message}`);
+      return new Map();
+    });
+    // Fail-open like answer_gap: re-emitting a frozen key is a no-op upsert.
+    const occupied = await this._loadOccupiedKeys(AEO_QUESTION_GAP_BUCKET).catch((err) => {
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: occupied keys load failed: ${err.message}`);
+      return new Set();
+    });
+    // Fail-CLOSED for refreshes: without the fence a page could collect two
+    // concurrent edits. New-article questions are unaffected.
+    const fencedPages = await this._aeoQuestionPageFence(cooldownDays).catch((err) => {
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: page fence lookup failed (${err.message}) — refreshes suppressed this run`);
+      return null;
+    });
+
+    const opps = gaps.map((gap) => {
+      const id = routeIdentity(hubTargetUrl(gap.question.target_path));
+      return buildAeoQuestionGapOpp(gap, { liveUrl: live.get(id) || null, impressions: impressions.get(id) || 0 });
+    });
+    // Rank + fence without the cap, then fill the cap. A live target the
+    // refresh lane cannot edit (a tool page rather than an Astro content
+    // file) would park its run for review, so each refresh pick is probed
+    // with the loader answer_gap uses — bounded, and confirmed non-editable
+    // pages are remembered across runs in the listicle probe's cache. Such
+    // a question is skipped, not turned into a competing new article.
+    const ranked = selectAeoQuestionGaps(opps, { cap: Infinity, occupiedKeys: occupied, fencedPages, batchRefreshPages });
+    const out = [];
+    const probe = { remaining: cap * 3 };
+    for (const o of ranked) {
+      if (out.length >= cap) break;
+      if (o.page_url && !(await this._aeoRefreshTargetEditable(o.page_url, probe))) continue;
+      out.push(o);
+    }
+    logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'})`);
+    return out;
+  }
+
+  async _aeoRefreshTargetEditable(pageUrl, probe) {
+    const cache = GscOpportunityMiner._nonEditablePages;
+    const id = routeIdentity(pageUrl);
+    const exp = cache.get(id);
+    if (exp && exp > Date.now()) return false;
+    if (probe.remaining <= 0) return false;
+    probe.remaining -= 1;
+    try {
+      const astroPublisher = require('../content-astro/astro-publisher');
+      const loaded = await astroPublisher.loadExistingPageBody(pageUrl, { strictRegistryErrors: true });
+      if (loaded && loaded.body) return true;
+      cache.set(id, Date.now() + GscOpportunityMiner.NON_EDITABLE_TTL_MS);
+    } catch (err) {
+      // Transient (GitHub / registry) — not cached; the question retries next mine.
+      logger.warn(`[gsc-opp-miner] aeo_question_gap: editability probe failed: ${err.message}`);
+    }
+    return false;
+  }
+
+  // Attributable observations for ACTIVE managed benchmark questions — the
+  // admin toggle on seo_llm_mention_queries stops a question's work.
+  async _loadAeoQuestionObservations(since, queries = []) {
+    if (!queries.length) return [];
+    return db('seo_llm_mentions as m')
+      .join('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
+      .where('q.active', true)
+      .where('m.check_date', '>=', since)
+      .whereIn('m.query', queries)
+      .select(
+        'm.query', 'm.check_date', 'm.llm_platform', 'm.model_version',
+        'm.waves_cited_urls', 'm.cited_urls', 'm.competitors_mentioned',
+        'm.measurement_version', 'm.answer_available', 'm.citations_complete'
+      );
+  }
+
+  // Hub route identity → live sitemap URL (sitemap-manager caches it, and
+  // local_gap reads the same sitemap earlier in the mine).
+  async _liveHubRoutes() {
+    const urls = await getSitemapManager().listUrls();
+    if (!Array.isArray(urls) || !urls.length) throw new Error('live sitemap parsed to zero URLs');
+    const map = new Map();
+    for (const u of urls) {
+      const id = routeIdentity(u);
+      if (id && id.startsWith(`${HUB_DOMAIN}::`) && !map.has(id)) map.set(id, u);
+    }
+    return map;
+  }
+
+  // Hub GSC impressions per route identity for the window (tracking-link
+  // variants fold in through CANON_URL_SQL + routeIdentity).
+  async _hubPageImpressionsByRoute(since) {
+    const rows = await db('gsc_pages')
+      .where('date', '>=', since)
+      .where('page_url', 'like', `%${HUB_DOMAIN}/%`)
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .sum('impressions as impressions')
+      .groupByRaw(CANON_URL_SQL);
+    const map = new Map();
+    for (const r of rows) {
+      const id = routeIdentity(r.page_url);
+      if (id) map.set(id, (map.get(id) || 0) + (parseInt(r.impressions, 10) || 0));
+    }
+    return map;
+  }
+
+  // Pages under an in-flight edit (pending / claimed / pending_review) or
+  // edited inside the cooldown (done), by route identity → holder keys.
+  async _aeoQuestionPageFence(cooldownDays) {
+    const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
+    const rows = await db('opportunity_queue')
+      .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
+      .whereNotNull('page_url')
+      .where((b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .orWhere((d) => d.where('status', 'done').where('updated_at', '>=', cutoff)))
+      .select('page_url', 'dedupe_key');
+    const map = new Map();
+    for (const r of rows) {
+      const id = routeIdentity(r.page_url);
+      if (!id) continue;
+      if (!map.has(id)) map.set(id, new Set());
+      map.get(id).add(r.dedupe_key);
+    }
+    return map;
   }
 
   /**
@@ -4841,4 +5226,9 @@ module.exports._internals = {
   extractHeadings,
   termCoverage,
   classifyAnswerGapQueries,
+  aeoQuestionGapQuestions,
+  aeoQuestionGapDedupeKey,
+  evaluateAeoQuestionGaps,
+  buildAeoQuestionGapOpp,
+  selectAeoQuestionGaps,
 };

@@ -906,6 +906,40 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
   });
 });
 
+describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => {
+  const compose = (opportunity, decision) => new ContentBriefBuilder()._composeBrief({
+    opportunity: { id: 'opp-aeo-q', city: null, service: 'pest', bucket: 'aeo_question_gap', ...opportunity },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision,
+  });
+  const engines_missing = [{ platform: 'chatgpt' }, { platform: 'claude' }, { platform: 'gemini' }];
+  const question = 'How do I get rid of German cockroaches in my Florida home — should I hire a professional?';
+
+  test('a live-target refresh carries the question as unanswered_queries, the AEO overlay, and its evidence', () => {
+    const unanswered = [{ query: question, impressions: 0, source: 'aeo_question_gap', benchmark_id: 'Q6' }];
+    const brief = compose(
+      { page_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-german-cockroaches/', query: question,
+        signal_metadata: { impressions: 0, benchmark_id: 'Q6', engines_missing, unanswered_queries: unanswered,
+          competitors_mentioned: ['Example Pest Co'] } },
+      { page_type: 'refresh', action_type: 'refresh_existing_page' }
+    );
+    expect(brief.gsc_signal.unanswered_queries).toEqual(unanswered);
+    expect(brief.required_sections.some((sec) => /direct-answer/i.test(sec))).toBe(true);
+    expect(brief.schema_types).toContain('FAQPage');
+    expect(brief.gsc_signal.aeo_benchmark_id).toBe('Q6');
+    expect(brief.gsc_signal.aeo_engines_missing).toEqual(['chatgpt', 'claude', 'gemini']);
+    // Competitor names are queue evidence only — they never reach the brief.
+    expect(JSON.stringify(brief)).not.toMatch(/Example Pest Co/);
+  });
+
+  test('other buckets carry no AEO evidence fields', () => {
+    const brief = compose({ bucket: 'aeo_gap', page_url: null, query: 'q', signal_metadata: { impressions: 80 } },
+      { page_type: 'supporting-blog', action_type: 'new_supporting_blog' });
+    expect(brief.gsc_signal.aeo_benchmark_id).toBeNull();
+    expect(brief.gsc_signal.aeo_engines_missing).toBeNull();
+  });
+});
+
 describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 2026-08-01)', () => {
   // seasonal_rising was the ONE bucket that never wrote the canonical
   // `impressions` key, so every draft from it hard-failed the quality gate's

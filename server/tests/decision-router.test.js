@@ -292,6 +292,21 @@ describe('final_score equals sum of breakdown entries', () => {
 
 // ── page-anchored buckets (answer_gap) ───────────────────────────────
 
+describe('page-anchored bucket pinning (aeo_question_gap)', () => {
+  test.each([
+    ['refresh_existing_page', '/pest-control/get-rid-of-german-cockroaches/', 'new_supporting_blog', 'refresh'],
+    ['new_supporting_blog', null, 'create_or_refresh_city_service_page', 'supporting-blog'],
+  ])('keeps %s when the profiler recommends another asset', (action, pageUrl, recommended, pageType) => {
+    const r = route(
+      opp({ bucket: 'aeo_question_gap', action_type: action, page_url: pageUrl, query: 'What affects termite treatment cost in Bradenton?' }),
+      { serp_profile: serp({ dominant_intent: 'informational', dominant_page_type: 'blog', recommended_asset_type: recommended }) }
+    );
+    expect(r.action_type).toBe(action);
+    expect(r.page_type).toBe(pageType);
+    expect(r.router_notes).toMatch(/page-anchored bucket aeo_question_gap/);
+  });
+});
+
 describe('page-anchored bucket pinning (answer_gap)', () => {
   test('answer_gap keeps refresh_existing_page when the profiler recommends a blog', () => {
     const r = route(

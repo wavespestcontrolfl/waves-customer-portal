@@ -2917,7 +2917,7 @@ describe('local_gap anchoring + sweep provenance + segment coverage (round-8 clo
 
   test('local_gap is PAGE-ANCHORED — the router cannot reroute it to an article', () => {
     const dr = fs.readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
-    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'\]\)/);
+    expect(dr).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\['answer_gap', 'listicle_family', 'local_gap'(, '[a-z_]+')*\]\)/);
   });
 
   test('the sweep consumes PRE-arbitration keys — an arbitration loss is not "signal gone"', () => {
@@ -3036,5 +3036,220 @@ describe('in-lock frozen targets reach the sweep (round-12 cloud P1)', () => {
     expect(src).toMatch(/const sweepFrozenTargets = new Set\(cityServiceFrozenTargets\)/);
     expect(src).toMatch(/collectFrozenTargets: sweepFrozenTargets/);
     expect(src).toMatch(/_sweepStaleLocalGapRows\(\n\s*\(buckets\.local_gap \|\| \[\]\),\n\s*sweepFrozenTargets,/);
+  });
+});
+
+// ── aeo_question_gap (question-level AI-search gaps) ─────────────────
+
+describe('aeo_question_gap bucket', () => {
+  const {
+    aeoQuestionGapQuestions,
+    aeoQuestionGapDedupeKey,
+    evaluateAeoQuestionGaps,
+    buildAeoQuestionGapOpp,
+    selectAeoQuestionGaps,
+  } = require('../services/seo/gsc-opportunity-miner')._internals;
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const { minScoreToActFor } = require('../services/content/scoring-config');
+  const benchmark = require('../data/aeo-benchmark-v1.json');
+  const entityCohort = require('../data/aeo-entity-cohort-v1.json');
+
+  const HUB = 'https://www.wavespestcontrol.com';
+  const PLATFORMS = ['chatgpt', 'claude', 'gemini', 'google_ai_overview', 'perplexity'];
+  const DAYS = ['2026-09-20', '2026-09-21', '2026-09-22'];
+  const q = (id) => benchmark.questions.find((x) => x.id === id);
+  const row = (question, platform, day, { cited = [], thirdParty = [], competitors = [], measured = true } = {}) => ({
+    query: question.query, llm_platform: platform, model_version: `${platform}-m1`, check_date: day,
+    measurement_version: 2, answer_available: measured, citations_complete: true,
+    waves_cited_urls: JSON.stringify(cited), cited_urls: JSON.stringify([...cited, ...thirdParty]),
+    competitors_mentioned: JSON.stringify(competitors.map((name) => ({ name }))),
+  });
+  // Synthetic dataset from the brief: every non-provider question is missing
+  // its target on ChatGPT/Gemini/Claude and cited on Perplexity/AI Overview.
+  const synthetic = (questions, { citingPlatforms = ['perplexity', 'google_ai_overview'], days = DAYS } = {}) =>
+    questions.flatMap((question) => PLATFORMS.flatMap((platform) => days.map((day) => row(question, platform, day, {
+      cited: citingPlatforms.includes(platform) ? [`${HUB}${question.target_path}`] : [],
+      thirdParty: ['https://www.bugguide.example/ants', 'https://extension.example.edu/roaches'],
+      competitors: ['Example Pest Co'],
+    }))));
+
+  test('only identify/decision/cost questions are eligible — provider and entity questions are excluded', () => {
+    const eligible = aeoQuestionGapQuestions([...benchmark.questions, ...entityCohort.questions.map((e, i) => ({ ...e, id: `E${i}`, intent: 'identify', target_path: '/about/' }))]);
+    expect(eligible.every((x) => ['identify', 'decision', 'cost'].includes(x.intent))).toBe(true);
+    expect(eligible.some((x) => x.intent === 'provider')).toBe(false);
+    expect(eligible.some((x) => String(x.id).startsWith('E'))).toBe(false);
+    expect(eligible).toHaveLength(benchmark.questions.filter((x) => x.intent !== 'provider').length);
+  });
+
+  test('synthetic dataset: identify questions uncited on ChatGPT/Gemini/Claude qualify with the evidence recorded', () => {
+    const identify = aeoQuestionGapQuestions(benchmark.questions).filter((x) => x.intent === 'identify');
+    const gaps = evaluateAeoQuestionGaps(synthetic(identify), identify, { minDays: 3, minEngines: 3 });
+    expect(gaps).toHaveLength(identify.length); // 11 in swfl-2026-09-v1
+    const g = gaps.find((x) => x.question.id === 'Q6');
+    expect(g.engines_missing.map((e) => e.platform)).toEqual(['chatgpt', 'claude', 'gemini']);
+    expect(g.engines_citing_target).toEqual(['google_ai_overview', 'perplexity']);
+    expect(g.gap_strength).toBe(0.6);
+    expect(g.third_party_domains.map((d) => d.domain)).toEqual(['bugguide.example', 'extension.example.edu']);
+    expect(g.competitors_mentioned).toEqual(['Example Pest Co']);
+  });
+
+  test('a target cited by enough engines does not qualify; minEngines and minDays are both required', () => {
+    const q6 = q('Q6');
+    // Claude cites the target too → only 2 engines missing.
+    expect(evaluateAeoQuestionGaps(synthetic([q6], { citingPlatforms: ['perplexity', 'google_ai_overview', 'claude'] }), [q6], { minDays: 3, minEngines: 3 })).toEqual([]);
+    // Missing on 3 engines, but only 2 observation days each.
+    expect(evaluateAeoQuestionGaps(synthetic([q6], { days: DAYS.slice(0, 2) }), [q6], { minDays: 3, minEngines: 3 })).toEqual([]);
+    // Unattributable answers never count as days.
+    const unmeasured = synthetic([q6]).map((r) => ({ ...r, answer_available: false }));
+    expect(evaluateAeoQuestionGaps(unmeasured, [q6], { minDays: 3, minEngines: 3 })).toEqual([]);
+  });
+
+  test('citing ANOTHER owned page is still a target miss (recorded as evidence)', () => {
+    const q6 = q('Q6');
+    const rows = synthetic([q6]).map((r) => (r.llm_platform === 'chatgpt' ? { ...r, waves_cited_urls: JSON.stringify([`${HUB}/`]) } : r));
+    const [gap] = evaluateAeoQuestionGaps(rows, [q6], { minDays: 3, minEngines: 3 });
+    expect(gap.engines_missing.find((e) => e.platform === 'chatgpt').other_owned_pages_cited).toBe(3);
+  });
+
+  test('provider questions never produce a gap even with the data present', () => {
+    const provider = benchmark.questions.filter((x) => x.intent === 'provider');
+    expect(evaluateAeoQuestionGaps(synthetic(provider), aeoQuestionGapQuestions(benchmark.questions), { minDays: 3, minEngines: 3 })).toEqual([]);
+  });
+
+  const gapFor = (id) => evaluateAeoQuestionGaps(synthetic([q(id)]), [q(id)], { minDays: 3, minEngines: 3 })[0];
+
+  test('a live target → refresh_existing_page with the question in unanswered_queries', () => {
+    const url = `${HUB}/pest-control/get-rid-of-german-cockroaches/`;
+    const opp = buildAeoQuestionGapOpp(gapFor('Q6'), { liveUrl: url, impressions: 0 });
+    expect(opp.action_type).toBe('refresh_existing_page');
+    expect(opp.page_url).toBe(url);
+    expect(opp.signal_metadata.unanswered_queries).toEqual([expect.objectContaining({ query: q('Q6').query, benchmark_id: 'Q6', engines_missing: ['chatgpt', 'claude', 'gemini'] })]);
+    // Thin GSC demand: admitted at the refresh floor, never above it, and
+    // kept out of the facts boost.
+    expect(opp.score).toBe(minScoreToActFor('refresh_existing_page'));
+    expect(opp.signal_metadata).toMatchObject({ demand_basis: 'ai_evidence_only', score_floor_pinned: true });
+    expect(opp.dedupe_key).toBe('aeo_question_gap::Q6::wavespestcontrol.com::/pest-control/get-rid-of-german-cockroaches');
+  });
+
+  test('a missing target → a single new article, no answer-block contract', () => {
+    const opp = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null, impressions: 0 });
+    expect(opp.action_type).toBe('new_supporting_blog');
+    expect(opp.page_url).toBeNull();
+    expect(opp.city).toBe('Sarasota');
+    expect(opp.service).toBe('termite');
+    expect(opp.signal_metadata.unanswered_queries).toBeUndefined();
+    expect(opp.score).toBe(minScoreToActFor('new_supporting_blog'));
+  });
+
+  test('GSC demand ranks: strong target impressions score above the floor without pinning', () => {
+    const thin = buildAeoQuestionGapOpp(gapFor('Q36'), { liveUrl: `${HUB}/termite/termite-treatment-cost/`, impressions: 0 });
+    const strong = buildAeoQuestionGapOpp(gapFor('Q36'), { liveUrl: `${HUB}/termite/termite-treatment-cost/`, impressions: 900 });
+    expect(strong.signal_metadata.demand_basis).toBe('gsc');
+    expect(strong.signal_metadata.score_floor_pinned).toBeUndefined();
+    expect(strong.score).toBeGreaterThan(thin.score);
+    expect(strong.score_breakdown.aeoGap).toBeGreaterThan(0);
+    expect(thin.score_breakdown.aeoGap).toBe(0);
+  });
+
+  test('selection: per-run cap, frozen keys, page fences, one question per page', () => {
+    const live = (id, path, impressions = 0) => buildAeoQuestionGapOpp(gapFor(id), { liveUrl: `${HUB}${path}`, impressions });
+    const a = live('Q26', '/termite/termite-bond/', 900);
+    const b = live('Q37', '/termite/termite-bond/', 0); // same page as a, floor-pinned
+    const c = live('Q36', '/termite/termite-treatment-cost/', 300);
+    const d = buildAeoQuestionGapOpp(gapFor('Q6'), { liveUrl: null });
+    expect(selectAeoQuestionGaps([a, b, c, d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q26', 'Q36']);
+    expect(selectAeoQuestionGaps([a, b, c, d], { cap: 5 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q26', 'Q36', 'Q6']);
+    // A frozen key never burns a slot.
+    expect(selectAeoQuestionGaps([a, b, c, d], { cap: 2, occupiedKeys: new Set([a.dedupe_key]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36', 'Q37']);
+    // Another row editing (or recently edited) the page fences it; this
+    // question's own pending row does not.
+    const bondPage = 'wavespestcontrol.com::/termite/termite-bond';
+    expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set(['decay_refresh::x'])]]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
+    expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set([a.dedupe_key])]]) })).toHaveLength(2);
+    expect(selectAeoQuestionGaps([a, c], { cap: 2, batchRefreshPages: new Set([bondPage]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
+    // Fence lookup failed → no refreshes, new articles still flow.
+    expect(selectAeoQuestionGaps([a, c, d], { cap: 2, fencedPages: null }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
+  });
+
+  test('dedupe key is per question and target', () => {
+    expect(aeoQuestionGapDedupeKey(q('Q26'))).not.toBe(aeoQuestionGapDedupeKey(q('Q27')));
+    expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/termite-bond' })).toBe(aeoQuestionGapDedupeKey(q('Q26')));
+    expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/other/' })).not.toBe(aeoQuestionGapDedupeKey(q('Q26')));
+  });
+
+  describe('mineAeoQuestionGaps', () => {
+    const OLD = { ...process.env };
+    afterEach(() => { process.env = { ...OLD }; jest.restoreAllMocks(); });
+
+    const stubbed = (rows, liveUrls) => {
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_loadAeoQuestionObservations').mockResolvedValue(rows);
+      jest.spyOn(miner, '_liveHubRoutes').mockResolvedValue(new Map(liveUrls.map((u) => [routeIdentity(u), u])));
+      jest.spyOn(miner, '_hubPageImpressionsByRoute').mockResolvedValue(new Map());
+      jest.spyOn(miner, '_loadOccupiedKeys').mockResolvedValue(new Set());
+      jest.spyOn(miner, '_aeoQuestionPageFence').mockResolvedValue(new Map());
+      jest.spyOn(miner, '_aeoRefreshTargetEditable').mockResolvedValue(true);
+      return miner;
+    };
+
+    test('gate off ⇒ [] without reading anything', async () => {
+      delete process.env.GATE_AEO_QUESTION_GAP_MINING;
+      const miner = stubbed([], []);
+      expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+      expect(miner._loadAeoQuestionObservations).not.toHaveBeenCalled();
+      process.env.GATE_AEO_QUESTION_GAP_MINING = '1';
+      expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+    });
+
+    test('gate on: synthetic identify gaps → at most AEO_QUESTION_GAP_MAX_PER_RUN rows, refresh when the target is live', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      const identify = aeoQuestionGapQuestions(benchmark.questions).filter((x) => x.intent === 'identify');
+      const live = identify.filter((x) => x.id !== 'Q6').map((x) => `${HUB}${x.target_path}`);
+      const miner = stubbed(synthetic(identify), live);
+      const out = await miner.mineAeoQuestionGaps('2026-08-30');
+      expect(out).toHaveLength(2);
+      expect(out.every((o) => o.bucket === 'aeo_question_gap')).toBe(true);
+      process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '20';
+      const all = await miner.mineAeoQuestionGaps('2026-08-30');
+      // 11 qualify; targets shared by two questions yield one refresh each.
+      const pages = new Set(identify.map((x) => x.target_path));
+      expect(all).toHaveLength(pages.size);
+      expect(all.find((o) => o.signal_metadata.benchmark_id === 'Q6')).toBeUndefined(); // its page is Q14's target too
+      expect(all.every((o) => o.action_type === 'refresh_existing_page')).toBe(true);
+      process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '0';
+      expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+    });
+
+    test('a live target the refresh lane cannot edit is skipped and the cap fills from the next question', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      const questions = [q('Q31'), q('Q36'), q('Q26')]; // calculator, termite cost, termite bond
+      const miner = stubbed(synthetic(questions), questions.map((x) => `${HUB}${x.target_path}`));
+      miner._aeoRefreshTargetEditable.mockImplementation(async (url) => !/pest-control-calculator/.test(url));
+      const out = await miner.mineAeoQuestionGaps('2026-08-30');
+      expect(out.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
+    });
+
+    test('the editability probe is bounded and remembers confirmed non-editable pages', async () => {
+      const miner = new GscOpportunityMiner();
+      const publisher = require('../services/content-astro/astro-publisher');
+      const load = jest.spyOn(publisher, 'loadExistingPageBody').mockResolvedValue(null);
+      const url = `${HUB}/pest-control-calculator/`;
+      GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
+      const probe = { remaining: 1 };
+      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe(false);
+      expect(await miner._aeoRefreshTargetEditable(url, probe)).toBe(false); // cached, no second load
+      expect(load).toHaveBeenCalledTimes(1);
+      load.mockResolvedValue({ body: 'x' });
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 0 })).toBe(false); // budget spent
+      expect(await miner._aeoRefreshTargetEditable(`${HUB}/termite/termite-bond/`, { remaining: 1 })).toBe(true);
+      GscOpportunityMiner._nonEditablePages.delete(routeIdentity(url));
+    });
+
+    test('an unreadable sitemap emits nothing (a live target must never read as missing)', async () => {
+      process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+      const miner = stubbed(synthetic([q('Q6')]), []);
+      miner._liveHubRoutes.mockRejectedValue(new Error('fetch failed'));
+      expect(await miner.mineAeoQuestionGaps('2026-08-30')).toEqual([]);
+    });
   });
 });
