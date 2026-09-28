@@ -40,13 +40,20 @@ function makeConn(state) {
   const conn = (table) => {
     if (table === 'notification_prefs') {
       return {
-        where: (cond) => ({
-          first: async () => state.prefs.find((p) => p.customer_id === cond.customer_id) || null,
-          // importOneCustomer takes this FOR SHARE and never reads the
-          // result — a no-op here is faithful (the row-lock itself is real
-          // Postgres behavior, proved in the Postgres suite).
+        where: () => ({
+          // decideAddress takes each sharing profile's row FOR SHARE and
+          // never reads the result — a no-op here is faithful (the row-lock
+          // itself is real Postgres behavior, proved in the Postgres suite).
           forShare: async () => {},
         }),
+        // classifyAddress's ONE prefs read, across every sharing profile.
+        // `state.onPrefsRead(n)` lets a test act right after the Nth read.
+        whereIn: async (column, ids) => {
+          const rows = state.prefs.filter((p) => ids.includes(p.customer_id));
+          state.prefsReads = (state.prefsReads || 0) + 1;
+          if (state.onPrefsRead) state.onPrefsRead(state.prefsReads);
+          return rows;
+        },
       };
     }
     if (table === 'newsletter_subscribers') {
@@ -89,25 +96,35 @@ function makeConn(state) {
     && (s.customer_id === c.id || (s.email || '').trim().toLowerCase() === c.email.trim().toLowerCase()));
   const key = (v) => String(v).trim().toLowerCase();
 
+  // THE orphan-link predicate (orphanTargetSql): still an active unlinked
+  // orphan, exactly one live customer on its address, and that customer
+  // owns no active subscriber yet.
+  const orphanTarget = (subscriberId) => {
+    const orphan = state.subscribers.find((s) => s.id === subscriberId);
+    if (!orphan || orphan.status !== 'active' || orphan.customer_id != null) return null;
+    const matches = state.customers.filter((c) => key(c.email || '') === key(orphan.email) && isLive(c));
+    if (matches.length !== 1) return null;
+    if (state.subscribers.some((s) => s.customer_id === matches[0].id && s.status === 'active')) return null;
+    return matches[0].id;
+  };
+
   conn.raw = jest.fn(async (sql, bindings = []) => {
-    // Checked FIRST, and by the most specific literal available: this SQL
-    // text also contains "FROM customers c2" (a substring match for the
-    // generic "FROM customers c" check below) and, since the NOT EXISTS
-    // orphan guard was added, "NOT EXISTS" too — both of which would
-    // otherwise mis-route this into the candidate-rows branch.
+    // Checked FIRST: the UPDATE embeds the orphan SELECT verbatim (and with
+    // it "NOT EXISTS" and "FROM customers c2"), so the more generic
+    // branches below would otherwise mis-route it.
     if (sql.includes('UPDATE newsletter_subscribers ns')) {
-      const [email, , subscriberId, whereEmail] = bindings;
-      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
-      const row = state.subscribers.find((s) => s.id === subscriberId);
-      // NOT EXISTS guard: never a second active subscriber for one customer.
-      const twinAlreadyLinked = matches.length === 1
-        && state.subscribers.some((s) => s.id !== subscriberId && s.customer_id === matches[0].id && s.status === 'active');
-      if (row && matches.length === 1 && !twinAlreadyLinked && row.status === 'active' && row.customer_id == null
-          && (row.email || '').toLowerCase() === key(whereEmail)) {
-        row.customer_id = matches[0].id;
-        return { rows: [{ id: row.id }] };
+      const subscriberId = bindings[0];
+      const lockedTarget = bindings[bindings.length - 1];
+      const target = orphanTarget(subscriberId);
+      if (target && target === lockedTarget) {
+        state.subscribers.find((s) => s.id === subscriberId).customer_id = target;
+        return { rows: [{ id: subscriberId }] };
       }
       return { rows: [] };
+    }
+    if (sql.includes('SELECT twin.id')) {
+      const target = orphanTarget(bindings[0]);
+      return { rows: target ? [{ id: target }] : [] };
     }
     // countInvalidEmailCandidates — checked BEFORE the generic
     // "FROM customers c ... NOT EXISTS" branch below, since its SQL text
@@ -115,6 +132,12 @@ function makeConn(state) {
     if (sql.includes('count(*) AS n')) {
       const n = state.customers.filter((c) => isLive(c) && c.email && c.email.trim() && !c.email.includes('@') && !hasActive(c)).length;
       return { rows: [{ n: String(n) }] };
+    }
+    // profilesSharingAddress — every NON-ARCHIVED profile on the address,
+    // any stage (the same population linkToCustomer's picker chooses from).
+    if (sql.includes('AS profile_id')) {
+      const [email] = bindings;
+      return { rows: state.customers.filter((c) => !c.deleted_at && key(c.email || '') === key(email)).map((c) => ({ profile_id: c.id })) };
     }
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
       return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
@@ -125,8 +148,8 @@ function makeConn(state) {
       return { rows: c ? [{ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city }] : [] };
     }
     if (sql.includes('ORDER BY CASE status')) {
-      const [customerId, email] = bindings;
-      const matches = state.subscribers.filter((s) => s.customer_id === customerId || (s.email || '').trim().toLowerCase() === key(email));
+      const [profileIds, email] = bindings;
+      const matches = state.subscribers.filter((s) => profileIds.includes(s.customer_id) || (s.email || '').trim().toLowerCase() === key(email));
       const best = matches.reduce((acc, m) => {
         const p = PRIORITY[m.status] ?? 4;
         return !acc || p < acc.p ? { status: m.status, p } : acc;
@@ -140,12 +163,6 @@ function makeConn(state) {
     }
     if (sql.includes('customer_id IS NULL') && sql.includes('SELECT id, email')) {
       return { rows: state.subscribers.filter((s) => s.status === 'active' && s.customer_id == null).map((s) => ({ id: s.id, email: s.email })) };
-    }
-    if (sql.includes('SELECT id FROM customers') || sql.includes('SELECT count(*) FROM customers')) {
-      const [email] = bindings;
-      const matches = state.customers.filter((c) => (c.email || '').trim().toLowerCase() === key(email) && isLive(c));
-      if (sql.includes('count(*)')) return { rows: [{ count: String(matches.length) }] };
-      return { rows: matches.map((c) => ({ id: c.id })) };
     }
     throw new Error(`Unhandled raw SQL: ${sql.slice(0, 80)}`);
   });
@@ -352,10 +369,12 @@ test('re-check reloads the customer: one archived between the read and the write
   const state = { customers: [cust({ id: 'c1', email: 'gone@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
   const conn = makeConn(state);
   const rawImpl = conn.raw.getMockImplementation();
+  let reloads = 0;
   conn.raw = jest.fn(async (sql, bindings) => {
-    // Archive the customer right before the write-time reload reads it (the
-    // batch classification loop never calls this query at all).
-    if (sql.includes('WHERE c.id = ?')) state.customers[0].deleted_at = new Date();
+    // The projection's decision reloads the customer twice (the unlocked
+    // peek, then FOR SHARE); archive it right before the WRITE-time
+    // decision's first reload.
+    if (sql.includes('WHERE c.id = ?') && ++reloads === 3) state.customers[0].deleted_at = new Date();
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
@@ -366,33 +385,14 @@ test('re-check reloads the customer: one archived between the read and the write
 
 test('a row that appears for the same email in the instant between the recheck and the INSERT is left byte-for-byte unchanged, and counted as row_appeared', async () => {
   const state = { customers: [cust({ email: 'race@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
-  const conn = makeConn(state);
-  // notification_prefs is classifyCustomer's LAST read, on both the batch
-  // pass (call 1) and the write-time recheck (call 2) — mutate right after
-  // call 2 finishes reading, so classifyCustomer still reports "importable"
-  // but the row exists by the time the INSERT's own ON CONFLICT runs.
-  let prefsReads = 0;
-  const originalPrefsTable = conn('notification_prefs');
-  const realConnFn = conn;
-  const wrapped = (table) => {
-    if (table !== 'notification_prefs') return realConnFn(table);
-    return {
-      where: (cond) => ({
-        first: async () => {
-          prefsReads += 1;
-          const result = await originalPrefsTable.where(cond).first();
-          if (prefsReads === 2) {
-            state.subscribers.push({ id: 's-race', customer_id: null, email: 'race@example.com', status: 'active', source: 'other_flow', region_zone: null });
-          }
-          return result;
-        },
-        forShare: async () => {}, // the pre-classify row lock — not a read this test counts
-      }),
-    };
+  // The prefs read is classifyAddress's LAST read, on both the projection
+  // (read 1) and the write-time decision (read 2) — land the race right
+  // after read 2, so the decision still says "importable" but the row
+  // exists by the time the INSERT's own ON CONFLICT runs.
+  state.onPrefsRead = (n) => {
+    if (n === 2) state.subscribers.push({ id: 's-race', customer_id: null, email: 'race@example.com', status: 'active', source: 'other_flow', region_zone: null });
   };
-  wrapped.raw = conn.raw;
-  wrapped.transaction = jest.fn(async (cb) => cb(wrapped));
-  const result = await reconcileCustomers({ dryRun: false, conn: wrapped });
+  const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
   expect(result.imported).toBe(0);
   expect(result.excluded.row_appeared).toBe(1);
   expect(linkToCustomer).not.toHaveBeenCalled();
@@ -435,15 +435,12 @@ test.each([
 test('orphan link is atomic with the match check: a second live customer sharing the email appearing mid-batch drops the link (reported count reflects what was ACTUALLY applied, not the read-phase snapshot)', async () => {
   const state = { customers: [cust({ id: 'c1', email: 'orphan@e.com' })], subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
   const conn = makeConn(state);
-  let firstRead = true;
   const rawImpl = conn.raw.getMockImplementation();
   conn.raw = jest.fn(async (sql, bindings) => {
-    // Call 1 = the read-phase count (sees exactly one match); call 2 = the
-    // atomic UPDATE's own match check — add a second live customer first.
-    if ((sql.includes('SELECT id FROM customers') || sql.includes('count(*) FROM customers'))) {
-      if (!firstRead) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com' }));
-      firstRead = false;
-    }
+    // The projection and the write's resolve both saw exactly one match;
+    // a second live customer lands just before the UPDATE re-evaluates the
+    // same predicate in its own statement.
+    if (sql.includes('UPDATE newsletter_subscribers ns')) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com' }));
     return rawImpl(sql, bindings);
   });
   const result = await reconcileCustomers({ dryRun: false, conn });
@@ -460,6 +457,10 @@ test('orphan link NEVER attaches a second active subscriber to one customer — 
     ],
     prefs: [],
   };
+  // The dry run runs the SAME predicate the write's UPDATE embeds, so it
+  // never promises the link the confirmed run refuses.
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.orphanLinks).toBe(0);
   const result = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
   expect(result.orphanLinks).toBe(0);
   expect(state.subscribers.find((s) => s.id === 's-orphan').customer_id).toBeNull();
@@ -485,4 +486,124 @@ test('write-time recheck rejections keep their specific reason and are counted �
   // no reason anywhere in the response.
   expect(result.excluded.previously_unsubscribed).toBe(1);
   expect(Object.values(result.excluded).reduce((a, b) => a + b, 0)).toBe(1); // exactly one exclusion, nowhere else
+});
+
+// Address-level eligibility (Codex P1, shared address): one mailbox shared
+// by two profiles is ONE subscriber — an explicit opt-out on ANY sharing
+// profile excludes the address, even when the profile being imported has
+// none, and even when the opted-out sharer is not itself a candidate (a
+// lead-stage or inactive profile, which linkToCustomer's picker can still
+// choose). Only an archived sharer is left out, exactly as the picker does.
+test.each([
+  ['marketing_opted_out', { marketing_offers: false }, {}],
+  ['email_switch_off', { email_enabled: false }, {}],
+  ['marketing_sms_only', { marketing_channel: 'sms' }, {}],
+  ['marketing_opted_out', { marketing_offers: false }, { pipeline_stage: 'new_lead' }],
+  ['marketing_opted_out', { marketing_offers: false }, { active: false }],
+])('a sharing profile\'s %s excludes the shared address (sharer %j / %j) — dry run and write agree, nothing inserted', async (reason, sharerPrefs, sharerOverrides) => {
+  const state = {
+    customers: [
+      cust({ id: 'c1', email: 'Shared@Example.com ' }),
+      cust({ id: 'c2', email: 'shared@example.com', ...sharerOverrides }),
+    ],
+    subscribers: [],
+    prefs: [{ customer_id: 'c1', marketing_offers: true }, { customer_id: 'c2', ...sharerPrefs }],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.importable).toBe(0);
+  expect(dry.excluded[reason]).toBe(dry.candidates); // every candidate on the address, under the sharer's reason
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(state.subscribers).toHaveLength(0);
+  expect(linkToCustomer).not.toHaveBeenCalled();
+});
+
+test('an ARCHIVED sharer\'s opt-out does not block the address (the same population linkToCustomer can attach to)', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'a@example.com' }), cust({ id: 'c2', email: 'a@example.com', deleted_at: new Date() })],
+    subscribers: [],
+    prefs: [{ customer_id: 'c2', marketing_offers: false }],
+  };
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+});
+
+test('an unsubscribed row linked to a sharing profile (at another address) excludes the shared address too', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'a@example.com' }), cust({ id: 'c2', email: 'a@example.com', pipeline_stage: 'new_lead' })],
+    subscribers: [{ id: 's0', customer_id: 'c2', email: 'old@example.com', status: 'unsubscribed' }],
+    prefs: [],
+  };
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.excluded.previously_unsubscribed).toBe(1);
+  expect(write.imported).toBe(0);
+});
+
+test('every sharing profile is comms-locked before the decision reads its preferences', async () => {
+  const { lockCustomerComms } = require('../utils/customer-comms-lock');
+  const state = {
+    customers: [cust({ id: 'c1', email: 'a@example.com' }), cust({ id: 'c2', email: 'a@example.com', pipeline_stage: 'new_lead' })],
+    subscribers: [],
+    prefs: [],
+  };
+  const locked = [];
+  lockCustomerComms.mockImplementation(async (_trx, id) => { locked.push(id); });
+  const lockedAtRead = [];
+  state.onPrefsRead = () => { lockedAtRead.push([...locked]); };
+  await reconcileCustomers({ conn: makeConn(state) });
+  expect(lockedAtRead.length).toBeGreaterThan(0);
+  for (const snapshot of lockedAtRead) expect(snapshot).toEqual(expect.arrayContaining(['c1', 'c2']));
+  lockCustomerComms.mockImplementation(async () => {});
+});
+
+test('two candidate profiles sharing one address: projected ONCE (duplicate_address), and the write imports exactly one row', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'a@example.com' }), cust({ id: 'c2', email: ' A@example.com' })],
+    subscribers: [],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry).toMatchObject({ candidates: 2, importable: 1 });
+  expect(dry.excluded.duplicate_address).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+  expect(write.excluded.row_appeared).toBe(0); // the projection's count matched what the write applied
+  expect(state.subscribers).toHaveLength(1);
+});
+
+test('a profile that joins the address after its comms locks were chosen forces a fresh attempt, and its opt-out is honoured', async () => {
+  const state = { customers: [cust({ id: 'c1', email: 'a@example.com' })], subscribers: [], prefs: [] };
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  let sharerReads = 0;
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // The first decision's SECOND sharer read (after the email lock) finds
+    // a newcomer that was never comms-locked — an opted-out one.
+    if (sql.includes('AS profile_id') && ++sharerReads === 2) {
+      state.customers.push(cust({ id: 'c2', email: 'a@example.com', pipeline_stage: 'new_lead' }));
+      state.prefs.push({ customer_id: 'c2', marketing_offers: false });
+    }
+    return rawImpl(sql, bindings);
+  });
+  const dry = await reconcileCustomers({ conn });
+  expect(dry.errors).toEqual([]);
+  expect(dry.importable).toBe(0);
+  expect(dry.excluded.marketing_opted_out).toBe(1);
+  expect(conn.transaction).toHaveBeenCalledTimes(2); // rolled back and decided again, never classified on the stale set
+});
+
+test('two orphans resolving to one customer: the dry run projects ONE link, matching what the write applies', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'orphan@e.com' })],
+    subscribers: [
+      { id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' },
+      { id: 's2', customer_id: null, email: ' orphan@e.com ', status: 'active' }, // padded legacy twin row
+    ],
+    prefs: [],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.orphanLinks).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.orphanLinks).toBe(1);
+  expect(state.subscribers.filter((s) => s.customer_id === 'c1')).toHaveLength(1);
 });

@@ -12,20 +12,22 @@
 jest.setTimeout(30000);
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 const connection = process.env.RECONCILE_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 
 // Pauses the Nth query against one table, AFTER Postgres has already
 // returned it, until the caller explicitly releases it — a deterministic
-// rendezvous point, not a timing guess. For ONE candidate, notification_prefs
-// is read THREE times: #1 the batch classification pass (before the write
-// phase even opens a transaction), #2 importOneCustomer's own FOR SHARE
-// (right after taking both locks), #3 classifyCustomer's write-time
-// re-check — the LAST read before the INSERT. Pausing #2 traps the moment
-// right after the lock is taken; pausing #3 traps the moment right before
-// the write, so a race landed between `reached` and `release()` is
-// guaranteed to fall in that exact gap. Same technique as
+// rendezvous point, not a timing guess. Every decision (decideAddress) makes
+// TWO notification_prefs calls for a single-profile address: the FOR SHARE
+// on the profile's row (after the comms lock and the customer row lock) and
+// classifyAddress's one read — the LAST read before an insert. The dry-run
+// projection makes one decision per candidate (#1 FOR SHARE, #2 read); the
+// write phase makes another (#3 FOR SHARE, #4 read). Pausing #3 traps the
+// write-phase decision while it holds its locks; pausing #4 traps the
+// moment right before the INSERT, so a race landed between `reached` and
+// `release()` is guaranteed to fall in that exact gap. Same technique as
 // reschedule-link-promises-postgres.test.js's pauseFirstTableRead,
 // generalized to the Nth occurrence.
 //
@@ -132,13 +134,10 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     const cust = await seedLiveConsentingCustomer(trx);
     const lc = cust.email.toLowerCase();
 
-    // notification_prefs is read THREE times total for this one candidate:
-    // #1 the batch classification pass, #2 importOneCustomer's own FOR
-    // SHARE (right after taking both locks), #3 classifyCustomer's
-    // write-time re-check — the LAST read before the INSERT. Pause #3,
+    // Pause #4 — the write-phase decision's last read before the INSERT —
     // insert the conflicting row from a genuinely separate connection, then
-    // release — the INSERT is guaranteed to run strictly after that commit.
-    const { conn: paused, reached, release } = pauseNthTableRead(trx, 'notification_prefs', 3);
+    // release: the INSERT is guaranteed to run strictly after that commit.
+    const { conn: paused, reached, release } = pauseNthTableRead(trx, 'notification_prefs', 4);
     const reconcilePromise = reconcileCustomers({ dryRun: false, conn: paused });
     const other = knexFactory({ client: 'pg', connection, pool: POOL });
     try {
@@ -171,16 +170,13 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
       const connA = knexFactory({ client: 'pg', connection, pool: POOL });
       const connB = knexFactory({ client: 'pg', connection, pool: POOL });
       try {
-        // Rendezvous: pause connA's import right after it takes the
-        // customer-comms lock. notification_prefs occurrence #1 is the
-        // batch classification pass (before the write-phase transaction
-        // even opens); #2 is importOneCustomer's own FOR SHARE, taken
-        // immediately after acquiring BOTH locks — pausing there holds the
-        // lock open. It's transaction-scoped — held until connA's
-        // transaction commits or rolls back — so while paused, connB's own
-        // lock attempt for the SAME customer_id is a real, provable block,
+        // Rendezvous: pause connA's write-phase decision (#3, its FOR
+        // SHARE, taken right after the customer-comms lock and the
+        // customer row lock). The lock is transaction-scoped — held until
+        // connA's import commits or rolls back — so while paused, connB's
+        // own decision for the SAME customer_id is a real, provable block,
         // not a timing guess.
-        const { conn: pausedA, reached: aReached, release: releaseA } = pauseNthTableRead(connA, 'notification_prefs', 2);
+        const { conn: pausedA, reached: aReached, release: releaseA } = pauseNthTableRead(connA, 'notification_prefs', 3);
         const resultAPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
         await aReached; // connA holds the lock now; paused before its own read
 
@@ -222,12 +218,11 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     const connA = knexFactory({ client: 'pg', connection, pool: POOL });
     const other = knexFactory({ client: 'pg', connection, pool: POOL });
     try {
-      // Pause connA's import right after fetchLiveCandidateNow's SELECT ...
-      // FOR SHARE has already run (notification_prefs occurrence #2 is
-      // importOneCustomer's own FOR SHARE, taken immediately after that
-      // customer-row read) — the customer row lock is held from this point
-      // until connA's transaction commits or rolls back.
-      const { conn: pausedA, reached, release } = pauseNthTableRead(connA, 'notification_prefs', 2);
+      // Pause connA's write-phase decision right after its customers-row
+      // SELECT ... FOR SHARE has run (#3 is the prefs FOR SHARE taken
+      // immediately after it) — the customer row lock is held from this
+      // point until connA's import commits or rolls back.
+      const { conn: pausedA, reached, release } = pauseNthTableRead(connA, 'notification_prefs', 3);
       const resultAPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
       await reached; // connA now holds FOR SHARE on the customers row
 
@@ -311,4 +306,139 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     const sent = await trx('email_messages').whereRaw('LOWER(recipient_email_snapshot) = ?', [lc]);
     expect(sent).toHaveLength(0); // no email_messages row for this address
   }));
+  // ── Address-level eligibility (a mailbox shared by several profiles) ──
+
+  async function seedCommitted(customers, prefs = []) {
+    for (const c of customers) await db('customers').insert(c);
+    for (const p of prefs) await db('notification_prefs').insert(p);
+  }
+  async function cleanupCommitted(customerIds, emails) {
+    await db('newsletter_subscribers').whereIn('customer_id', customerIds).del();
+    for (const e of emails) await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [e.toLowerCase()]).del();
+    await db('notification_prefs').whereIn('customer_id', customerIds).del();
+    await db('customers').whereIn('id', customerIds).del();
+  }
+
+  test('a lead-stage profile sharing the address with an explicit opt-out excludes it (real Postgres) — the dry run and the write agree', () => rollbackTest(async (trx) => {
+    const primary = synthCustomer();
+    const sharer = synthCustomer({ email: ` ${primary.email.toUpperCase()}`, pipeline_stage: 'new_lead' });
+    await trx('customers').insert([primary, sharer]);
+    await trx('notification_prefs').insert([
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: sharer.id, marketing_offers: false, email_enabled: true },
+    ]);
+    const dry = await reconcileCustomers({ conn: trx });
+    expect(dry.candidates).toBe(1);
+    expect(dry.importable).toBe(0);
+    expect(dry.excluded.marketing_opted_out).toBe(1);
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBe(0);
+    const rows = await trx('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [primary.email.toLowerCase()]);
+    expect(rows).toHaveLength(0);
+  }));
+
+  test('a sharing profile\'s opt-out committed under its customer-comms lock (the notification-prefs writer protocol) blocks the reconcile, which then honours it', async () => {
+    const primary = synthCustomer();
+    const sharer = synthCustomer({ email: primary.email, pipeline_stage: 'new_lead' });
+    await seedCommitted([primary, sharer], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: sharer.id, marketing_offers: true, email_enabled: true },
+    ]);
+    const writer = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let writerTrx;
+    try {
+      writerTrx = await writer.transaction();
+      await lockCustomerComms(writerTrx, sharer.id);
+      await writerTrx('notification_prefs').where({ customer_id: sharer.id }).update({ marketing_offers: false });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 200); });
+      expect(settled).toBe(false); // waiting on the SHARER's comms lock, not just its own
+
+      await writerTrx.commit();
+      const result = await resultPromise;
+      expect(result.imported).toBe(0);
+      expect(result.excluded.marketing_opted_out).toBe(1);
+      const rows = await db('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [primary.email.toLowerCase()]);
+      expect(rows).toHaveLength(0);
+    } finally {
+      // A failed assertion must not leave the held transaction open (destroy would hang).
+      if (writerTrx && !writerTrx.isCompleted()) await writerTrx.rollback();
+      await writer.destroy();
+      await connA.destroy();
+      await cleanupCommitted([primary.id, sharer.id], [primary.email]);
+    }
+  });
+
+  test('a sharing profile\'s prefs row stays FOR SHARE-locked from the decision through the insert — a lockless FOR UPDATE writer (admin-customers.js pattern) waits for the commit', async () => {
+    const primary = synthCustomer();
+    const sharer = synthCustomer({ email: primary.email, pipeline_stage: 'new_lead' });
+    await seedCommitted([primary, sharer], [
+      { customer_id: primary.id, marketing_offers: true, email_enabled: true },
+      { customer_id: sharer.id, marketing_offers: true, email_enabled: true },
+    ]);
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    const other = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Two profiles => each decision makes 3 prefs calls (2 FOR SHARE + 1
+      // read); #6 is the write-phase decision's last read before the INSERT.
+      const { conn: pausedA, reached, release } = pauseNthTableRead(connA, 'notification_prefs', 6);
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
+      await reached;
+
+      let writerDone = false;
+      const writerPromise = other.transaction(async (t) => {
+        await t('notification_prefs').where({ customer_id: sharer.id }).forUpdate().first('customer_id');
+        await t('notification_prefs').where({ customer_id: sharer.id }).update({ marketing_offers: false });
+      }).then(() => { writerDone = true; });
+      await new Promise((resolve) => { setTimeout(resolve, 200); });
+      expect(writerDone).toBe(false); // cannot land between the decision and the insert
+
+      release();
+      const result = await resultPromise;
+      await writerPromise;
+      expect(result.imported).toBe(1); // decided and inserted strictly BEFORE the opt-out committed
+    } finally {
+      await other.destroy();
+      await connA.destroy();
+      await cleanupCommitted([primary.id, sharer.id], [primary.email]);
+    }
+  });
+
+  test('orphan linking serializes on the target customer\'s comms lock: a competing link committed first makes this run refuse, never a second active subscriber', async () => {
+    const twin = synthCustomer();
+    await seedCommitted([twin]);
+    const orphanEmail = twin.email.toLowerCase();
+    const competingEmail = `synth-${randomUUID().slice(0, 8)}@example.invalid`;
+    await db('newsletter_subscribers').insert({ email: orphanEmail, status: 'active', source: 'test_orphan' });
+    const holder = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let holderTrx;
+    try {
+      // A competing linker holds the twin's comms lock and links ANOTHER
+      // active subscriber to the twin, uncommitted.
+      holderTrx = await holder.transaction();
+      await lockCustomerComms(holderTrx, twin.id);
+      await holderTrx('newsletter_subscribers').insert({ email: competingEmail, status: 'active', source: 'test_orphan', customer_id: twin.id });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      expect(settled).toBe(false); // blocked on the lock BEFORE its one-active-link check
+
+      await holderTrx.commit();
+      const result = await resultPromise;
+      expect(result.orphanLinks).toBe(0);
+      const linked = await db('newsletter_subscribers').where({ customer_id: twin.id, status: 'active' });
+      expect(linked).toHaveLength(1);
+      expect(linked[0].email).toBe(competingEmail);
+    } finally {
+      if (holderTrx && !holderTrx.isCompleted()) await holderTrx.rollback();
+      await holder.destroy();
+      await connA.destroy();
+      await cleanupCommitted([twin.id], [orphanEmail, competingEmail]);
+    }
+  });
 });

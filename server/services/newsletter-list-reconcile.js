@@ -8,17 +8,28 @@
  * with a non-empty, minimally-valid email ("@" present, matching
  * subscribeOrResubscribe's own strict:false floor) and no ACTIVE subscriber
  * row (by customer_id or LOWER(TRIM(email)) on both sides — a padded legacy
- * row must still block a new one). Every exclusion is checked in ONE
- * fixed priority order —
- * an existing subscriber-state row always outranks a preference/suppression
- * check, so a both-unsubscribed-AND-opted-out customer counts once, under the higher reason:
- *   1. existing non-active row: unsubscribed / pending / inactive+waitlist
+ * row must still block a new one).
+ *
+ * ELIGIBILITY IS PER ADDRESS, NOT PER PROFILE. Two profiles can share one
+ * mailbox, and the subscriber row is one row per address, linked to
+ * whichever profile linkToCustomer's canonical picker chooses — so every
+ * check below runs across EVERY non-archived profile whose email
+ * normalizes (LOWER(TRIM)) to the address, and an exclusion on ANY of them
+ * excludes the address. Every exclusion is checked in ONE fixed priority
+ * order — an existing subscriber-state row always outranks a
+ * preference/suppression check, so a both-unsubscribed-AND-opted-out
+ * address counts once, under the higher reason:
+ *   1. an existing row for the address, or linked to any sharing profile:
+ *      active (already claimed) / unsubscribed / pending / inactive+waitlist
  *   2. an active suppression, global or group 'marketing_newsletter'
  *      (activeSuppressionsFor is the single source of truth here)
- *   3. notification_prefs.email_enabled === false -> email_switch_off
- *   4. marketing_offers === false (an EXPLICIT opt-out) -> marketing_opted_out
+ *   3. notification_prefs.email_enabled === false on any sharing profile
+ *      -> email_switch_off
+ *   4. marketing_offers === false (an EXPLICIT opt-out) on any sharing
+ *      profile -> marketing_opted_out
  *   5. the resolved marketing_channel is 'sms' (channelFor — the SAME
- *      resolution email-division/eligibility.js uses) -> marketing_sms_only
+ *      resolution email-division/eligibility.js uses) on any sharing
+ *      profile -> marketing_sms_only
  *   6. otherwise -> importable
  *
  * CONSENT BASIS (owner-approved plan, ~/email-division-final-plan-20260927.md
@@ -53,15 +64,19 @@
  * picker for customer_id, on the SAME connection — same as every other
  * trusted caller.
  *
- * The consent decision and the insert are NOT two separate operations: each
- * import runs in its own transaction (importOneCustomer) that takes the
- * shared `customer-comms` lock (customer-comms-lock.js, the SAME lock
- * notification_prefs's own writer takes) and the shared per-email lock (the
- * SAME lock email-suppression writers take) before re-classifying — so a
- * concurrent opt-out or suppression fully serializes behind this decision,
- * never slips in between it and the write. The orphan-link UPDATE also
- * never attaches a second active subscriber to one customer (a NOT EXISTS
- * guard mirrors the candidate query's own one-active-subscription rule).
+ * ONE decision path (withAddressDecision → decideAddress) serves both the
+ * dry run's projection and the write: each runs in its own transaction
+ * that takes the shared `customer-comms` lock (customer-comms-lock.js — the
+ * SAME lock the notification-prefs writers take) for EVERY profile sharing
+ * the address, the customer row FOR SHARE, every sharing profile's prefs
+ * row FOR SHARE, and the shared per-address email lock (the SAME lock
+ * email-suppression writers take) before classifying; the write inserts
+ * inside that same transaction. So the preview can never promise what the
+ * write refuses on unchanged data, and a concurrent opt-out, suppression,
+ * or email change on any sharing profile serializes behind the decision
+ * instead of slipping between it and the insert. The orphan link likewise
+ * uses ONE predicate (orphanTargetSql) for the projection and the UPDATE,
+ * under the target customer's comms lock.
  */
 
 const db = require('../models/db');
@@ -135,20 +150,22 @@ async function countInvalidEmailCandidates(conn) {
   return Number(result.rows?.[0]?.n || 0);
 }
 
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const sortedUnique = (ids) => [...new Set(ids.map(String))].sort();
+
 // Re-verifies ONE customer is STILL a live candidate (same predicate as
 // fetchCandidateRows) and returns its CURRENT email/name/city — closes the
 // gap where an archive, pipeline-stage change, or email edit mid-batch would
 // otherwise leave a stale row importable.
 //
-// FOR SHARE holds the customers row through classification, the insert, and
-// the link — not just this one read: it's a real Postgres row lock, taken
-// inside importOneCustomer's transaction, so it stays held until that
-// transaction commits or rolls back. That serializes against any writer
-// that takes FOR UPDATE on the SAME row before committing an email/archive/
-// stage change — customer-email-write.js's `customers row FOR UPDATE` is
-// exactly that writer — so it can never commit mid-import and leave a
-// stale address active underneath us.
-async function fetchLiveCandidateNow(conn, customerId) {
+// `forShare` holds the customers row through classification, the insert,
+// and the link — a real Postgres row lock taken inside the decision's
+// transaction, held until it commits or rolls back. That serializes
+// against any writer that takes FOR UPDATE on the SAME row before
+// committing an email/archive/stage change — customer-email-write.js's
+// `customers row FOR UPDATE` is exactly that writer — so it can never
+// commit mid-import and leave a stale address active underneath us.
+async function fetchLiveCandidate(conn, customerId, { forShare = false } = {}) {
   const result = await conn.raw(
     `SELECT c.id AS customer_id, c.email, c.first_name, c.last_name, c.city
        FROM customers c
@@ -159,19 +176,35 @@ async function fetchLiveCandidateNow(conn, customerId) {
         AND c.email IS NOT NULL
         AND TRIM(c.email) <> ''
         AND ${HAS_AT('c')}
-        FOR SHARE`,
+        ${forShare ? 'FOR SHARE' : ''}`,
     [customerId, CUSTOMER_STAGES],
   );
   return result.rows?.[0] || null;
 }
 
-// Highest-priority existing subscriber row for this customer (same match
-// rule as the candidate query). Ordered so a still-active row (a race with
-// the candidate fetch, or the write-time recheck) always wins the read.
-async function existingSubscriberStatus(conn, customerId, email) {
+// EVERY profile whose customers.email is this normalized address — any
+// stage, any `active` flag, only archived (deleted_at) rows left out: the
+// SAME population linkToCustomer's canonical picker (liveTwinSubselect,
+// newsletter-subscribers.js) chooses the subscriber's customer_id from, so
+// no profile the new row can end up attached to is ever left unchecked.
+async function profilesSharingAddress(conn, email) {
+  const result = await conn.raw(
+    `SELECT c.id AS profile_id
+       FROM customers c
+      WHERE LOWER(TRIM(c.email)) = ?
+        AND c.deleted_at IS NULL`,
+    [normalizeEmail(email)],
+  );
+  return (result.rows || []).map((r) => r.profile_id);
+}
+
+// Highest-priority existing subscriber row for this ADDRESS: any row whose
+// email normalizes to it, or that is linked to ANY profile sharing it.
+// Ordered so a still-active row always wins the read.
+async function existingAddressStatus(conn, profileIds, email) {
   const result = await conn.raw(
     `SELECT status FROM newsletter_subscribers
-      WHERE customer_id = ? OR LOWER(TRIM(email)) = LOWER(TRIM(?))
+      WHERE customer_id = ANY(?::uuid[]) OR LOWER(TRIM(email)) = ?
       ORDER BY CASE status
                  WHEN 'active' THEN 0
                  WHEN 'unsubscribed' THEN 1
@@ -181,39 +214,102 @@ async function existingSubscriberStatus(conn, customerId, email) {
                  ELSE 4
                END
       LIMIT 1`,
-    [customerId, email],
+    [profileIds, normalizeEmail(email)],
   );
   return result.rows?.[0]?.status || null;
 }
 
-// Classifies ONE candidate against the fixed priority order above. Returns
-// an exclusion reason, 'already_active' (a race — no longer a candidate),
-// or null (importable). Reused verbatim for the write-time recheck.
-async function classifyCustomer(conn, row) {
-  const status = await existingSubscriberStatus(conn, row.customer_id, row.email);
+// Classifies ONE ADDRESS (never one profile) against the fixed priority
+// order in the module header. `profileIds` is every profile sharing the
+// address (profilesSharingAddress): an opt-out, email switch-off, or
+// SMS-only channel on ANY of them excludes the address — the mailbox is
+// one inbox, whichever profile the subscriber row ends up linked to.
+// Returns an exclusion reason, 'already_active', or null (importable).
+async function classifyAddress(conn, { email, profileIds }) {
+  const status = await existingAddressStatus(conn, profileIds, email);
   if (status === 'active') return 'already_active';
   if (status === 'unsubscribed') return 'previously_unsubscribed';
   if (status === 'pending') return 'pending_confirmation';
   if (status === 'inactive' || status === 'waitlist') return 'inactive_subscriber';
 
-  const suppressions = await activeSuppressionsFor(null, row.email, 'marketing_newsletter', conn);
+  const suppressions = await activeSuppressionsFor(null, email, 'marketing_newsletter', conn);
   if (suppressions.length) return 'suppressed';
 
-  const prefs = await conn('notification_prefs').where({ customer_id: row.customer_id }).first();
-  if (prefs && prefs.email_enabled === false) return 'email_switch_off';
+  const prefsRows = await conn('notification_prefs').whereIn('customer_id', profileIds);
+  if (prefsRows.some((p) => p.email_enabled === false)) return 'email_switch_off';
   // OPT-OUT gate, never an opt-in requirement (see the module header's
   // "CONSENT BASIS" — owner-approved plan rows 2 & 11, cited in the PR
   // body): only an EXPLICIT false excludes. A missing row, a NULL, or a
   // legacy-migration-defaulted true is "no opt-out on file", not consent —
   // this import's authority to subscribe someone comes from the plan, not
   // from this column reading true.
-  if (prefs && prefs.marketing_offers === false) return 'marketing_opted_out';
+  if (prefsRows.some((p) => p.marketing_offers === false)) return 'marketing_opted_out';
   // The SAME channel-resolution rule email-division/eligibility.js uses
   // (channelFor): a missing row / null / unrecognised value reads as the
   // schema default ('email'); only a RESOLVED 'sms' means email is unwanted.
-  if (channelFor(prefs, 'marketing_channel') === 'sms') return 'marketing_sms_only';
+  if (prefsRows.some((p) => channelFor(p, 'marketing_channel') === 'sms')) return 'marketing_sms_only';
 
   return null;
+}
+
+// Thrown (and retried from a fresh transaction) when the address, or the
+// set of profiles sharing it, moved after its comms locks were chosen — a
+// comms lock can only be taken in sorted order BEFORE any row lock, so the
+// only safe response to a new sharer is to roll back and start over.
+class AddressMovedError extends Error {}
+const MAX_DECISION_ATTEMPTS = 3;
+
+// THE eligibility decision for one customer's CURRENT address — the single
+// chokepoint the dry run's projection AND the write's insert both go
+// through (withAddressDecision), so the preview can never promise what the
+// write refuses. Must run inside a transaction. Lock order, matching every
+// other writer of these rows (customer-comms-lock.js's contract;
+// notifications.js / admin-customers.js prefs writers take the prefs row
+// BEFORE an address key):
+//   1. customer-comms advisory lock for EVERY profile sharing the address,
+//      in sorted order (the notification-prefs writers take this same lock
+//      before touching a profile's prefs row);
+//   2. this customer's row FOR SHARE (fences customer-email-write.js);
+//   3. every sharing profile's notification_prefs row FOR SHARE (fences a
+//      prefs writer that updates the row, lock or no lock);
+//   4. the per-address email key (fences suppression writers and an email
+//      assignment that would add a new sharer);
+//   5. re-resolve the sharing set — anyone new since step 1 retries.
+async function decideAddress(trx, customerId) {
+  const peek = await fetchLiveCandidate(trx, customerId);
+  if (!peek) return { outcome: 'no_longer_live' };
+  const lockedIds = sortedUnique([customerId, ...await profilesSharingAddress(trx, peek.email)]);
+  for (const id of lockedIds) await lockCustomerComms(trx, id);
+
+  const fresh = await fetchLiveCandidate(trx, customerId, { forShare: true });
+  if (!fresh) return { outcome: 'no_longer_live' };
+  if (normalizeEmail(fresh.email) !== normalizeEmail(peek.email)) throw new AddressMovedError('address changed');
+  for (const id of lockedIds) await trx('notification_prefs').where({ customer_id: id }).forShare();
+  await lockCustomerEmail(trx, fresh.email);
+
+  const profileIds = sortedUnique([customerId, ...await profilesSharingAddress(trx, fresh.email)]);
+  if (profileIds.some((id) => !lockedIds.includes(id))) throw new AddressMovedError('new profile shares the address');
+
+  const reason = await classifyAddress(trx, { email: fresh.email, profileIds });
+  if (reason === 'already_active') return { outcome: 'row_appeared' };
+  if (reason) return { outcome: 'excluded', reason };
+  return { outcome: 'importable', fresh };
+}
+
+// Opens a transaction on `conn` (a savepoint when `conn` is already one),
+// makes the decision, and hands it to `then` INSIDE the same transaction —
+// so everything `then` writes commits under the locks the decision took.
+// Outcomes: { outcome: 'importable', fresh } | { outcome: 'excluded', reason }
+//   | { outcome: 'row_appeared' } — an ACTIVE row already claims the address
+//   | { outcome: 'no_longer_live' } — archived/re-staged out since the read
+async function withAddressDecision(conn, customerId, then) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await conn.transaction(async (trx) => then(trx, await decideAddress(trx, customerId)));
+    } catch (e) {
+      if (!(e instanceof AddressMovedError) || attempt >= MAX_DECISION_ATTEMPTS) throw e;
+    }
+  }
 }
 
 // ACTIVE subscribers missing a region_zone, linked to a live customer
@@ -245,101 +341,80 @@ async function fetchOrphanSubscriberRows(conn) {
   return result.rows || [];
 }
 
-// Live customers whose email matches. The orphan link only ever applies
-// when this resolves to EXACTLY one row — an ambiguous match is never guessed.
-async function findLiveCustomersForEmail(conn, email) {
-  const result = await conn.raw(
-    `SELECT id FROM customers
-      WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
-        AND deleted_at IS NULL
-        AND active = true
-        AND pipeline_stage = ANY(?)`,
-    [email, CUSTOMER_STAGES],
-  );
-  return result.rows || [];
+// THE orphan-link predicate, as one SQL fragment the dry-run projection and
+// the write's UPDATE both embed verbatim: the orphan is still an active,
+// unlinked row; EXACTLY one live customer matches its address (an
+// ambiguous match is never guessed); and that customer does not already own
+// an active subscriber (the candidate query's one-active-subscription rule).
+function orphanTargetSql(subscriberId) {
+  return {
+    sql: `SELECT twin.id
+            FROM newsletter_subscribers orphan
+            JOIN customers twin ON LOWER(TRIM(twin.email)) = LOWER(TRIM(orphan.email))
+           WHERE orphan.id = ?
+             AND orphan.status = 'active'
+             AND orphan.customer_id IS NULL
+             AND twin.deleted_at IS NULL AND twin.active = true AND twin.pipeline_stage = ANY(?)
+             AND (
+                   SELECT count(*) FROM customers c2
+                    WHERE LOWER(TRIM(c2.email)) = LOWER(TRIM(orphan.email))
+                      AND c2.deleted_at IS NULL AND c2.active = true AND c2.pipeline_stage = ANY(?)
+                 ) = 1
+             AND NOT EXISTS (
+                   SELECT 1 FROM newsletter_subscribers ns2
+                    WHERE ns2.customer_id = twin.id AND ns2.status = 'active'
+                 )`,
+    bindings: [subscriberId, CUSTOMER_STAGES, CUSTOMER_STAGES],
+  };
 }
 
-// Links ONE orphan subscriber to its live twin in a SINGLE statement — the
-// exactly-one-match check and the write are the same atomic UPDATE, not a
-// separate read followed by a write, so there is no window between "we
-// looked" and "we wrote" for a second live customer (or an email change on
-// either side) to land in. Returns true only when a row was actually
-// updated (the report below distinguishes "matched at read time" from
-// "actually linked").
-async function applyOrphanLink(conn, link) {
-  const result = await conn.raw(
-    `UPDATE newsletter_subscribers ns
-        SET customer_id = twin.id, updated_at = NOW()
-       FROM (
-             SELECT id FROM customers
-              WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))
-                AND deleted_at IS NULL AND active = true AND pipeline_stage = ANY(?)
-              LIMIT 1
-           ) twin
-      WHERE ns.id = ?
-        AND ns.email = ?
-        AND ns.status = 'active'
-        AND ns.customer_id IS NULL
-        AND (
-              SELECT count(*) FROM customers c2
-               WHERE LOWER(TRIM(c2.email)) = LOWER(TRIM(?))
-                 AND c2.deleted_at IS NULL AND c2.active = true AND c2.pipeline_stage = ANY(?)
-            ) = 1
-        AND NOT EXISTS (
-              -- never a second active subscriber for one customer — the
-              -- candidate query enforces this same one-active-subscription
-              -- rule by customer_id, and the orphan path must match it.
-              SELECT 1 FROM newsletter_subscribers ns2
-               WHERE ns2.customer_id = twin.id AND ns2.status = 'active'
-            )
-      RETURNING ns.id`,
-    [link.email, CUSTOMER_STAGES, link.subscriberId, link.email, link.email, CUSTOMER_STAGES],
-  );
-  return (result.rows || []).length > 0;
+async function orphanLinkTarget(conn, subscriberId) {
+  const { sql, bindings } = orphanTargetSql(subscriberId);
+  const result = await conn.raw(sql, bindings);
+  const rows = result.rows || [];
+  return rows.length === 1 ? rows[0].id : null;
 }
 
-// Imports ONE customer in its own transaction, with the consent decision
-// and the insert serialized under the same locking protocol the app's other
-// comms/suppression writers use — never a separate read then a trusted
-// write. `notification_prefs`'s own writer (routes/notifications.js PUT
-// /preferences) takes lockCustomerComms before its update; email
-// suppression writers (e.g. webhooks-sendgrid.js) take lockCustomerEmail
-// before their insert — taking BOTH here means a concurrent opt-out OR a
-// concurrent suppression fully serializes behind this decision (whichever
-// commits first is the one that's honoured; there is no window between
-// them). Returns one of:
-//   { outcome: 'imported' }
-//   { outcome: 'excluded', reason }   — a real classifyCustomer reason
-//   { outcome: 'row_appeared' }       — the INSERT's own ON CONFLICT fired,
-//                                       or the fresh reload found an ALREADY
-//                                       active row (the same "someone else
-//                                       already claimed this address" story)
-//   { outcome: 'no_longer_live' }     — archived/re-staged out since the read
-async function importOneCustomer(conn, row) {
+// Links ONE orphan. Resolve → lock → re-check: the target's customer-comms
+// lock (the same lock every import of that customer's address holds while
+// it inserts and links) is taken BEFORE the one-active-subscription check
+// that matters, and the UPDATE re-evaluates the WHOLE predicate in its own
+// statement after the lock — so two reconciles linking different orphans
+// to one customer serialize, and the second sees the first's committed
+// link and refuses. Returns true only when a row was actually updated.
+async function applyOrphanLink(conn, subscriberId) {
   return conn.transaction(async (trx) => {
-    await lockCustomerComms(trx, row.customer_id);
+    const target = await orphanLinkTarget(trx, subscriberId);
+    if (!target) return false;
+    await lockCustomerComms(trx, target);
+    const { sql, bindings } = orphanTargetSql(subscriberId);
+    const result = await trx.raw(
+      `UPDATE newsletter_subscribers ns
+          SET customer_id = t.id, updated_at = NOW()
+         FROM (${sql}) t
+        WHERE ns.id = ?
+          AND t.id = ?
+        RETURNING ns.id`,
+      [...bindings, subscriberId, target],
+    );
+    return (result.rows || []).length > 0;
+  });
+}
 
-    // Re-check immediately before writing, INSIDE the lock: reload the
-    // customer (an archive, pipeline-stage change, or email edit mid-batch
-    // drops it) and re-classify consent/suppression on the FRESH row.
-    const fresh = await fetchLiveCandidateNow(trx, row.customer_id);
-    if (!fresh) return { outcome: 'no_longer_live' };
-
-    await lockCustomerEmail(trx, fresh.email);
-    // FOR SHARE the customer's own prefs row so this decision is fenced
-    // against the SAME row the PUT /preferences writer takes FOR UPDATE
-    // under the comms lock above — the two can never interleave.
-    await trx('notification_prefs').where({ customer_id: row.customer_id }).forShare();
-
-    const reason = await classifyCustomer(trx, fresh);
-    if (reason === 'already_active') return { outcome: 'row_appeared' };
-    if (reason) return { outcome: 'excluded', reason };
-
-    const lc = fresh.email.trim().toLowerCase();
+// Imports ONE customer's address: the decision (withAddressDecision) and
+// the insert + link commit in ONE transaction under the decision's locks —
+// never a separate read then a trusted write. Returns the decision's own
+// outcome, or { outcome: 'imported' }, or { outcome: 'row_appeared' } when
+// the INSERT's own ON CONFLICT fired.
+async function importOneCustomer(conn, customerId) {
+  return withAddressDecision(conn, customerId, async (trx, decision) => {
+    if (decision.outcome !== 'importable') return decision;
+    const { fresh } = decision;
+    const lc = normalizeEmail(fresh.email);
     // INSERT-only: no UPDATE branch exists for this statement to take, so
     // a row that appeared for this email in the instant between the
-    // recheck above and this write is left completely untouched — the
-    // conflict just yields zero returned rows.
+    // decision and this write is left completely untouched — the conflict
+    // just yields zero returned rows.
     const inserted = await trx('newsletter_subscribers')
       .insert({
         email: lc,
@@ -354,7 +429,10 @@ async function importOneCustomer(conn, row) {
       .returning('id');
     if (!inserted.length) return { outcome: 'row_appeared' };
 
-    await linkToCustomer(lc, trx); // canonical picker, same connection — never crosses a database boundary
+    // Canonical picker, same connection. Its candidates are exactly
+    // profilesSharingAddress's set — every one of them was checked and is
+    // comms-locked by the decision above.
+    await linkToCustomer(lc, trx);
     const zone = cityToZone(fresh.city);
     if (zone) {
       await trx('newsletter_subscribers')
@@ -370,48 +448,55 @@ async function importOneCustomer(conn, row) {
  * Reconcile the newsletter list against live customers. Read-only unless
  * `dryRun === false` — the route is responsible for requiring an explicit
  * confirmation before ever passing that. `conn` runs every read on a
- * connection of the caller's choosing (default the shared db pool); each
- * write-mode import runs in its OWN transaction opened on that SAME `conn`
- * (a nested transaction/savepoint when `conn` is already one), so the
- * consent decision, the insert, and the customer link never cross a
- * connection or database boundary the caller didn't choose.
+ * connection of the caller's choosing (default the shared db pool); every
+ * decision runs in its OWN transaction opened on that SAME `conn` (a nested
+ * transaction/savepoint when `conn` is already one).
+ *
+ * The dry run and the write share ONE decision path: the projection below
+ * calls withAddressDecision (the same locks, the same address-level
+ * classification) that importOneCustomer calls before inserting, and the
+ * orphan projection runs the same orphanTargetSql predicate the write's
+ * UPDATE embeds. Within one run, one address is imported at most once and
+ * one customer receives at most one orphan link — the projection counts
+ * the same way (duplicate_address / a claimed twin) so its numbers match
+ * what a confirmed run applies against unchanged data.
  */
 async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const write = dryRun === false;
   const excluded = {
     previously_unsubscribed: 0, pending_confirmation: 0, inactive_subscriber: 0,
     suppressed: 0, marketing_opted_out: 0, marketing_sms_only: 0, email_switch_off: 0,
-    row_appeared: 0, no_longer_live: 0, invalid_email: 0,
+    row_appeared: 0, no_longer_live: 0, invalid_email: 0, duplicate_address: 0,
   };
   const errors = [];
 
   const candidateRows = await fetchCandidateRows(conn);
   excluded.invalid_email = await countInvalidEmailCandidates(conn);
   const importableRows = [];
+  const projectedAddresses = new Set();
   const cityCounts = new Map();
 
   for (const row of candidateRows) {
-    let reason;
+    let decision;
     try {
-      reason = await classifyCustomer(conn, row);
+      decision = await withAddressDecision(conn, row.customer_id, async (_trx, d) => d);
     } catch (e) {
       errors.push({ customerId: row.customer_id, error: e.message });
       logger.error(`[newsletter-list-reconcile] classify customer id=${row.customer_id} failed: ${e.message}`);
       continue;
     }
-    // 'already_active' means a concurrent writer already made this address
-    // active between the candidate fetch and this read — the SAME
-    // "someone else already claimed it" story as a write-time row_appeared,
-    // so it's counted there too rather than silently dropped (a customer
-    // whose race lands during THIS read, not the write-time recheck, must
-    // still show up in the total).
-    if (reason === 'already_active') { excluded.row_appeared += 1; continue; }
-    if (reason) {
-      excluded[reason] += 1;
-      continue;
-    }
-    importableRows.push(row);
-    const city = (row.city || '').trim() || 'Unknown';
+    if (decision.outcome === 'excluded') { excluded[decision.reason] += 1; continue; }
+    // 'row_appeared' (an active row already claims the address) and
+    // 'no_longer_live' keep their own buckets — never silently dropped.
+    if (decision.outcome !== 'importable') { excluded[decision.outcome] += 1; continue; }
+    // Two candidate profiles sharing one address are ONE subscriber: the
+    // first is projected, the rest counted here — exactly what the write
+    // would do (its second insert would find the first's active row).
+    const address = normalizeEmail(decision.fresh.email);
+    if (projectedAddresses.has(address)) { excluded.duplicate_address += 1; continue; }
+    projectedAddresses.add(address);
+    importableRows.push(decision.fresh);
+    const city = (decision.fresh.city || '').trim() || 'Unknown';
     cityCounts.set(city, (cityCounts.get(city) || 0) + 1);
   }
 
@@ -422,9 +507,14 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const zoneFillCandidates = await fetchZoneFillCandidates(conn);
   const orphanCandidateRows = await fetchOrphanSubscriberRows(conn);
   const orphanLinks = [];
+  const claimedTwins = new Set();
   for (const orphan of orphanCandidateRows) {
-    const matches = await findLiveCustomersForEmail(conn, orphan.email);
-    if (matches.length === 1) orphanLinks.push({ subscriberId: orphan.id, email: orphan.email, customerId: matches[0].id });
+    const target = await orphanLinkTarget(conn, orphan.id);
+    // A second orphan for a twin this run already links would be refused
+    // by the write's own one-active-subscription check — never projected.
+    if (!target || claimedTwins.has(String(target))) continue;
+    claimedTwins.add(String(target));
+    orphanLinks.push({ subscriberId: orphan.id, customerId: target });
   }
 
   // Runs `action` per item, catching so one failure never aborts the batch.
@@ -445,7 +535,7 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   let orphanLinksApplied = 0;
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
-      const result = await importOneCustomer(conn, row);
+      const result = await importOneCustomer(conn, row.customer_id);
       if (result.outcome === 'imported') { imported += 1; return; }
       if (result.outcome === 'excluded') { excluded[result.reason] = (excluded[result.reason] || 0) + 1; return; }
       // 'row_appeared' and 'no_longer_live' each have their own bucket —
@@ -462,10 +552,8 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       if (updated) zoneFillsApplied += 1;
     });
 
-    // applyOrphanLink is ONE atomic statement — the exactly-one-match check
-    // and the write happen together, so there is no separate read to trust.
     await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), async (link) => {
-      if (await applyOrphanLink(conn, link)) orphanLinksApplied += 1;
+      if (await applyOrphanLink(conn, link.subscriberId)) orphanLinksApplied += 1;
     });
   }
 
@@ -475,9 +563,9 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     importable: importableRows.length,
     imported,
     excluded,
-    // Dry run reports the read-phase candidate/match count (what WOULD
-    // happen); write mode reports what was ACTUALLY applied — a race can
-    // make these differ even within one call.
+    // Dry run reports the projection (what WOULD happen); write mode
+    // reports what was ACTUALLY applied — a change landing between the two
+    // can make these differ, never the rules themselves.
     zoneFills: write ? zoneFillsApplied : zoneFillCandidates.length,
     orphanLinks: write ? orphanLinksApplied : orphanLinks.length,
     byCity,
