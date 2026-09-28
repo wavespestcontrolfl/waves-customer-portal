@@ -42,7 +42,11 @@ async function call(endpoint, body) {
   if (!isConfigured()) throw new PlaidError('Plaid is not configured (PLAID_CLIENT_ID / PLAID_SECRET / PLAID_ENV)');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  // The timer spans headers AND body: fetch resolves at headers, and a
+  // stalled body would otherwise hold the request (and the sequential
+  // hourly sync behind it) indefinitely.
   let res;
+  let json = null;
   try {
     res = await fetch(`${HOSTS[plaidEnv()]}${endpoint}`, {
       method: 'POST',
@@ -54,13 +58,15 @@ async function call(endpoint, body) {
       }),
       signal: controller.signal,
     });
+    try { json = await res.json(); } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      json = null; // non-JSON body — judged by the status below
+    }
   } catch (err) {
     throw new PlaidError(`Plaid ${endpoint} request failed: ${err.name === 'AbortError' ? 'timeout' : 'network error'}`);
   } finally {
     clearTimeout(timer);
   }
-  let json = null;
-  try { json = await res.json(); } catch { json = null; }
   if (!res.ok) {
     const code = json && json.error_code;
     const msg = (json && (json.display_message || json.error_message)) || `HTTP ${res.status}`;
@@ -71,6 +77,7 @@ async function call(endpoint, body) {
       requestId: json && json.request_id,
     });
   }
+  if (!json) throw new PlaidError(`Plaid ${endpoint}: unreadable response`, { status: res.status });
   return json;
 }
 

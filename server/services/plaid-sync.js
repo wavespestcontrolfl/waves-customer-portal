@@ -258,12 +258,31 @@ async function connectItem({ publicToken, institutionName }) {
     const e = new Error('no encryption key configured (PLAID_TOKEN_KEY) — refusing to store a bank token'); e.status = 503; throw e;
   }
   const { accessToken, itemId } = await plaid.exchangePublicToken(publicToken);
-  // From here on the connection is LIVE at Plaid: any failure before it is
-  // stored must revoke it, or it would be invisible and undisconnectable.
+  const instName = String(institutionName || '').trim().slice(0, 200) || null;
+  // The connection is LIVE at Plaid from here. Store the (encrypted) token
+  // FIRST, on its own: every later failure then leaves a visible
+  // connection the operator can disconnect (which revokes it), never an
+  // orphan nobody can see or revoke.
   let created;
   try {
+    [created] = await db('plaid_items').insert({
+      item_id: itemId,
+      institution_name: instName,
+      access_token_enc: encryptedTokenRaw(db, accessToken),
+      status: 'setup',
+    }).returning(['id']);
+  } catch (err) {
+    try {
+      await plaid.removeItem(accessToken);
+    } catch (cleanupErr) {
+      // both failed: the item id (never the token) is the operator's handle
+      // for removing it in the Plaid dashboard
+      logger.error(`[plaid-sync] ORPHANED Plaid item ${itemId}: could not store it (${err.code || 'database error'}) or revoke it (${cleanupErr.errorCode || cleanupErr.message}) — remove it in the Plaid dashboard`);
+    }
+    throw new Error(`could not save the bank connection: ${err.code ? `database error ${err.code}` : 'database error'}`);
+  }
+  try {
     const { accounts, institutionId } = await plaid.getAccounts(accessToken);
-    const instName = String(institutionName || '').trim().slice(0, 200) || null;
     const defaults = [];
     const usedLabels = new Set();
     for (const a of accounts) {
@@ -272,17 +291,11 @@ async function connectItem({ publicToken, institutionName }) {
       usedLabels.add(label.toUpperCase());
       defaults.push({ a, label, syncFrom: await defaultSyncFrom(label) });
     }
-    created = await db.transaction(async (trx) => {
-      const [item] = await trx('plaid_items').insert({
-        item_id: itemId,
-        institution_id: institutionId,
-        institution_name: instName,
-        access_token_enc: encryptedTokenRaw(trx, accessToken),
-        status: 'setup',
-      }).returning(['id']);
+    await db.transaction(async (trx) => {
+      await trx('plaid_items').where({ id: created.id }).update({ institution_id: institutionId, updated_at: trx.fn.now() });
       if (defaults.length) {
         await trx('plaid_accounts').insert(defaults.map(({ a, label, syncFrom }) => ({
-          plaid_item_id: item.id,
+          plaid_item_id: created.id,
           account_id: a.account_id,
           name: String(a.name || a.official_name || 'Account').slice(0, 200),
           mask: a.mask ? String(a.mask).slice(0, 10) : null,
@@ -294,13 +307,22 @@ async function connectItem({ publicToken, institutionName }) {
           enabled: defaultEnabled(a),
         })));
       }
-      return item;
     });
   } catch (err) {
-    await plaid.removeItem(accessToken).catch(() => {});
+    const reason = err instanceof plaid.PlaidError ? err.message
+      : `could not save the bank connection: ${err.code ? `database error ${err.code}` : 'database error'}`;
+    // revoke + forget when possible; otherwise the stored row stays (still
+    // in 'setup', so nothing syncs) with the reason, and Disconnect retries
+    const revoked = await plaid.removeItem(accessToken).then(() => true, () => false);
+    if (revoked) await db('plaid_items').where({ id: created.id }).del().catch(() => {});
+    else {
+      await db('plaid_items').where({ id: created.id }).update({
+        last_error: `${reason} — could not be revoked automatically; disconnect it`.slice(0, 500),
+        updated_at: db.fn.now(),
+      }).catch(() => {});
+    }
     if (err instanceof plaid.PlaidError) throw err;
-    // sanitized: knex messages carry bindings (the token and the key)
-    throw new Error(`could not save the bank connection: ${err.code ? `database error ${err.code}` : 'database error'}`);
+    throw new Error(reason);
   }
   return created.id;
 }

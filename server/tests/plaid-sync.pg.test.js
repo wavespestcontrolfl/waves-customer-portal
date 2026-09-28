@@ -189,6 +189,20 @@ async function activate(itemId, overrides = {}) {
     expect(await mockPg('plaid_items').where({ item_id: 'item-orphan' }).first()).toBeUndefined();
   });
 
+  test('when revoking also fails, the stored connection stays visible so Disconnect can retry', async () => {
+    plaid.exchangePublicToken.mockResolvedValueOnce({ accessToken: 'access-stuck', itemId: 'item-stuck' });
+    plaid.getAccounts.mockRejectedValueOnce(new plaid.PlaidError('Plaid /accounts/get: INTERNAL_SERVER_ERROR — try later', { errorCode: 'INTERNAL_SERVER_ERROR' }));
+    plaid.removeItem.mockRejectedValueOnce(new plaid.PlaidError('Plaid /item/remove: INTERNAL_SERVER_ERROR', { errorCode: 'INTERNAL_SERVER_ERROR' }));
+    await expect(plaidSync.connectItem({ publicToken: 'public-x', institutionName: 'Bank' })).rejects.toThrow(/accounts\/get/);
+    const kept = await mockPg('plaid_items').where({ item_id: 'item-stuck' }).first();
+    expect(kept).toMatchObject({ status: 'setup' });
+    expect(kept.access_token_enc).toMatch(/BEGIN PGP MESSAGE/);
+    expect(kept.last_error).toMatch(/could not be revoked automatically/);
+    await plaidSync.disconnectItem(kept.id);
+    expect(plaid.removeItem).toHaveBeenLastCalledWith('access-stuck');
+    expect((await mockPg('plaid_items').where({ id: kept.id }).first()).status).toBe('removed');
+  });
+
   test('setup enforces the label→type invariant and unique labels', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-checking', account_type: 'bank', txn_date: '2026-08-01',

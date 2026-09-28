@@ -66,3 +66,28 @@ test('errors carry the Plaid code and never the secret or token', async () => {
   const netErr = await plaid.removeItem('access-secret-token').catch(e => e);
   expect(netErr.message).toBe('Plaid /item/remove request failed: network error');
 });
+
+test('the timeout covers a stalled response BODY, not just the headers', async () => {
+  jest.useFakeTimers();
+  try {
+    fetch.mockImplementationOnce(async (_url, init) => ({
+      ok: true,
+      status: 200,
+      json: () => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }),
+    }));
+    const pending = plaid.transactionsSync('tok', null).catch(e => e);
+    await jest.advanceTimersByTimeAsync(30000);
+    const err = await pending;
+    expect(err).toBeInstanceOf(plaid.PlaidError);
+    expect(err.message).toBe('Plaid /transactions/sync request failed: timeout');
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a 200 with an unreadable body is an error, never a null result', async () => {
+  fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); } });
+  await expect(plaid.getAccounts('tok')).rejects.toThrow('Plaid /accounts/get: unreadable response');
+});
