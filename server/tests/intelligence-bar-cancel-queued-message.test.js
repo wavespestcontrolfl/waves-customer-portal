@@ -456,6 +456,21 @@ test('list_queued_messages caps at the default limit (25) and pages by next_curs
   expect(page2.next_cursor).toBeNull();
 });
 
+test('list_queued_messages keeps reading past ineligible rows so a page is not empty while more are queued', async () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({
+    id: `msg-${String(i).padStart(2, '0')}`, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'reminder', message_body: `Synthetic body ${i}`,
+    scheduled_for: new Date(Date.UTC(2099, 0, 1, 12, i)),
+    // The first 26 were already attempted — never listed.
+    metadata: i < 26 ? { provider_retry_at: '2099-01-01T11:00:00Z' } : {},
+  }));
+  db.mockImplementation(makeSmsDbMock(rows));
+  const page = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(page.messages.map((m) => m.message_id)).toEqual(['msg-26', 'msg-27', 'msg-28', 'msg-29']);
+  expect(page.has_more).toBe(false);
+  expect(page.next_cursor).toBeNull();
+});
+
 test('list_queued_messages refuses a malformed cursor instead of restarting from the top', async () => {
   db.mockImplementation(makeSmsDbMock([]));
   const out = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms', cursor: 'bm90LWEtY3Vyc29y' });

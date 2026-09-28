@@ -567,6 +567,7 @@ async function queuedMessagePreview(conn, messageId, channel) {
 
 const LIST_QUEUED_MESSAGES_DEFAULT_LIMIT = 25;
 const LIST_QUEUED_MESSAGES_MAX_LIMIT = 100;
+const LIST_QUEUED_MESSAGES_MAX_BATCHES = 10;
 
 // Bounded like every other paged IB reader (query_customers, getScheduleView
 // in tools.js): fetch one row past the page to learn has_more without a
@@ -604,41 +605,65 @@ async function listQueuedMessages(input) {
   const limit = Math.max(1, Math.min(Math.trunc(input.limit) || LIST_QUEUED_MESSAGES_DEFAULT_LIMIT, LIST_QUEUED_MESSAGES_MAX_LIMIT));
   const after = decodeQueueCursor(input.cursor);
   if (after === undefined) return { error: 'That cursor is not valid — call list_queued_messages again without one.' };
-  const query = db('sms_log')
-    .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' });
-  if (after) {
-    query.where(function () {
-      if (after.sf) {
-        this.whereRaw(`${SF_MS} > ?::timestamptz`, [after.sf])
-          .orWhere(function () { this.whereRaw(`${SF_MS} = ?::timestamptz`, [after.sf]).andWhere('id', '>', after.id); })
-          .orWhereNull('scheduled_for');
-      } else {
-        this.whereNull('scheduled_for').andWhere('id', '>', after.id);
-      }
-    });
-  }
-  const rows = await query
-    .orderByRaw(`${SF_MS} ASC NULLS LAST, id ASC`)
-    .limit(limit + 1)
-    .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
-  const hasMore = rows.length > limit;
-  const page = hasMore ? rows.slice(0, limit) : rows;
+  // Ineligible rows (workflow-owned, recruiting, already attempted) are
+  // dropped from the listing, so keep reading batches until the page is full
+  // or the queue is exhausted — a caller would read [] as "nothing queued"
+  // (pre-push audit on #5224 round-5 fix). Bounded batch count — only a queue
+  // with over 10 pages of back-to-back ineligible rows can still return an
+  // empty page with has_more, and the result then says so. The
+  // cursor always points at the last row EXAMINED, so a capped read resumes
+  // exactly where it stopped.
   const messages = [];
-  for (const row of page) {
-    if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
-    messages.push({
-      message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
-      kind: row.message_type || 'sms',
-      scheduled_time: row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null,
-      body_preview: bodyPreview(row.message_body),
-    });
+  let cursor = after;
+  let lastExamined = null;
+  let hasMore = false;
+  for (let batch = 0; batch < LIST_QUEUED_MESSAGES_MAX_BATCHES && messages.length < limit; batch += 1) {
+    const query = db('sms_log')
+      .where({ customer_id: customer.id, direction: 'outbound', status: 'scheduled' });
+    if (cursor) {
+      const at = cursor;
+      query.where(function () {
+        if (at.sf) {
+          this.whereRaw(`${SF_MS} > ?::timestamptz`, [at.sf])
+            .orWhere(function () { this.whereRaw(`${SF_MS} = ?::timestamptz`, [at.sf]).andWhere('id', '>', at.id); })
+            .orWhereNull('scheduled_for');
+        } else {
+          this.whereNull('scheduled_for').andWhere('id', '>', at.id);
+        }
+      });
+    }
+    const want = limit - messages.length;
+    const rows = await query
+      .orderByRaw(`${SF_MS} ASC NULLS LAST, id ASC`)
+      .limit(want + 1)
+      .select('id', 'to_phone', 'message_type', 'scheduled_for', 'metadata', 'message_body');
+    hasMore = rows.length > want;
+    const page = hasMore ? rows.slice(0, want) : rows;
+    for (const row of page) {
+      lastExamined = row;
+      if (smsIneligibilityReason(row)) continue; // workflow-owned or already delivered — not the bar's to list
+      messages.push({
+        message_id: row.id, channel: 'sms', masked_recipient: maskPhoneLast4(row.to_phone),
+        kind: row.message_type || 'sms',
+        scheduled_time: row.scheduled_for ? new Date(row.scheduled_for).toISOString() : null,
+        body_preview: bodyPreview(row.message_body),
+      });
+    }
+    if (!hasMore) break;
+    cursor = {
+      sf: lastExamined.scheduled_for ? new Date(lastExamined.scheduled_for).toISOString() : null,
+      id: lastExamined.id,
+    };
   }
   return {
     customer_id: customer.id,
     customer_name: `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || null,
     messages, total: messages.length,
     has_more: hasMore,
-    next_cursor: hasMore ? encodeQueueCursor(page[page.length - 1]) : null,
+    next_cursor: hasMore ? encodeQueueCursor(lastExamined) : null,
+    ...(hasMore && messages.length === 0
+      ? { note: 'Only texts the bar cannot cancel were found so far — more are queued; call again with next_cursor.' }
+      : {}),
   };
 }
 
