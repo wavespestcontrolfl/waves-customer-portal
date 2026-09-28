@@ -5529,6 +5529,13 @@ async function isTermiteRenewalPrepayInvoice(invoiceId) {
   }
 }
 
+// The renewal charge's own gate, read fresh (the same env read
+// termite-annual-renewal-charge.js termiteAnnualRenewalChargeLive uses).
+function termiteRenewalReconcilerLive() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.gateEnvValue === 'function' && Boolean(gates.gateEnvValue('GATE_TERMITE_ANNUAL_PLAN'));
+}
+
 async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
   const piId = paymentIntent.id;
 
@@ -5552,8 +5559,13 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // an automatic retry) and count the failure toward the customer's ACH
     // escalation — so it steps aside for a renewal successor's prepay
     // invoice. Detected on the durable term link, never on PI metadata.
+    // Codex #4971 r25 P1: ONLY while that follow-through can actually run.
+    // runTermiteAnnualRenewalSweep (leg 7d with it) is a no-op while
+    // GATE_TERMITE_ANNUAL_PLAN is off, so a renewal debit that fails after
+    // the gate was turned off would have NO owner at all — with the gate
+    // off this generic ladder keeps handling it like any other ACH failure.
     const achInvoiceId = achInvoice?.id || payment.invoice_id || null;
-    if (achInvoiceId && (await isTermiteRenewalPrepayInvoice(achInvoiceId))) {
+    if (achInvoiceId && termiteRenewalReconcilerLive() && (await isTermiteRenewalPrepayInvoice(achInvoiceId))) {
       logger.info(`[stripe-webhook] ACH failure on termite renewal invoice ${achInvoiceId} (PI ${piId}) — left to the renewal charge's own follow-through, generic ACH ladder skipped`);
       return;
     }

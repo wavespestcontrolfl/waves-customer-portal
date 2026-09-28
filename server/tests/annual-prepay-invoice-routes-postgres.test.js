@@ -627,8 +627,10 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect(await stampOf()).toBeNull();
 
     // The end date moves: stamped.
+    // One day off the original end, staying inside the month on any date
+    // (a term ending on the 28th+ moves back a day instead of forward).
     const [y, m, d] = sameEnd.split('-').map(Number);
-    const movedEnd = `${y}-${String(m).padStart(2, '0')}-${String(Math.min(d + 1, 28)).padStart(2, '0')}`;
+    const movedEnd = `${y}-${String(m).padStart(2, '0')}-${String(d >= 28 ? d - 1 : d + 1).padStart(2, '0')}`;
     expect(movedEnd).not.toBe(sameEnd);
     expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: movedEnd })).status).toBe(200);
     const stamped = await stampOf();
@@ -637,6 +639,44 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     // Re-saving the moved dates unchanged leaves the original stamp alone.
     expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: movedEnd })).status).toBe(200);
     expect(await stampOf()).toEqual(stamped);
+  });
+
+  // Codex #4971 r25 P1: once a renewal successor exists, the FIRST window
+  // move after its mint is the one that dates the parent's change — a later
+  // correction must not push the stamp past a payment that followed the
+  // first move. A stamp that predates the mint is replaced.
+  test('term_window_changed_at keeps the first post-mint move; a pre-mint stamp is replaced', async () => {
+    const { customerId, prepayInvoiceId, term } = await markedPaidPrepay();
+    const start = etDateString();
+    const end0 = String(term.term_end instanceof Date ? term.term_end.toISOString().slice(0, 10) : term.term_end).slice(0, 10);
+    const [y, m, d0] = end0.split('-').map(Number);
+    // Three end days that each differ from the original and from each other,
+    // whatever day of the month the term happens to end on.
+    const days = [10, 11, 12, 13].filter((day) => day !== d0).slice(0, 3);
+    const endOn = (day) => `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const stampOf = async () => (await trx('annual_prepay_terms').where({ id: term.id }).first('term_window_changed_at')).term_window_changed_at;
+    const move = async (day) => expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: endOn(day) })).status).toBe(200);
+
+    // A pre-mint move (an old correction), then the successor is minted.
+    await move(days[0]);
+    const preMint = await stampOf();
+    expect(preMint).toBeInstanceOf(Date);
+    await new Promise((resolve) => { setTimeout(resolve, 15); });
+    await trx('annual_prepay_terms').insert({
+      customer_id: customerId, status: 'payment_pending', annual_plan_version: 'v3', renewed_from_term_id: term.id,
+      term_start: `${y + 3}-01-01`, term_end: `${y + 4}-01-01`, created_at: new Date(),
+    });
+    await new Promise((resolve) => { setTimeout(resolve, 15); });
+
+    // First post-mint move: the pre-mint stamp is replaced.
+    await move(days[1]);
+    const firstPostMint = await stampOf();
+    expect(firstPostMint.getTime()).toBeGreaterThan(preMint.getTime());
+    await new Promise((resolve) => { setTimeout(resolve, 15); });
+
+    // A later correction: the first post-mint move is kept.
+    await move(days[2]);
+    expect(await stampOf()).toEqual(firstPostMint);
   });
 
   // Codex #4971 r15 P1 / r21 P1: withCustomerDeletionGate (the account

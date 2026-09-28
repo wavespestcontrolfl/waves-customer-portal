@@ -6599,7 +6599,25 @@ async function createTermForAnnualPrepay({
         && dateOnly(existing.term_start) !== updates.term_start;
       const endMoved = Object.prototype.hasOwnProperty.call(updates, 'term_end')
         && dateOnly(existing.term_end) !== updates.term_end;
-      if (startMoved || endMoved) updates.term_window_changed_at = new Date();
+      if (startMoved || endMoved) {
+        // Codex #4971 r25 P1: keep the FIRST move made after the current
+        // renewal successor was minted. A later correction must not push
+        // the stamp past a payment that followed the first invalidating
+        // move (paidAfterParentChanged would then read "paid before the
+        // change" and lose the refund-or-honor alert). An existing stamp
+        // that predates the successor's mint (an installation anchor, an
+        // old correction) is not a post-mint move and IS replaced.
+        let keepFirstPostMintMove = false;
+        if (existing.term_window_changed_at && termCols.renewed_from_term_id) {
+          const successor = await conn('annual_prepay_terms')
+            .where({ renewed_from_term_id: existing.id })
+            .orderBy('created_at', 'desc')
+            .first('created_at');
+          keepFirstPostMintMove = Boolean(successor?.created_at)
+            && new Date(existing.term_window_changed_at).getTime() > new Date(successor.created_at).getTime();
+        }
+        if (!keepFirstPostMintMove) updates.term_window_changed_at = new Date();
+      }
     }
     if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
       updates.coverage_service_type = normalizedCoverageServiceType;
@@ -7255,9 +7273,16 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
       .update({
         [sentCol]: sentAt,
         [claimCol]: null,
-        ...(freezeFee ? { renewal_noticed_fee: claimedTerm.prepay_amount } : {}),
         updated_at: new Date(),
       });
+    // Its own plain write, only once the witness actually stamped — the
+    // witness update above stays a literal with no spread (the term-states
+    // pin test reads every write object on this table).
+    if (stamped && freezeFee) {
+      await trx('annual_prepay_terms')
+        .where({ id: claimedTerm.id })
+        .update({ renewal_noticed_fee: claimedTerm.prepay_amount });
+    }
     if (lateCol && stamped) {
       otherRecorded = await trx('annual_prepay_terms')
         .where({ id: claimedTerm.id })
