@@ -941,7 +941,8 @@ const NEW_OR_CHANGED_VISIT_RE = /\b(?:(?:new|another|replacement|rescheduled|reb
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero|aunque)\b/i;
 const SPANISH_VISIT_PURPOSE_RE = /\bpara\s+[a-záéíóúñü]+(?:ar|er|ir)(?:le|les|nos|se)?\s+(?:(?!que\b)[a-záéíóúñü]+\s+){0,3}(?:(?:la|el|su)\s+)?(?:visita|cita|servicio|tratamiento)\b/gi;
 const SPANISH_QUALITATIVE_VISIT_SUBJECT = '(?:visita|cita|servicio|tratamiento|t[eé]cnico)';
-const SPANISH_QUALITATIVE_VISIT_PREDICATE = '(?:es|ser[aá]|ser[ií]a|est[aá]|estar[aá]|estar[ií]a|queda|quedar[aá]|ocurre|ocurrir[aá]|tiene\\s+lugar|tendr[aá]\\s+lugar|llega|llegar[aá]|llegar[ií]a|viene|vendr[aá]|vendr[ií]a|comienza|comenzar[aá]|empieza|empezar[aá]|program[a-záéíóúñü]*|agend[a-záéíóúñü]*|reserv[a-záéíóúñü]*)';
+const SPANISH_FILED_STATUS_PARTICIPLE = '(?:registrad|presentad|enviad|archivad|radicad|procesad)[oa]s?';
+const SPANISH_QUALITATIVE_VISIT_PREDICATE = `(?:(?:es|ser[aá]|ser[ií]a|est[aá]|estar[aá]|estar[ií]a|queda|quedar[aá])(?!\\s+${SPANISH_FILED_STATUS_PARTICIPLE}\\b)|ocurre|ocurrir[aá]|tiene\\s+lugar|tendr[aá]\\s+lugar|llega|llegar[aá]|llegar[ií]a|viene|vendr[aá]|vendr[ií]a|comienza|comenzar[aá]|empieza|empezar[aá]|program[a-záéíóúñü]*|agend[a-záéíóúñü]*|reserv[a-záéíóúñü]*)`;
 const SPANISH_QUALITATIVE_VISIT_SUBJECT_RE = new RegExp(`\\b(?:${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])|${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü]))`, 'i');
 function spanishQualitativeTimeEvidence(text, subject) {
   return String(text || '').replace(new RegExp(SPANISH_QUALITATIVE_VISIT_TIME_RE.source, 'gi'), (match, offset, source) => {

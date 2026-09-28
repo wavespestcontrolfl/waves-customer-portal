@@ -6860,6 +6860,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. Registré la solicitud para su visita tras el almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Tras el almuerzo envié su solicitud al técnico. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Envié su solicitud al técnico tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio está registrada desde antes del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Está registrada su solicitud de re-servicio desde antes del almuerzo. La oficina le llamará.',
     ]) {
       const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
