@@ -2577,10 +2577,16 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
-  function pageEditLockHarness(lockedRow, { unlockThrows = false, lockFree = true } = {}) {
+  function pageEditLockHarness(lockedRow, { unlockThrows = false, lockFree = true, resetThrows = false } = {}) {
     const events = [];
+    const sessionSql = [];
     const conn = {
       query: jest.fn(async (sql) => {
+        if (/^(SET|RESET) statement_timeout/.test(sql)) {
+          sessionSql.push(sql);
+          if (resetThrows && sql.startsWith('RESET')) throw new Error('reset failed');
+          return { rows: [] };
+        }
         if (sql.includes('unlock')) {
           events.push('unlock');
           if (unlockThrows) throw new Error('connection reset');
@@ -2605,7 +2611,7 @@ describe('runNext post-publish bookkeeping', () => {
       };
       return q;
     });
-    return { client, conn, events, first, query };
+    return { client, conn, events, first, query, sessionSql };
   }
 
   // publishRefresh runs only its GitHub write phase under the caller's
@@ -2836,6 +2842,37 @@ describe('runNext post-publish bookkeeping', () => {
       await new Promise((r) => setImmediate(r));
       expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
       expect(lock.conn.query).not.toHaveBeenCalled();
+    });
+
+    test('bounds every statement on the lock session and resets it before the pool gets it back', async () => {
+      const lock = pageEditLockHarness(lockedRow);
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_stmt'), briefBuilder: {},
+        publisher: { publishRefresh: guardedPublishRefresh(async () => ({ status: 'pr_open', pr_url: 'u', url: 'x' })) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_stmt'),
+      ).catch(() => {});
+      expect(lock.sessionSql).toEqual(['SET statement_timeout = 30000', 'RESET statement_timeout']);
+      expect(lock.conn.query.mock.calls[0][0]).toBe('SET statement_timeout = 30000');
+      expect(lock.client.destroyRawConnection).not.toHaveBeenCalled();
+    });
+
+    test('a session whose statement timeout cannot be reset is destroyed, not pooled', async () => {
+      const lock = pageEditLockHarness(lockedRow, { resetThrows: true });
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_reset'), briefBuilder: {},
+        publisher: { publishRefresh: guardedPublishRefresh(async () => ({ status: 'pr_open', pr_url: 'u', url: 'x' })) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_reset'),
+      ).catch(() => {});
+      expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
+      expect(lock.conn.__knex__disposed).toMatch(/reset failed/);
     });
 
     test('a GitHub call that outlives the hold deadline fails and the lock is still released', async () => {

@@ -110,6 +110,7 @@ const getGithubClient = lazy('github-client', '../content-astro/github-client');
 const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
 const PAGE_EDIT_LOCK_POLL_MS = 250;
 const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
+const PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS = 30_000;
 
 // Check a connection out of the pool, giving up at `deadlineAt`. A checkout
 // that completes after the deadline is returned to the pool at once.
@@ -1772,8 +1773,15 @@ class AutonomousRunner {
     // One deadline bounds both the pool checkout and the lock polling, so a
     // saturated pool cannot stretch the advertised wait.
     const waitUntil = Date.now() + acquireMs;
+    let timeoutSet = false;
     try {
       lockConn = await acquireConnectionBy(waitUntil);
+      // Every statement on this dedicated session (lock polling, the
+      // ownership read, unlock) is bounded, so a stalled query cannot keep
+      // the shared lock held past the hold budget. Reset before the session
+      // returns to the pool.
+      await lockConn.query(`SET statement_timeout = ${PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS}`);
+      timeoutSet = true;
       for (;;) {
         const res = await lockConn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
         if (res?.rows?.[0]?.locked === true) break;
@@ -1795,6 +1803,14 @@ class AutonomousRunner {
         catch (err) {
           unlockError = err;
           logger.warn(`[autonomous-runner] page-edit advisory unlock failed (${err.message}); destroying the locked session`);
+        }
+      }
+      if (lockConn && timeoutSet && !unlockError) {
+        try { await lockConn.query('RESET statement_timeout'); }
+        catch (err) {
+          // A session whose timeout cannot be reset must not return to the pool.
+          unlockError = err;
+          logger.warn(`[autonomous-runner] page-edit session reset failed (${err.message}); destroying the session`);
         }
       }
       if (lockConn) {
