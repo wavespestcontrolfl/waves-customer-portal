@@ -32,7 +32,13 @@ const SCHEMA_VERSION = 2;
 // 2026-08-02). A v2 snapshot can never carry that label, so the version is
 // what tells fixtures and audits which generator produced a given row
 // (codex P2 on #3159).
-const COPY_MAP_VERSION = 3;
+// Copy map v4: tree & shrub / palm 'Yes' labels (palm_trunk_concern,
+// pruning_issue_observed, irrigation_issue_observed, mulch_depth_concern) no
+// longer end in "— see recommendations" — the Next steps chips were retired
+// in #5116 so a visit may carry no advice. A v3 snapshot still renders its
+// persisted pointer text; the version is what tells fixtures and audits which
+// copy produced a row (codex r7 P2 on #5116).
+const COPY_MAP_VERSION = 4;
 // Summary template v5: every gauge lane accepts the tech-reviewed AI report
 // copy as the body (bodySource 'technician_report'), not just rodent
 // trapping — cockroach, bed bug, the termite family, bait stations, and
