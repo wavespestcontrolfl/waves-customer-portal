@@ -616,6 +616,76 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  // codex #5018 pre-push P2 (2nd finding): a booking for a customer staff
+  // quick-added straight from the appointment modal — matched only by
+  // phone, never linked to this lead — can commit BETWEEN the earlier
+  // (staging-time) bookedSinceCall SELECT above and this handoff's own
+  // final recheck. neverSendRecheck now takes lockCustomerComms for every
+  // customer bookedSinceCall would consider (the phone match here) BEFORE
+  // its own final bookedSinceCall lookup — the SAME lock the booking writer
+  // (admin-schedule.js POST /api/admin/schedule, and admin-leads.js's own
+  // lead-conversion booking flow) takes before its customer row lock and
+  // scheduled_services insert. A concurrent booking writer holding that
+  // lock genuinely blocks this handoff (a mocked knex cannot prove a lock
+  // is really held) until it commits, and the handoff's own recheck then
+  // sees the just-committed booking and refuses to send.
+  test('a booking writer holding customer-comms for a phone-matched customer makes the handoff wait, then the handoff sees the booking and does not send', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550999', customer_id: null });
+    const unlinkedCustomerId = randomUUID();
+    await mockPg('customers').insert({
+      id: unlinkedCustomerId, first_name: 'Quick', last_name: 'Added', phone: '+15555550999',
+      address_line1: '3 Example St', city: 'Bradenton', zip: '34205',
+    });
+    const callCreatedAt = new Date('2027-01-15T10:00:00.000Z');
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550999', created_at: callCreatedAt, updated_at: callCreatedAt,
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-9b', line: 'Pick a time.\n\n', phone: '+15555550999' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest000000000000000000000000b' }
+        : { sent: false, ...verdict };
+    });
+
+    const { lockCustomerComms } = require('../utils/customer-comms-lock');
+    let releaseBookingWriter;
+    const bookingWriterHeld = new Promise((resolve) => { releaseBookingWriter = resolve; });
+    const bookingWriterTx = mockPg.transaction(async (trx) => {
+      // The real booking writers' own order: customer-comms FIRST, then the
+      // scheduled_services insert — while still holding the lock.
+      await lockCustomerComms(trx, unlinkedCustomerId);
+      await trx('scheduled_services').insert({
+        id: randomUUID(), customer_id: unlinkedCustomerId, scheduled_date: '2027-01-20', service_type: 'Pest Control', status: 'pending',
+        created_at: new Date(callCreatedAt.getTime() + 60 * 60 * 1000), // booked an hour after the call started
+      });
+      await bookingWriterHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the booking-writer transaction a moment to actually acquire the
+    // lock (and commit its own INSERT within it) before the handoff starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const handoffPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The handoff's own withSmsHandoff is now genuinely blocked on the SAME
+    // advisory key the booking writer holds (pg_advisory_xact_lock waits,
+    // it does not error) — this is the real proof no mocked knex can give.
+    await new Promise((r) => setTimeout(r, 200));
+    releaseBookingWriter();
+    await bookingWriterTx;
+
+    const result = await handoffPromise;
+    expect(result).toEqual({ sent: false, skipped: 'booked_since_call' });
+  }, 10000);
+
   // codex #5018 r15 P2: proof a mocked knex/sendCustomerMessage cannot give
   // — a manual send (admin-leads.js's own withSmsHandoff, the SAME
   // lockSmsPhone key) already holding the phone lock genuinely blocks this
@@ -673,6 +743,68 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     await new Promise((r) => setTimeout(r, 200));
     releaseManualSend();
     await manualSendTx;
+
+    const result = await workerPromise;
+    expect(result).toEqual({ sent: false, skipped: 'link_sent_recently' });
+  }, 10000);
+
+  // codex #5018 pre-push P2: the Communications composer (admin-
+  // communications.js POST /sms) now takes this SAME lockSmsPhone handoff
+  // before a send, mirroring admin-leads.js's manual send above — a
+  // consultation link can ride the composer's body too, racing this
+  // worker's own final linkSentRecently check. Since lockSmsPhone keys
+  // purely on the destination phone (pg_advisory_xact_lock, the two-key
+  // family), any holder of it — admin-leads.js's manual send or the
+  // composer's — blocks the worker identically; this test drives that same
+  // mechanism directly (no HTTP layer) to pin the composer's own code path.
+  test('a Communications composer send holding the phone lock makes the worker wait, then the worker sees the delivered link and skips', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550777' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550777',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    const mintedAt = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
+    await mockPg('short_codes').insert({ id: randomUUID(), code: 'zz88', target_url: 'https://portal.example.com/inspection/tok-8', kind: 'consultation', entity_type: 'leads', entity_id: leadId, created_at: mintedAt, updated_at: mintedAt });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-8', line: 'Pick a time.\n\n', phone: '+15555550777' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000008' }
+        : { sent: false, ...verdict };
+    });
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releaseComposerSend;
+    const composerSendHeld = new Promise((resolve) => { releaseComposerSend = resolve; });
+    const composerSendTx = mockPg.transaction(async (trx) => {
+      // admin-communications.js's own new withSmsHandoff, verbatim: lock
+      // the phone, then send and record — while it still holds the lock.
+      await lockSmsPhone(trx, '+15555550777');
+      await trx('sms_log').insert({
+        id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550777', status: 'accepted',
+        message_body: 'Pick a time: https://portal.example.com/l/zz88', created_at: new Date(),
+      });
+      await composerSendHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the composer transaction a moment to actually acquire the lock
+    // (and commit its own INSERT within it) before the worker starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const workerPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The worker's own withSmsHandoff is now genuinely blocked on the SAME
+    // advisory key the composer holds (pg_advisory_xact_lock waits, it does
+    // not error) — this is the real proof no mocked knex can give.
+    await new Promise((r) => setTimeout(r, 200));
+    releaseComposerSend();
+    await composerSendTx;
 
     const result = await workerPromise;
     expect(result).toEqual({ sent: false, skipped: 'link_sent_recently' });

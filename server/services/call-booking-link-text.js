@@ -84,7 +84,7 @@ const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-s
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { phoneIdentityKey } = require('../utils/phone');
-const { lockSmsPhone } = require('../utils/customer-comms-lock');
+const { lockSmsPhone, lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV,
   suppressUnsupportedModelFlags, BLOCKING_TRIAGE_FLAGS,
@@ -1063,6 +1063,51 @@ async function dispatchIneligibleReason(ctx) {
 function neverSendRecheck(call, leadId, destinationPhone) {
   return async ({ dbi }) => {
     try {
+      // codex #5018 pre-push P2 (2nd finding): every customer bookedSinceCall
+      // (below) will consider, locked BEFORE this handoff's own row locks.
+      // LOCK ORDER — customer-comms is taken FIRST, matching the two writers
+      // that could otherwise race a booking in underneath this check:
+      //   - admin-leads.js's own lead-conversion booking flow: "take the
+      //     comms advisory lock FIRST — the merge-undo holds it as its
+      //     first lock and later repoints the lead, so a lead row lock
+      //     taken before it could deadlock" (that flow ALSO takes leads
+      //     FOR UPDATE, right after comms, on the very lead this handoff
+      //     holds — reversing the order here would cycle against it).
+      //   - admin-schedule.js's booking writer (~7941-7959): occupancy lock,
+      //     then lockCustomerComms, then the customer row lock, then the
+      //     scheduled_services insert — never touches leads/call_log at
+      //     all, so it can only ever wait on this handoff's comms lock,
+      //     never cycle against the leads/call_log locks below.
+      // lockSmsPhone (an advisory key, taken by withSmsHandoff BEFORE this
+      // function ever runs) never conflicts with lockCustomerComms —
+      // Postgres's single-key (pg_advisory_xact_lock(bigint)) and two-key
+      // (pg_advisory_xact_lock(int,int)) advisory lock families are
+      // entirely separate lock spaces, so their relative order never
+      // matters.
+      //
+      // Both candidate sources are closure-stable — no speculative read (or
+      // later escalation) needed: leadLinkedToExistingCustomer (below)
+      // already refuses whenever lead.customer_id is truthy and differs
+      // from call.metadata.created_customer_id, so the ONLY value
+      // lead.customer_id can hold by the time bookedSinceCall actually runs
+      // is either null or exactly that id — read here from `call`, which
+      // this whole handoff already trusts for that exact comparison, not a
+      // fresh, lockable row. destinationPhone is the same phone
+      // bookedSinceCall's own phone-match branch resolves against, enforced
+      // by the phone_changed_before_send check a few lines down.
+      const candidateCustomerIds = new Set();
+      const createdCustomerId = parseMetadata(call).created_customer_id;
+      if (createdCustomerId) candidateCustomerIds.add(String(createdCustomerId));
+      const phoneKey = phoneIdentityKey(destinationPhone);
+      if (phoneKey && phoneKey.length === 10) {
+        const { nanpStoredPhoneClause } = require('./outbound-call-reason');
+        const phoneMatches = await dbi('customers').whereNull('deleted_at')
+          .whereRaw(nanpStoredPhoneClause('phone'), [phoneKey]).pluck('id');
+        for (const id of phoneMatches) candidateCustomerIds.add(String(id));
+      }
+      for (const id of [...candidateCustomerIds].sort()) {
+        await lockCustomerComms(dbi, id);
+      }
       // .forUpdate() (codex #5018 r12 P1): a plain SELECT let a phone
       // correction committed between this read and messages.create() go
       // unnoticed — admin-leads.js's own PATCH updates leads.phone under a

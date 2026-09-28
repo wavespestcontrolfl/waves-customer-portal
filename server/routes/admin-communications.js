@@ -12,6 +12,7 @@ const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
+const { lockSmsPhone } = require('../utils/customer-comms-lock');
 const {
   draftIdSql,
   draftReplyToMessageIdSql,
@@ -1046,6 +1047,24 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // codex #5018 pre-push P2: a consultation link can ride this composer
+      // send (a pasted URL, or one the operator typed in) without the
+      // phone-locked handoff call-booking-link-text.js's own worker holds —
+      // linkSentRecently only sees committed sms_log rows and excludes
+      // unresolved reservations, so a composer send racing the worker's
+      // final check could reach Twilio alongside the automated one. The
+      // SAME phone lock admin-leads.js's manual send already uses
+      // (lockSmsPhone, matching applyInboundOptout's own key) serializes
+      // the two. Applied to every composer SMS to this route, not only
+      // consultation-carrying ones — it is a phone lock only, so manual
+      // semantics (staff can always send, no delivered-link block) are
+      // unconditionally unchanged either way, and narrowing it to just the
+      // consultation-carrying sends would add conditional complexity for
+      // no behavioral difference.
+      withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
+        await lockSmsPhone(trx, to);
+        return dispatch(trx);
+      }),
       providerHandoffReservation: reservationId
         ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
           reservationId,

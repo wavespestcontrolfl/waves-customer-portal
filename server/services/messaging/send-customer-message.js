@@ -440,7 +440,19 @@ async function sendCustomerMessageCore(input) {
     // exact phone, 'lead' otherwise — manual semantics are unconditional
     // either way, so no providerPreSendCheck requirement here.
     || (['lead', 'customer'].includes(input.audience) && input.purpose === 'conversational'
-      && input.entryPoint === 'admin_leads_send_sms');
+      && input.entryPoint === 'admin_leads_send_sms')
+    // Communications composer sends (admin-communications.js POST /sms,
+    // codex #5018 pre-push P2): the SAME shape and reason as the manual
+    // Leads-page compose above — a consultation link can ride this
+    // composer's body too, racing the SAME worker's own delivered-link
+    // check. Covers both purposes this ONE route's sendMessage ever emits
+    // (card_request when the composer carries a visit's card-request link,
+    // conversational otherwise) — applied to every composer SMS from this
+    // route, not only consultation-carrying ones, since it is a phone lock
+    // only and manual semantics are unconditional either way.
+    || (['lead', 'customer'].includes(input.audience)
+      && ['conversational', 'card_request'].includes(input.purpose)
+      && input.entryPoint === 'admin_communications_manual_sms');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
