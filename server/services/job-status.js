@@ -318,15 +318,6 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       success). This writer then skips its
  *                                       own lazy activation instead of
  *                                       running a second, concurrent one.
- * @param {boolean} [args.skipCancellationMoneySeam] pass true when the
- *                                       caller runs its OWN pinned invoice-
- *                                       void/credit-reversal follow-through
- *                                       right after this call (today: IB
- *                                       cancel_appointment) — skips only
- *                                       this writer's UNPINNED
- *                                       voidOpenInvoicesForCancelledService(jobId)
- *                                       seam; the follow-up re-park and
- *                                       visit-group hooks still run.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
@@ -339,16 +330,6 @@ async function transitionJobStatus({
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
   // launch 100 concurrent route repair/measurement passes (codex #4295 r1 P2).
   qualityDates = null,
-  // A caller that runs its OWN pinned invoice-void/credit-reversal follow-
-  // through immediately after this call (today: Intelligence Bar
-  // cancel_appointment — see tools.js) sets this so maybeReparkFollowupObligation
-  // below skips its own UNPINNED voidOpenInvoicesForCancelledService — that
-  // seam could otherwise race the caller's pinned, card-approved set and
-  // void an invoice the operator never saw. Narrow to this ONE money seam:
-  // the follow-up re-park and visit-group hooks in the same function still
-  // run for every caller, pinned or not — they carry no money and no
-  // card-approved effect set to violate.
-  skipCancellationMoneySeam = false,
 }) {
   if (!jobId || !toStatus || fromStatus === undefined) {
     throw new Error(
@@ -970,16 +951,10 @@ async function transitionJobStatus({
       // writer — so no transition surface can forget it; the helper is
       // idempotent, so routes that also run it (cancel/no-show branches)
       // double-run safely. Post-commit by placement, best-effort by
-      // contract. Skipped when the caller runs its OWN pinned version of
-      // this exact seam right after (skipCancellationMoneySeam — Codex
-      // round-1 P1): this call is UNPINNED (no invoice allowlist), so
-      // racing it against a card-approved set could void an invoice the
-      // operator never saw approved.
-      if (!skipCancellationMoneySeam) {
-        void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
-          logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
-        });
-      }
+      // contract.
+      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
+      });
       // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
       // child leaves its group; the last remaining row dissolves it.
       // Guarded HERE — the one shared status writer — so no transition

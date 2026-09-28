@@ -546,29 +546,6 @@ test('a matched confirm reaches the follow-through UNPINNED — bare visits have
   expect(mockFollowThrough.mock.calls[0][0]).not.toHaveProperty('pinnedEffects');
 });
 
-// Owner ruling 2026-09-28 ("bare visits only"): every check (proposal-side
-// and, again, under the commit's own row lock) guarantees a card-confirmed
-// cancel is a visit with NO invoice and NO inspection-credit offer at all —
-// nothing left for a scoped, pinned money seam to protect against racing.
-// The shared status writer's own UNPINNED voidOpenInvoicesForCancelledService
-// post-commit seam now runs exactly as it would for a Dispatch cancel — no
-// skip (this replaces the round-1 P1 skipCancellationMoneySeam mechanism,
-// which existed only to protect the now-removed pinned follow-through).
-test('the commit no longer tells the status writer to skip its own invoice-void seam', async () => {
-  mockComputeImpact.mockResolvedValue(FROZEN);
-  mockTransitionJobStatus.mockResolvedValue(undefined);
-  await executeTool('cancel_appointment', {
-    appointment_id: 'svc-synthetic-1',
-    _frozen_cancellation_impact: FROZEN,
-  }, {});
-  expect(mockTransitionJobStatus.mock.calls[0][0]).not.toHaveProperty('skipCancellationMoneySeam');
-
-  mockTransitionJobStatus.mockClear();
-  mockTransitionJobStatus.mockResolvedValue(undefined);
-  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
-  expect(mockTransitionJobStatus.mock.calls[0][0]).not.toHaveProperty('skipCancellationMoneySeam');
-});
-
 // Codex round-1 P1: the reason append must read the CURRENT `notes` column
 // at UPDATE time, not a value captured before the transaction opened — a
 // note a concurrent writer appended in between must survive.
