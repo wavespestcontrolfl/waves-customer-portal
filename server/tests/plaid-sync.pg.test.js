@@ -105,6 +105,7 @@ async function activate(itemId, overrides = {}) {
       '20260813000031_bank_txn_force_identity',
       '20260813000032_bank_txn_refund_status',
       '20260928020000_plaid_bank_sync',
+      '20260928020100_bank_txn_plaid_account_id',
     ]) {
       await require(`../models/migrations/${m}`).up(mockPg);
     }
@@ -136,6 +137,12 @@ async function activate(itemId, overrides = {}) {
     await m.up(mockPg);
     await m.up(mockPg); // idempotent
     expect(await mockPg.schema.hasColumn('bank_transactions', 'plaid_transaction_id')).toBe(true);
+    const m2 = require('../models/migrations/20260928020100_bank_txn_plaid_account_id');
+    await m2.down(mockPg);
+    expect(await mockPg.schema.hasColumn('bank_transactions', 'plaid_account_id')).toBe(false);
+    await m2.up(mockPg);
+    await m2.up(mockPg); // idempotent
+    expect(await mockPg.schema.hasColumn('bank_transactions', 'plaid_account_id')).toBe(true);
   });
 
   test('connect stores the token encrypted and seeds account defaults; nothing syncs during setup', async () => {
