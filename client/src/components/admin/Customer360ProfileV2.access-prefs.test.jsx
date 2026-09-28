@@ -229,6 +229,24 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('shows structured pets in the portal shape (type / indoor / temperament)', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          pets_structured: [{ name: 'Rex', type: 'Dog', breed: 'Boxer', indoor: 'Outdoor', temperament: 'Aggressive' }],
+        }));
+      }
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    expect(await screen.findByText('Rex — Dog — Boxer · Outdoor, Aggressive')).toBeInTheDocument();
+  });
+
   it('an unset contact preference shows Not set, and choosing Text actually saves it', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {

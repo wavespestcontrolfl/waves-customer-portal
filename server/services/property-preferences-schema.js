@@ -34,6 +34,9 @@ function shortTextMax(max) {
   return Joi.string().trim().allow('', null).max(max);
 }
 const longText = Joi.string().trim().allow('', null).max(2000);
+function enumOrNull(values) {
+  return Joi.string().trim().valid(...values).allow(null).empty('').default(null);
+}
 // Date-or-clear (codex P1): blackoutStart/blackoutEnd are real Postgres
 // `date` columns. `.allow(null, '')` alone still passes '' straight
 // through as the literal string '' (Joi's allow-list bypasses the type
@@ -67,11 +70,12 @@ const PREFS_FIELD_SCHEMAS = {
   petDetails: longText,
   petsSecuredPlan: longText,
   petsStructured: Joi.array().items(petSchema).max(20),
-  // Postgres ENUM columns, not varchar — constrained by VALUE, not length,
-  // so the generic 200-char shortText is a plain app-level sanity cap here.
-  preferredDay: shortText,
-  preferredTime: shortText,
-  contactPreference: shortText,
+  // Postgres ENUM columns (20260401000005_property_preferences.js) —
+  // validated on VALUE so an off-list value is a per-field rejection, not
+  // a database error that rolls back the whole save. '' clears to null.
+  preferredDay: enumOrNull(['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'no_preference']),
+  preferredTime: enumOrNull(['early_morning', 'morning', 'midday', 'afternoon', 'no_preference']),
+  contactPreference: enumOrNull(['call', 'text', 'email']),
   blackoutStart: dateOrNull(),
   blackoutEnd: dateOrNull(),
   // 20260401000005_property_preferences.js — varchar(200).

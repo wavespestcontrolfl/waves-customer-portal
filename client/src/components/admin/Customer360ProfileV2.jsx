@@ -6669,10 +6669,14 @@ function accessPrefsOptionLabel(options, value) {
 function accessPrefsFormatPetsStructured(petsStructured) {
   const pets = Array.isArray(petsStructured) ? petsStructured : [];
   return pets.map((pet) => {
-    const nameSpecies = [pet?.name, pet?.species || pet?.breed]
+    // The customer portal stores type/indoor/temperament; older onboarding
+    // rows use species/friendly/secured — read both shapes.
+    const nameSpecies = [pet?.name, pet?.type || pet?.species, pet?.breed]
       .filter(Boolean)
       .join(" — ");
     const traits = [
+      pet?.indoor || null,
+      pet?.temperament || null,
       pet?.friendly === true ? "friendly" : pet?.friendly === false ? "not friendly" : null,
       pet?.secured === true ? "secured" : pet?.secured === false ? "not secured" : null,
     ].filter(Boolean);

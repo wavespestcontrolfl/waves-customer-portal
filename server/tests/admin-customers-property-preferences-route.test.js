@@ -329,3 +329,19 @@ describe('codex r2', () => {
     expect(mockState.prefsRow.chemical_sensitivities).toBe(false);
   });
 });
+
+describe('codex r3 — enum columns validate on value', () => {
+  it('an off-list preferredDay is a per-field rejection and the rest still saves', async () => {
+    const result = await putPrefs({ preferredDay: 'saturday', accessNotes: 'Code box by the mailbox' });
+    expect(result.status).toBe(200);
+    expect(result.body.rejected.map((r) => r.field)).toEqual(['preferredDay']);
+    expect(mockState.prefsRow.access_notes).toBe('Code box by the mailbox');
+    expect(mockState.prefsRow).not.toHaveProperty('preferred_day', 'saturday');
+  });
+
+  it('accepts valid enum values and clears an empty contact preference to null', async () => {
+    const result = await putPrefs({ preferredDay: 'tuesday', preferredTime: 'early_morning', contactPreference: '' });
+    expect(result.status).toBe(200);
+    expect(mockState.prefsRow).toMatchObject({ preferred_day: 'tuesday', preferred_time: 'early_morning', contact_preference: null });
+  });
+});
