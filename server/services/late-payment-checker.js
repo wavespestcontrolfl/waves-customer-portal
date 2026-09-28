@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime, previouslySettledBillingLegs } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -141,6 +141,12 @@ async function claimReservedEmail(ContactLedger, ledger) {
   return claim.allowed ? { allowed: true } : { allowed: false, held: true };
 }
 
+async function markEmailAtAcceptedTime(ContactLedger, ledger, result) {
+  if (typeof ContactLedger.markDelivered !== 'function') return false;
+  const occurredAt = result?.deduped ? billingLegContactTime(result) : null;
+  return ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
+}
+
 async function completePendingEmail(row, channel = 'sms+email') {
   if (!row?.id) return false;
   try {
@@ -165,7 +171,7 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = '
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
-  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted' };
+  if (claim.delivered) return { sent: true, deduped: true, deliveryOutcome: 'accepted', eventVisibleAt: ledger.occurred_at };
   if (!claim.allowed) return { sent: false, deferred: true, code: 'PRIOR_TEXT_OUTCOME_UNCONFIRMED' };
   let result;
   try { result = await dispatch(); }
@@ -184,11 +190,12 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = '
     return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
   const accepted = !!delivery;
+  const occurredAt = billingLegContactTime(result);
   const stamped = accepted
     ? (typeof ContactLedger.markDelivered === 'function'
-      ? await ContactLedger.markDelivered(ledger) : true)
+      ? await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : [])) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
-  return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
+  return stamped ? { ...result, sent: accepted, ...(delivery === 'deduped' ? { deduped: true } : {}) } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
 
 function selectedNonEmailChannels(explicitChannels) {
@@ -341,7 +348,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     const claim = await claimReservedEmail(ContactLedger, emailLedger);
     if (claim.delivered) {
       await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-      return 'sent';
+      return 'deduped';
     }
     if (claim.resolved) {
       await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
@@ -361,9 +368,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       }
       return 'skip';
     }
-    await ContactLedger.markDelivered(emailLedger);
+    await markEmailAtAcceptedTime(ContactLedger, emailLedger, result);
     await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-    return 'sent';
+    return result.deduped ? 'deduped' : 'sent';
   }
 
   const body = await renderSmsTemplate('bank_verification_incomplete', {
@@ -409,6 +416,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       if (!emailLedger) return;
       const claim = await claimReservedEmail(ContactLedger, emailLedger);
       if (claim.delivered) {
+        emailResult = { ok: true, deduped: true, sentAt: emailLedger.occurred_at };
         emailDelivered = true;
         return;
       }
@@ -424,7 +432,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         enforceBillingPreference: true,
       }).catch((e) => ({ ok: false, error: e.message }));
       emailDelivered = emailResult?.ok === true;
-      if (emailDelivered) await ContactLedger.markDelivered(emailLedger);
+      if (emailDelivered) await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
       else if (emailResult?.deliveryOutcome !== 'uncertain') {
         await ContactLedger.markSendFailed(emailLedger, { error: emailResult?.reason || 'sidecar_failed' });
       }
@@ -446,10 +454,13 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
     const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
       && !emailDelivered && !terminalEmailResolved;
+    const repair = previouslySettledBillingLegs([...Object.values(delivery.results), emailResult]);
+    const repaired = !!repair;
     const activityInsert = db('activity_log').insert({
+      ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
-      description: `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
+      description: repaired ? `Original ${tierDays}-day ${delivery.results.push?.deduped ? 'App event' : 'reminder'} settled` : `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
       metadata: JSON.stringify({
         dedupeKey, invoiceId: inv.id, tierDays, daysOverdue: daysSince,
         ...(pendingEmail ? {
@@ -461,7 +472,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     });
     if (pendingEmail) await activityInsert;
     else await activityInsert.catch(() => {});
-    return 'sent';
+    return repaired ? 'deduped' : 'sent';
   } catch (e) {
     logger.error(`[late-payment] micro-deposit re-nudge failed for invoice ${inv.id}: ${e.message}`);
     return 'skip';
@@ -747,7 +758,7 @@ const LatePaymentService = {
           if (!emailLedger) return emailResult;
           const claim = await claimReservedEmail(ContactLedger, emailLedger);
           if (claim.delivered) {
-            emailResult = { ok: true, deduped: true };
+            emailResult = { ok: true, deduped: true, sentAt: emailLedger.occurred_at };
             return emailResult;
           }
           if (claim.resolved) {
@@ -779,7 +790,7 @@ const LatePaymentService = {
             logger.error(`[late-payment] Email sidecar failed for invoice ${inv.id}: ${emailErr.message}`);
           }
           if (emailResult?.ok === true) {
-            if (typeof ContactLedger.markDelivered === 'function') await ContactLedger.markDelivered(emailLedger);
+            await markEmailAtAcceptedTime(ContactLedger, emailLedger, emailResult);
           } else if (emailResult?.deliveryOutcome !== 'uncertain') {
             await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
           }
@@ -790,7 +801,9 @@ const LatePaymentService = {
           await attemptEmail();
           if (emailResult?.ok === true) {
             await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
-            notified++;
+            const freshEmail = Number(!emailResult.deduped);
+            notified += freshEmail;
+            skipped += 1 - freshEmail;
           } else if (emailResult?.resolved === true
             || (isTerminalEmailRefusal(emailResult)
               && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
@@ -836,11 +849,13 @@ const LatePaymentService = {
         const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
           && !emailDelivered && !terminalEmailResolved;
 
+        const repair = previouslySettledBillingLegs([...Object.values(delivery.results), emailResult]);
+        const repaired = !!repair;
         if (delivery.sentChannels) {
-          notified++;
+          if (repaired) skipped++; else notified++;
           logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
         } else if (emailDelivered) {
-          emailedFallback++;
+          if (repaired) skipped++; else emailedFallback++;
           logger.info(`[late-payment] Email reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
         } else {
           // Neither channel reached the customer (SMS undeliverable AND no email
@@ -856,11 +871,12 @@ const LatePaymentService = {
         }
 
         const activityInsert = db('activity_log').insert({
+          ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
           customer_id: customer.id,
           action: 'late_payment_reminder',
-          description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
+          description: repaired ? `Original ${tierDays}-day ${delivery.results.push?.deduped ? 'App event' : 'reminder'} settled` : `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
           metadata: JSON.stringify({
-            invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince,
+            invoiceKey, invoiceId: inv.id, ...(repaired ? { delivery_repaired: true } : { amount: totalAmount, daysOverdue: daysSince }),
             tierDays,
             channel: delivery.sentChannels ? `${delivery.sentChannels}${emailDelivered ? '+email' : ''}` : 'email_only',
             ...(pendingEmail ? {

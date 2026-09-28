@@ -4405,7 +4405,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, ...await readFreshMeta(), customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({
