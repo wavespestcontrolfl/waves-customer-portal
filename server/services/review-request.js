@@ -510,10 +510,12 @@ function isAccountHolderRecipient(contact, customer) {
 // GATE_REVIEW_DAY0_CONTEXT (owner rulings 2026-09-28): once a recurring
 // sequence's Day-0 ask has gone out, a stored topic earns it ONE follow-up
 // about four days on; every other recurring customer still gets the one ask.
-// Null = the plan stays as it is. Decided at the step that just sent, so the
-// first-send plan re-resolve (which only runs before anything is sent) can
-// never undo it.
-function topicFollowupPlan(seq, plan) {
+// Only when that Day-0 ask went by SMS to the account holder — the follow-up
+// must reach the same person, never add a second recipient. Null = the plan
+// stays as it is. Decided at the step that just sent, so the first-send plan
+// re-resolve (which only runs before anything is sent) can never undo it.
+function topicFollowupPlan(seq, plan, { dayZeroToAccountHolder = false } = {}) {
+  if (!dayZeroToAccountHolder) return null;
   if ((seq.current_step || 0) !== 0 || seq.ask_context == null) return null;
   if (!isRecurringAskPlan(plan)) return null;
   if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return null;
@@ -3838,11 +3840,11 @@ const ReviewService = {
     if (seq.status !== "active" && !parked) return false;
     let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     if (!Array.isArray(plan)) plan = [];
-    // Same topic follow-up the ordinary runner adds once a Day-0 ask is out.
-    const followupPlan = topicFollowupPlan(seq, plan);
-    if (followupPlan) plan = followupPlan;
+    // No topic follow-up here: a stranded send carries no evidence of who
+    // received the Day-0 ask (topicFollowupPlan), so the sequence ends as a
+    // plain recurring one would.
     const nextStep = seq.current_step + 1;
-    const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now, ...(followupPlan ? { plan: JSON.stringify(followupPlan) } : {}) };
+    const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now };
     const updates = nextStep >= plan.length
       ? { ...advance, status: "completed", stop_reason: "completed", next_run_at: null, completed_at: now }
       // previousStep carries the 72-hour spacing rule the ordinary runner
@@ -6562,11 +6564,18 @@ const ReviewService = {
       return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
     }
     const step = plan[seq.current_step] || {};
-    // GATE_REVIEW_DAY0_CONTEXT is the topic follow-up's kill switch too: off,
-    // a follow-up not yet sent ends the sequence instead of going out.
-    if (step.templateKey === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY
-      && !require("../config/feature-gates").isEnabled("reviewDay0Context")) {
-      return stop("completed");
+    if (step.templateKey === OUTREACH.TOPIC_FOLLOWUP_TEMPLATE_KEY) {
+      // GATE_REVIEW_DAY0_CONTEXT is the topic follow-up's kill switch too:
+      // off, a follow-up not yet sent ends the sequence instead of going out.
+      if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return stop("completed");
+      // The Day-0 text invites "Reply if anything's off": a customer who has
+      // texted since it went out is in a conversation with the office, so no
+      // automated review follow-up.
+      const repliedSince = await db("sms_log")
+        .where({ customer_id: seq.customer_id, direction: "inbound" })
+        .where("created_at", ">", seq.last_touch_at || seq.started_at)
+        .first("id");
+      if (repliedSince) return stop("responded");
     }
 
     // Final atomic claim right before sending: an admin Stop (or a completing
@@ -6614,7 +6623,11 @@ const ReviewService = {
     }
 
     if (outcome.ok && outcome.sent) {
-      const followupPlan = topicFollowupPlan(seq, plan);
+      // Same resolver and customer row sendOutreachTouch just used.
+      const followupPlan = topicFollowupPlan(seq, plan, {
+        dayZeroToAccountHolder: outcome.channel === "sms"
+          && isAccountHolderRecipient(require("./customer-contact").getServiceContactSmsRecipient(customer), customer),
+      });
       if (followupPlan) plan = followupPlan;
       const nextStep = seq.current_step + 1;
       // The post-send advance/complete is conditional on status='active': if an

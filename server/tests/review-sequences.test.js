@@ -545,10 +545,11 @@ describe('review sequences — cadence engine', () => {
     const FOLLOWUP = { day: 4, channel: 'sms', templateKey: 'topic_followup', weekdaysOnly: true };
     const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v3' });
     const DRAFTED = "Hi Dee! Are the ants backing off since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
-    const setup = ({ seq = {}, customer = {}, prefs = [] } = {}) => {
+    const setup = ({ seq = {}, customer = {}, prefs = [], sms = [] } = {}) => {
       const mock = makeMock({
         customers: [{ id: 'tf-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
         notification_prefs: prefs,
+        sms_log: sms,
         review_sequences: [{
           id: 'seq-tf', customer_id: 'tf-1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'admin',
           plan: JSON.stringify(RECURRING), ask_context: TOPIC,
@@ -583,6 +584,8 @@ describe('review sequences — cadence engine', () => {
     test.each([
       ['the gate is off', { gateOff: true }],
       ['no topic was stored', { seq: { ask_context: null } }],
+      // The follow-up must reach the same person the Day-0 ask did (codex r2 on #5246).
+      ['the Day-0 ask went to a service contact, not the account holder', { customer: { service_contact_phone: '+19410000099' } }],
     ])('%s → the recurring sequence completes after its one Day-0 ask, as before', async (_label, { gateOff, ...opts }) => {
       if (gateOff) mockGates.reviewDay0Context = false;
       const mock = setup(opts);
@@ -593,7 +596,7 @@ describe('review sequences — cadence engine', () => {
       expect(JSON.parse(seqRow(mock).plan)).toEqual(RECURRING);
     });
 
-    const followupDue = { current_step: 1, touches_sent: 1, plan: JSON.stringify([...RECURRING, FOLLOWUP]), started_at: new Date(Date.now() - 5 * 86400000) };
+    const followupDue = { current_step: 1, touches_sent: 1, plan: JSON.stringify([...RECURRING, FOLLOWUP]), started_at: new Date(Date.now() - 5 * 86400000), last_touch_at: new Date(Date.now() - 4 * 86400000) };
 
     test('the follow-up asks about the customer\'s own topic, then the sequence completes', async () => {
       const mock = setup({ seq: followupDue });
@@ -629,6 +632,26 @@ describe('review sequences — cadence engine', () => {
       expect(mockDraftTopicFollowup).not.toHaveBeenCalled();
       expect(mock.__state.rows.review_requests).toHaveLength(0);
       expect(seqRow(mock)).toMatchObject({ status: 'completed', stop_reason: 'completed' });
+    });
+
+    test('a customer who has texted since the Day-0 ask gets no automated follow-up (codex r2 on #5246)', async () => {
+      const mock = setup({ seq: followupDue, sms: [
+        { id: 'in-1', customer_id: 'tf-1', direction: 'inbound', message_body: 'The ants are still bad', created_at: new Date(Date.now() - 86400000) },
+      ] });
+      await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockDraftTopicFollowup).not.toHaveBeenCalled();
+      expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'responded' });
+    });
+
+    test('a text from BEFORE the Day-0 ask (the one that raised the topic) does not cancel the follow-up', async () => {
+      const mock = setup({ seq: followupDue, sms: [
+        { id: 'in-0', customer_id: 'tf-1', direction: 'inbound', message_body: 'Ants in the kitchen again', created_at: new Date(Date.now() - 6 * 86400000) },
+      ] });
+      await ReviewService.processReviewSequences();
+
+      expect(lastTouch(mock).template_key).toBe('topic_followup_personalized');
     });
 
     test('turning the gate off cancels a follow-up not yet sent', async () => {
