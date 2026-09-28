@@ -20061,6 +20061,33 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
   return classified === 0;
 }
 
+// Inputs-only saves are rendered by replaying the engine, and the guarantee
+// decisions classify that same complete result (its one-time work included)
+// instead of treating a sellable recurring plan as empty or losing its
+// termite add-ons. The replay runs ONCE per parsed estData object (the same
+// per-request memo shape as termiteComparisonAvailabilityMemo): every reader
+// of the page's guarantee rule asks both decisions, and a /data request asks
+// from the pricing contract, the payload and the view, so an unmemoized
+// replay ran the full engine several times per request on an unauthenticated
+// route (pre-push audit P1 on #4982). A failed replay is memoized too, so
+// each reader fails closed without replaying or warning again.
+const guaranteeReplayMemo = new WeakMap();
+function guaranteeReplayForInputsOnly(estData) {
+  if (!estData || typeof estData !== 'object') return { result: null };
+  if (guaranteeReplayMemo.has(estData)) return guaranteeReplayMemo.get(estData);
+  let replay = { result: null };
+  const engineInputs = extractEngineInputs(estData);
+  if (engineInputs) {
+    try { replay = { result: generateEstimate(engineInputs) }; }
+    catch (err) {
+      logger.warn(`[estimate-data] guarantee classification replay failed: ${err.message}`);
+      replay = { failed: true };
+    }
+  }
+  guaranteeReplayMemo.set(estData, replay);
+  return replay;
+}
+
 // Every service row the estimate's guarantee decisions read. Mapped pricing
 // can omit a raw one-time line, so both persisted roots are classified, just
 // as recurring rows are, without changing displayed totals. Null when an
@@ -20070,17 +20097,9 @@ function guaranteeServiceRows(estData = {}, pricingBundle = {}) {
     .filter((root) => root && typeof root === 'object');
   if (!roots.length) {
     roots.push(estData);
-    // Inputs-only saves are rendered by replaying the engine. Classify that
-    // same complete result, including its one-time work, instead of treating
-    // a sellable recurring plan as empty or losing its termite add-ons.
-    const engineInputs = extractEngineInputs(estData);
-    if (engineInputs) {
-      try { roots.push(generateEstimate(engineInputs)); }
-      catch (err) {
-        logger.warn(`[estimate-data] guarantee classification replay failed: ${err.message}`);
-        return null;
-      }
-    }
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (replay.failed) return null;
+    if (replay.result) roots.push(replay.result);
   }
   return {
     recurring: roots.flatMap(guaranteeRecurringRows),
