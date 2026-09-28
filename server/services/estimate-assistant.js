@@ -767,7 +767,7 @@ function rowGuaranteeLanes(row = {}) {
     || (row.isCommercial === true ? guaranteeLanesForRow(row) : serviceKeysFromText(row.service, row.label));
 }
 
-function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows) {
+function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows, oneTimeRows, noEstimateWideGuarantee = false) {
   const rowLanes = [...recurringRows, ...oneTimeRows].map((row) => {
     const keys = rowGuaranteeLanes(row);
     return keys.length ? keys : ['unknown'];
@@ -778,7 +778,10 @@ function assistantGuaranteeContext(noGuaranteeClaims, serviceMode, recurringRows
   // + lawn bundle carries them, and a rodent, commercial or unknown lane does
   // not. The one-time 30-day callback follows the same scope, except a
   // lawn-only job (the page's oneTimePriceCopy lawn branch).
-  const everyLaneCarriesTerms = lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
+  // The page's own decision (noEstimateWideGuarantee: an authored proposal or
+  // an engine commercial mark the rows here may not show) can only narrow it.
+  const everyLaneCarriesTerms = noEstimateWideGuarantee !== true
+    && lanes.length > 0 && lanes.every((lane) => RECURRING_TERMS_LANES.includes(lane));
   const recurringTermsEligible = !noGuaranteeClaims && serviceMode === 'recurring'
     && recurringRows.length > 0 && everyLaneCarriesTerms;
   const oneTimePestTerms = !noGuaranteeClaims && serviceMode === 'one_time'
@@ -803,6 +806,7 @@ function buildEstimateAssistantContext({
   selectedFrequency = '',
   serviceMode = 'recurring',
   noGuaranteeClaims = false,
+  noEstimateWideGuarantee = false,
 } = {}) {
   const parsedData = parseEstimateData(estData);
   const requestedMode = serviceMode === 'one_time' ? 'one_time' : 'recurring';
@@ -843,7 +847,7 @@ function buildEstimateAssistantContext({
   // Classify before display-name merging: "Commercial Pest" and "Pest Control"
   // share a short label but must not share recurring residential terms.
   const guarantees = assistantGuaranteeContext(noGuaranteeClaims, selectedMode,
-    [...pricingRecurringRows, ...estimateRecurringRows], oneTimeServices);
+    [...pricingRecurringRows, ...estimateRecurringRows], oneTimeServices, noEstimateWideGuarantee);
   const billingPeriod = periodLabelForFrequency(frequency);
   const billingAmount = billingAmountForFrequency(frequency);
   const serviceCadence = frequency?.billingFrequencyKey && frequency.billingFrequencyKey !== frequency.key
@@ -1945,6 +1949,7 @@ async function answerEstimateQuestion({
   selectedFrequency,
   serviceMode,
   noGuaranteeClaims = false,
+  noEstimateWideGuarantee = false,
   database = db,
 } = {}) {
   const cleanQuestion = cleanText(question);
@@ -1955,6 +1960,7 @@ async function answerEstimateQuestion({
     selectedFrequency,
     serviceMode,
     noGuaranteeClaims,
+    noEstimateWideGuarantee,
   });
   try {
     context.supportContext = await loadEstimateAiSupportContext({

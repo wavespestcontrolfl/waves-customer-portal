@@ -26680,6 +26680,10 @@ async function composeEstimateDataPayload(estimate, {
       estimateDataForIntelligence,
       pricingBundle,
     );
+    // Not every service carries the plan terms (a rodent, commercial or
+    // authored-proposal estimate): no line covering the whole estimate, on
+    // the page or in Ask Waves, may state them.
+    const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -26718,6 +26722,7 @@ async function composeEstimateDataPayload(estimate, {
           selectedFrequency: '',
           serviceMode: defaultServiceMode,
           noGuaranteeClaims,
+          noEstimateWideGuarantee,
         });
         intelligence.supportSources = loadPublicEstimateSupportSources({
           question: 'What is included in this WaveGuard estimate?',
@@ -27368,7 +27373,7 @@ async function composeEstimateDataPayload(estimate, {
         // guaranteed" wherever they'd make an estimate-wide claim. Present
         // only when true so every other response stays byte-identical.
         ...(noGuaranteeClaims ? { noGuaranteeClaims: true } : {}),
-        ...(estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle) ? {} : { noEstimateWideGuarantee: true }),
+        ...(noEstimateWideGuarantee ? { noEstimateWideGuarantee: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -27761,6 +27766,9 @@ async function handleEstimateAsk(req, res, next) {
       logger.warn(`[estimate-ask] pricing bundle failed: ${err.message}`);
     }
     const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(estData, pricingBundle);
+    // The page's own estimate-wide decision (estimateCarriesPlanTerms): an
+    // authored proposal or a commercial row stays terms-neutral here too.
+    const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estData, pricingBundle);
 
     const result = await answerEstimateQuestion({
       question,
@@ -27770,6 +27778,7 @@ async function handleEstimateAsk(req, res, next) {
       selectedFrequency,
       serviceMode,
       noGuaranteeClaims,
+      noEstimateWideGuarantee,
     });
 
     await db('intelligence_bar_queries').insert(buildEstimateAskQueryLog({

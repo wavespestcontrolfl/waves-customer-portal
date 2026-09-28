@@ -81,6 +81,25 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test('the page decision narrows eligibility: pest-only rows on an authored (commercial) proposal get no plan terms', () => {
+    // An authored proposal is commercial work (estimateCarriesPlanTerms), a
+    // mark its pest-only engine rows do not carry. The route passes the
+    // page's own decision, and Ask Waves never states estimate-wide terms
+    // the page withholds.
+    const build = (noEstimateWideGuarantee) => buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Bronze', monthly_total: 55 },
+      pricingBundle: { waveGuardTier: 'Bronze', frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55, annual: 660,
+        included: [{ service: 'pest_control', label: 'Pest Control' }],
+      }] },
+      noEstimateWideGuarantee,
+    });
+    expect(build(false).guarantees.recurringTermsEligible).toBe(true);
+    const context = build(true);
+    expect(context.guarantees).toMatchObject({ noGuaranteeClaims: false, recurringTermsEligible: false, recurring: null, oneTime: null });
+    const answer = answerEstimateQuestionFallback('Does this include a money-back guarantee?', context);
+    expect(answer).not.toMatch(/includes the money-back guarantee|30-day callback/i);
+  });
+
   test('a pest + lawn bundle carries the plan terms, as the page states them (every service carries them)', () => {
     const context = buildEstimateAssistantContext({
       estimate: { waveguard_tier: 'Silver', monthly_total: 110 },
