@@ -85,11 +85,12 @@ records whose outcome is not inspection-only, customer-declined or incomplete
 schedule row's status alone, and one physical stop counts once (grouped
 services share the booking's `visit_id`, and a booking's sibling completion
 records — detailed form, recap rail — count as that one booking). `reservicesThisYear` counts how many
-of those stops were callbacks (the record's completion-time `is_callback`
-snapshot, the booking's flag only when the record has none, a
-`pest_re_service` / `lawn_re_service` key, or a "Re-Service" service name when
-neither is stamped; a rodent-program visit, such as the included trapping
-follow-up, never counts, by its key or its rodent line). Counts only: no
+of those stops were callbacks, decided by the record's frozen completion-time
+evidence only: its `is_callback`, or its `service_data.completedServiceKey` of
+`pest_re_service` / `lawn_re_service` — never the booking row (repointable
+after closeout) or a "Re-Service" display name; a rodent-program visit, such
+as the included trapping follow-up, never counts, by its key or its rodent
+line. Counts only: no
 price, no "at no charge" claim (a callback can be billed; see
 `reservice-report.js`), no upcoming visits, dates, address, technician, or
 token. `stripLiveOnlyScheduleFields` also

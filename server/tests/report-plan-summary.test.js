@@ -155,13 +155,14 @@ const record = (id, overrides = {}) => ({
   service_line: 'pest',
   service_type: 'Quarterly Pest Control Service',
   structured_notes: '{}',
+  service_data: '{}',
   record_is_callback: false,
-  service_key_snapshot: null,
   scheduled_service_id: null,
   visit_id: null,
-  scheduled_is_callback: null,
   ...overrides,
 });
+// The completion-time catalog identity the record freezes.
+const frozen = (completedServiceKey) => JSON.stringify({ completedServiceKey });
 
 test('gate on: counts PERFORMED visits in the current ET calendar year, and which of them were re-services', async () => {
   const build = requireWithGateOn();
@@ -170,33 +171,30 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
     service_records: [
       // a performed visit — counts
       record('record-current'),
-      // a keyed re-service — counts toward both totals
-      record('record-reservice', { service_date: `${YEAR}-03-01`, service_type: 'Pest Re-Service', service_key_snapshot: 'pest_re_service', scheduled_is_callback: false }),
+      // a re-service by its frozen catalog key — counts toward both totals
+      record('record-reservice', { service_date: `${YEAR}-03-01`, service_type: 'Pest Re-Service', service_data: frozen('pest_re_service') }),
       // an included trapping follow-up — a visit, never a re-service
-      record('record-trap-followup', { service_date: `${YEAR}-03-08`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', scheduled_is_callback: false }),
-      // a free-text re-service booking with no key — the name fallback counts it
-      record('record-freetext-reservice', { service_date: `${YEAR}-03-15`, service_type: 'Pest Re-Service', scheduled_is_callback: false }),
-      // an unkeyed trapping follow-up with no stamped line — still not a
-      // re-service, by its rodent-line name
-      record('record-freetext-trap', { service_date: `${YEAR}-03-22`, service_line: null, service_type: 'Rodent Trapping Follow-Up', scheduled_is_callback: false }),
-      // a callback flagged on its record (the completion-time snapshot) whose
-      // key and name don't say re-service, and whose booking was reclassified
-      // since — the frozen record flag counts it
-      record('record-flagged-callback', { service_date: `${YEAR}-04-05`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: true, scheduled_is_callback: false }),
-      // the reverse: booking flagged after closeout, record frozen false —
-      // the record wins, so a visit but not a re-service
-      record('record-reclassified-booking', { service_date: `${YEAR}-04-06`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: false, scheduled_is_callback: true }),
-      // a flagged trapping follow-up, keyed — never a re-service
-      record('record-flagged-trap', { service_date: `${YEAR}-04-12`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', record_is_callback: true }),
+      record('record-trap-followup', { service_date: `${YEAR}-03-08`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_data: frozen('rodent_trapping_followup') }),
+      // named "Re-Service" but with no frozen callback evidence — a name can
+      // belong to a non-callback, so it is a visit only
+      record('record-name-only', { service_date: `${YEAR}-03-15`, service_type: 'Pest Re-Service' }),
+      // an unkeyed trapping follow-up with no stamped line — a visit only
+      record('record-freetext-trap', { service_date: `${YEAR}-03-22`, service_line: null, service_type: 'Rodent Trapping Follow-Up' }),
+      // a callback frozen on its record whose booking was reclassified since —
+      // the record counts it (the booking fields are ignored)
+      record('record-flagged-callback', { service_date: `${YEAR}-04-05`, service_type: 'Pest Control Service', record_is_callback: true, service_key_snapshot: 'pest_general_quarterly', scheduled_is_callback: false }),
+      // the reverse: the booking was repointed to a re-service after closeout,
+      // the record froze a regular visit — a visit only
+      record('record-repointed-booking', { service_date: `${YEAR}-04-06`, service_type: 'Pest Control Service', service_data: frozen('pest_general_quarterly'), service_key_snapshot: 'pest_re_service', scheduled_is_callback: true }),
+      // a flagged trapping follow-up — never a re-service
+      record('record-flagged-trap', { service_date: `${YEAR}-04-12`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_data: frozen('rodent_trapping_followup'), record_is_callback: true }),
       // a flagged trapping follow-up with NO key and no stamped line — the
-      // rodent-line name excludes it before the callback flag is read
+      // rodent-line name excludes it
       record('record-flagged-unkeyed-trap', { service_date: `${YEAR}-04-19`, service_line: null, service_type: 'Rodent Trapping Follow-Up', record_is_callback: true }),
-      // a record with no callback value (legacy): the booking flag stands in
-      record('record-legacy-null-flag', { service_date: `${YEAR}-04-26`, service_type: 'Pest Control Service', record_is_callback: null, scheduled_is_callback: true }),
-      // ONE physical stop, two services (grouped under one visit_id), one of
-      // them a re-service: one visit, one re-service
-      record('record-stop-pest', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_type: 'Pest Re-Service', service_key_snapshot: 'pest_re_service' }),
-      record('record-stop-lawn', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_line: 'lawn', service_type: 'Lawn Re-Service', service_key_snapshot: 'lawn_re_service' }),
+      // ONE physical stop, two services (grouped under one visit_id), both
+      // re-services: one visit, one re-service
+      record('record-stop-pest', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_type: 'Pest Re-Service', service_data: frozen('pest_re_service') }),
+      record('record-stop-lawn', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_line: 'lawn', service_type: 'Lawn Re-Service', service_data: frozen('lawn_re_service') }),
       // NOT performed — each excluded from both totals, even when flagged
       record('record-incomplete-status', { service_date: `${YEAR}-05-01`, status: 'incomplete' }),
       record('record-outcome-incomplete', { service_date: `${YEAR}-05-02`, structured_notes: JSON.stringify({ visitOutcome: 'incomplete' }) }),
@@ -212,7 +210,7 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, LIVE_PAGE);
-  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 11, reservicesThisYear: 5 });
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 10, reservicesThisYear: 3 });
 });
 
 test('one booking with several completion records (detailed form + recap rail) is one visit', async () => {
@@ -233,17 +231,20 @@ test('one booking with several completion records (detailed form + recap rail) i
   expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 2, reservicesThisYear: 1 });
 });
 
-test('the frozen record callback flag wins over a booking reclassified after closeout, in both directions', async () => {
+test('only the frozen record decides a re-service; a booking repointed after closeout never does', async () => {
   const build = requireWithGateOn();
   const countFor = async (row) => {
     const data = await build(BASE_SERVICE, `token-plan-${row.id}`, makeKnex({ ...BASE_FIXTURES, service_records: [row] }), LIVE_PAGE);
     return data.planSummary;
   };
-  // Frozen true, booking since flipped false: still a re-service.
-  expect(await countFor(record('record-frozen-true', { service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: true, scheduled_is_callback: false })))
+  // Frozen callback flag, booking since flipped to a regular visit: counts.
+  expect(await countFor(record('record-frozen-flag', { service_type: 'Pest Control Service', record_is_callback: true, service_key_snapshot: 'pest_general_quarterly', scheduled_is_callback: false })))
     .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1 });
-  // Frozen false, booking since flipped true: not a re-service.
-  expect(await countFor(record('record-frozen-false', { service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: false, scheduled_is_callback: true })))
+  // Frozen re-service key alone (flag never stamped, e.g. the recap rail): counts.
+  expect(await countFor(record('record-frozen-key', { service_type: 'Pest Control Service', service_data: frozen('lawn_re_service') })))
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1 });
+  // Frozen regular visit, booking since repointed to a re-service: does not.
+  expect(await countFor(record('record-frozen-regular', { service_type: 'Pest Re-Service', service_data: frozen('pest_general_quarterly'), service_key_snapshot: 'pest_re_service', scheduled_is_callback: true })))
     .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 0 });
 });
 

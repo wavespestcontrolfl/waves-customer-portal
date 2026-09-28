@@ -59,12 +59,11 @@ const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-id
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
-// The plan's free callbacks, as a customer knows them ("re-service"). Not
+// The plan's callbacks, as a customer knows them ("re-service"). Not
 // re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
 // rodent_trapping_followup, an included trapping-program visit that no
 // customer would call a re-service.
 const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
-const { isReService } = require('../re-service');
 const { isActivePlanCustomer } = require('../waveguard-existing-services');
 const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
 const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
@@ -5017,8 +5016,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // completed, customer-visible service record whose outcome is not
       // inspection-only, customer-declined or incomplete. The schedule row's
       // status alone is not proof: an incomplete or declined closeout still
-      // leaves it 'completed'. The booking joins in only for its service key
-      // and canonical callback flag.
+      // leaves it 'completed'. The booking joins in only for its visit_id
+      // (grouped stops); it never decides "re-service" — an admin can repoint
+      // or rename it after closeout.
       const recordRows = member
         ? await knex('service_records')
           .leftJoin('scheduled_services', 'scheduled_services.id', 'service_records.scheduled_service_id')
@@ -5032,10 +5032,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             'service_records.service_line',
             'service_records.service_type',
             'service_records.structured_notes',
+            'service_records.service_data',
             { record_is_callback: 'service_records.is_callback' },
-            'scheduled_services.service_key_snapshot',
             'scheduled_services.visit_id',
-            { scheduled_is_callback: 'scheduled_services.is_callback' },
           )
           .catch(() => null)
         : null;
@@ -5057,21 +5056,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         };
         const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
         const reservicesThisYear = new Set(performedRows
-          // A rodent-program visit (the included trapping follow-up, a trap
-          // check) is a program step, never a re-service, whatever its flags
-          // say: excluded by its key or by its rodent line, keyed or not.
-          // Then the record's is_callback — the completion-time snapshot
-          // reservice-report.js treats as authoritative — with the mutable
-          // booking flag only when the record has no value, then a stamped
-          // callback key, then, for a free-text booking with neither, the
-          // canonical "Re-Service" match. A stop counts once however many of
-          // its services were re-services.
+          // Decided by the record's FROZEN completion-time evidence only, the
+          // rule reservice-report.js and 20260830000051_repair_recap_callback_
+          // flags.js set: its is_callback, or its service_data.
+          // completedServiceKey of pest_re_service / lawn_re_service. Never
+          // the booking row (repointable after closeout) or a "Re-Service"
+          // display name (a name can belong to a non-callback). A rodent-
+          // program visit (the included trapping follow-up, a trap check) is
+          // a program step, never a re-service, whatever its flags say. A
+          // stop counts once however many of its services were re-services.
           .filter((row) => {
-            const key = row.service_key_snapshot || null;
-            if (key === 'rodent_trapping_followup'
+            const frozenKey = parseJsonObject(row.service_data).completedServiceKey || null;
+            if (frozenKey === 'rodent_trapping_followup'
               || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
-            if ((row.record_is_callback ?? row.scheduled_is_callback) === true) return true;
-            return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row.service_type });
+            return row.record_is_callback === true || PLAN_CALLBACK_RESERVICE_KEYS.has(frozenKey);
           })
           .map(visitIdentity)).size;
         planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
