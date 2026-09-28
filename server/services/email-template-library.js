@@ -1159,6 +1159,88 @@ function assertTemplateSendable(template, { test = false } = {}) {
   throw err;
 }
 
+// NO-PROVIDER preflight: the subset of sendTemplate's pre-dispatch checks
+// that decide whether a live attempt with these same params would even
+// REACH the provider — template resolution/sendable, required-variable
+// validation, the production placeholder-payload guard, and the recipient
+// suppression check. Never writes an email_messages row, never calls
+// auditEmailTemplateIssue (that table records real send attempts; a
+// preflight-only caller has its own audit trail), never calls the
+// provider. Built for email-template-automation-executor.js's shadow mode
+// (codex P2 on #5154): shadow finalizes would_send without ever reaching
+// dispatchRun, so a suppressed recipient or a disabled/invalid template
+// was counting as a would-send even though the identical live attempt
+// would block or fail — this preflight lets shadow tell the difference.
+//
+// Deliberately NARROWER than sendTemplate's full guard set — sendTemplate
+// remains the single source of truth for the checks below (this mirrors
+// them; it does not call into sendTemplate, since sendTemplate's own
+// pre-dispatch block is entangled with per-attempt email_messages
+// bookkeeping (audit-issue writes, the message-level idempotency/in-flight
+// lookup) that only makes sense against a real dispatch attempt — pulling
+// this preflight INTO that flow risked destabilizing the codebase's most
+// heavily-hardened send path for a P2 shadow-accuracy improvement). Two
+// checks are intentionally NOT reproduced: the message-level idempotency
+// lookup against email_messages (a real-send concern; a shadow "would
+// this collide" answer has no meaning since shadow inserts no message),
+// and the estimate annual-offer guard (server/services/sendgrid-mail.js
+// sendOne, the true provider boundary — it reads state no earlier point
+// can see). Keep the checks below in sync BY HAND with sendTemplate's own
+// if either changes.
+async function preflightTemplateSend({ templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey } = {}) {
+  if (!to) return { ok: false, reason: 'recipient email required' };
+  let template;
+  let version;
+  if (versionId) {
+    const row = await loadVersion(versionId);
+    if (!row) return { ok: false, reason: 'template version not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' };
+    template = row.template;
+    version = row;
+  } else {
+    const loaded = await loadTemplateByKey(templateKey);
+    if (!loaded?.template) return { ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' };
+    template = loaded.template;
+    version = loaded.activeVersion;
+  }
+  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
+    return { ok: false, reason: 'The reviewed email content changed. Review the message again before sending.' };
+  }
+  try {
+    assertTemplateSendable(template, {});
+  } catch (err) {
+    return { ok: false, reason: err.message, code: err.code };
+  }
+  if (!version) return { ok: false, reason: 'active template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' };
+
+  const effectiveSuppressionGroupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
+  const pinsServiceChrome = String(template.layout_wrapper_id || '').toLowerCase() === 'service_pinned_v1';
+  const rendered = renderTemplate({
+    template,
+    version,
+    payload,
+    unsubscribeUrl: null,
+    modeOverride: pinsServiceChrome ? 'service' : (isMarketingSend(template, effectiveSuppressionGroupKey) ? 'marketing' : null),
+  });
+  if (rendered.missingPayload.length) {
+    return { ok: false, reason: `Missing required variables: ${rendered.missingPayload.join(', ')}` };
+  }
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    const placeholderFields = productionPlaceholderPayloadValues(payload || {});
+    if (placeholderFields.length) {
+      return { ok: false, reason: `Placeholder values are not allowed in production email payloads: ${placeholderFields.join(', ')}`, code: 'EMAIL_TEMPLATE_PLACEHOLDER_PAYLOAD' };
+    }
+    const renderedPlaceholderFields = productionPlaceholderRenderedValues(rendered);
+    if (renderedPlaceholderFields.length) {
+      return { ok: false, reason: `Placeholder values are not allowed in production rendered emails: ${renderedPlaceholderFields.join(', ')}`, code: 'EMAIL_TEMPLATE_PLACEHOLDER_RENDERED' };
+    }
+  }
+  const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
+  if (suppression) {
+    return { ok: false, reason: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}` };
+  }
+  return { ok: true, template, version, rendered };
+}
+
 async function sendTemplate({
   templateKey,
   versionId,
@@ -1908,4 +1990,5 @@ module.exports = {
   createDraftVersion,
   publishVersion,
   sendTemplate,
+  preflightTemplateSend,
 };

@@ -2503,3 +2503,95 @@ describe('email template library rendering', () => {
     });
   });
 });
+
+describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch checks for shadow mode)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockMarkerDb.mockImplementation(() => {
+      const marker = chain();
+      marker.update = jest.fn(async () => 1);
+      return marker;
+    });
+  });
+
+  test('passes (ok:true) for a healthy, active, fully-supplied, unsuppressed send — never touches email_messages or the provider', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.rendered.subject).toBe('Your estimate expires June 12');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('blocks (ok:false) a disabled/paused template with the same reason sendTemplate would throw', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ status: 'paused', active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      reason: 'email template estimate.expiring_notice is paused',
+      code: 'EMAIL_TEMPLATE_DISABLED',
+    }));
+  });
+
+  test('blocks (ok:false) on a missing required variable', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' }, // missing estimate_url, expires_at
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Missing required variables/);
+  });
+
+  test('blocks (ok:false) a suppressed recipient — the exact reason sendTemplate would block on', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [{ suppression_type: 'unsubscribe', group_key: null }] })],
+    });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'suppressed@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'Suppressed: unsubscribe' }));
+  });
+
+  test('blocks (ok:false) a missing template', async () => {
+    setDbQueues({ email_templates: [chain({ first: null })] });
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'no.such.template',
+      to: 'sam@example.com',
+      payload: {},
+    });
+
+    expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
+  });
+});

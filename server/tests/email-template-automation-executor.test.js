@@ -1,6 +1,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
+  // Default: every shadow-mode test exercises the ok:true path unless it
+  // overrides this — matches today's "would send" behavior before the
+  // preflight existed.
+  preflightTemplateSend: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -1565,6 +1569,13 @@ describe('email template automation executor', () => {
 
       expect(result.status).toBe('shadow');
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      // The same pre-provider checks a live send would hit ran first (codex
+      // P2) — disabled/missing template, required variables, suppression —
+      // and passed, which is WHY this finalized would_send.
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'estimate.extension_notice',
+        to: 'sam@example.com',
+      }));
       expect(wouldSendLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
         run_id: 'run-1',
         event_type: 'would_send',
@@ -1579,6 +1590,53 @@ describe('email template automation executor', () => {
       expect(metadata.recipient_hash).toEqual(expect.stringMatching(/^[0-9a-f]{12}$/));
       // Never the full address in the event.
       expect(JSON.stringify(metadata)).not.toContain('sam@example.com');
+    });
+
+    test('records would_block (not would_send) when the live send would have blocked pre-provider — e.g. a suppressed recipient (codex P2)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({ ok: false, reason: 'Suppressed: unsubscribe' });
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const blockedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'Suppressed: unsubscribe' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, blockedRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldBlockLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        run_id: 'run-1',
+        event_type: 'would_block',
+        message: 'Suppressed: unsubscribe',
+      }));
+      expect(blockedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped',
+        exit_reason: 'Suppressed: unsubscribe',
+      }));
+    });
+
+    test('a preflight infrastructure failure fails OPEN to would_send (never breaks shadow itself)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockRejectedValueOnce(new Error('db unavailable'));
+      const queuedRun = run({ entity_type: '', entity_id: '' });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(wouldSendLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_send' }));
     });
 
     test('a shadow-ORIGIN delayed run finalizes as shadow even after the gate flips to true (codex P1)', async () => {

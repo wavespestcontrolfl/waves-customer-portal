@@ -91,15 +91,22 @@ async function hasActiveAutomation(triggerEventKey) {
 }
 
 // Estimates the direct emitter (estimate-expiration.js) may have missed:
-// flipped to 'expired' within the window, no run recorded for THIS trigger
-// key against this entity. Bound on updated_at, NOT expires_at (codex P1):
-// expiredUpdate() stamps updated_at on EVERY flip, but only Rule 2's
-// explicit-expires_at rows have a fresh expires_at — Rule 1's aged-out
-// rows (sent/viewed past the inactivity threshold, no explicit deadline)
-// never get expires_at touched at flip time, so bounding on it would
-// silently exclude exactly the cohort most likely to need this safety
-// net. updated_at is guaranteed fresh for both rules — again just a
-// window, not the correctness check (the NOT EXISTS below is).
+// flipped to 'expired' within the window, and AT LEAST ONE active
+// estimate.expired automation has no run for this entity yet (codex P2:
+// several active automations can share a trigger — loadAutomations loops
+// over every active match — so a blanket "any run exists for this entity"
+// check treats a partial success, one automation's run inserted before a
+// later automation's insert failed, as full coverage and never retries
+// the missing one; correlating per-automation via the nested EXISTS below
+// fixes that, since re-emitting is safe either way — processTrigger loops
+// every active automation itself and dedupes per automation's own
+// idempotency key). r.entity_id is varchar while e.id is uuid (codex P2):
+// cast the uuid side to text or Postgres rejects the comparison outright
+// and the catch below silently returns 0, leaving this sweep permanently
+// inert. Bound on updated_at, NOT expires_at (codex P1 from the prior
+// round): expiredUpdate() stamps updated_at on EVERY flip, but only Rule
+// 2's explicit-expires_at rows have a fresh expires_at — Rule 1's
+// aged-out rows never get expires_at touched at flip time.
 async function sweepMissedExpiredEstimates(since) {
   if (!(await hasActiveAutomation('estimate.expired'))) return 0;
   let rows;
@@ -107,9 +114,14 @@ async function sweepMissedExpiredEstimates(since) {
     rows = await db('estimates as e')
       .where('e.status', 'expired')
       .where('e.updated_at', '>=', since)
-      .whereNotExists(function notEmitted() {
-        this.select(1).from('email_template_automation_runs as r')
-          .whereRaw('r.entity_type = ? AND r.entity_id = e.id AND r.trigger_event_key = ?', ['estimate', 'estimate.expired']);
+      .whereExists(function missingForSomeActiveAutomation() {
+        this.select(1).from('email_template_automations as a')
+          .where('a.trigger_event_key', 'estimate.expired')
+          .where('a.status', 'active')
+          .whereNotExists(function noRunForThisAutomation() {
+            this.select(1).from('email_template_automation_runs as r')
+              .whereRaw('r.entity_type = ? AND r.entity_id = e.id::text AND r.automation_id = a.id', ['estimate']);
+          });
       })
       .select('e.id', 'e.customer_id', 'e.customer_email', 'e.category', 'e.service_interest', 'e.expires_at')
       .limit(SWEEP_ROW_LIMIT);
@@ -131,13 +143,20 @@ async function sweepMissedExpiredEstimates(since) {
 
 // Reviews google-business.js's two sync sites or review-incentives.js's
 // manual-attribution branch may have missed: five-star, linked to a live
-// customer, not dismissed, not removed from Google, touched within the
-// window, no run recorded for THIS trigger key against this entity.
-// google_reviews has no dedicated "linked_at" column (checked the table's
-// migrations — auto_linked_at only covers the click-auto-link path);
-// updated_at is bumped by every attribution path (ordinary sync, manual
-// match, click-auto), so it is the sweep's bound — again just a window,
-// not the correctness check (the NOT EXISTS is).
+// customer, HUMAN-CONFIRMED (link_source <> 'click_auto' — codex P1: the
+// probabilistic click-tracking matcher deliberately withholds all
+// customer-facing copy on a click_auto row until manualAttributeGoogleReview
+// confirms it, google-business.js's _attemptClickAutoLink; a live sweep
+// reading customer_id alone would bypass that safety boundary and message
+// someone who may not have written the review — the manual-confirmation
+// emitter added in the prior round creates the run once a person confirms),
+// not dismissed, not removed from Google, touched within the window, and
+// AT LEAST ONE active review.linked_5star automation has no run for this
+// entity yet (same per-automation correlation as the estimate sweep
+// above, and the same r.entity_id vs uuid g.id cast). google_reviews has
+// no dedicated "linked_at" column (checked the table's migrations —
+// auto_linked_at only covers the click-auto-link path); updated_at is
+// bumped by every attribution path, so it is the sweep's bound.
 async function sweepMissedFiveStarReviews(since) {
   if (!(await hasActiveAutomation('review.linked_5star'))) return 0;
   let rows;
@@ -148,9 +167,17 @@ async function sweepMissedFiveStarReviews(since) {
       .where('g.dismissed', false)
       .whereNull('g.missing_since')
       .where('g.updated_at', '>=', since)
-      .whereNotExists(function notEmitted() {
-        this.select(1).from('email_template_automation_runs as r')
-          .whereRaw('r.entity_type = ? AND r.entity_id = g.id AND r.trigger_event_key = ?', ['review', 'review.linked_5star']);
+      .where(function humanConfirmedOnly() {
+        this.whereNull('g.link_source').orWhereNot('g.link_source', 'click_auto');
+      })
+      .whereExists(function missingForSomeActiveAutomation() {
+        this.select(1).from('email_template_automations as a')
+          .where('a.trigger_event_key', 'review.linked_5star')
+          .where('a.status', 'active')
+          .whereNotExists(function noRunForThisAutomation() {
+            this.select(1).from('email_template_automation_runs as r')
+              .whereRaw('r.entity_type = ? AND r.entity_id = g.id::text AND r.automation_id = a.id', ['review']);
+          });
       })
       .select('g.id', 'g.customer_id', 'g.location_id', 'g.star_rating')
       .limit(SWEEP_ROW_LIMIT);

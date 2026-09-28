@@ -1852,6 +1852,83 @@ describe('Google Business review sync', () => {
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
   });
 
+  test('stamps updated_at when an existing unmatched review is linked to a customer during an ordinary GBP sync (codex P2: the lifecycle sweep recovery window reads this column)', async () => {
+    const existing = seedSyncedReview({ id: 'attr-1', customer_id: null });
+    expect(existing.updated_at).toBeFalsy();
+    db.__state.rows.customers.push({
+      id: 'cust-attr', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'attr-1');
+    expect(after.customer_id).toBe('cust-attr');
+    expect(after.updated_at).toBeTruthy();
+  });
+
+  test('does NOT stamp updated_at when a synced review has no customer match (no transition)', async () => {
+    const existing = seedSyncedReview({ id: 'no-match-1', reviewer_name: 'Nobody Matches' });
+    expect(existing.updated_at).toBeFalsy();
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'Nobody Matches' },
+      starRating: 5,
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'no-match-1');
+    expect(after.customer_id).toBeFalsy();
+    expect(after.updated_at).toBeFalsy();
+  });
+
+  test('Places fallback also stamps updated_at when an existing unmatched row is linked to a customer (codex P2, second sync path)', async () => {
+    const existing = {
+      id: 'places-attr-1',
+      google_review_id: 'places_place-1_1779307999',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: new Date(1779307999 * 1000).toISOString(),
+      review_reply: null,
+      customer_id: null,
+      synced_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      missing_since: null,
+    };
+    db.__state.rows.google_reviews.push(existing);
+    db.__state.rows.customers.push({
+      id: 'cust-places-attr', first_name: 'John', last_name: 'Doe', has_left_google_review: false, review_marked_at: null, deleted_at: null,
+    });
+    service._getClient = jest.fn(async () => null); // force Places fallback
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Doe',
+          rating: 5,
+          text: 'Great work',
+          time: 1779307999,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'places-attr-1');
+    expect(after.customer_id).toBe('cust-places-attr');
+    expect(after.updated_at).toBeTruthy();
+  });
+
   test('an older overlapping runner YIELDS on an existing row: no content regression, no reviewer-edit park, no attribution side effects (codex r48)', async () => {
     const newerToken = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     seedSyncedReview({ id: 'overlap-y', synced_at: newerToken });

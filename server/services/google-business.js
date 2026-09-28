@@ -915,6 +915,16 @@ class GoogleBusinessService {
       synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
+    // Stamp updated_at at the customer_id null->set transition ONLY (codex
+    // P2): this UPDATE's own patch (row, below) otherwise never touches
+    // updated_at, so a review attributed here — as opposed to through
+    // manual attribution, which already stamps it — stayed silently stale
+    // for the email-template-automation-emitters.js lifecycle sweep's
+    // recovery-window cutoff, permanently excluding an older-than-7-days
+    // review that gets linked during an ordinary sync. Harmless on an
+    // INSERT (existing is falsy): the column's own knex.fn.now() default
+    // already covers it, so this is a no-op duplicate there.
+    if (!existing?.customer_id && row.customer_id) row.updated_at = new Date();
     // Monotonic liveness: an older overlapping runner must never regress a
     // newer runner's synced_at — writing its earlier fetch start over a
     // fresher token would make the newer runner's reconcile see
@@ -1333,6 +1343,12 @@ class GoogleBusinessService {
           // Existing link first — mirror of _upsertGbpReview (GH codex r1).
           customer_id: existing.customer_id || customerId,
         };
+        // Same null->set transition stamp as _upsertGbpReview, same reason
+        // (codex P2): this branch is always an UPDATE (existing is truthy
+        // here), so without it a review first linked through the Places
+        // sync never advances updated_at and stays excluded from the
+        // lifecycle sweep's recovery window past 7 days.
+        if (!existing.customer_id && upd.customer_id) upd.updated_at = new Date();
         // synced_at participates in the authoritative reconcile's claim
         // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
         // asserts "seen live just now". An uncorroborated same-name match

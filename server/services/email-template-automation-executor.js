@@ -1286,14 +1286,34 @@ function recipientDomain(email) {
 function recipientHash(email) {
   return crypto.createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex').slice(0, 12);
 }
-async function finalizeShadowRun(run, automation) {
-  const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
-    status: 'shadow',
-    last_error: null,
-    completed_at: new Date(),
-    updated_at: new Date(),
-  }).returning('*');
-  await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', {
+// Runs the SAME pre-provider checks dispatchRun's sendTemplate call would
+// hit (codex P2): disabled/missing template, required-variable validation,
+// and recipient suppression. A block records the same audit-safe would_send
+// metadata under event type 'would_block' with the library's own reason
+// instead of finalizing 'shadow' — a suppressed recipient or an invalid
+// template no longer counts as rollout-readiness evidence it isn't. Never
+// calls the provider, never writes email_messages, never throws into the
+// caller: a preflight infrastructure hiccup (not a real block) fails OPEN
+// to would_send, same posture as every other best-effort check in this
+// file — an evidence-collection bug must not make shadow mode itself
+// unreliable.
+async function shadowPreflight(run, executionPayload, automation) {
+  try {
+    return await EmailTemplates.preflightTemplateSend({
+      templateKey: run.template_key,
+      versionId: run.template_version_id || undefined,
+      payload: executionPayload,
+      to: run.recipient_email,
+      suppressionGroupKey: automation.suppression_group_key || undefined,
+    });
+  } catch (err) {
+    logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${err.message}`);
+    return { ok: true };
+  }
+}
+async function finalizeShadowRun(run, automation, executionPayload = {}) {
+  const preflight = await shadowPreflight(run, executionPayload, automation);
+  const wouldSendMetadata = {
     automation_key: automation.automation_key,
     template_key: run.template_key,
     trigger_event_key: run.trigger_event_key,
@@ -1301,7 +1321,28 @@ async function finalizeShadowRun(run, automation) {
     entity_id: run.entity_id || null,
     recipient_domain: recipientDomain(run.recipient_email),
     recipient_hash: recipientHash(run.recipient_email),
-  });
+  };
+  if (!preflight.ok) {
+    const [blocked] = await db('email_template_automation_runs').where({ id: run.id }).update({
+      status: 'skipped',
+      exit_reason: preflight.reason || 'would_block',
+      last_error: null,
+      completed_at: new Date(),
+      updated_at: new Date(),
+    }).returning('*');
+    await logRunEvent(run.id, 'would_block', preflight.reason || 'Shadow mode: the live send would have blocked pre-provider', {
+      ...wouldSendMetadata,
+      guard: preflight.code || 'preflight',
+    });
+    return blocked || { ...run, status: 'skipped', exit_reason: preflight.reason || 'would_block' };
+  }
+  const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'shadow',
+    last_error: null,
+    completed_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata);
   return updated || { ...run, status: 'shadow' };
 }
 
@@ -1501,7 +1542,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     const originMode = asObject(claimedRun.context).origin_mode;
     const dispatchMode = emailTemplateAutomationsMode();
     if (originMode === 'shadow' || dispatchMode === 'shadow') {
-      return finalizeShadowRun(claimedRun, resolvedAutomation);
+      return finalizeShadowRun(claimedRun, resolvedAutomation, executionPayload);
     }
     // Fail-closed (codex P1): a run already sitting in the queue (created
     // while the gate was on) must not dispatch a real email just because
