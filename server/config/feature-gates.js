@@ -3021,6 +3021,12 @@ const gates = {
   // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
   // Off = byte-identical to before (the building size flows through).
   commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Condo unit folio (unit-scope ruling #8): a typed Apt/Unit in a stacked
+  // condo building resolves the unit's OWN county roll row instead of
+  // dropping to the address search. **Ships DARK: off unless exactly
+  // `true`**; canonical CALL-TIME reader condoUnitFolioLive(). Off =
+  // byte-identical to before.
+  condoUnitFolio: process.env.GATE_CONDO_UNIT_FOLIO === 'true',
   // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
   // single-visit cancel inside a counted plan adds one visit back at the
   // END of the series (services/recurring-series-cancel-reseed.js →
@@ -3230,6 +3236,12 @@ function commercialSuiteSizingLive() {
   return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
 }
 
+// GATE_CONDO_UNIT_FOLIO read at CALL time — strict `=== 'true'`, same
+// convention as commercialSuiteSizingLive().
+function condoUnitFolioLive() {
+  return process.env.GATE_CONDO_UNIT_FOLIO === 'true';
+}
+
 function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
@@ -3359,5 +3371,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914
