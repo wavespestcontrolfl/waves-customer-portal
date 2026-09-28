@@ -1897,6 +1897,13 @@ const gates = {
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
 
+  // aeo_question_gap opportunity mining — identify/decision/cost AEO
+  // benchmark questions whose target page answer engines don't cite become
+  // a refresh of that page (or one new article when it doesn't exist).
+  // DARK in every environment unless exactly 'true'; read at call time so
+  // unsetting it stops the bucket without a redeploy (off ⇒ []).
+  get aeoQuestionGapMining() { return process.env.GATE_AEO_QUESTION_GAP_MINING === 'true'; },
+
   // answer_gap opportunity mining — queries a page already ranks 9–30 for
   // (per gsc_query_page_map) whose body never directly answers them; emits
   // refresh_existing_page opportunities whose drafts add self-contained
