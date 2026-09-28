@@ -263,10 +263,24 @@ function matchingPreSlabWarrantyRow(target, rows = [], targets = [target]) {
   }
   const amountFor = (row) => row?.amount ?? row?.price ?? row?.total;
   const amount = Number(amountFor(target));
-  const sameAmount = candidates.filter((row) => amountFor(row) !== '' && amountFor(row) != null
-    && Number(amountFor(row)) === amount);
-  const peerAmountCount = peers.filter((row) => amountFor(row) !== '' && amountFor(row) != null
-    && Number(amountFor(row)) === amount).length;
+  const hasAmount = (row) => amountFor(row) !== '' && amountFor(row) != null && Number(amountFor(row)) === amount;
+  const labelCount = (list, value) => (value ? list.filter((row) => labelFor(row) === value).length : 0);
+  // A unique exact-label row is reserved for the peer that carries that label
+  // before amount fallback, and that peer is reserved with it, exactly as
+  // matchingTrenchingWarrantyRow does: two priced jobs sharing a price must
+  // never both inherit one job's warranty (pre-push audit P1 on d5f5cf244b).
+  const reservedByLabel = (row, list, other) => {
+    const value = labelFor(row);
+    return Boolean(value) && labelCount(list, value) === 1 && labelCount(other, value) === 1;
+  };
+  const sameAmount = candidates.filter((row) => {
+    if (labelFor(row) !== label && reservedByLabel(row, candidates, peers)) return false;
+    return hasAmount(row);
+  });
+  const peerAmountCount = peers.filter((row) => {
+    if (row !== target && reservedByLabel(row, peers, candidates)) return false;
+    return hasAmount(row);
+  }).length;
   if (Number.isFinite(amount) && sameAmount.length === 1 && peerAmountCount === 1) return sameAmount[0];
   if (candidates.length === 1 && peers.length === 1) return candidates[0];
   return null;

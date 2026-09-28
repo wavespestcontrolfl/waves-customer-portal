@@ -868,6 +868,26 @@ describe('estimate assistant no-guarantee context', () => {
     }]);
   });
 
+  test('an exact-label saved row is reserved for its job before amount fallback (pre-push P1)', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const house = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment – House', amount: 1000 };
+    const annex = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment – Annex', amount: 1200 };
+    const savedHouse = { ...house, amount: 1200, warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 2200, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: { result: { recurring: { services: [recurring] }, oneTime: { items: [savedHouse] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: true, anchorOneTimePrice: 2200,
+        oneTimeBreakdown: { total: 2200, items: [house, annex] } },
+    });
+    expect(context.guarantees.serviceTerms).toEqual([
+      { service: 'Pre-Slab Termiticide Treatment – House',
+        terms: ['Extended 5-year warranty selected. Warranty terms depend on the selected warranty option.'] },
+      { service: 'Pre-Slab Termiticide Treatment – Annex',
+        terms: ['Warranty terms depend on the selected warranty option. No extended warranty selected.'] },
+    ]);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [
