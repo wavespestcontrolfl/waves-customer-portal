@@ -154,6 +154,28 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const drought = possibility('fixture-drought', 0.3, [1]); // both 'manageable'/'cultural_fix' -> 'other' class
       expect(engine.namedAnswerFor([large, drought], large)).not.toBeNull();
     });
+
+    test('a 4th-ranked conflicting-outcome-class candidate still blocks naming — buildWorkup must check ALL approved possibilities, not just the displayed top 3 (Codex pre-push P1)', () => {
+      const leafSpot = possibility('fixture-palm-leaf-spot', 0.9, [1]); // rank 1, photo-confirmable, no_cure-free
+      const fillerA = possibility('fixture-manganese-deficiency-palm', 0.5, [1]); // rank 2
+      const fillerB = possibility('fixture-cosmetic-spot', 0.4, [1]); // rank 3
+      const bronzing = possibility('fixture-lethal-bronzing', 0.25, [1]); // rank 4 — no_cure, >=0.20
+      const built = engine.buildWorkup({
+        subject: 'palm',
+        possibilities: [leafSpot, fillerA, fillerB, bronzing],
+        turfCandidates: [],
+        weedCandidates: [],
+        hostCandidates: [],
+        observedTerms: [],
+        currentMonth: 1,
+        chips: {},
+        context: {},
+        photosCount: 1,
+        quality: { usable: true, issue: 'none' },
+      });
+      expect(built.answer.level).toBe('symptom');
+      expect(built.possibilities).toHaveLength(3); // the display list is still capped at 3
+    });
   });
 
   // ── settle_it selection order (§6.5) ────────────────────────────────────
@@ -496,6 +518,52 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.escalation_triggered).toBe(true);
       expect(result.internal.escalation_reasons).toContain('different_outcome_classes');
       expect(dispatch).toHaveBeenCalledTimes(3); // candidates, conditions, escalation — no verify (no catalog identity candidate)
+    });
+
+    test('three higher-confidence weeds do not wipe out the turf identity — each identity slot is deduped separately (Codex pre-push P1)', async () => {
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' },
+          shows: 'plant',
+          turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', confidence: 0.6 }],
+          weeds: [
+            { slug: '', off_catalog_name: 'Weed A', confidence: 0.95 },
+            { slug: '', off_catalog_name: 'Weed B', confidence: 0.9 },
+            { slug: '', off_catalog_name: 'Weed C', confidence: 0.85 },
+          ],
+          host: [],
+        },
+      });
+      dispatch.mockResolvedValue({ ok: false, reason: 'provider_error' }); // every later leg misses
+
+      const result = await engine.identifyPlantV2({ photos: [{ data: 'x', mimeType: 'image/jpeg' }], subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      // The turf candidate must have survived being combined with 3
+      // higher-confidence weed candidates before the old code's shared,
+      // capped-at-3 dedupe ran.
+      expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine', source: 'photo' });
+    });
+
+    test('a schema-invalid identity verify response is treated as a miss, not consumed (Codex pre-push P1)', async () => {
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', confidence: 0.6 }], weeds: [], host: [],
+        },
+      });
+      // Malformed verify response: `candidates` items missing the required
+      // cues_visible/cues_not_visible arrays entirely — must not be
+      // consumed as if it verified anything.
+      dispatch.mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fixture-st-augustine', confidence: 0.99 }] } });
+      dispatch.mockResolvedValue({ ok: false, reason: 'provider_error' }); // conditions, escalation
+
+      const result = await engine.identifyPlantV2({ photos: [{ data: 'x', mimeType: 'image/jpeg' }], subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(result.internal.escalation_reasons).toContain('gemini_missed');
+      // The bogus 0.99 must not have been consumed — an unverified 0.6
+      // reads "likely" at best, never "pretty_sure".
+      expect(result.v2.subject.plant.wording).not.toBe('pretty_sure');
     });
   });
 });

@@ -293,10 +293,13 @@ function citesARealCue(entry, cuesVisible) {
   return (cuesVisible || []).some((n) => Number.isInteger(n) && n >= 1 && n <= count);
 }
 
-function mergeIdentityVerify(candidates, verifyResult) {
+/** `verifyJson` is the Ajv-validated Call B response (or `null` on a miss) —
+ * callers must validate before calling this (see `validJson(..., 'verifyA')`
+ * at the call site), never the raw, unvalidated `dispatch()` result. */
+function mergeIdentityVerify(candidates, verifyJson) {
   const bySlug = new Map();
-  if (verifyResult?.ok && Array.isArray(verifyResult.json?.candidates)) {
-    for (const v of verifyResult.json.candidates) {
+  if (Array.isArray(verifyJson?.candidates)) {
+    for (const v of verifyJson.candidates) {
       if (v?.slug && typeof v.confidence === 'number') bySlug.set(String(v.slug), v);
     }
   }
@@ -700,8 +703,15 @@ function buildWorkup(ctx) {
     currentMonth, chips = {}, context = {}, photosCount = 0, quality = { usable: true, issue: 'none' },
   } = ctx;
 
-  const approvedPossibilities = possibilities.filter((p) => isApproved(p.entry))
-    .sort((a, b) => b.confidence - a.confidence)
+  // Codex pre-push P1: the naming gate's outcome-class check (§6.3 condition
+  // 4) must see EVERY approved candidate, not just the displayed top 3 — a
+  // 4th-ranked no_cure/regulated candidate at >=0.20 confidence still has to
+  // block naming a manageable top possibility. Only the DISPLAY list
+  // (possibilities block, observed, settle_it, next_step_hint — all of
+  // which the contract itself scopes to "the top 3"/"the top 2") is capped.
+  const allApprovedPossibilities = possibilities.filter((p) => isApproved(p.entry))
+    .sort((a, b) => b.confidence - a.confidence);
+  const approvedPossibilities = allApprovedPossibilities
     .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context } }));
 
@@ -726,7 +736,7 @@ function buildWorkup(ctx) {
     : [];
 
   // ── answer (naming gate, §6.3) ──
-  const namedAnswer = namedAnswerFor(approvedPossibilities, approvedPossibilities[0] || null);
+  const namedAnswer = namedAnswerFor(allApprovedPossibilities, allApprovedPossibilities[0] || null);
   let answer;
   if (namedAnswer) {
     answer = {
@@ -894,10 +904,26 @@ function combineIdentity(geminiCandidates, escalationRaw, indexEntries) {
   };
 }
 
+/** Dedupe possibilities by slug, keeping the higher-confidence instance —
+ * same preference rule as `pest-engine.dedupeCandidates`, but WITHOUT its
+ * cap at 3: the naming gate's outcome-class check (§6.3 condition 4) needs
+ * every approved candidate, not just the ones that will end up displayed
+ * (`buildWorkup` does its own top-3 slice for the display list). Codex
+ * pre-push P1: reusing `dedupeCandidates` here silently dropped a
+ * 4th-ranked no_cure/regulated candidate before the gate ever saw it. */
+function dedupePossibilities(list) {
+  const bySlug = new Map();
+  for (const p of list) {
+    const existing = bySlug.get(p.slug);
+    if (!existing || p.confidence > existing.confidence) bySlug.set(p.slug, p);
+  }
+  return [...bySlug.values()].sort((a, b) => b.confidence - a.confidence);
+}
+
 function combinePossibilities(geminiPossibilities, escalationRaw, indexEntries) {
   if (!Array.isArray(escalationRaw)) return geminiPossibilities;
   const openaiPossibilities = escalationRaw.map((raw) => resolveConditionCandidate(raw, indexEntries)).filter(Boolean);
-  return dedupeCandidates([...geminiPossibilities, ...openaiPossibilities]).sort((a, b) => b.confidence - a.confidence);
+  return dedupePossibilities([...geminiPossibilities, ...openaiPossibilities]);
 }
 
 function combineQuality(a, b) {
@@ -944,19 +970,38 @@ async function identifyPlantV2({
 
   const candidatesResult = await callIdentityCandidates(images, subject, indexTexts, legTimeoutMs(4));
   const candidatesJson = validJson(candidatesResult, 'candidatesA');
-  const rawIdentity = candidatesJson ? [...(candidatesJson.turf || []), ...(candidatesJson.weeds || []), ...(candidatesJson.host || [])] : [];
-  const identityFromCall1 = dedupeCandidates(rawIdentity.map((r) => resolveIdentityCandidate(r, identityIndex)));
+  // Codex pre-push P1: each identity SLOT (turf / weeds / host) is deduped
+  // and capped at 3 SEPARATELY — `dedupeCandidates` itself caps at 3, so
+  // combining all three slots into one list before deduping let 3
+  // higher-confidence weeds silently discard every turf candidate (or vice
+  // versa) before verification ever ran.
+  const rawTurf = candidatesJson?.turf || [];
+  const rawWeeds = candidatesJson?.weeds || [];
+  const rawHost = candidatesJson?.host || [];
+  const turfFromCall1 = dedupeCandidates(rawTurf.map((r) => resolveIdentityCandidate(r, identityIndex)));
+  const weedsFromCall1 = dedupeCandidates(rawWeeds.map((r) => resolveIdentityCandidate(r, identityIndex)));
+  const hostFromCall1 = dedupeCandidates(rawHost.map((r) => resolveIdentityCandidate(r, identityIndex)));
+  const identityFromCall1 = [...turfFromCall1, ...weedsFromCall1, ...hostFromCall1];
   const identityCatalogCandidates = identityFromCall1.filter((c) => c.entry);
 
   let verifyResult = null;
+  let verifyJson = null;
   let verifiedIdentity = identityFromCall1;
   if (identityCatalogCandidates.length) {
     verifyResult = await callIdentityVerify(images, identityContextFor(identityCatalogCandidates), legTimeoutMs(3));
-    verifiedIdentity = mergeIdentityVerify(identityFromCall1, verifyResult);
+    // Codex pre-push P1: VERIFY_A_SCHEMA was compiled but never applied — an
+    // `ok:true` malformed verifier response could change confidence and
+    // verify an identity unchecked. Ajv-validate before merging, same as
+    // every other leg (schema rejection = a miss, contract §5).
+    verifyJson = validJson(verifyResult, 'verifyA');
+    verifiedIdentity = mergeIdentityVerify(identityFromCall1, verifyJson);
   }
-  const turfCandidates = dedupeCandidates(verifiedIdentity.filter((c) => !c.entry || c.entry.group === 'turfgrasses'));
-  const weedCandidates = dedupeCandidates(verifiedIdentity.filter((c) => c.entry && WEED_GROUPS.includes(c.entry.group)));
-  const hostCandidates = dedupeCandidates(verifiedIdentity.filter((c) => !c.entry || (c.entry.group !== 'turfgrasses' && !WEED_GROUPS.includes(c.entry.group))));
+  const verifiedTurf = verifiedIdentity.slice(0, turfFromCall1.length);
+  const verifiedWeeds = verifiedIdentity.slice(turfFromCall1.length, turfFromCall1.length + weedsFromCall1.length);
+  const verifiedHost = verifiedIdentity.slice(turfFromCall1.length + weedsFromCall1.length);
+  const turfCandidates = dedupeCandidates(verifiedTurf);
+  const weedCandidates = dedupeCandidates(verifiedWeeds);
+  const hostCandidates = dedupeCandidates(verifiedHost);
 
   // The host slug feeding `conditionIndexFor`: the resolved (even if
   // unapproved) top host candidate, else the customer's own `plant_slug`
@@ -990,14 +1035,14 @@ async function identifyPlantV2({
   const identityConfidence = identityTop?.confidence ?? null;
   const geminiMissed = [
     !candidatesJson,
-    identityCatalogCandidates.length > 0 && !verifyResult?.ok,
+    identityCatalogCandidates.length > 0 && !verifyJson,
     mode !== 'identify' && conditionIndex.length > 0 && !conditionsJson,
   ].includes(true);
   const lowConfidence = [identityConfidence, topConditionConfidence].some((c) => c !== null && c < escalateBelow());
   // A verify call whose top candidate disagrees with the candidates call's
   // own raw top (same self-contradiction shape pest-engine checks, applied
   // to identity only — conditions have no separate verify leg to contradict).
-  const rawIdentityTop = [...rawIdentity].sort((a, b) => clamp01(b.confidence) - clamp01(a.confidence))[0] || null;
+  const rawIdentityTop = [...rawTurf, ...rawWeeds, ...rawHost].sort((a, b) => clamp01(b.confidence) - clamp01(a.confidence))[0] || null;
   const selfContradiction = !!(rawIdentityTop?.slug && identityTop && identityTop.slug !== rawIdentityTop.slug);
   // NEW trigger (contract §5): the top two possibilities read different
   // outcome classes (no_cure/regulated vs. the rest) — potassium deficiency
