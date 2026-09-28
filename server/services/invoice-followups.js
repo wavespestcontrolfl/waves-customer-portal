@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { billingLegDeliveryState, billingLegContactTime, originalBillingContactArgs } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
@@ -51,7 +52,6 @@ const {
 } = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 const { anchorInvoiceOf } = require('./collections/account-anchor');
-const { etDateString } = require('../utils/datetime-et');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -130,17 +130,23 @@ async function currentStepLedgerIds(row, step, channels) {
 
 // Combined-touch twin of currentStepLedgerIds: the combined lane's own
 // reservations use a DIFFERENT idempotency-key shape
-// (invoice_followups:combined:<customerId>:<step.id>:<etDay>:<channel>,
-// not the per-invoice followupLedgerKey), so a same-day retry after a
-// partial success must exclude THESE keys too, or the policy consult can
-// see the earlier partial attempt's own contact and deny the retry
-// (Codex pre-push r2).
-async function currentCombinedStepLedgerIds(customerId, step, etDay, includedIdsKey, channels) {
+// (invoice_followups:combined:<customerId>:<step.id>:<includedIdsKey>:<channel>,
+// not the per-invoice followupLedgerKey) — but the SAME stability
+// contract: no date component, stable for as long as this exact included-
+// invoice-set sits at this exact step (one "episode"), same as
+// followupLedgerKey's own row.id+step.id+channel shape (Fable review P2 —
+// a day-scoped key would mint a FRESH reservation on every retry across a
+// day boundary, losing claimAttempt's "a prior attempt's outcome is still
+// unconfirmed" protection for a held touch retried tomorrow). A retry —
+// same day or a later one after a hold — must exclude THESE keys too, or
+// the policy consult can see the earlier partial attempt's own contact and
+// deny the retry (Codex pre-push r2).
+async function currentCombinedStepLedgerIds(customerId, step, includedIdsKey, channels) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
   if (!channels.length) return [];
   const rows = await db('collections_contact_ledger')
     .where({ source: 'invoice_followups' })
-    .whereIn('idempotency_key', channels.map((channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${includedIdsKey}:${channel}`));
+    .whereIn('idempotency_key', channels.map((channel) => `invoice_followups:combined:${customerId}:${step.id}:${includedIdsKey}:${channel}`));
   return (rows || []).map((entry) => entry.id);
 }
 
@@ -1540,7 +1546,6 @@ async function fireCombinedTouch(rowsForCustomer) {
  */
 async function fireCombinedTouchClaimed(rows) {
   const customerId = rows[0].customer_id;
-  const includedIdsOf = (list) => list.map((r) => r.invoice_id);
 
   const customer = await db('customers').where({ id: customerId }).first();
   if (customer?.deleted_at) {
@@ -1555,18 +1560,172 @@ async function fireCombinedTouchClaimed(rows) {
     return;
   }
 
-  // Per-invoice guards fireTouch applies before rendering: a live Bill-To
-  // re-read, a fresh paid/prepaid re-check, and micro-deposit-pending
-  // diversion. The combined message has no verification-nudge variant, so
-  // an mdPending invoice drops out of the combined set — but it is still
-  // CLAIMED right now (claimTouchRow, above), and its next_touch_at is not
-  // touched by exclusion alone, so leaving it to "a later run" can leave it
-  // stuck: if every row in this group is mdPending, `included` ends up
-  // empty and next_touch_at never advances, and the SAME group re-forms
-  // and re-excludes on every subsequent run until the stale-touch grace
-  // silently skips it past its verification reminder (Codex pre-push r3).
-  // Fire it through fireTouch NOW instead — the same immediate handling
-  // the other exclusions above already give their row (pause, stop).
+  // Resolves the eligible set, the anchor/step, and pulls out any
+  // final-notice sibling — every early-return decision that requires,
+  // extracted so this orchestrator only checks the outcome once (Codex r1
+  // P2 — complexity). Returns null when nothing further is owed this run
+  // (each such case fires its own row(s) through fireTouch already, inside
+  // the helper).
+  const group = await resolveCombinedGroup(rows, customerId);
+  if (!group) return;
+  const { included, anchorRow, step } = group;
+
+  const smsTemplateKey = COMBINED_SMS_TEMPLATE_BY_STEP_ID[step.id];
+  const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+  if (!smsTemplateKey && !emailTemplateKey) return;
+
+  const includedIds = included.map((r) => r.invoice_id);
+
+  // The combined message quotes an exact invoice_count and total_due — the
+  // link behind it must settle EXACTLY the included set, not a superset
+  // (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read degradation, no
+  // sibling excluded for its own reason, and no OTHER open invoice not due
+  // today riding along and inflating the page's total past what the
+  // message promised). See resolveCombinedPayLink: anything short of an
+  // exact match falls back to firing every included invoice through its
+  // own per-invoice touch instead, same as the single-survivor fallback
+  // above (Codex pre-push r2 + r4).
+  const payUrl = await resolveCombinedPayLink(customer, includedIds);
+  if (!payUrl) {
+    logger.info(`[invoice-followups] no pay link covers every invoice in the combined touch for customer ${customerId} — falling back to ${included.length} individual touches`);
+    await fireIndividualTouchesForCombined(included, rows);
+    return;
+  }
+
+  const channelSelection = await resolveCombinedChannelPolicy(customer);
+  if (!channelSelection) return;
+  const { category, nonEmailChannels, emailSelected, policyChannels } = channelSelection;
+
+  const ContactLedger = require('./collections/contact-ledger');
+  // A stable identity for THIS combined touch's included set — the same
+  // step id recurs for a customer as new invoices reach it later, and the
+  // included set itself can differ between two attempts at the same step
+  // (an invoice drops out, another joins). Both the contact-ledger
+  // reservation's own idempotency key AND the email template's provider-
+  // level key are scoped to it, so a regrouped retry never reuses — and
+  // silently "delivers" — a reservation that only ever quoted a DIFFERENT
+  // set of invoices (Codex pre-push r1 + r3).
+  // A digest, not the raw sorted UUID list: production customer/invoice ids
+  // are 36-char UUIDs, so even the minimum two-invoice group already runs
+  // ~165-171 chars — over collections_contact_ledger.idempotency_key's
+  // varchar(120) (both ledger reservations would fail before either leg
+  // could send) and, at 5+ invoices, over email_messages'
+  // trigger_event_id/idempotency-key columns too (Codex r1 P1). A 16-hex
+  // SHA-256 prefix of the sorted, comma-joined ids is stable for the same
+  // included set and short enough to leave headroom in every key it rides.
+  const includedIdsKey = crypto.createHash('sha256')
+    .update(includedIds.map(String).sort().join(',')).digest('hex').slice(0, 16);
+  // NO date component (Fable review P2): a held touch retried on a LATER
+  // day must reuse the SAME reservation, or a fresh day-scoped key loses
+  // claimAttempt's "a prior attempt's outcome is still unconfirmed"
+  // protection across the day boundary — the same stability contract
+  // followupLedgerKey already gives the single-invoice path (keyed by
+  // sequence row id + step + channel, never a date).
+  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${includedIdsKey}:${channel}`;
+
+  const excludeLedgerIds = await combinedExcludeLedgerIds(
+    included, rows, step, customerId, includedIdsKey, policyChannels,
+  );
+
+  const policyResults = await Promise.all(policyChannels.map((channel) =>
+    collectionsChannelPermitted(customer.id, null, channel, excludeLedgerIds, true, includedIds)));
+  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+  if (!Object.values(channelPolicy).some(Boolean)) {
+    // The aggregate check requires EVERY included invoice to sit in the
+    // policy's own eligible set (rail-guard.js's includesQuotedInvoices) —
+    // ONE sibling excluded from it (its own dispute/hold, not necessarily
+    // the customer's own standing) denies the channel for the WHOLE group,
+    // even when the rest are individually eligible. Rather than hold every
+    // invoice hostage to that one, fall back to firing each included
+    // invoice through its own per-invoice touch — the SAME fallback the
+    // pay-link mismatch and ownership-change guards already take — so
+    // fireTouch's own single-invoice policy check (no aggregate
+    // invoiceIds) can send for the eligible ones while holding or skipping
+    // the ineligible one on its own (Fable review P2).
+    logger.info(`[invoice-followups] collections policy denied every selected channel for combined touch (customer ${customerId}) — falling back to ${included.length} individual touches`);
+    await fireIndividualTouchesForCombined(included, rows);
+    return;
+  }
+
+  const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+  const totalDue = totalDueNum.toFixed(2);
+
+  // LAST-MINUTE re-verification, immediately before dispatch (Codex
+  // pre-push r4): the guard pass in resolveCombinedIncludedInvoices ran
+  // before several awaits (channel preferences, the collections-policy
+  // consult, the ledger id lookups, the pay-balance link) during which a
+  // sibling's Bill-To could still change — the claim only protects each
+  // row's SEQUENCE state, not this. See combinedOwnershipStillEligible,
+  // which covers every quoted invoice, not only the anchor. Any invoice
+  // that moved bails the WHOLE combined send (the totals/copy already
+  // reflect the stale set) — each invoice still legitimate goes through
+  // its own per-invoice touch instead, same as the coverage fallback
+  // above; the one that moved is picked up correctly by fireTouch's own
+  // guards on a later run.
+  const stillEligible = await combinedOwnershipStillEligible(included);
+  if (!stillEligible) {
+    logger.info(`[invoice-followups] an included invoice's ownership changed just before dispatch for customer ${customerId} — abandoning the combined send; falling back to ${included.length} individual touches`);
+    await fireIndividualTouchesForCombined(included, rows);
+    return;
+  }
+
+  // Durable vs transient policy denials, per selected channel — a
+  // transient denial (spacing window, a releasable hold) must HOLD the
+  // whole touch until it clears, same as fireTouch; a durable one (a flag,
+  // no consent) is waived and never blocks the other leg.
+  const durablyDenied = Object.fromEntries(
+    policyChannels.map((channel, index) => [channel, verdictDurablyDenied(policyResults[index])]),
+  );
+
+  // ONE text leg and ONE email leg — "one combined text"/"one combined
+  // email", not one attempt per selected channel. Extracted so each leg's
+  // own hold/deliver decision tree is reasoned about on its own (Codex r1
+  // P2); see sendCombinedSmsLeg / sendCombinedEmailLeg.
+  const { smsOk, smsHold } = await sendCombinedSmsLeg({
+    customer, included, includedIds, includedIdsKey, step, smsTemplateKey, payUrl, totalDue,
+    nonEmailChannels, channelPolicy, durablyDenied, emailSelected, anchorRow, combinedLedgerKey, ContactLedger, category,
+  });
+  const { emailOk, emailHold } = await sendCombinedEmailLeg({
+    customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue,
+    channelPolicy, durablyDenied, emailSelected, combinedLedgerKey, ContactLedger, anchorRow,
+  });
+
+  // A selected leg still pending (transient policy denial, an uncertain
+  // send, an unresolved prior attempt) holds the WHOLE combined touch —
+  // every included sequence stays on its current step, exactly like
+  // fireTouch holds its one invoice's touch, rather than silently dropping
+  // the pending leg the moment a sibling leg succeeds (pre-push audit P1).
+  if (smsHold || emailHold) {
+    logger.info(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} held — a selected leg is still pending (sms ${smsHold ? 'held' : 'settled'}, email ${emailHold ? 'held' : 'settled'}); ${included.length} sequence(s) left at their current step`);
+    // Re-date next_touch_at to the held-touch floor, same as fireTouch's
+    // own holdStep — leaving it at its already-due date would have every
+    // included sequence read as stale on the NEXT run's isStaleTouch check
+    // (now vs. the ORIGINAL due date, not today's hold) and stale-skip
+    // right past this step without ever sending it (Fable review P1).
+    await reTimeHeldCombinedSequences(included, rows);
+    return;
+  }
+
+  if (!smsOk && !emailOk) {
+    logger.warn(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} delivered nothing — ${included.length} sequence(s) left at their current step for the next run`);
+    return;
+  }
+
+  await advanceCombinedSequences({ included, rows, customer, step, totalDue, smsOk, emailOk, includedIds });
+}
+
+/**
+ * Per-row eligibility pass for a combined touch: re-reads each claimed
+ * row's invoice live and applies the same exclusions fireTouch applies per
+ * invoice (third-party Bill-To, a fresh paid/prepaid re-check, terminal
+ * status, micro-deposit-pending diversion). An mdPending row is fired
+ * through fireTouch immediately rather than left to re-exclude itself on
+ * every future run (Codex pre-push r3 — see fireCombinedTouchClaimed's own
+ * comment above its call). Extracted from fireCombinedTouchClaimed to keep
+ * that orchestrator's complexity reasoned about one decision at a time
+ * (Codex r1 P2).
+ */
+async function resolveCombinedIncludedInvoices(rows, customerId) {
   const included = [];
   const mdPendingRows = [];
   for (const row of rows) {
@@ -1607,14 +1766,36 @@ async function fireCombinedTouchClaimed(rows) {
   }
   for (const row of mdPendingRows) {
     // Sequential: each fireTouch owns its own DB writes for its invoice.
-    await fireTouch(row, {});
+    // try/catch per row (Fable review P2): one invoice's fireTouch failure
+    // must not abort the rest of the group's mdPending verification sends —
+    // the row that threw is simply picked up again on the next run.
+    try {
+      await fireTouch(row, {});
+    } catch (err) {
+      logger.error(`[invoice-followups] mdPending individual touch failed for invoice ${row.invoice_id}: ${err.message}`);
+    }
   }
+  return included;
+}
 
-  if (!included.length) return;
+/**
+ * Resolves the eligible included set for a combined touch, picks the
+ * anchor invoice/step, and pulls out any final-notice sibling — every
+ * early-return decision that resolution requires, so
+ * fireCombinedTouchClaimed's own orchestration checks the outcome once
+ * instead of repeating the same length/step checks after each step
+ * (Codex r1 P2 — complexity). Returns null when nothing further is owed
+ * this run; a null-producing branch has already fired its own row(s)
+ * through fireTouch, same as every other immediate-handling exclusion in
+ * this lane.
+ */
+async function resolveCombinedGroup(rows, customerId) {
+  const included = await resolveCombinedIncludedInvoices(rows, customerId);
+  if (!included.length) return null;
   if (included.length === 1) {
     const soleRow = rows.find((r) => r.invoice_id === included[0].invoice_id);
     await fireTouch(soleRow, {});
-    return;
+    return null;
   }
 
   // Step from the OLDEST included invoice (account-anchor.js) — the
@@ -1623,139 +1804,190 @@ async function fireCombinedTouchClaimed(rows) {
   const anchorInvoice = anchorInvoiceOf(included);
   const anchorRow = rows.find((r) => r.invoice_id === anchorInvoice.invoice_id);
   const step = followupSteps()[anchorRow.step_index];
-  if (!step) return; // exhausted cadence on the anchor invoice — nothing to send
+  if (!step) return null; // exhausted cadence on the anchor invoice — nothing to send
 
-  const smsTemplateKey = COMBINED_SMS_TEMPLATE_BY_STEP_ID[step.id];
-  const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
-  if (!smsTemplateKey && !emailTemplateKey) return;
+  // A sibling already at ITS OWN final-notice step must never ride along
+  // under an earlier anchor step's copy (see excludeFinalNoticeSiblings) —
+  // pull it out and fire it individually first; only then decide whether
+  // enough of the group remains for a combined send.
+  const filtered = await excludeFinalNoticeSiblings(included, rows, anchorRow);
+  if (!filtered.length) return null;
+  if (filtered.length === 1) {
+    const soleRow = rows.find((r) => r.invoice_id === filtered[0].invoice_id);
+    await fireTouch(soleRow, {});
+    return null;
+  }
+  return { included: filtered, anchorRow, step };
+}
 
-  const includedIds = includedIdsOf(included);
+/**
+ * A sibling invoice already at ITS OWN final-notice step must never be
+ * folded into a combined touch whose rendered content is an EARLIER
+ * step's copy: advanceCombinedSequences would still retire that
+ * sequence's step past the final one, and the customer would never
+ * actually receive THAT invoice's final notice (Fable review P2). Safe
+ * rule: only ever combine a final-notice invoice into a touch whose own
+ * rendered step IS that same final step (the anchor itself is at its
+ * final notice, so the combined copy genuinely represents it) —
+ * otherwise the sibling is pulled out and fired through its own
+ * individual touch RIGHT NOW, which renders its real final-notice
+ * template, rather than left to re-exclude itself (and risk the same
+ * staleness the mdPending path above guards against) on a later run.
+ */
+async function excludeFinalNoticeSiblings(included, rows, anchorRow) {
+  const lastStepIndex = followupSteps().length - 1;
+  if (anchorRow.step_index === lastStepIndex) return included; // the combined touch itself IS the final notice
+  const keep = [];
+  const finalNoticeSiblings = [];
+  for (const inv of included) {
+    if (inv.step_index === lastStepIndex) finalNoticeSiblings.push(inv);
+    else keep.push(inv);
+  }
+  for (const inv of finalNoticeSiblings) {
+    const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+    if (!originalRow) continue;
+    // Sequential, not Promise.all: each fireTouch owns its own DB writes.
+    // try/catch per row (Fable review P2): one sibling's final-notice
+    // fireTouch failure must not stop the OTHER final-notice siblings from
+    // getting their own real final-notice send this run.
+    try {
+      await fireTouch(originalRow, {});
+    } catch (err) {
+      logger.error(`[invoice-followups] final-notice sibling touch failed for invoice ${inv.invoice_id}: ${err.message}`);
+    }
+  }
+  return keep;
+}
 
-  // The combined message quotes an exact invoice_count and total_due — the
-  // link behind it must settle EXACTLY the included set, not a superset
-  // (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read degradation, no
-  // sibling excluded for its own reason, and no OTHER open invoice not due
-  // today riding along and inflating the page's total past what the
-  // message promised). Anything short of an exact match does NOT send a
-  // combined message with a link (or copy) that quotes a different set —
-  // fall back to firing every included invoice through its own per-invoice
-  // touch instead, same as the single-survivor fallback above (Codex
-  // pre-push r2 + r4).
+// Fire every included invoice through its own per-invoice touch instead of
+// the combined message — the shared fallback the pay-link mismatch guard
+// and the last-minute ownership recheck both take (Codex pre-push r2/r4).
+async function fireIndividualTouchesForCombined(included, rows) {
+  for (const inv of included) {
+    // Sequential, not Promise.all: each fireTouch owns its own DB writes
+    // and must not race a sibling invoice for the same customer.
+    const individualRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+    if (!individualRow) continue;
+    // try/catch per row (Fable review P2): one invoice's fireTouch failure
+    // must not abort the fallback for the REST of the group — each row is
+    // independent and the one that threw is picked up again next run.
+    try {
+      await fireTouch(individualRow, {});
+    } catch (err) {
+      logger.error(`[invoice-followups] individual fallback touch failed for invoice ${inv.invoice_id}: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * The combined message quotes an exact invoice_count and total_due — the
+ * link behind it must settle EXACTLY the included set, not a superset
+ * (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read degradation, no
+ * sibling excluded for its own reason, and no OTHER open invoice not due
+ * today riding along and inflating the page's total past what the message
+ * promised). Returns null on anything short of an exact match.
+ */
+async function resolveCombinedPayLink(customer, includedIds) {
   const { buildPayBalanceLink } = require('./composer-customer-links');
-  let payUrl = null;
   try {
     const balanceLink = await buildPayBalanceLink([customer.id]);
     const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
     const matchesIncludedSetExactly = coveredIds.size === includedIds.length
       && includedIds.every((id) => coveredIds.has(String(id)));
-    payUrl = matchesIncludedSetExactly ? (balanceLink?.url || null) : null;
+    return matchesIncludedSetExactly ? (balanceLink?.url || null) : null;
   } catch (err) {
-    logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
+    logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customer.id}: ${err.message}`);
+    return null;
   }
-  if (!payUrl) {
-    logger.info(`[invoice-followups] no pay link covers every invoice in the combined touch for customer ${customerId} — falling back to ${included.length} individual touches`);
-    for (const inv of included) {
-      // Sequential, not Promise.all: each fireTouch owns its own DB writes
-      // and must not race a sibling invoice for the same customer.
-      const individualRow = rows.find((r) => r.invoice_id === inv.invoice_id);
-      await fireTouch(individualRow, {});
-    }
-    return;
-  }
+}
 
-  const category = 'invoice'; // mdPending invoices are excluded above
-  let explicitChannels = null;
+/**
+ * Which channels this customer's combined touch may use — the explicit-
+ * selection resolution fireTouch applies per invoice, run once for the
+ * whole group (category is always 'invoice': mdPending invoices are
+ * excluded before this runs). Returns null on a preferences read failure;
+ * the caller skips the touch for this run.
+ */
+async function resolveCombinedChannelPolicy(customer) {
+  const category = 'invoice';
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-    explicitChannels = explicitBillingChannels(prefs || {}, category);
+    const explicitChannels = explicitBillingChannels(prefs || {}, category);
+    const nonEmailChannels = explicitChannels === null ? ['sms']
+      : ['push', 'sms'].filter((channel) => explicitChannels.includes(channel));
+    const emailSelected = explicitChannels === null || explicitChannels.includes('email');
+    const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
+    return {
+      category, nonEmailChannels, emailSelected, policyChannels,
+    };
   } catch (err) {
-    logger.warn(`[invoice-followups] skipped combined touch for customer ${customerId} — channel preferences unavailable: ${err.message}`);
-    return;
+    logger.warn(`[invoice-followups] skipped combined touch for customer ${customer.id} — channel preferences unavailable: ${err.message}`);
+    return null;
   }
-  const nonEmailChannels = explicitChannels === null ? ['sms']
-    : ['push', 'sms'].filter((channel) => explicitChannels.includes(channel));
-  const emailSelected = explicitChannels === null || explicitChannels.includes('email');
-  const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
+}
 
-  const etDay = etDateString(new Date());
-  const ContactLedger = require('./collections/contact-ledger');
-  // A stable identity for THIS combined touch's included set — the same
-  // step id recurs for a customer as new invoices reach it later, and the
-  // included set itself can differ between two attempts at the same step
-  // on the same day (an invoice drops out, another joins). Both the
-  // contact-ledger reservation's own idempotency key AND the email
-  // template's provider-level key are scoped to it, so a regrouped retry
-  // never reuses — and silently "delivers" — a reservation that only ever
-  // quoted a DIFFERENT set of invoices (Codex pre-push r1 + r3).
-  const includedIdsKey = includedIds.map(String).sort().join(',');
-  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${includedIdsKey}:${channel}`;
-
-  // excludeLedgerIds: THIS touch's own reservations must not count against
-  // itself on a same-day retry — both the per-invoice-keyed rows a legacy
-  // single touch at this step might have left, AND this lane's own
-  // combined-keyed rows for this SAME included set (a partial success
-  // earlier today already wrote one), which currentStepLedgerIds' per-
-  // invoice key format never matches (Codex pre-push r2).
+/**
+ * excludeLedgerIds: THIS touch's own reservations must not count against
+ * itself on a retry — both the per-invoice-keyed rows a legacy single
+ * touch might have left, AND this lane's own combined-keyed rows for this
+ * SAME included set (a partial success earlier already wrote one — same
+ * day, or an earlier day if the touch was held and re-timed, since the
+ * combined key carries no date; see currentCombinedStepLedgerIds), which
+ * currentStepLedgerIds' per-invoice key format never matches (Codex
+ * pre-push r2).
+ *
+ * Each row's legacy check uses ITS OWN current step, not the anchor's
+ * (Fable review P2): a non-anchor sibling can sit at a DIFFERENT point of
+ * its own cadence than the anchor (the combined message intentionally
+ * spans them — see fireCombinedTouchClaimed's own comment), so a legacy
+ * single touch it received earlier reserved a key at ITS OWN step id.
+ * Checking every row against the anchor's step alone would miss that
+ * sibling's real reservation and let the policy consult see it as an
+ * unaccounted prior contact.
+ */
+async function combinedExcludeLedgerIds(included, rows, step, customerId, includedIdsKey, policyChannels) {
   const ownLedgerIdsPerRow = await Promise.all(included.map((inv) => {
     const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
-    return currentStepLedgerIds(originalRow, step, policyChannels).catch(() => []);
+    const ownStep = followupSteps()[originalRow.step_index];
+    if (!ownStep) return [];
+    return currentStepLedgerIds(originalRow, ownStep, policyChannels).catch(() => []);
   }));
-  const ownCombinedLedgerIds = await currentCombinedStepLedgerIds(customerId, step, etDay, includedIdsKey, policyChannels).catch(() => []);
-  const excludeLedgerIds = [...new Set([...ownLedgerIdsPerRow.flat(), ...ownCombinedLedgerIds])];
+  const ownCombinedLedgerIds = await currentCombinedStepLedgerIds(
+    customerId, step, includedIdsKey, policyChannels,
+  ).catch(() => []);
+  return [...new Set([...ownLedgerIdsPerRow.flat(), ...ownCombinedLedgerIds])];
+}
 
-  const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(customer.id, null, channel, excludeLedgerIds, true, includedIds)));
-  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
-  if (!Object.values(channelPolicy).some(Boolean)) {
-    logger.info(`[invoice-followups] collections policy denied every selected channel for combined touch (customer ${customerId}) — deferred to a later run`);
-    return;
-  }
-
-  const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-  const totalDue = totalDueNum.toFixed(2);
-
-  // LAST-MINUTE re-verification, immediately before dispatch (Codex
-  // pre-push r4): the guard pass above ran before several awaits (channel
-  // preferences, the collections-policy consult, the ledger id lookups,
-  // the pay-balance link) during which a sibling's Bill-To could still
-  // change — the claim only protects each row's SEQUENCE state, not this.
-  // fireTouch's own final safeguard is a single fresh re-read right before
-  // it sends; the combined equivalent covers every quoted invoice, not
-  // only the anchor. Any invoice that moved bails the WHOLE combined send
-  // (the totals/copy already reflect the stale set) — each invoice still
-  // legitimate goes through its own per-invoice touch instead, same as the
-  // coverage fallback above; the one that moved is picked up correctly by
-  // fireTouch's own guards on a later run.
+/**
+ * LAST-MINUTE re-verification, immediately before dispatch (Codex pre-push
+ * r4): the per-row guard pass ran before several awaits (channel
+ * preferences, the collections-policy consult, the ledger id lookups, the
+ * pay-balance link) during which a sibling's Bill-To could still change —
+ * the claim only protects each row's SEQUENCE state, not this. Covers
+ * every quoted invoice, not only the anchor.
+ */
+async function combinedOwnershipStillEligible(included) {
   const freshOwnership = await Promise.all(included.map((inv) => db('invoices')
     .where({ id: inv.invoice_id }).first('payer_id', 'scheduled_send_error', 'status').catch(() => undefined)));
-  const stillEligible = included.every((inv, index) => {
+  return included.every((inv, index) => {
     const fresh = freshOwnership[index];
     if (!fresh) return false;
     if (fresh.payer_id || invoiceWithdrawnFromCustomer({ scheduled_send_error: fresh.scheduled_send_error })) return false;
     if (isTerminalInvoice(fresh)) return false;
     return true;
   });
-  if (!stillEligible) {
-    logger.info(`[invoice-followups] an included invoice's ownership changed just before dispatch for customer ${customerId} — abandoning the combined send; falling back to ${included.length} individual touches`);
-    for (const inv of included) {
-      // Sequential: each fireTouch re-reads and re-guards its own invoice.
-      const individualRow = rows.find((r) => r.invoice_id === inv.invoice_id);
-      await fireTouch(individualRow, {});
-    }
-    return;
-  }
+}
 
-  // Durable vs transient policy denials, per selected channel — a
-  // transient denial (spacing window, a releasable hold) must HOLD the
-  // whole touch until it clears, same as fireTouch; a durable one (a flag,
-  // no consent) is waived and never blocks the other leg.
-  const durablyDenied = Object.fromEntries(
-    policyChannels.map((channel, index) => [channel, verdictDurablyDenied(policyResults[index])]),
-  );
-
-  // ONE text leg, on the best available channel the customer selected
-  // (sms preferred; push only when sms is unavailable/unselected) — "one
-  // combined text", not one attempt per selected channel.
+/**
+ * ONE text leg, on the best available channel the customer selected (sms
+ * preferred; push only when sms is unavailable/unselected) — "one combined
+ * text", not one attempt per selected channel. Mirrors fireTouch's own
+ * hold/deliver decisions for its single-invoice SMS leg.
+ */
+async function sendCombinedSmsLeg({
+  customer, included, includedIds, includedIdsKey, step, smsTemplateKey, payUrl, totalDue,
+  nonEmailChannels, channelPolicy, durablyDenied, emailSelected, anchorRow, combinedLedgerKey, ContactLedger, category,
+}) {
   let smsChannel = null;
   if (nonEmailChannels.includes('sms') && channelPolicy.sms === true && customer.phone) smsChannel = 'sms';
   else if (nonEmailChannels.includes('push') && channelPolicy.push === true) smsChannel = 'push';
@@ -1763,170 +1995,241 @@ async function fireCombinedTouchClaimed(rows) {
   // transient (not durable) — hold rather than silently drop it; matches
   // fireTouch's holdStep on a policy denial (pre-push audit P1).
   let smsHold = !smsChannel && nonEmailChannels.some((ch) => channelPolicy[ch] !== true && !durablyDenied[ch]);
-
   let smsOk = false;
-  if (smsChannel && smsTemplateKey) {
-    const body = await smsTemplatesRouter.getTemplate(smsTemplateKey, {
-      first_name: customer.first_name || 'there',
-      invoice_count: String(included.length),
-      total_due: totalDue,
-      pay_url: payUrl,
-    }, { workflow: 'invoice_followup_combined', entity_type: 'customer', entity_id: customer.id });
-    if (!body) {
-      logger.warn(`[invoice-followups] combined SMS template ${smsTemplateKey} missing/disabled for customer ${customerId}`);
-    } else {
-      let ledger = null;
-      try {
-        ledger = await ContactLedger.recordContact({
-          customerId: customer.id, channel: smsChannel, purpose: 'invoice_followup',
-          invoiceIds: includedIds, source: 'invoice_followups',
-          metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
-          idempotencyKey: combinedLedgerKey(smsChannel),
-        });
-      } catch (err) {
-        logger.warn(`[invoice-followups] combined ${smsChannel} ledger unavailable for customer ${customerId}: ${err.message}`);
-        smsHold = true; // retryable — don't drop the leg over a ledger blip
-      }
-      if (ledger) {
-        const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
-        if (claim.delivered) smsOk = true;
-        else if (!claim.allowed) smsHold = true; // a prior attempt's outcome is still unconfirmed
-        else {
-          let result;
-          try {
-            result = await sendCustomerMessage({
-              to: smsChannel === 'sms' ? customer.phone : undefined,
-              body, channel: smsChannel, audience: 'customer', purpose: 'payment_link',
-              customerId: customer.id, invoiceId: anchorRow.invoice_id, entryPoint: 'invoice_followup_sequence_combined',
-              metadata: {
-                original_message_type: 'invoice_followup_combined',
-                // Scoped to the included set, same as the ledger/email keys
-                // — otherwise a later group reaching the same step reuses
-                // this App-push dedupe key and can silently skip the new
-                // reminder (Codex pre-push r4).
-                notificationEventKey: `invoice-followup-combined:${customer.id}:${step.id}:${includedIdsKey}`,
-                billingDeliveryCategory: category, billingDeliveryLeg: smsChannel,
-                invoice_ids: includedIds, rendered_amount: totalDue, collections_ledger_id: ledger.id,
-                ...(smsChannel === 'push' ? { appOnly: true } : {}),
-              },
-              hasEmailLeg: emailSelected,
-              preDispatchCheck: invoiceHelpers.selfPayAtDispatch(anchorRow.invoice_id, db),
-            });
-          } catch (err) {
-            result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
-          }
-          const delivery = billingLegDeliveryState(smsChannel, result || {});
-          if (delivery) {
-            smsOk = true;
-            const occurredAt = billingLegContactTime(result);
-            if (typeof ContactLedger.markDelivered === 'function') {
-              await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
-            }
-          } else if (result?.deliveryOutcome === 'not_sent' || (result?.deliveryOutcome == null && result?.blocked === true)) {
-            // A DEFINITE provider rejection — but still hold when the
-            // stamp itself didn't land, or the rejection is one fireTouch
-            // treats as retryable/deferred rather than final (a consent
-            // lookup failure, a send-window defer): mirrors fireTouch's own
-            // holdStep calls on this exact branch (Codex pre-push r3).
-            if (!await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' })) smsHold = true;
-            if (result?.retryable || result?.deferred || result?.code === 'CONSENT_LOOKUP_FAILED') smsHold = true;
-          } else {
-            // Uncertain / retryable (a thrown send, a deferred window): the
-            // provider may still have accepted it — do NOT stamp
-            // send_failed (that would let claimAttempt reopen the
-            // reservation and risk a duplicate text). Hold instead, same as
-            // fireTouch's holdStep (pre-push audit P1).
-            smsHold = true;
-          }
-        }
-      }
-    }
+  if (!smsChannel || !smsTemplateKey) return { smsOk, smsHold };
+
+  const body = await smsTemplatesRouter.getTemplate(smsTemplateKey, {
+    first_name: customer.first_name || 'there',
+    invoice_count: String(included.length),
+    total_due: totalDue,
+    pay_url: payUrl,
+  }, { workflow: 'invoice_followup_combined', entity_type: 'customer', entity_id: customer.id });
+  if (!body) {
+    logger.warn(`[invoice-followups] combined SMS template ${smsTemplateKey} missing/disabled for customer ${customer.id}`);
+    return { smsOk, smsHold };
   }
 
+  let ledger = null;
+  try {
+    ledger = await ContactLedger.recordContact({
+      customerId: customer.id, channel: smsChannel, purpose: 'invoice_followup',
+      invoiceIds: includedIds, source: 'invoice_followups',
+      metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
+      idempotencyKey: combinedLedgerKey(smsChannel),
+    });
+  } catch (err) {
+    logger.warn(`[invoice-followups] combined ${smsChannel} ledger unavailable for customer ${customer.id}: ${err.message}`);
+    smsHold = true; // retryable — don't drop the leg over a ledger blip
+  }
+  if (!ledger) return { smsOk, smsHold };
+
+  const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
+  if (claim.delivered) return { smsOk: true, smsHold };
+  if (!claim.allowed) return { smsOk, smsHold: true }; // a prior attempt's outcome is still unconfirmed
+
+  return dispatchCombinedSmsMessage({
+    customer, smsChannel, body, includedIds, includedIdsKey, step, totalDue, payUrl,
+    emailSelected, anchorRow, category, ledger, ContactLedger, smsHold,
+  });
+}
+
+/**
+ * The actual provider handoff for the combined SMS/push leg, and the
+ * fireTouch-mirrored interpretation of its outcome. Split from
+ * sendCombinedSmsLeg (channel selection, template render, ledger claim) so
+ * neither half reasons about the whole hold/deliver decision tree at once
+ * (Codex r1 P2 — complexity).
+ */
+async function dispatchCombinedSmsMessage({
+  customer, smsChannel, body, includedIds, includedIdsKey, step, totalDue, payUrl,
+  emailSelected, anchorRow, category, ledger, ContactLedger, smsHold,
+}) {
+  let result;
+  try {
+    result = await sendCustomerMessage({
+      to: smsChannel === 'sms' ? customer.phone : undefined,
+      body, channel: smsChannel, audience: 'customer', purpose: 'payment_link',
+      customerId: customer.id, invoiceId: anchorRow.invoice_id, entryPoint: 'invoice_followup_sequence_combined',
+      metadata: {
+        original_message_type: 'invoice_followup_combined',
+        // Scoped to the included set, same as the ledger/email keys —
+        // otherwise a later group reaching the same step reuses this
+        // App-push dedupe key and can silently skip the new reminder
+        // (Codex pre-push r4).
+        notificationEventKey: `invoice-followup-combined:${customer.id}:${step.id}:${includedIdsKey}`,
+        billingDeliveryCategory: category, billingDeliveryLeg: smsChannel,
+        invoice_ids: includedIds, rendered_amount: totalDue, collections_ledger_id: ledger.id,
+        ...(smsChannel === 'push' ? { appOnly: true } : {}),
+      },
+      hasEmailLeg: emailSelected,
+      // Every included invoice, not just the anchor: the quoted
+      // count/total/pay link covers all of them, so a sibling reassigned
+      // to a third-party payer between the last full re-read and this
+      // provider handoff must still abort the send (Codex r1 P1).
+      preDispatchCheck: invoiceHelpers.selfPayAtDispatchMany(includedIds, db),
+    });
+  } catch (err) {
+    result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+  }
+  return interpretCombinedSmsOutcome({ smsChannel, result, ledger, ContactLedger, smsHold });
+}
+
+/**
+ * fireTouch-mirrored interpretation of a combined SMS/push send outcome —
+ * split out of dispatchCombinedSmsMessage so the provider call and the
+ * hold/deliver decision tree are each reasoned about on their own (Codex
+ * r1 P2 — complexity).
+ */
+async function interpretCombinedSmsOutcome({ smsChannel, result, ledger, ContactLedger, smsHold }) {
+  const delivery = billingLegDeliveryState(smsChannel, result || {});
+  if (delivery) {
+    const occurredAt = billingLegContactTime(result);
+    if (typeof ContactLedger.markDelivered === 'function') {
+      await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
+    }
+    return { smsOk: true, smsHold };
+  }
+  if (result?.deliveryOutcome === 'not_sent' || (result?.deliveryOutcome == null && result?.blocked === true)) {
+    // A DEFINITE provider rejection — but still hold when the stamp itself
+    // didn't land, or the rejection is one fireTouch treats as
+    // retryable/deferred rather than final (a consent lookup failure, a
+    // send-window defer): mirrors fireTouch's own holdStep calls on this
+    // exact branch (Codex pre-push r3).
+    let held = smsHold;
+    if (!await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' })) held = true;
+    if (result?.retryable || result?.deferred || result?.code === 'CONSENT_LOOKUP_FAILED') held = true;
+    return { smsOk: false, smsHold: held };
+  }
+  // Uncertain / retryable (a thrown send, a deferred window): the provider
+  // may still have accepted it — do NOT stamp send_failed (that would let
+  // claimAttempt reopen the reservation and risk a duplicate text). Hold
+  // instead, same as fireTouch's holdStep (pre-push audit P1).
+  return { smsOk: false, smsHold: true };
+}
+
+/**
+ * ONE email leg for the combined touch. Mirrors fireTouch's own hold/
+ * deliver decisions for its single-invoice email leg.
+ */
+async function sendCombinedEmailLeg({
+  customer, included, includedIds, includedIdsKey, step, emailTemplateKey, payUrl, totalDue,
+  channelPolicy, durablyDenied, emailSelected, combinedLedgerKey, ContactLedger, anchorRow,
+}) {
   let emailOk = false;
   // Selected but not (yet) permitted, and not a durable denial — hold, same
   // as fireTouch's own emailHold seed (pre-push audit P1).
   let emailHold = emailSelected && channelPolicy.email !== true && !durablyDenied.email;
-  if (emailSelected && channelPolicy.email === true && emailTemplateKey) {
-    let emailLedger = null;
-    try {
-      emailLedger = await ContactLedger.recordContact({
-        customerId: customer.id, channel: 'email', purpose: 'invoice_followup',
-        invoiceIds: includedIds, source: 'invoice_followups',
-        metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
-        idempotencyKey: combinedLedgerKey('email'),
-      });
-    } catch (err) {
-      logger.warn(`[invoice-followups] combined email ledger unavailable for customer ${customerId}: ${err.message}`);
-    }
-    if (emailLedger) {
-      const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
-      if (claim.delivered) emailOk = true;
-      else if (claim.allowed) {
-        const emailResult = await sendCombinedFollowupEmail({
-          customer, step, anchorInvoiceId: anchorRow.invoice_id, includedIdsKey,
-          payload: {
-            invoice_count: String(included.length),
-            total_due: `$${totalDue}`,
-            pay_url: payUrl,
-            customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
-            invoices: included.map((inv) => ({
-              invoice_number: inv.invoice_number || '',
-              invoice_title: inv.title || 'your service',
-              amount_due: currency(invoiceAmountDue(inv)),
-            })),
-          },
-        });
-        // settleFollowupEmailLedger stamps the ledger row (delivered /
-        // send_failed) and returns whether the step should stay HELD —
-        // delivery itself is emailResult.ok. It returns NOT-held for any
-        // stamped failure, including a merely RETRYABLE refusal, so mirror
-        // fireTouch's own additional check: an unsuccessful, non-durably-
-        // denied result that is not a genuinely TERMINAL refusal still
-        // holds (Codex pre-push r2) — settling only on delivery or a true
-        // terminal refusal (missing address, template unavailable, a
-        // suppression), never on an ordinary retryable not-sent.
-        const held = await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
-        emailOk = emailResult.ok === true;
-        emailHold = emailHold || held
-          || (!durablyDenied.email && emailOk !== true && !terminalFollowupEmailRefusal(emailResult));
-      } else {
-        emailHold = true; // a prior attempt's outcome is still unconfirmed
-      }
-    } else {
-      emailHold = true; // ledger unavailable — retry, don't drop the leg
-    }
-  }
+  if (!emailSelected || channelPolicy.email !== true || !emailTemplateKey) return { emailOk, emailHold };
 
-  // A selected leg still pending (transient policy denial, an uncertain
-  // send, an unresolved prior attempt) holds the WHOLE combined touch —
-  // every included sequence stays on its current step, exactly like
-  // fireTouch holds its one invoice's touch, rather than silently dropping
-  // the pending leg the moment a sibling leg succeeds (pre-push audit P1).
-  if (smsHold || emailHold) {
-    logger.info(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} held — a selected leg is still pending (sms ${smsHold ? 'held' : 'settled'}, email ${emailHold ? 'held' : 'settled'}); ${included.length} sequence(s) left at their current step`);
-    return;
+  let emailLedger = null;
+  try {
+    emailLedger = await ContactLedger.recordContact({
+      customerId: customer.id, channel: 'email', purpose: 'invoice_followup',
+      invoiceIds: includedIds, source: 'invoice_followups',
+      metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
+      idempotencyKey: combinedLedgerKey('email'),
+    });
+  } catch (err) {
+    logger.warn(`[invoice-followups] combined email ledger unavailable for customer ${customer.id}: ${err.message}`);
   }
+  if (!emailLedger) return { emailOk, emailHold: true }; // ledger unavailable — retry, don't drop the leg
 
-  if (!smsOk && !emailOk) {
-    logger.warn(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} delivered nothing — ${included.length} sequence(s) left at their current step for the next run`);
-    return;
-  }
+  const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
+  if (claim.delivered) return { emailOk: true, emailHold };
+  if (!claim.allowed) return { emailOk, emailHold: true }; // a prior attempt's outcome is still unconfirmed
 
+  const emailResult = await sendCombinedFollowupEmail({
+    customer, step, anchorInvoiceId: anchorRow.invoice_id, includedIdsKey, includedIds,
+    payload: {
+      invoice_count: String(included.length),
+      total_due: `$${totalDue}`,
+      pay_url: payUrl,
+      customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+      invoices: included.map((inv) => ({
+        invoice_number: inv.invoice_number || '',
+        invoice_title: inv.title || 'your service',
+        amount_due: currency(invoiceAmountDue(inv)),
+      })),
+    },
+  });
+  // settleFollowupEmailLedger stamps the ledger row (delivered /
+  // send_failed) and returns whether the step should stay HELD — delivery
+  // itself is emailResult.ok. It returns NOT-held for any stamped failure,
+  // including a merely RETRYABLE refusal, so mirror fireTouch's own
+  // additional check: an unsuccessful, non-durably-denied result that is
+  // not a genuinely TERMINAL refusal still holds (Codex pre-push r2) —
+  // settling only on delivery or a true terminal refusal (missing address,
+  // template unavailable, a suppression), never on an ordinary retryable
+  // not-sent.
+  const held = await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
+  emailOk = emailResult.ok === true;
+  emailHold = emailHold || held
+    || (!durablyDenied.email && emailOk !== true && !terminalFollowupEmailRefusal(emailResult));
+  return { emailOk, emailHold };
+}
+
+/**
+ * A held combined touch (see the caller above) must not leave
+ * next_touch_at at its already-elapsed due date: the single-invoice path's
+ * own holdStep always re-dates to heldTouchFloor() (the start of the next
+ * NY calendar day) for exactly this reason — without it, the NEXT run's
+ * isStaleTouch check measures from the ORIGINAL due date, finds the touch
+ * stale, and skipStaleTouches advances the step without ever sending it
+ * (Fable review P1). Only moves next_touch_at forward — a row already
+ * scheduled at or after the floor (e.g. re-selected same-day) is left
+ * alone — and only a still-active row at its batch-snapshot step, so an
+ * admin edit or a manual advance in the meantime is never clobbered.
+ */
+async function reTimeHeldCombinedSequences(included, rows) {
+  const floor = heldTouchFloor();
   for (const inv of included) {
     const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
-    const nextIndex = originalRow.step_index + 1;
-    const anchorAt = originalRow.anchor_at || originalRow.invoice_sent_at
-      || originalRow.invoice_sms_sent_at || originalRow.invoice_created_at || originalRow.created_at;
-    const nextAt = computeNextTouchAt(anchorAt, nextIndex);
-    await db('invoice_followup_sequences').where({ id: originalRow.id }).update({
-      updated_at: db.fn.now(),
-      touches_sent: originalRow.touches_sent + 1,
-      step_index: nextIndex,
-      last_touch_at: new Date(),
-      next_touch_at: nextAt,
-      status: nextAt ? 'active' : 'completed',
-    });
+    if (!originalRow) continue;
+    const current = originalRow.next_touch_at ? new Date(originalRow.next_touch_at) : null;
+    if (current && current.getTime() >= floor.getTime()) continue;
+    await db('invoice_followup_sequences')
+      .where({ id: originalRow.id, status: 'active', step_index: originalRow.step_index })
+      .update({ updated_at: db.fn.now(), next_touch_at: floor })
+      .catch((err) => logger.warn(
+        `[invoice-followups] could not re-time held combined touch for sequence ${originalRow.id}: ${err.message}`,
+      ));
+  }
+}
+
+/**
+ * Advance every included sequence past this step and log the per-invoice
+ * audit trail, once delivery has settled.
+ */
+async function advanceCombinedSequences({
+  included, rows, customer, step, totalDue, smsOk, emailOk, includedIds,
+}) {
+  // One transaction for every included sequence's advance (Codex r1 P2):
+  // the message already went out for the WHOLE group, so a failure partway
+  // through these updates must not leave some sequences advanced and
+  // others not — a stalled row would carry a different grouping/
+  // idempotency identity next run and could pick up its own individual
+  // reminder on top of the combined one just delivered.
+  await db.transaction(async (trx) => {
+    for (const inv of included) {
+      const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+      const nextIndex = originalRow.step_index + 1;
+      const anchorAt = originalRow.anchor_at || originalRow.invoice_sent_at
+        || originalRow.invoice_sms_sent_at || originalRow.invoice_created_at || originalRow.created_at;
+      const nextAt = computeNextTouchAt(anchorAt, nextIndex);
+      await trx('invoice_followup_sequences').where({ id: originalRow.id }).update({
+        updated_at: trx.fn.now(),
+        touches_sent: originalRow.touches_sent + 1,
+        step_index: nextIndex,
+        last_touch_at: new Date(),
+        next_touch_at: nextAt,
+        status: nextAt ? 'active' : 'completed',
+      });
+    }
+  });
+  // customer_interactions rows are audit trail, not delivery state — kept
+  // outside the transaction (non-critical, same as every other touch path)
+  // so one insert failure never rolls back the sequence advances above.
+  for (const inv of included) {
     try {
       await db('customer_interactions').insert({
         customer_id: customer.id,
@@ -1950,7 +2253,7 @@ async function fireCombinedTouchClaimed(rows) {
  * the resolved recipient's first name.
  */
 async function sendCombinedFollowupEmail({
-  customer, step, anchorInvoiceId, includedIdsKey, payload,
+  customer, step, anchorInvoiceId, includedIdsKey, includedIds, payload,
 }) {
   const templateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
@@ -1958,6 +2261,12 @@ async function sendCombinedFollowupEmail({
     customerId: customer.id, invoiceId: anchorInvoiceId, channel: 'email',
     metadata: { billingDeliveryCategory: 'invoice' },
   };
+  // Every included invoice, not just the anchor authorityInput carries
+  // (Codex r1 P1) — dispatchUnderBillingEmailAuthority runs this both
+  // before provider preparation and again at the locked provider-boundary
+  // recheck, so a sibling reassigned to a third-party payer in that window
+  // still aborts the whole combined send.
+  const preSendCheck = invoiceHelpers.selfPayAtDispatchMany(includedIds && includedIds.length ? includedIds : [anchorInvoiceId], db);
   const { recipient, to, refusal } = await billingEmailRecipient(authorityInput, 'invoice-followups');
   if (refusal) return refusal;
   const finalPayload = {
@@ -1984,7 +2293,7 @@ async function sendCombinedFollowupEmail({
       categories: ['invoice_followup', 'combined', step.id],
       suppressionGroupKey: 'transactional_required',
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
-        input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
+        input: authorityInput, recipientEmail: to, templateKey, dispatch, state, preSendCheck,
       }),
     });
     return await billingEmailSendOutcome(result, state, log);

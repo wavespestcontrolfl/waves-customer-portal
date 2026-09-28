@@ -42,12 +42,19 @@ function isSenderRenderedEmail(message) {
 function isFinalSenderRenderedEmail(message) {
   const ladderLive = process.env.GATE_DUNNING_LADDER_90 === 'true';
   const key = String(message?.template_key || '').trim();
-  if (key === 'invoice.followup_30_day') return !ladderLive;
+  // Combined-message terminal steps (GATE_DUNNING_COMBINED_MESSAGE) carry
+  // the same final-notice doctrine as their single-invoice counterparts:
+  // Day 30 is final only while the Day 90 ladder is off, Day 90 is always
+  // final (Codex r1 P2).
+  if (key === 'invoice.followup_30_day' || key === 'invoice.followup_combined_30_day') return !ladderLive;
   if (key === 'payment.microdeposit_verification') {
     const touch = String(message?.trigger_event_id || '').split(':').pop();
     return touch === '90d' || touch === 'd90_final_notice' || (touch === 'd30_final' && !ladderLive);
   }
-  return ['billing_late_payment_90_day', 'invoice.followup_90_day', 'billing.previsit_balance'].includes(key);
+  return [
+    'billing_late_payment_90_day', 'invoice.followup_90_day', 'invoice.followup_combined_90_day',
+    'billing.previsit_balance',
+  ].includes(key);
 }
 
 const FINAL_NOTICE_CAUSES = {

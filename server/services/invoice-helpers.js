@@ -140,6 +140,38 @@ function selfPayAtDispatch(invoiceId, database) {
   };
 }
 
+/**
+ * Multi-invoice twin of selfPayAtDispatch: a combined dunning touch quotes
+ * an invoice_count/total_due/pay_url covering SEVERAL invoices, so the
+ * provider-boundary check must prove EVERY one of them is still self-pay
+ * immediately before dispatch — checking only the anchor invoice (as a
+ * single-invoice touch would) lets a sibling reassigned to a third-party
+ * payer between the last full re-read and the provider handoff still ride
+ * the anchor's clearance, and the homeowner is sent a dunning message for
+ * debt now owned by the payer (Codex r1 P1). Fails closed on the first
+ * ineligible or unreadable invoice.
+ */
+function selfPayAtDispatchMany(invoiceIds, database) {
+  const ids = [...new Set((invoiceIds || []).map(String))];
+  return async () => {
+    if (!ids.length) return { ok: false, code: 'INVOICE_UNREADABLE', reason: 'no invoices to verify before dispatch' };
+    try {
+      const rows = await database('invoices').whereIn('id', ids).select('id', 'payer_id', 'scheduled_send_error');
+      const byId = new Map(rows.map((row) => [String(row.id), row]));
+      for (const id of ids) {
+        const live = byId.get(id);
+        if (!live) return { ok: false, code: 'INVOICE_UNREADABLE', reason: `invoice ${id} could not be re-read before dispatch` };
+        if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
+          return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: `invoice ${id} is billed to a third-party payer` };
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: 'INVOICE_UNREADABLE', reason: err.message };
+    }
+  };
+}
+
 function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
@@ -279,6 +311,7 @@ module.exports = {
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,
   selfPayAtDispatch,
+  selfPayAtDispatchMany,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,
