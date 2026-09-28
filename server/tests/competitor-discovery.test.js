@@ -52,6 +52,8 @@ describe('competitor-discovery', () => {
     expect(_internals.isNationalChain('orkin.com')).toBe(true);
     expect(_internals.isNationalChain('locations.trulynolen.com')).toBe(true);
     expect(_internals.isNationalChain('turnerpest.com')).toBe(false);
+    // Owner ruling 2026-09-28: Pestie (DIY subscription) is a competitor.
+    expect(_internals.isNationalChain('pestie.com')).toBe(true);
   });
 
   test('isNonCompetitor classification', () => {

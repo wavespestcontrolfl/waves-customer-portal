@@ -414,7 +414,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     payload.thesis ? `THESIS (the post must argue exactly this): ${payload.thesis}` : null,
     'OUTLINE: cover every outline item in the brief\'s required_sections, in order — they are the content plan, not suggestions.',
     requiredSources.length
-      ? `REQUIRED SOURCES (cite IN-POST): every source below must be linked in the body with explicit attribution (name the source where you cite it). Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
+      ? `REQUIRED SOURCES (cite IN-POST): every source below must be cited in the body with explicit attribution (name the source where you cite it) and linked — EXCEPT a competitor's own website, which is named in plain text and never linked. Quote exactly where the brief calls for verbatim quotes. Sources: ${requiredSources.join(' | ')}`
       : null,
     // Non-URL sourcing directives (manifest `source_notes`) are instructions
     // for sources the writer must locate ("Orkin published terms/plan pages",
@@ -422,7 +422,7 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
     // must-link URL list above so the snapshot step never tries to archive a
     // sentence.
     sourceNotes.length
-      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post as real linked URLs with explicit attribution, and OMIT any claim those pages do not support.`
+      ? `SOURCING DIRECTIVES (binding): ${sourceNotes.join(' | ')}. Locate the live pages these directives describe, cite them in-post with explicit attribution (a real linked URL — EXCEPT a competitor's own website, which is named in plain text and never linked), and OMIT any claim those pages do not support.`
       : null,
     ...(Array.isArray(payload.verify_notes) ? payload.verify_notes.map((n) => `VERIFY BEFORE WRITING (mandatory): ${n} If a claim cannot be verified against the cited source, OMIT the claim entirely.`) : []),
     payload.internal_links?.length
@@ -442,15 +442,18 @@ function buildBindingInstructions({ payload, byline, ctaDirectives, globalRules,
       ? `SCHEMA: emit ${payload.schema_types.join(' + ')} structured data with matching VISIBLE content (FAQPage requires the visible FAQ section; HowTo requires visible steps). The operator manifest explicitly REQUIRES the FAQ section for this post (owner directive 2026-06-11) — this operator mandate overrides the default no-FAQ rule for blocked topics for THIS brief only; include the FAQ section as outlined.`
       : null,
     globalRules ? `GLOBAL RULES (apply to every intercept post): ${globalRules}` : null,
-    'COMPARISON DISCLAIMER: end the post with a short footer noting competitor pricing/terms are as of the publish date and readers should verify current terms directly.',
+    // Owner rulings 2026-09-28: "I do not want to link to a competitor's
+    // website, whatsoever" and "list them, we don't have to link to their
+    // site, or say verified or not verified." This line outranks the
+    // manifest's older global rules (in-post competitor links, dated
+    // attribution, a verify-current-terms footer), which predate them.
+    'COMPETITOR FACTS (owner ruling 2026-09-28 — overrides any rule above): NEVER link a competitor\'s own website, anywhere (body, CTA, caption, frontmatter). State competitor facts and prices plainly, naming the company — no link to their site, no "verified"/"not verified" label, no "as of" date or "verify current terms" footer required. Public-record sources about a competitor (court/AG/regulator releases, BBB, ConsumerAffairs) may still be linked.',
     'Never hardcode Waves pricing — link to /pest-control-calculator/ instead.',
-    // The publish-time price guards (content-guardrails + seo-completion-gate)
-    // P0 any bare dollar figure unless one of their allowance words sits
-    // within ~80 characters. The manifest REQUIRES sourced competitor dollar
-    // figures, so the framing rule below is what makes those two requirements
-    // compatible — without it a compliant draft gets routed out as
-    // HARDCODED_PRICE.
-    'COMPETITOR PRICING FRAMING (mandatory for every dollar figure): each competitor dollar amount must appear in the same sentence as at least one of these exact words: "quote", "range", "pricing varies", "depends", or "estimate" — AND carry a dated source attribution. Example: "Aptive\'s early-cancellation fee is $199 as of June 2026 per ConsumerAffairs, though quoted pricing varies by contract." A bare dollar figure with none of those words nearby will block the post at the publish-time price guard.',
+    // Mirrors the publish-time price guard (content-guardrails
+    // findHardcodedPrice): on an intercept brief a dollar figure passes only
+    // when its OWN sentence names whose price it is, in plain prose outside
+    // any table; framing words ("pricing varies") do not exempt an amount.
+    'COMPETITOR PRICING (mandatory for every dollar figure): each competitor dollar amount must sit in a plain-prose sentence that names whose price it is — e.g. "Aptive\'s early-cancellation fee is $199." — never in a table, never next to a Waves price, never with first-person wording ("we", "our") in the same sentence. An unattributed dollar figure blocks the post at the publish-time price guard.',
   ];
   return lines.filter(Boolean);
 }

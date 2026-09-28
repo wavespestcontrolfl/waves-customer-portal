@@ -16,7 +16,7 @@ describe('competitor host matcher', () => {
     // competitor-facts curated records (their sourced official hosts)
     for (const h of ['orkin.com', 'terminix.com', 'trugreen.com', 'masseyservices.com', 'pestdefense.com', 'prodigypest.com']) expect(hosts.has(h)).toBe(true);
     // competitor-discovery NATIONAL_CHAINS
-    for (const h of ['mosquitojoe.com', 'lawndoctor.com']) expect(hosts.has(h)).toBe(true);
+    for (const h of ['mosquitojoe.com', 'lawndoctor.com', 'pestie.com']) expect(hosts.has(h)).toBe(true);
     // competitor-gap-miner tracked locals + the classifier's extra competitors
     for (const h of ['turnerpest.com', 'westfallspestcontrol.com', 'flapest.com', 'hometeampestdefense.com']) expect(hosts.has(h)).toBe(true);
     // never our own hub or spokes, never a reference/listing site
