@@ -916,7 +916,12 @@ function resolveEnvChain(ref) {
   const dependsOnEnvs = own ? [] : [...(base.pinEnv ? [base.pinEnv] : []), ...(base.dependsOnEnvs || [])];
   const chain = [link, ...(base.chain || [])];
   const chainBase = base.chainBase || { selector: base.selector || null, model: base.model };
-  const accepts = ref.catalogOnly ? { ...base.accepts, catalogOnly: true, allowedIds: ref.allowed ? ref.allowed() : null } : base.accepts;
+  const allowedIds = ref.catalogOnly && ref.allowed ? ref.allowed() : null;
+  // A gated allowlist can name another provider's model (voice_relay: GPT-6
+  // Luna under GATE_VOICE_RELAY_OPENAI_INBOUND); the picker filters by
+  // `providers` before `allowedIds`, so every allowed id's provider joins.
+  const providers = base.accepts && allowedIds ? [...new Set([...base.accepts.providers, ...allowedIds.map(providerOf)])] : null;
+  const accepts = ref.catalogOnly ? { ...base.accepts, ...(providers ? { providers } : {}), catalogOnly: true, allowedIds } : base.accepts;
   const via = own ? `${link.setEnv} (pinned)` : link.setEnv ? `${link.setEnv} rejected → ${base.via}` : `${link.env} → ${base.via}`;
   return {
     model: own ? link.model : base.model,

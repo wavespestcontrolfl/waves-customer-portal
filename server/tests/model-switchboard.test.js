@@ -702,6 +702,7 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
       expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
       expect(inbound.primary.accepts.allowedIds).not.toContain('gpt-6-luna');
+      expect(inbound.primary.accepts.providers).toEqual(['anthropic']);
     });
 
     it('off — a gpt-6-luna VOICE_RELAY_INBOUND_MODEL shows as rejected, falling back to the shared chain', () => {
@@ -724,6 +725,8 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       const { resolveSessionModel } = require('../services/voice-agent/relay-conversation');
       const inbound = lanes.find((l) => l.id === 'voice_relay');
       expect(inbound.primary.accepts.allowedIds).toContain('gpt-6-luna');
+      // The picker filters by provider before the allowlist (codex r1 P2 on #5209).
+      expect(inbound.primary.accepts.providers).toEqual(expect.arrayContaining(['anthropic', 'openai']));
       expect(inbound.primary.model).toBe('gpt-6-luna');
       expect(resolveSessionModel({ sandbox: false })).toEqual({ model: 'gpt-6-luna', fallbackReason: null });
     });

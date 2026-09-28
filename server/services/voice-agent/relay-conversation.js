@@ -2957,6 +2957,16 @@ class RelayConversation {
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
+    // An earlier leg already switched this call from OpenAI to Claude (codex
+    // r1 P2 on #5209): the switch is once per CALL, so this leg stays on
+    // Claude instead of returning to the provider that failed, and carries
+    // the earlier record forward in its own stamps. Applied before this
+    // leg's first model round (_runLoop awaits _resumeReady first).
+    if (state.modelSwitch) {
+      if (this._provider === 'openai') this._pinClaudeFallback();
+      this._modelSwitch ||= state.modelSwitch;
+      if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
+    }
     // A segment may reveal its captured lead only after this leg booked.
     // Repair that existing card just as capture_lead and the capture floor do.
     if (this._leadId && this._bookingRequested) {
@@ -3187,15 +3197,24 @@ class RelayConversation {
    */
   _switchToClaudeFallback(reason, turn) {
     const from = this.model;
-    const to = resolveSharedAnthropicChain(null).model;
-    this.model = to;
+    this._pinClaudeFallback();
+    this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(turn) ? turn : null };
+    logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
+  }
+
+  /**
+   * The pin half of the switch: the shared Anthropic chain's model and every
+   * per-model pin derived from it, with OpenAI-only history cleaned up. Also
+   * run by _applyResumeState when an earlier leg of this call already
+   * switched, so a reconnect never returns to the provider that failed.
+   */
+  _pinClaudeFallback() {
+    this.model = resolveSharedAnthropicChain(null).model;
     this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
     this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
     this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
     stripOpenAIHistoryExtras(this.messages);
-    this._modelSwitch = { from, to, reason, turn: Number.isFinite(turn) ? turn : null };
-    logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${to}`);
   }
 
   /**

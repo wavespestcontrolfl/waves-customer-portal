@@ -907,6 +907,20 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  test('a reconnected leg of a call that already switched starts on Claude — one switch per call, not per socket', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume', from: '+19415551234', send: () => {} });
+    expect(convo._provider).toBe('openai');
+    const earlier = { from: LUNA, to: MODELS.DEFAULTS.VOICE, reason: 'provider_error', turn: 2 };
+    await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: earlier });
+
+    expect(convo._provider).toBe('anthropic');
+    expect(convo.model).toBe(MODELS.DEFAULTS.VOICE);
+    expect(convo._canSwitchToClaudeFallback()).toBe(false);
+    expect(convo._versionStamps().model_switch).toEqual(earlier);
+  });
+
   test('a mid-stream OpenAI error on the block renderer retries on Claude, and the turn stats describe the Claude reply', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
