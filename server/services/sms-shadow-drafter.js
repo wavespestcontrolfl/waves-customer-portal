@@ -590,6 +590,13 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
     const day = [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean);
     const span = offerSpanInText(original, day, w.window);
     if (span && body.includes(span)) {
+      // Pre-push audit P1 (r4): "…Tuesday 9:00 AM - 11:00 AM next week?"
+      // keeps the span verbatim yet changes the date. No vocabulary of
+      // date-changing modifiers is ever complete, so the rule is
+      // structural: inside the sentence that holds a kept offer, the edit
+      // may only use words the drafted sentence already had — trimming an
+      // option passes, ADDING anything to that sentence refuses.
+      if (!sentenceAddsNoWords(original, body, span)) return { action: 'refuse', reason: 'edited_offer_text' };
       kept.push(w);
       residual = residual.split(span).join(' ');
       originalResidual = originalResidual.split(span).join(' ');
@@ -628,12 +635,39 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
 // names or abbreviations, clock times, bare hour ranges, or relative-day
 // words. Deliberately broad — it only decides what an EDIT may leave behind
 // or add, and the safe answer to "not sure" is refuse.
-const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/gi;
+const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b|\b(next|this|following)\s+(week|weekend|month)\b|\bweek(end|s)?\b/gi;
 function offerTokens(text) {
   return (String(text || '').match(OFFER_TOKEN_RE) || []).map((t) => t.toLowerCase().replace(/\s+/g, ' ').replace(/\./g, ''));
 }
 function looksLikeOfferText(text) {
   return offerTokens(text).length > 0;
+}
+
+// The sentence of `text` that contains [start, end): back to the previous
+// terminator-plus-space (or newline/start), forward through the next one.
+function sentenceAround(text, start, end) {
+  let s = 0;
+  const before = text.slice(0, start);
+  const back = Math.max(before.lastIndexOf('. '), before.lastIndexOf('? '), before.lastIndexOf('! '), before.lastIndexOf('\n'));
+  if (back !== -1) s = back + 1;
+  const after = text.slice(end);
+  const m = after.match(/[.?!](?=\s|$)|\n/);
+  const e = m ? end + m.index + 1 : text.length;
+  return text.slice(s, e);
+}
+function sentenceWords(sentence) {
+  return String(sentence || '').toLowerCase().split(/\s+/)
+    .map((w) => w.replace(/^[^a-z0-9$]+|[^a-z0-9]+$/g, ''))
+    .filter(Boolean);
+}
+// true when the body's sentence around `span` uses only words from the
+// drafted reply's sentence around the same span.
+function sentenceAddsNoWords(original, body, span) {
+  const oi = original.indexOf(span);
+  const bi = body.indexOf(span);
+  if (oi === -1 || bi === -1) return false;
+  const allowed = new Set(sentenceWords(sentenceAround(original, oi, oi + span.length)));
+  return sentenceWords(sentenceAround(body, bi, bi + span.length)).every((w) => allowed.has(w));
 }
 
 // The shortest substring of `text` containing the pair's day anchor

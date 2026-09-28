@@ -1339,6 +1339,16 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about September 29 from 9:00 AM - 11:00 AM? Thanks!', originalBody: orig })).toEqual({ action: 'recheck', quotedWindows: snap.quotedWindows });
   });
 
+  test('edited: a date-changing modifier added INSIDE a kept offer\'s sentence ("next week") → refuse; trimming an option from that sentence still passes', () => {
+    const snap = { lookup: {}, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] };
+    const orig = 'How about Tuesday 9:00 AM - 11:00 AM?';
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM next week?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about the following Tuesday 9:00 AM - 11:00 AM?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM? That is next week.', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    // trimming one of two options out of the shared sentence only REMOVES words
+    expect(planOpenTimesRecheck({ snapshot, outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?', originalBody: original })).toEqual({ action: 'recheck', quotedWindows: [snapshot.quotedWindows[0]] });
+  });
+
   test('looksLikeOfferText: broad on purpose', () => {
     const { looksLikeOfferText } = require('../services/sms-shadow-drafter');
     for (const t of ['Tue 9–11 AM', 'thurs', '2pm', '9 - 11', 'tomorrow morning', 'Sat.', '10:30 a.m.', 'October 6', 'Sept. 29th', '10/6', '10/06/2026']) expect(looksLikeOfferText(t)).toBe(true);
