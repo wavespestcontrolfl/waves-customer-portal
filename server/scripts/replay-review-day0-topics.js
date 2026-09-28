@@ -85,15 +85,17 @@ function mdEscape(value) {
 // resolver gives the single recurring ask — not ss.is_recurring, which
 // misses a one-off visit for a customer with live recurring coverage.
 async function fetchRecurringAskVisits(since, now) {
+  // Left join: a visit completed before its service record exists still
+  // enrolls live (admin-schedule passes only the visit id).
   const rows = await db('scheduled_services as ss')
-    .join('service_records as sr', 'sr.scheduled_service_id', 'ss.id')
+    .leftJoin('service_records as sr', 'sr.scheduled_service_id', 'ss.id')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.status', 'completed')
     .where('ss.completed_at', '>=', since)
     .where('ss.completed_at', '<=', now)
     .select(
       'ss.id as visit_id', 'ss.visit_id as stop_id', 'ss.completed_at', 'ss.customer_id',
-      'sr.id as service_record_id', 'sr.service_type',
+      'sr.id as service_record_id', 'sr.service_type', 'ss.service_type as visit_service_type',
       'c.first_name as customer_first_name',
     )
     .orderBy('ss.completed_at', 'asc');
@@ -138,7 +140,7 @@ async function classifyVisit(visit) {
     visitId: visit.visit_id,
     customerId: visit.customer_id,
     completedAt: completedAt.toISOString(),
-    serviceType: visit.service_type || null,
+    serviceType: visit.service_type || visit.visit_service_type || null,
     evidence: evidence || { completion: { concernText: null }, texts: [] },
     evidenceRead: !!evidence,
     // The model's own answer before the checks, and the check that refused it.

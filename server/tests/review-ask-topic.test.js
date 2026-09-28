@@ -504,6 +504,18 @@ describe('classifyTopic (the replay\'s raw outcome)', () => {
     await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'ungrounded' });
   });
 
+  test('a negation the customer never wrote never flips their meaning ("no ants" against "ants are still bad")', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'no ants', kind: 'service_concern', source: 'sms', evidence_id: 's-7', service_line: 'pest', confidence: 0.9 } });
+    const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-7', at: NOW.toISOString(), body: 'The ants are still bad' }] };
+    await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'ungrounded' });
+  });
+
+  test('a negated condition the customer did write still grounds ("grass not growing")', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'grass not growing', kind: 'service_concern', source: 'sms', evidence_id: 's-8', service_line: 'lawn', confidence: 0.9 } });
+    const lawnVisit = { completion: { concernText: null }, serviceLines: ['lawn'], texts: [{ id: 's-8', at: NOW.toISOString(), body: 'The grass is not growing in the front' }] };
+    await expect(classifyTopic(lawnVisit)).resolves.toMatchObject({ topic: { topic: 'grass not growing' }, refusal: null });
+  });
+
   test('a confidence outside 0-1 (a percentage like 85) is refused, never read as confident', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-6', service_line: 'pest', confidence: 85 } });
     const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-6', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };

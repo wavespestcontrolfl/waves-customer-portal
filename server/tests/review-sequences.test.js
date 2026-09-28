@@ -30,6 +30,7 @@ jest.mock('../services/review-ask-drafter', () => ({
 const mockResolveReviewTopic = jest.fn(async () => null);
 jest.mock('../services/review-ask-topic', () => ({
   resolveReviewTopicForEnrollment: (...a) => mockResolveReviewTopic(...a),
+  isRecurringAskPlan: jest.requireActual('../services/review-ask-topic').isRecurringAskPlan,
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The per-customer send lock needs a real pool; its own suite covers it.
@@ -5524,6 +5525,32 @@ describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => 
     expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
     const body = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(body).toMatch(/First treatment's done/);
+    // A row that never held a Day-0 topic gets no ask_context write.
+    expect(seq).not.toHaveProperty('ask_context');
+  });
+
+  test('GATE_REVIEW_DAY0_CONTEXT: a recurring sequence reclassified at first send drops its Day-0 topic in the same write', async () => {
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    const topic = { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v3' };
+    const mock = makeMock({
+      customers: [{ id: 'lc-1', first_name: 'Ann', last_name: 'O', phone: '+19410000073', nearest_location_id: 'bradenton' }],
+      // Enrolled on the recurring one-step plan with a stored topic…
+      review_sequences: [{ id: 'seq-lc', customer_id: 'lc-1', service_record_id: 'sr-lc1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service', plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]), ask_context: JSON.stringify(topic), started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) }],
+      service_records: [{ id: 'sr-lc1', customer_id: 'lc-1', scheduled_service_id: 'ss-lc1' }],
+      scheduled_services: [
+        { id: 'ss-lc1', customer_id: 'lc-1', status: 'completed', scheduled_date: d(0) },
+        // …then a follow-up was booked, so the first send reclassifies it.
+        { id: 'ss-lc2', customer_id: 'lc-1', followup_source_service_id: 'ss-lc1', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    await ReviewService.processReviewSequences();
+
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
+    expect(seq.ask_context).toBeNull();
   });
 });
 

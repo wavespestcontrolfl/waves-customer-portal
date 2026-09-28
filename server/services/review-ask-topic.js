@@ -280,10 +280,17 @@ function normalizePluralToken(token) {
   return token.length > 1 && token.endsWith("s") ? token.slice(0, -1) : token;
 }
 
-// Three-letter words a topic may add around the customer's own nouns ("ants
-// in THE kitchen"). Every other three-letter word names something — "rat",
-// "ant", "bug", "fly", "air wig" — and must be grounded like a long word.
-const SHORT_FILLER_WORDS = new Set(["the", "and", "for", "are", "was", "has", "had", "our", "you", "any", "all", "not", "but", "its", "his", "her", "out", "off", "too", "can", "get", "got", "one", "two", "lot", "new", "old", "few", "per", "via", "yet", "now", "how", "why", "who", "did", "may", "own", "see", "day", "way"]);
+// Function words a topic may add around the customer's own words ("ants IN
+// THE kitchen", "bugs in MY bathroom", the "s" of a possessive). Every other
+// word, whatever its length, must be grounded. Negations ("no", "not",
+// "never") are deliberately absent, so "no ants" can never pass against
+// "ants are still bad", while "grass not growing" grounds when the customer
+// said it.
+const TOPIC_FILLER_WORDS = new Set([
+  "a", "an", "the", "in", "on", "at", "of", "by", "to", "as", "for", "from", "with", "and", "or", "but",
+  "my", "our", "your", "his", "her", "its", "their", "it", "we", "i", "me", "us", "you",
+  "is", "are", "was", "were", "be", "been", "has", "have", "had", "do", "does", "did", "some", "any", "all", "s", "t",
+]);
 
 // Whole word, plural-insensitive ("ants" grounds on "ant" or "ants"): a
 // substring is too loose — "ants" is inside "plants", "rat" inside "rather".
@@ -295,22 +302,20 @@ function isWordInEvidence(word, evidenceLower) {
 
 /**
  * Deterministic grounding check (never trusts the model alone): every topic
- * word longer than 3 letters, and every meaningful three-letter word, must
- * appear in the cited evidence as a whole word, or the topic is rejected. So
- * an invented pest never rides along with grounded words ("rat noise in
- * attic" against "noise in the attic", "ants in yard" against "plants in the
- * yard").
+ * word except the function words above must appear in the cited evidence as
+ * a whole word, or the topic is rejected. So an invented pest never rides
+ * along with grounded words ("rat noise in attic" against "noise in the
+ * attic", "ants in yard" against "plants in the yard"), and a negation the
+ * customer never wrote never flips their meaning ("no ants").
  */
 function isTopicGrounded(topic, citedText) {
   const evidenceLower = String(citedText || "").toLowerCase();
   if (!evidenceLower) return false;
   const words = String(topic || "").toLowerCase().match(/[a-z]+/g) || [];
-  const checked = words.filter((w) => w.length > 3 || (w.length === 3 && !SHORT_FILLER_WORDS.has(w)));
+  const checked = words.filter((w) => !TOPIC_FILLER_WORDS.has(w));
   return checked.length > 0 && checked.every((w) => isWordInEvidence(w, evidenceLower));
 }
 
-// Nothing to classify without the customer's words, or without a known
-// service line for the visit (no topic could be kept against it).
 function hasEvidenceToClassify(ev) {
   const hasCompletion = !!ev?.completion?.concernText;
   const hasTexts = Array.isArray(ev?.texts) && ev.texts.length > 0;

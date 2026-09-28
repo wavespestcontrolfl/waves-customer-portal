@@ -65,7 +65,7 @@ async function technicianFirstName(technicianId) {
 }
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
-const { resolveReviewTopicForEnrollment } = require("./review-ask-topic");
+const { resolveReviewTopicForEnrollment, isRecurringAskPlan } = require("./review-ask-topic");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
 const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
@@ -6241,13 +6241,19 @@ const ReviewService = {
           return { ran: false, stopped: true, reason: re.skip };
         }
         if (re.plan && JSON.stringify(re.plan) !== JSON.stringify(plan)) {
+          // GATE_REVIEW_DAY0_CONTEXT: a Day-0 topic is recurring-only, so it
+          // leaves with the recurring plan — in the same write, and only on
+          // a row that holds one.
+          const dropAskContext = seq.ask_context != null && !isRecurringAskPlan(re.plan);
           await db("review_sequences").where({ id: seq.id, status: "active" }).update({
             plan: JSON.stringify(re.plan),
             series_final: re.seriesFinal === true,
+            ...(dropAskContext ? { ask_context: null } : {}),
             updated_at: new Date(),
           });
           plan = re.plan;
           seq.series_final = re.seriesFinal === true;
+          if (dropAskContext) seq.ask_context = null;
         }
       } catch {
         // Same posture as re.error (codex r19): a blip mid-swap must defer,
