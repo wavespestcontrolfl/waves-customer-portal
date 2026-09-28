@@ -589,6 +589,27 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  // Codex r10 on #5216: next_steps buttons are shipped customer copy, so the
+  // semantic compliance pass sees them (as the links they render as).
+  test('the semantic compliance pass receives the next_steps buttons', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 125, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/125' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+    const complianceGate = require('../services/content/compliance-gate');
+    const spy = jest.spyOn(complianceGate, 'evaluate');
+    try {
+      const frontmatter = validFrontmatter({ slug: '/ant-trails-bradenton/', next_steps: [{ label: 'Found a live one?', href: '/contact/' }] });
+      await AstroPublisher.publishOrUpdatePage({ type: 'draft', frontmatter, body: 'Waves Pest Control guidance for Bradenton homeowners.' }, { action_type: 'new_supporting_blog' });
+      const pass = spy.mock.calls.find(([arg]) => String(arg?.body || '').includes(complianceGate.META_SECTION_MARKER));
+      expect(pass).toBeTruthy();
+      expect(pass[0].body).toContain('[Found a live one?](/contact/)');
+    } finally { spy.mockRestore(); }
+  });
+
   test('publishOrUpdatePage refuses a draft that links a competitor, before any branch (owner rulings 2026-09-28: refuse, don\'t rewrite)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});

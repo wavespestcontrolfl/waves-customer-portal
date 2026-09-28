@@ -3444,10 +3444,13 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   // UNATTENDED lane — an autonomous draft that clears every gate publishes with
   // no human in the loop — so it needs the semantic layer at least as much as
   // the admin lane does. Hero alt is included: publishOrUpdatePage writes it.
+  // So are the next_steps buttons, as the "[label](href)" links they render
+  // as (Codex r10 on #5216): customer-facing copy the deterministic layer
+  // scans, so the semantic layer judges it too.
   await assertComplianceClear({
     title: frontmatter.title,
     body,
-    meta: [frontmatter.metaTitle, frontmatter.meta_description, frontmatter.hero_image_alt, frontmatter.hero_image?.alt],
+    meta: [frontmatter.metaTitle, frontmatter.meta_description, frontmatter.hero_image_alt, frontmatter.hero_image?.alt, contentGuardrails.nextStepsLinkMarkdown(frontmatter)],
     city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
     keyword: frontmatter.primary_keyword,
     tag: frontmatter.category,
