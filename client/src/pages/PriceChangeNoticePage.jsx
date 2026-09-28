@@ -9,6 +9,7 @@ import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand
 import DocumentActionBar from '../components/DocumentActionBar';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 import {
   DOC,
   DOC_FONT,
@@ -30,8 +31,8 @@ const SURFACE = {
   text: DOC.ink,
   body: DOC.muted,
   muted: DOC.supporting,
-  calloutBg: '#F0F7F1',
-  calloutBorder: '#3E8E5A',
+  calloutBg: CUSTOMER_SURFACE.successBg,
+  calloutBorder: CUSTOMER_SURFACE.successBorder,
   detailBg: '#F9F8F5',
 };
 

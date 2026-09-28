@@ -356,6 +356,60 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Missing-contact capture (owner ruling 2026-09-27). GET
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+booleans only — while the estimate is accept-active (never on
+accepted/declined/expired/off-surface estimates or the PDF render pass).
+`lastName` is true when the estimate's `customer_name` has fewer than two
+name tokens AND the linked customer (if any) has no real last name (blank or
+the `'Customer'` placeholder); `email` is true when neither the estimate nor
+the linked customer has an email. The linked customer's name/email are never
+returned. The page renders "Last name" (required client-side) and "Email (for
+your service reports and receipts)" (optional) above Accept for whichever is
+true, and blocks Accept on a typed-but-malformed email.
+`firstName` is true only when there is no name at all (blank estimate name and
+no linked first name), or the estimate name is exactly the linked profile's
+surname while its first name is blank; the page then also asks for "First
+name" (required). Name gaps are judged from structure, not by guessing which
+stored words are placeholders (owner ruling 2026-09-28): the only exceptions
+are the literal `undefined` / `null` tokens of the old concatenation bug and
+the `Customer` surname the accept itself used to stamp. Names are normalized
+with `normalizeContactName` (proper case) and capped by whole code points.
+Without a usable first name the surname is not applied, so the accept never
+creates a placeholder first name. The explicitly linked profile
+(`estimates.customer_id`) with a blank first name takes the collected first
+name through `propagateCustomerNameChange`; phone-matched or sibling profiles
+never do.
+`PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
+(trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
+≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
+`{ error, code: 'CONTACT_FIRST_NAME_INVALID' | 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
+any mutation; a blank or absent value is never an error (a tab loaded before
+this shipped still accepts). Values fill GAPS only and never overwrite: the
+gap verdict is recomputed and the estimate row written inside the acceptance
+transaction on the locked row, after the eligibility checks, so a rejected
+accept changes nothing and a failed check fails the accept (retryable) rather
+than dropping the input. Customer resolution (phone match) runs on the
+pre-fill identity, so a submitted email never steers which profile the accept
+lands on; an authored proposal's `preparedFor` that matched the old name moves
+with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
+new customer is created with the supplied values; an EXISTING matched, linked
+or grouped-sibling profile is filled only when the estimate's own first name
+matches the profile's (an estimate addressed to a tenant under a landlord's
+record keeps the values on the estimate only), and then `last_name` only when
+blank or `'Customer'` and `email` only when blank (whitespace-only counts as
+blank). Each existing-profile fill stamps `customers.updated_at`, and a surname
+fill runs `propagateCustomerNameChange` in the same transaction. Only fields the
+server's own `contactGaps` verdict flags are ever written — a value for a field
+the page never offered is ignored. The customer email fill runs through the
+shared email-claim guard (`backfillCustomerEmailInTrx`: row lock, then the
+`customer-email:` advisory lock, then the undone-merge holder recheck) in a
+savepoint, so a guard failure drops only the email fill, not the accept. An
+accept-active estimate with a contact gap always gets the React view: the
+`/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
+the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
+because of these fields.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
@@ -741,7 +795,40 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op),
+non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+the quote form's self-reported "How did you hear about us?" answer,
+validated against a FIXED allowlist (`server/routes/lead-webhook.js`
+`sanitizeHeardAbout`): `google_search`, `google_maps`, `chatgpt`,
+`other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
+`truck_yard_sign`, `other`. Any other value — including free text — is
+SILENTLY DROPPED (never stored; the request still succeeds as if the field
+were absent). A valid value is stored verbatim in `leads.heard_about`
+(nullable column, migration `20260928020000_leads_heard_about.js`) and
+surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+`leads.lead_source_id` / the classified `lead_source` — self-reported, never
+merged into technically-observed attribution, and "unknown" (the field
+omitted or invalid) stores NULL rather than a guess. Separately and
+independently of `heard_about`, the SAME technically-observed attribution
+pipeline both endpoints already run (UTM/click-id/referrer →
+`server/services/lead-source-classify.js`) now also classifies an
+AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
+Copilot, Claude, or another AI answer engine and followed its citation
+link — matched by EITHER `utm_source` (`chatgpt.com` / `chatgpt` / `openai`
+for ChatGPT, and the analogous values per assistant) OR the raw
+`document.referrer` host (`chatgpt.com`, `chat.openai.com`,
+`perplexity.ai`, `gemini.google.com`, `bard.google.com`,
+`copilot.microsoft.com`, `claude.ai`, `you.com`, …; the shared table is
+`server/services/ai-referral-sources.js`) — checked after every paid/GBP/
+Meta UTM or click-id branch (those still win) and before the domain/hub
+fallback. A match resolves `lead_source = 'ai_assistant'`
+(`server/services/source-names.js` label: "AI Assistant") and, via the
+seeded `lead_sources` row (migration
+`20260928030000_ai_assistant_lead_source.js`), a real `lead_source_id`.
+The identical detection table is shared with `resolveLeadSource`
+(`server/services/lead-source-resolver.js`), the classifier
+`/api/public/estimator/property-lookup` and `/api/public/quote/calculate`
+use — see those entries below — so an AI-referred visitor is classified
+the same way regardless of which endpoint their lead lands on),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -1130,6 +1217,13 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. Also accepts the OPTIONAL `timeline` described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
+Attribution (referrer/UTM/click-ids) resolves through
+`server/services/lead-source-resolver.js`, which shares its AI-assistant
+referral detection table with `/api/webhooks/lead`'s classifier (see that
+entry above) — a ChatGPT/Perplexity/Gemini/Copilot/Claude referral
+classifies `ai_assistant` here identically. `heard_about` (also described
+under `/api/webhooks/lead` above) is NOT currently read by this endpoint —
+only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
@@ -1626,6 +1720,99 @@ against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
+Guarantee rule for the estimate page, its proposal document and Ask Waves
+(owner 2026-09-26/27): a guarantee line that covers the whole estimate
+appears only when every service carries it. The recurring plan terms
+(callbacks, money-back, no contract) are carried by residential pest, lawn,
+mosquito, tree & shrub and palm; "satisfaction guaranteed" is also the
+rodent and commercial lanes' own term, so it may cover any estimate without
+termite or unclassifiable work. An estimate with termite work
+states no callback, money-back, satisfaction or no-contract terms for any
+service; its termite work states "no guarantee" except the terms of a
+termite bond, trenching warranty or pre-slab warranty option the customer
+selected. Where no estimate-wide terms apply, Ask Waves answers every
+guarantee question with one per-service list under these rules, never infers
+from a question's wording which service is meant, and never serves a model
+answer that makes a plan-terms claim. A service that carries the plan terms
+itself lists them under its own name, as the page shows them on its own card;
+the route passes the page's `noEstimateWideGuarantee` and commercial scope so
+Ask Waves never states more than the page.
+`/data`'s optional `estimate.noEstimateWideGuarantee: true` (and the same
+field on a document `proposal`) is set when not every service carries the
+recurring residential terms: a rodent, commercial, termite or unclassifiable
+service anywhere, or an authored (commercial) proposal
+(`estimateCarriesPlanTerms` / `proposalCarriesPlanTerms`). Absent otherwise.
+Lines that cover the whole estimate follow it through the shared
+`guaranteeScope` ('none' under `noGuaranteeClaims` below, 'satisfaction'
+here, else 'all'): the shell footer's "Backed by the Waves Guarantee", the
+legacy plan-terms card, perks and one-time callback note, the hero, the plan
+CTA line, the one-time price card and the document's terms line. Row-level
+copy states each service's own terms instead: `/data` stamps `termsScope`
+('all' | 'satisfaction' | 'none') on every `pricing.services[]` section,
+`pricing.oneTimeBreakdown.items[]` row and document
+`proposal.buildings[].lineItems[]` line (`serviceRowTermsScope` /
+`proposalRowTermsScope`). It is 'all' for residential pest, lawn, mosquito,
+tree & shrub or palm work, 'satisfaction' for rodent or commercial work
+(every row of an estimate with a commercial row or an authored proposal),
+and 'none' under `noGuaranteeClaims`. A row's inclusions, one-time copy and
+detail follow it (`serviceGuaranteeScope`); a row without the field follows
+the estimate, and the legacy page applies the same per-row rule. So a pest
+section beside a rodent one keeps its own plan terms while the footer stays
+neutral.
+`/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
+to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
+is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this
+route, read from the SAME normalized rows the page's category and
+regulated-surface decisions use (`recurringServicesWithSupplements` plus the
+`normalizeOneTimeBreakdown` rows unioned with the pricing bundle's). Present
+only when true, absent otherwise so every other response stays
+byte-identical. True when any recurring or one-time service row is termite
+work (the page's own category, or termite wording on the row), when a service
+row can't be classified, or when nothing on the estimate classifies at all.
+Setup, discount and credit rows never count (`isNonServiceOneTimeItem`), and
+a positive "other one-time services" residual counts as unclassified work.
+The React page's one-time hero and the proposal document's terms line drop
+their guarantee wording when it is set; per-service CTA lines follow their
+own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
+service makes no guarantee). Derived read-only; no write. The legacy
+server-rendered page applies the same rule to its plan-terms card.
+When `/data` includes a `proposal` for document rendering or an enabled
+public proposal, its explicit boolean `proposal.noGuaranteeClaims` classifies
+the normalized rows that the document actually prints. React document mode
+uses that flag before the page-level fallback; PDFKit uses the same decision.
+Thus disabled itemization retained for document rendering can suppress
+guarantees in the document without changing the current page's policy or
+prices. Generic promise suppression does not remove a row's explicitly
+purchased warranty scope, which still requires that row's sold-tier metadata.
+Projected one-time-choice rows retain reconciled `warrantyTier` and
+`warrantyAdder` from the same evidence used to resolve their copy, including
+when a mapped `result` omits evidence that remains in the matching raw
+`engineResult`. A current engine replay (including its cache) governs older
+saved rows; a sent snapshot's `snapshotHit` keeps its historical source from
+being mistaken for that replay. In unversioned projections, an explicit
+priced or current saved `none`/`null` decision blocks older purchased proof,
+including key-alias and zero-price clearing rows. Removal metadata survives
+the public response so assistant fallback cannot restore rejected coverage.
+Warranty evidence is audited
+before price filtering or deduplication across `oneTime.items`, nested one-time
+items, supported `specItems`, and `lineItems`; ambiguous repeated service rows
+cannot borrow another row's warranty. Ask Waves coalesces renamed fallback
+display rows against the current canonical service identity, while retaining
+all raw rows for warranty evidence. Distinct current jobs remain distinct.
+The server, browser, and Ask Waves use the shared purchased-warranty evidence
+rule and the existing authored copy pack. Ask Waves normalizes legacy termite
+bond aliases, names, and `bondYears` through the acceptance converter's
+canonical identity rule; every guarantee question, named or generic, returns
+the one per-service list described above, and the question's wording never
+narrows it to a single service. A current top-level bond selector governs historical snapshots.
+Without that selector, the unversioned saved rows and frozen pricing must
+agree on the purchased bond term; explicit removal, contradictory terms, or
+zero-price decisions suppress coverage regardless of snapshot order. A raw
+termite-bait row's `selectedBondTerm` also participates in this check.
+Ask Waves also requires separate recurring-terms eligibility: rodent,
+commercial, bundle, and unknown scope never inherit residential callbacks,
+money-back, or no-contract terms merely because the page permits a
+category-specific satisfaction statement.
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)

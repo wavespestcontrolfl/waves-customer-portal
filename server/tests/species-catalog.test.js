@@ -350,12 +350,11 @@ describe('owner approval content binding', () => {
     expect(catalog.isApproved(entry)).toBe(true);
   });
 
-  // Owner approved every fact-check-clean entry 2026-09-27 (after #5106);
-  // only house-centipede keeps an open fact-check.
-  test('every fact-check-clean entry is owner-approved; house-centipede stays draft', () => {
-    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(238);
-    expect(allEntries.filter((entry) => entry.review.status === 'draft').map((entry) => entry.slug))
-      .toEqual(['house-centipede']);
+  // Owner approved every fact-check-clean entry 2026-09-27 (after #5106) and
+  // house-centipede 2026-09-28 once its range fact-check closed (#5114).
+  test('every entry is owner-approved', () => {
+    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(239);
+    expect(allEntries.filter((entry) => entry.review.status === 'draft')).toEqual([]);
   });
 });
 
