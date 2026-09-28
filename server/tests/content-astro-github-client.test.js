@@ -392,6 +392,20 @@ describe('content-astro github-client request deadline', () => {
       .rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
   });
 
+  test('a 5xx whose error body stalls past the deadline is a deadline error, not an HTTP error', async () => {
+    global.fetch = jest.fn((url, init) => Promise.resolve({
+      ok: false,
+      status: 502,
+      headers: { get: () => 'text/plain' },
+      text: () => new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason));
+      }),
+    }));
+    await expect(gh.runWithRequestDeadline(Date.now() + 20, () => gh.createPr({ head: 'b', title: 't', body: 'x' })))
+      .rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('a call inside the deadline completes normally', async () => {
     global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ sha: 's', path: 'p', content: '' }));
     await expect(gh.runWithRequestDeadline(Date.now() + 60_000, () => gh.getFile('p')))

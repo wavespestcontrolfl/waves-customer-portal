@@ -81,6 +81,9 @@ async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries 
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    // A deadline abort while reading the error body is still a deadline: the
+    // write may have landed, so callers must reconcile rather than retry.
+    if (init.signal?.aborted) throw deadlineExceeded(method, url);
     // Retry once on 5xx — transient GitHub blips are common.
     if (res.status >= 500 && retries > 0) {
       logger.warn(`[github] ${method} ${url} → ${res.status}, retrying (${text.slice(0, 200)})`);
