@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -1147,11 +1147,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }
       const delivery = billingLegDeliveryState(channel, result || {});
       if (delivery) {
+        const occurredAt = billingLegContactTime(result);
         smsSent = true;
-        if (delivery === 'deduped' && result.eventVisibleAt) originalDeliveryTimes.push(result.eventVisibleAt);
+        if (delivery === 'deduped' && occurredAt) originalDeliveryTimes.push(occurredAt);
         if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
-          && !await ContactLedger.markDelivered(ledger, ...(result.eventVisibleAt ? [{ occurredAt: result.eventVisibleAt }] : []))) holdStep();
+          && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();

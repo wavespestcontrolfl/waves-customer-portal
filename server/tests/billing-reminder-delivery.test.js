@@ -67,8 +67,10 @@ describe('billing reminder per-channel delivery progress', () => {
       row.metadata.send_failed = false;
       return { allowed: true };
     });
-    ContactLedger.markDelivered.mockImplementation(async (entry) => {
-      rows.find((candidate) => candidate.id === entry.id).metadata.delivered = true;
+    ContactLedger.markDelivered.mockImplementation(async (entry, options = {}) => {
+      const row = rows.find((candidate) => candidate.id === entry.id);
+      row.metadata.delivered = true;
+      if (options.occurredAt) row.occurred_at = options.occurredAt;
       return true;
     });
     ContactLedger.markSendFailed.mockImplementation(async (entry, extra) => {
@@ -254,6 +256,27 @@ describe('billing reminder per-channel delivery progress', () => {
     await expect(deliver(['email'], send, 'email-dedupe')).resolves.toMatchObject({ complete: true, deliveredNow: [] });
     expect(rows[0].metadata.delivered).toBe(true);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['email', 'sms'])('a deduped %s leg restores the stored acceptance time, not the retry reservation time', async (channel) => {
+    const sentAt = new Date('2026-05-20T14:00:00Z');
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt }));
+    await expect(deliver([channel], send, `old-${channel}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.anything(), { occurredAt: sentAt });
+    expect(rows[0].occurred_at).toEqual(sentAt);
+    await expect(deliver([channel], send, `old-${channel}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(rows[0].occurred_at).toEqual(sentAt);
+  });
+
+  test('fresh Email does not adopt unrelated sentAt metadata as its contact time', async () => {
+    await deliver(['email'], jest.fn(async () => ({
+      sent: true, deliveryOutcome: 'accepted', sentAt: new Date('2026-05-20T14:00:00Z'),
+    })), 'fresh-email');
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.anything());
+    expect(rows[0].occurred_at.getTime()).toBeGreaterThan(new Date('2026-05-20T14:00:00Z').getTime());
   });
 
   test('accepted Text is not repeated while failed Email is retried', async () => {

@@ -34,6 +34,7 @@ const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals'
 const exemptions = (customerIds = [], charged = []) => ({ customerIds: new Set(customerIds), chargeMethodIdsByCustomer: new Map(charged) });
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { eventExistsRecently } = require('../services/autopay-log');
+const { logAutopay } = require('../services/autopay-log');
 const { sendCardExpiryWarnings } = require('../services/autopay-notifications');
 
 function thenable(rows) {
@@ -83,6 +84,21 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
         payment_method_id: 'pm-cur', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day',
       }),
     }));
+  });
+
+  test('a deduped Text expiry reminder records its original acceptance time', async () => {
+    const sentAt = new Date('2026-08-20T15:00:00Z');
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+        last_four: '4242', exp_month: '9', exp_year: '26' }])],
+    });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted',
+      deduped: true, channelResults: { sms: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt } } });
+    expect(await sendCardExpiryWarnings()).toMatchObject({ sent: 0, skipped: 1 });
+    expect(logAutopay).toHaveBeenCalledWith('c1', 'card_expiring_soon',
+      expect.objectContaining({ createdAt: sentAt, paymentMethodId: 'pm-cur' }));
   });
 
   test.each([

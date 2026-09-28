@@ -135,6 +135,47 @@ test('a leg whose send throws does not skip its sibling and records no progress 
   expect(logAutopay.mock.calls.map(([, , opts]) => opts.details.channel)).toEqual(['email']);
 });
 
+test('a deduped Email leg logs the original acceptance without a new amount', async () => {
+  mockPrefs = { billing_channels: ['email'] };
+  const sentAt = new Date('2026-05-20T14:00:00Z');
+  sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt });
+  expect(await sendPreChargeReminders()).toMatchObject({ sent: 0, skipped: 1 });
+  expect(logAutopay).toHaveBeenCalledWith('cust-1', 'pre_charge_reminder_sent',
+    expect.objectContaining({ createdAt: sentAt, details: expect.objectContaining({ channel: 'email' }) }));
+  expect(logAutopay.mock.calls[0][2].amountCents).toBeUndefined();
+});
+
+test('an all-old aggregate uses the latest original rail time while a fresh sibling keeps its amount', async () => {
+  mockCustomers = [{ ...NO_PHONE, phone: '+19415550101' }];
+  const sentAt = new Date('2026-05-20T14:00:00Z');
+  sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: new Date('2026-05-19T14:00:00Z') },
+      sms: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt },
+    } });
+  expect(await sendPreChargeReminders()).toMatchObject({ sent: 0, skipped: 1 });
+  expect(logAutopay.mock.calls[0][2]).toMatchObject({ createdAt: sentAt });
+  expect(logAutopay.mock.calls[0][2].amountCents).toBeUndefined();
+  logAutopay.mockClear();
+  sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted',
+    channelResults: {
+      email: { sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt },
+      sms: { sent: true, deliveryOutcome: 'accepted' },
+    } });
+  expect(await sendPreChargeReminders()).toMatchObject({ sent: 1, skipped: 0 });
+  expect(logAutopay.mock.calls[0][2]).toMatchObject({ amountCents: 8900 });
+  expect(logAutopay.mock.calls[0][2].createdAt).toBeUndefined();
+});
+
+test('a deduped Text without a valid original time retains legacy progress fields', async () => {
+  mockCustomers = [{ ...NO_PHONE, phone: '+19415550101' }];
+  sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true,
+    sentAt: 'invalid-time' });
+  await sendPreChargeReminders();
+  expect(logAutopay.mock.calls[0][2]).toMatchObject({ amountCents: 8900 });
+  expect(logAutopay.mock.calls[0][2].createdAt).toBeUndefined();
+});
+
 test('a customer with a phone keeps the single Text reminder and the customer-wide cooldown', async () => {
   mockCustomers = [{ ...NO_PHONE, phone: '+19415550101' }];
   await sendPreChargeReminders();

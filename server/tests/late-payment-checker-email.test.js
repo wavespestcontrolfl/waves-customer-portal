@@ -304,6 +304,8 @@ describe('late-payment checker email sidecar', () => {
     [priorApp, true, false, ['email', 'push'], true],
     [priorApp, false, false, ['email', 'push'], false],
     [priorApp, false, false, ['push', 'sms'], false, { sent: true, deliveryOutcome: 'accepted' }],
+    [priorApp, true, false, ['push', 'sms'], false, { sent: true, deliveryOutcome: 'accepted',
+      deduped: true, sentAt: new Date('2026-05-19T14:00:00Z') }],
     [priorApp, true, false, ['push', 'sms'], false, { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TERMINAL_DENIAL' }],
     [{ sent: false, deliveryOutcome: 'uncertain', deferred: true, retryable: true, bellPersisted: true }, false, false],
     [{ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }, false, true],
@@ -328,6 +330,8 @@ describe('late-payment checker email sidecar', () => {
     expect(result).toMatchObject({ notified: repaired ? 0 : 1, skipped: repaired ? 1 : 0 });
     if (appResult.reason === 'app_event_already_visible') expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }), { occurredAt });
     else expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }));
+    if (smsResult?.deduped) expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sms-14' }), { occurredAt: smsResult.sentAt });
     if (!smsResult) expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(activityInsert.insert).toHaveBeenCalled();
     if (oldEmail) expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();

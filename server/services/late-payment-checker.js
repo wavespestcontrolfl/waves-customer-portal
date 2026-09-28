@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -184,9 +184,10 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = '
     return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
   const accepted = !!delivery;
+  const occurredAt = billingLegContactTime(result);
   const stamped = accepted
     ? (typeof ContactLedger.markDelivered === 'function'
-      ? await ContactLedger.markDelivered(ledger, ...(result.eventVisibleAt ? [{ occurredAt: result.eventVisibleAt }] : [])) : true)
+      ? await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : [])) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
   return stamped ? { ...result, sent: accepted, ...(delivery === 'deduped' ? { deduped: true } : {}) } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }

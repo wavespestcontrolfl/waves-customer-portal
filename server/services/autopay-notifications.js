@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 const db = require('../models/db');
 const logger = require('./logger');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
@@ -27,6 +27,14 @@ const { billingChannelAllowed } = require('./billing-delivery-channels');
 // accepted leg records its own autopay_log progress so an unfinished sibling
 // still sends on a later run instead of being retired by the accepted one.
 const NO_PHONE_LEGS = ['push', 'email'];
+
+// All three autopay progress writers use original time when the canonical
+// sender supplies it, retaining legacy progress behavior without a witness.
+function autopayProgressStamp(result, deduped, freshFields = {}) {
+  if (!deduped) return freshFields;
+  const createdAt = billingLegContactTime(result);
+  return createdAt ? { createdAt } : freshFields;
+}
 
 // Selected legs that have not yet been accepted for this billing cycle.
 async function pendingPreChargeLegs(customerId) {
@@ -72,8 +80,9 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
     if (result.code === 'lane_changed') return { code: 'lane_changed', reason: result.reason };
     const delivery = billingLegDeliveryState(channel, result);
     if (delivery) {
+      const stamp = autopayProgressStamp(result, delivery === 'deduped', { amountCents });
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
-        ...(delivery === 'deduped' && result.eventVisibleAt ? { createdAt: result.eventVisibleAt } : { amountCents }),
+        ...stamp,
         details: { charge_date: chargeDate, channel },
       });
       settled++;
@@ -223,8 +232,9 @@ async function sendPreChargeReminders() {
       // send owns the customer-wide progress, using the original App time
       // only when the guarded provider path supplies that earlier witness.
       if (!pendingLegs) {
+        const stamp = autopayProgressStamp(outcome, outcome.deduped, { amountCents });
         await logAutopay(c.id, 'pre_charge_reminder_sent', {
-          ...(outcome.eventVisibleAt ? { createdAt: outcome.eventVisibleAt } : { amountCents }),
+          ...stamp,
           details: { charge_date: etDateString(target) },
         });
       }
@@ -429,9 +439,10 @@ async function sendCardExpiryWarnings() {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
       }
 
+      const stamp = autopayProgressStamp(sendResult, sendResult.deduped);
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,
-        ...(sendResult.deduped && sendResult.eventVisibleAt ? { createdAt: sendResult.eventVisibleAt } : {}),
+        ...stamp,
         details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4, reminder_stage: reminderStage },
       });
       await emailPromise;

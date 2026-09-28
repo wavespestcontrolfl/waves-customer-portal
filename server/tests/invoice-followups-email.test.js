@@ -637,21 +637,25 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true, 'prior', 'bell', 'prior+old-email', 'prior+fresh-email', 'legacy-old-email'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+  test.each([false, true, 'prior', 'bell', 'prior+old-email', 'prior+old-text', 'prior+fresh-email', 'legacy-old-email'])('advances a selected App (%s) or legacy email sequence', async (appSelected) => {
     const visibleAt = new Date('2026-05-20T14:00:00Z');
+    const textAt = new Date('2026-05-21T14:00:00Z');
     const prior = String(appSelected).startsWith('prior');
+    const oldText = appSelected === 'prior+old-text';
     const legacyOldEmail = appSelected === 'legacy-old-email';
     const withEmail = String(appSelected).includes('email');
     const repaired = legacyOldEmail || (prior && appSelected !== 'prior+fresh-email');
     if (legacyOldEmail) EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true, deduped: true });
     if (prior) sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    if (oldText) sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: textAt });
     if (appSelected === 'prior+old-email') {
       const ledger = require('../services/collections/contact-ledger');
       ledger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
       ledger.recordContact.mockResolvedValueOnce({ id: 'email-old', metadata: {}, occurred_at: visibleAt });
     }
     if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true });
-    const prefs = { email_enabled: true, ...(appSelected && !legacyOldEmail ? { invoice_channels: withEmail ? ['email', 'push'] : ['push'] } : {}) };
+    const prefs = { email_enabled: true, ...(appSelected && !legacyOldEmail
+      ? { invoice_channels: withEmail ? ['email', 'push'] : oldText ? ['push', 'sms'] : ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
     const sequenceUpdate = chain();
@@ -660,7 +664,7 @@ describe('invoice follow-up email sidecar', () => {
     if (creditCase) credit.autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow(legacyOldEmail ? { last_touch_at: visibleAt } : {})] })],
-      customers: [chain({ first: customer({ phone: null }) })],
+      customers: [chain({ first: customer({ phone: oldText ? '+19415550101' : null }) })],
       // Two invoice reads per fired step: credit re-read + email eligibility.
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
@@ -682,7 +686,9 @@ describe('invoice follow-up email sidecar', () => {
     if (appSelected && !legacyOldEmail) {
       if (appSelected === 'prior+fresh-email') expect(EmailTemplates.sendTemplate).toHaveBeenCalled();
       else expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', to: null }));
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-1', to: oldText ? '+19415550101' : null,
+      }));
     } else {
       expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'invoice.followup_3_day' }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -691,7 +697,9 @@ describe('invoice follow-up email sidecar', () => {
       step_index: 1,
       status: 'active',
     }));
-    expect(sequenceUpdate.update.mock.calls[0][0].last_touch_at).toEqual(repaired ? visibleAt : new Date());
+    expect(sequenceUpdate.update.mock.calls[0][0].last_touch_at).toEqual(repaired ? (oldText ? textAt : visibleAt) : new Date());
+    if (oldText) expect(require('../services/collections/contact-ledger').markDelivered)
+      .toHaveBeenCalledWith(expect.anything(), { occurredAt: textAt });
     if (appSelected === 'prior+fresh-email') expect(finalInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({ interaction_type: 'email_outbound' }));
     if (legacyOldEmail) {
       expect(credit.autoApplyAccountCreditIfEnabled).toHaveBeenCalled();

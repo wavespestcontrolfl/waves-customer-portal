@@ -1,6 +1,6 @@
 'use strict';
 
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 
 const crypto = require('node:crypto');
 const db = require('../models/db');
@@ -116,8 +116,9 @@ async function sendLeg(send, channel, entry) {
 async function recordLegOutcome(entry, channel, result, results) {
   const delivered = billingLegDeliveryState(channel, result || {});
   if (delivered) {
-    const stamped = result.eventVisibleAt
-      ? await ContactLedger.markDelivered(entry, { occurredAt: result.eventVisibleAt })
+    const occurredAt = billingLegContactTime(result);
+    const stamped = occurredAt
+      ? await ContactLedger.markDelivered(entry, { occurredAt })
       : await ContactLedger.markDelivered(entry);
     if (stamped) return delivered;
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };

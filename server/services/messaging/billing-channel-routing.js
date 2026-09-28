@@ -133,6 +133,21 @@ function billingLegDeliveryState(channel, result = {}) {
   return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
 }
 
+// A deduped Email/Text leg exposes the original acceptance as sentAt; a
+// persisted App bell exposes eventVisibleAt. Return only valid stored evidence
+// and leave legacy missing-evidence behavior to each caller.
+function billingLegContactTime(result = {}) {
+  const candidates = result.deduped && result.channelResults
+    ? Object.entries(result.channelResults)
+      .filter(([channel, leg]) => billingLegDeliveryState(channel, leg) === 'deduped')
+      .flatMap(([, leg]) => [leg.sentAt, leg.eventVisibleAt])
+      .concat([result.sentAt, result.eventVisibleAt])
+    : result.deduped ? [result.sentAt, result.eventVisibleAt] : [result.eventVisibleAt];
+  const times = candidates.filter(Boolean).map((candidate) => new Date(candidate))
+    .filter((time) => !Number.isNaN(time.getTime()));
+  return times.length ? new Date(Math.max(...times.map((time) => time.getTime()))) : null;
+}
+
 function needsRetry(result) {
   if (result?.bellPersisted === true || result?.reason === 'app_event_already_visible') return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
@@ -252,4 +267,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
   billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
+  billingLegContactTime,
 };
