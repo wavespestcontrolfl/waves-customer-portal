@@ -208,6 +208,26 @@ async function markJobRetry(job, err, { smsResult = null, emailResult = null } =
     });
 }
 
+// payment_receipt=false is the full receipt kill switch (migration 104):
+// the customer opted out of payment receipts on EVERY channel, not just
+// texts. Payer-billed invoices are exempt: their receipt goes to the
+// third-party payer's AP inbox, which the homeowner's prefs don't govern. A
+// transient lookup failure must NOT read as "no opt-out" (that would email a
+// kill-switch customer on a DB blip) — it comes back as prefsLookupFailed.
+// Shared by the worker below and the Intelligence Bar closeout repair's card.
+async function receiptEmailOptOutState(invoice) {
+  if (invoice.payer_id) return { receiptKillSwitch: false, prefsLookupFailed: false };
+  let prefsLookupFailed = false;
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: invoice.customer_id })
+    .first()
+    .catch(() => {
+      prefsLookupFailed = true;
+      return null;
+    });
+  return { receiptKillSwitch: prefs?.payment_receipt === false, prefsLookupFailed };
+}
+
 async function processReceiptDeliveryJob(job) {
   let smsResult = null;
   let emailResult = null;
@@ -253,22 +273,7 @@ async function processReceiptDeliveryJob(job) {
     // by the shared billing email authority inside sendReceiptEmail (owner
     // ruling 2026-09-27), which reports an unselected Email as the expected
     // 'billing_email_not_selected' skip.
-    let receiptKillSwitch = false;
-    let prefsLookupFailed = false;
-    if (!invoice.payer_id) {
-      const prefs = await db('notification_prefs')
-        .where({ customer_id: invoice.customer_id })
-        .first()
-        .catch(() => {
-          // A transient lookup failure must NOT read as "no opt-out" — that
-          // would email a kill-switch customer on a DB blip. Fail the email
-          // leg actionably so the retry ladder re-runs the lookup (the email
-          // idempotency key makes the eventual send safe to repeat).
-          prefsLookupFailed = true;
-          return null;
-        });
-      receiptKillSwitch = prefs?.payment_receipt === false;
-    }
+    const { receiptKillSwitch, prefsLookupFailed } = await receiptEmailOptOutState(invoice);
     // The email leg is deliberately NOT gated on payment_receipt_channel:
     // migration 104 seeded 'sms' as the column DEFAULT on every existing row,
     // so "channel === 'sms'" cannot distinguish a customer who chose Text in
@@ -341,6 +346,9 @@ function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
 }
 
 module.exports = {
+  receiptEmailOptOutState,
+  // Also the IB closeout repair card's rule for "no email, on purpose".
+  expectedEmailSkip,
   enqueueReceiptDelivery,
   claimDueReceiptDeliveryJobs,
   processDueReceiptDeliveryJobs,
