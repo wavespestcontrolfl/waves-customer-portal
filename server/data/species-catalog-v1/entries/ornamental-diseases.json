@@ -83,8 +83,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f8f83562ea624a6a86396a0a9ef745cd5a31fe0c6ee1c58e8a17296d299d73ff"
     },
     "condition": {
       "hosts": [
@@ -209,8 +210,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Whether classic-looking spots are truly Plasmopara viburni versus a look-alike fungus is unresolved (UF/IFAS 2026 Florida nursery trials found several look-alike species and some seasons with no true downy mildew at all), which is moot for the customer now that confirmable_by is technician and copy no longer claims a photo settles it."
+      "status": "owner_approved",
+      "notes": "Whether classic-looking spots are truly Plasmopara viburni versus a look-alike fungus is unresolved (UF/IFAS 2026 Florida nursery trials found several look-alike species and some seasons with no true downy mildew at all), which is moot for the customer now that confirmable_by is technician and copy no longer claims a photo settles it.",
+      "approval_hash": "b1c1d6653c59d881322585333dec2b8407c68d468d69f4f87cdd3ea2b043d522"
     },
     "condition": {
       "hosts": [
@@ -328,8 +330,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9955265a448ba48929496ca4561fdecfa351e06e8446cb0052e8622ee2ca505"
     },
     "condition": {
       "hosts": [
@@ -456,8 +459,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "e9bb2a20e4da4b20233f36773b98ae695a642be1ec7fe39eea6934acc52c4264"
     },
     "condition": {
       "hosts": [
@@ -589,8 +593,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "The root-cortex-sloughing diagnostic description is the most detailed UF/IFAS source found but is written for citrus (HS261), a genus-level Phytophthora trait rather than a woody-ornamental-specific fact sheet; PP123 confirms overwatering as a general catalyst for Phytophthora/Fusarium root and crown disease on ornamentals but does not detail the sloughing symptom itself."
+      "status": "owner_approved",
+      "notes": "The root-cortex-sloughing diagnostic description is the most detailed UF/IFAS source found but is written for citrus (HS261), a genus-level Phytophthora trait rather than a woody-ornamental-specific fact sheet; PP123 confirms overwatering as a general catalyst for Phytophthora/Fusarium root and crown disease on ornamentals but does not detail the sloughing symptom itself.",
+      "approval_hash": "e6500ff795ff04ea49fb31f2de7fedb3ea290baea33a09e7c2ace4e13c24b142"
     },
     "condition": {
       "hosts": [
@@ -728,8 +733,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d43d99000cc7f2cbcfae01641d41a5110aeac4780585c1b851ea6950a4301c8b"
     },
     "condition": {
       "hosts": [
@@ -851,8 +857,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Reporting a suspected case through the county extension office is recommended, not a stated legal requirement for homeowners per FDACS's homeowner FAQ, which is why action routes to a specialist referral rather than a reporting mandate."
+      "status": "owner_approved",
+      "notes": "Reporting a suspected case through the county extension office is recommended, not a stated legal requirement for homeowners per FDACS's homeowner FAQ, which is why action routes to a specialist referral rather than a reporting mandate.",
+      "approval_hash": "a5a214748797aade5e63c12f98d7e275354d439239fb83169665469346799169"
     },
     "condition": {
       "hosts": [
@@ -979,8 +986,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Current establishment/severity of oleander leaf scorch specifically in Sarasota-Charlotte-Manatee-Lee-Collier is not separately confirmed; the UF/IFAS source describes the disease generally for Florida oleander, so range is set to occasional as an estimate."
+      "status": "owner_approved",
+      "notes": "Current establishment/severity of oleander leaf scorch specifically in Sarasota-Charlotte-Manatee-Lee-Collier is not separately confirmed; the UF/IFAS source describes the disease generally for Florida oleander, so range is set to occasional as an estimate.",
+      "approval_hash": "c4b9bd2f74c48af3b0bbc4b336cb40b604a76f4f0972b3688c79c3218787475e"
     },
     "condition": {
       "hosts": [

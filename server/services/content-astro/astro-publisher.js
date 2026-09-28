@@ -27,6 +27,7 @@ const fm = require('./frontmatter');
 const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { isIdentificationPost, isLibraryPhotoSrc } = require('../content/licensed-photo-library');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const { applyCostGuidePriceRange } = require('./price-range');
 const contentGuardrails = require('../content/content-guardrails');
@@ -43,8 +44,27 @@ const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 const { resolveSpokeTarget, blogOriginForSpoke: sharedBlogOriginForSpoke } = require('./spoke-routing');
 const { etDateString } = require('../../utils/datetime-et');
+const competitorLinks = require('../content/competitor-links');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
+
+// Owner rulings 2026-09-28: "I do not want to link to a competitor's
+// website, whatsoever" — and refuse, don't rewrite. The last step before
+// EVERY commit, blog, service and location targets alike (publishAstro,
+// publishOrUpdatePage, publishRefresh, publishMetadataRewrite): a link to a
+// competitor host anywhere in the body or frontmatter refuses the publish
+// before any branch exists. Nothing is rewritten. The writer's self-lint
+// (content-guardrails' COMPETITOR_LINK) sends such a draft back first, and an
+// admin/calendar post meets the same guardrail and is fixed by hand.
+function competitorFreeMarkdown(frontmatter, body) {
+  const found = competitorLinks.competitorLinkUrlsIn(frontmatter, body);
+  if (found.length) {
+    const err = new Error(`competitor link "${found[0]}" in the page — publish refused (owner ruling: no links to competitor sites)`);
+    err.code = 'COMPETITOR_LINK';
+    throw err;
+  }
+  return fm.stringify(frontmatter, body);
+}
 const ASTRO_HERO_DIR = 'public/images/blog';
 
 // Only blog posts are governed by the blog frontmatter schema. Service/location
@@ -341,6 +361,36 @@ function safeJson(v, fallback) {
 function normalizeArray(v) {
   const arr = safeJson(v, []);
   return Array.isArray(arr) ? arr.filter((item) => item != null && String(item).trim() !== '') : [];
+}
+
+// Codex P2 (2026-09-28): normalizeAutonomousBlogFrontmatter below rebuilds
+// frontmatter from an explicit field list — without these, a writer draft
+// carrying a valid, gate-approved frontmatter.next_steps /
+// .related_posts (packages/blog-schema/schema.json's own field names) was
+// silently dropped before the Astro file was ever committed, so the
+// next-step row and hand-picked related-post rail never shipped even
+// though content-quality-gate approved them. Defensive shape validation
+// here too (belt-and-suspenders on top of the gate, which already ran):
+// related_posts keeps only non-empty STRING entries; next_steps keeps
+// only well-shaped {label, href} entries and caps at 4, matching the
+// vendored schema's own z.array(...).max(4). Return undefined (never []),
+// consistent with this function's other optional fields (`tracking`) —
+// the JSON.parse(JSON.stringify(data)) below drops an undefined key
+// entirely rather than emitting an empty array/field.
+function normalizeRelatedPostsFrontmatter(v) {
+  const arr = safeJson(v, []);
+  if (!Array.isArray(arr)) return undefined;
+  const out = arr.filter((item) => typeof item === 'string' && item.trim() !== '');
+  return out.length ? out : undefined;
+}
+function normalizeNextStepsFrontmatter(v) {
+  const arr = safeJson(v, []);
+  if (!Array.isArray(arr)) return undefined;
+  const out = arr
+    .filter((s) => s && typeof s === 'object' && typeof s.label === 'string' && s.label.trim() && typeof s.href === 'string' && s.href.trim())
+    .map((s) => ({ label: String(s.label).trim(), href: String(s.href).trim() }))
+    .slice(0, 4);
+  return out.length ? out : undefined;
 }
 
 function normalizeCategory(category, tag) {
@@ -674,6 +724,8 @@ function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body =
     tracking: frontmatter.tracking && typeof frontmatter.tracking === 'object' && !Array.isArray(frontmatter.tracking)
       ? { ...frontmatter.tracking }
       : undefined,
+    next_steps: normalizeNextStepsFrontmatter(frontmatter.next_steps),
+    related_posts: normalizeRelatedPostsFrontmatter(frontmatter.related_posts),
   };
 
   return JSON.parse(JSON.stringify(data));
@@ -1380,6 +1432,12 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
       hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
     });
     assertValidBlogFrontmatter(data);
+    // No competitor-evidence channel on this lane: a blog_posts row has no
+    // reviewer notes (the autonomous lanes' notes_for_reviewer), and a post
+    // may not link a competitor's page. So under GATE_EDITORIAL_EVIDENCE a
+    // claim sourced only from a competitor's own site is not evidenced here,
+    // and the review repairs or refuses it (Codex r7 on #5191; a notes field
+    // for admin posts is an owner decision).
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
     const body = String(prepared.body || '').trim();
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
@@ -1531,7 +1589,7 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
     // applied once the live post is known so a republish keeps its list.
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
-    const markdown = fm.stringify(data, finalBody + '\n');
+    const markdown = competitorFreeMarkdown(data, finalBody + '\n');
     // Owner competitor list on the FINAL text (Codex r6 on #5146): the
     // scheduler's publish auto-merges through pages-poll, so an off-list
     // company is refused before any branch; competitor content naming only
@@ -2175,8 +2233,36 @@ async function assertBodyImagesAtHead(args) {
     return { ok: false, reason: err.message, transient: err?.code !== 'BLOG_BODY_IMAGES_FAILED' };
   }
 }
+// With GATE_BLOG_BODY_IMAGES off only identification posts are checked at
+// merge time (their licensed-library photos must still be committed as the
+// merge carries them — Codex r9 on #5216). A new post is known from its own
+// frontmatter; a refresh ships the LIVE frontmatter, so its file on the
+// branch is read. A read error counts as identification (the full check
+// then decides); a target that cannot be found keeps the gate-off pass.
+async function identificationPostAtHead({ frontmatter, branch, actionType, targetUrl, filePath }) {
+  if (isIdentificationPost(frontmatter)) return true;
+  if (actionType !== 'refresh_existing_page' && !filePath) return false;
+  try {
+    let content = null;
+    if (actionType === 'refresh_existing_page') {
+      const found = filePath
+        ? await resolveExistingAstroFile(filePath, { ref: branch })
+        : await resolveExistingAstroFileForTarget(targetUrl, { ref: branch });
+      content = found?.file?.content || null;
+    } else {
+      content = (await gh.getFile(filePath, branch))?.content || null;
+    }
+    if (!content) return false;
+    return isIdentificationPost(fm.parse(content)?.data);
+  } catch {
+    return true;
+  }
+}
+
 async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
-  if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
+  if (!bodyImagesEnabled() && !(await identificationPostAtHead({ frontmatter, branch, actionType, targetUrl, filePath }))) {
+    return { ok: true, reason: 'gate_off' };
+  }
   if (!branch) return { ok: false, reason: 'PR head branch unknown' };
   // Assets are validated as the MERGE will carry them: a path the PR did
   // not change resolves to the default branch's current blob (that is what
@@ -2277,7 +2363,11 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   } catch (_) { /* no safe frontmatter slug — file key only */ }
   const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)), slug: ownSlugs });
   if (!valid.ok) return { ok: false, reason: valid.reason };
-  if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
+  // Identification posts never get generated images, so a slot with no
+  // licensed photo legitimately leaves them under the minimum — the SAME
+  // exemption resolveBodyImages applies, from the same shared predicate,
+  // judged on the frontmatter the merge ships (Codex r2 on #5216).
+  if (!isIdentificationPost(parsed?.data) && valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
   const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
   if (!pictures.ok) return { ok: false, reason: pictures.reason };
   return { ok: true, reason: null, baseSha };
@@ -2863,7 +2953,33 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 // HTML blocks hide the Markdown inside them (renderedBodyView).
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
-  if (!bodyImagesEnabled()) return none;
+  if (!bodyImagesEnabled()) {
+    // Codex r6 on #5216: generation stays gated, but an identification
+    // post's licensed-library photos are still checked to be committed
+    // image files and pinned to the blobs judged here (re-checked on the
+    // fresh branch before the commit), so a catalog entry that lands before
+    // its asset, or an asset renamed since, parks instead of publishing a
+    // broken image.
+    if (!isIdentificationPost(frontmatter)) return none;
+    const checked = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
+    if (!checked.ok) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} ${checked.reason}`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    const pinned = [];
+    for (const src of new Set(checked.refs.map((r) => r.src))) {
+      const repoPath = `public${src}`;
+      const file = await gh.getFile(repoPath);
+      pinned.push({ repoPath, sha: file?.sha || null });
+    }
+    return { ...none, pinned };
+  }
+  // ONE predicate with the merge-time check and the quality gate. An
+  // identification post's photos are licensed-library files already
+  // committed in the Astro repo and embedded by local path (the quality gate
+  // enforces that); nothing is fetched or generated for it here.
+  const isDiagnostic = isIdentificationPost(frontmatter);
   // A refresh draft may RETAIN a publisher-managed reference while
   // rewriting its section: the picture then ships under prose it may no
   // longer describe, bypassing the reuse context check (GH r28). Managed
@@ -2879,6 +2995,9 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     for (const sec of sections) {
       for (const src of sec.images || []) {
         if (!String(src || '').startsWith(ownPrefix) || !/body-\d+\.webp$/i.test(String(src))) continue;
+        // A licensed-library photo is never the publisher's to strip (Codex
+        // r3 on #5216) — same lookup the quality gate approves it by.
+        if (isLibraryPhotoSrc(src)) continue;
         if (!reusableLiveBodyImage(existingFile, src, sec.heading, { title: frontmatter?.title, lead: sec.lead, mdx: liveFlavour })) stale.add(src);
       }
     }
@@ -2942,7 +3061,12 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   }
 
   const have = valid.distinct;
-  const need = BODY_IMAGE_MIN - have;
+  // Diagnostic drafts NEVER get an AI/generated body image — a shortfall
+  // below BODY_IMAGE_MIN is expected and correct when a slot has no
+  // licensed photo (owner rule): publish with no image there, never a
+  // generated one. Forcing need to 0 also means a diagnostic draft always
+  // takes THIS early-return path, never the generation loop below.
+  const need = isDiagnostic ? 0 : (BODY_IMAGE_MIN - have);
   // Nothing to generate — but the draft may have DROPPED references to
   // publisher-managed pictures (a refresh that replaces body-1/body-2 with
   // two authored images): those files are still publicly addressable and
@@ -3320,10 +3444,13 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   // UNATTENDED lane — an autonomous draft that clears every gate publishes with
   // no human in the loop — so it needs the semantic layer at least as much as
   // the admin lane does. Hero alt is included: publishOrUpdatePage writes it.
+  // So are the next_steps buttons, as the "[label](href)" links they render
+  // as (Codex r10 on #5216): customer-facing copy the deterministic layer
+  // scans, so the semantic layer judges it too.
   await assertComplianceClear({
     title: frontmatter.title,
     body,
-    meta: [frontmatter.metaTitle, frontmatter.meta_description, frontmatter.hero_image_alt, frontmatter.hero_image?.alt],
+    meta: [frontmatter.metaTitle, frontmatter.meta_description, frontmatter.hero_image_alt, frontmatter.hero_image?.alt, contentGuardrails.nextStepsLinkMarkdown(frontmatter)],
     city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
     keyword: frontmatter.primary_keyword,
     tag: frontmatter.category,
@@ -3391,11 +3518,12 @@ async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } 
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  const markdown = competitorFreeMarkdown(frontmatter, `${finalBody}\n`);
   // Owner competitor list on the FINAL committed text — hero / body-image
   // alts included (Codex r5 on #5146). Throws before any branch exists.
   await assertOwnerListForCommit({ draft, brief, frontmatter, body: finalBody, humanApproved });
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3575,7 +3703,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const markdown = fm.stringify(nextFrontmatter, parsed.content || '');
+  const markdown = competitorFreeMarkdown(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3607,7 +3735,8 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
   await gh.createBranch(branch);
   if (editorialFiles.length) {
     const current = await gh.getFile(filePath, branch);
@@ -3668,10 +3797,20 @@ async function publishMetadataRewrite(draft, brief = {}) {
 // programmatically, only when the body actually changed.
 const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
+function assertRefreshLaneEnabled(brief) {
+  if (brief.gsc_signal?.bucket === 'citability_backfill'
+    && !require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
+    const err = new Error('Citability backfill is disabled; refresh publication withheld');
+    err.code = 'CITABILITY_BACKFILL_DISABLED';
+    throw err;
+  }
+}
+
 async function publishRefresh(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
+  assertRefreshLaneEnabled(brief);
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
   const target = draft.file_path || urlToAstroPath(targetUrl);
@@ -3874,14 +4013,16 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
     }
   }
   const finalBody = refreshImages.body;
-  const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  const markdown = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
   // Same owner-list chokepoint as the new-post lane: refreshes auto-merge
   // under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on #5146).
   await assertOwnerListForCommit({ draft, brief, frontmatter: nextFrontmatter, body: finalBody, humanApproved });
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.evidenceUrlsFor(draft) });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
+  assertRefreshLaneEnabled(brief);
   await gh.createBranch(branch);
   // Optimistic lock on the multi-file path: the tree write replaces paths
   // unconditionally (no per-file SHA like putFile), and image generation
@@ -3908,6 +4049,12 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
   }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
     ? await gh.commitFiles({
       branch,
@@ -3923,6 +4070,12 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
       sha: existing.sha,
     });
 
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
@@ -5261,6 +5414,7 @@ module.exports = {
   clampTitle,
   clampMetaDescription,
   _internals: {
+    competitorFreeMarkdown,
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,

@@ -86,8 +86,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "1995484098de7ee7f9803be1224b8402ff0b0860927e16df434bcc91908db0c9"
     },
     "condition": {
       "hosts": [
@@ -234,8 +235,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "53116243a00f0913ae4989619abce7a8aa92ef43a49d165a8986c8397b8b7d4a"
     },
     "condition": {
       "hosts": [
@@ -367,8 +369,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "5c19f6a313a73a63352366c4c59d6c6dd5dd630fa6a59f3eeba0dc7c5f81eb3f"
     },
     "condition": {
       "hosts": [
@@ -516,8 +519,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "2aa5b4daeeea80708d3ba9585184bb5e07be72096bda38a8a3d77e88749b3a4b"
     },
     "condition": {
       "hosts": [
@@ -656,8 +660,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c939e7f36bd5f8eb7c09051f4ed57bc640248f8a9445fb93461ba6a34b3fe683"
     },
     "condition": {
       "hosts": [
@@ -787,8 +792,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "af987bfcf9e57c05ce8903a9736067f3e380c3d43899d22d7976d5d1de7517a9"
     },
     "condition": {
       "hosts": [
@@ -812,7 +818,7 @@
         {
           "slug": "nitrogen-deficiency-turf",
           "difference": "Nitrogen deficiency shows a uniform pale yellow-green across older blades with no powdery pustules; rust shows orange pustules that rub off on a finger.",
-          "next_observation": "Rub a blade between your fingers checking for orange residue.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
           "photo_can_confirm": true
         },
         {
@@ -917,8 +923,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "fb7bc856ed22244ed8204bde9b072a0e796676984c655d5d6815ebd62a09ba69"
     },
     "condition": {
       "hosts": [
@@ -1040,8 +1047,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "03665e1487076648315ad8aa3720884f85f112c7f7a70540bfd533f341e4b160"
     },
     "condition": {
       "hosts": [
@@ -1157,8 +1165,9 @@
     ],
     "verification": [],
     "review": {
-      "status": "draft",
-      "notes": "Active/peak months are an estimate based on moderate-temperature transitional periods; UF/IFAS describes dollar spot generally without a Florida-specific seasonal calendar, so season_basis is set to unverified."
+      "status": "owner_approved",
+      "notes": "Active/peak months are an estimate based on moderate-temperature transitional periods; UF/IFAS describes dollar spot generally without a Florida-specific seasonal calendar, so season_basis is set to unverified.",
+      "approval_hash": "f71c196350bdf629c3a4a7f478f9b957995dfa52dcb1d8298ad03a3309b222a8"
     },
     "condition": {
       "hosts": [

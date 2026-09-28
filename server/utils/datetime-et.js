@@ -162,12 +162,24 @@ function expandWeekdayAbbreviations(text) {
   return String(text == null ? '' : text)
     .replace(/\b(mon|tues?|weds?|thu(?:rs?)?|fri|sat|sun)\.?(?=\s|$|,)/gi, (_, abbr) => WEEKDAY_ABBREVIATIONS[abbr.toLowerCase()]);
 }
+// The first day of a span phrase: Saturday for the weekend (today once it
+// has begun), Monday for next week. Null for any other phrase.
+function spanStartETDay(phrase, reference) {
+  const dow = etParts(reference).dayOfWeek;
+  const offset = (days) => etDateString(addETDays(reference, days));
+  if (/^(?:this |the |over the )?weekend$/.test(phrase)) return offset(dow === 0 ? -1 : (6 - dow) % 7);
+  if (phrase === 'next week') return offset((8 - dow) % 7 || 7);
+  return null;
+}
 function parseQuotedETDay(text, reference) {
   if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
   const quoted = String(text).trim().toLowerCase().replace(/[.!]+$/, '');
   const before = /^before\s+/.test(quoted);
   if (before) {
-    const boundary = parseQuotedETDay(quoted.replace(/^before\s+/, ''), reference);
+    // A span's boundary is its first day, not the day it is due by: "before
+    // this weekend" is Friday, "before next week" is Sunday (Codex #5248 r4).
+    const rest = quoted.replace(/^before\s+/, '').replace(/^(?:by|on|until|till|to|for)\s+/, '');
+    const boundary = spanStartETDay(rest, reference) || parseQuotedETDay(rest, reference);
     const dayBefore = boundary && etDateString(addETDays(parseETDateTime(`${boundary}T12:00`), -1));
     return dayBefore && dayBefore >= etDateString(reference) ? dayBefore : null;
   }

@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -224,6 +224,13 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     }
 
     const numericConfidence = Number.isFinite(Number(confidence)) ? Number(confidence) : null;
+    // Codex #5194 P2 — see publishSuggestion's identical comment
+    // (sms-suggest-mode.js): the instant the drafter rendered the SLA phrase
+    // into factsBlock, read back by slaDraftedAt (sms-followup-sla.js) in
+    // place of this row's own (later) created_at.
+    const factsGeneratedAtIso = factsGeneratedAt instanceof Date && Number.isFinite(factsGeneratedAt.getTime())
+      ? factsGeneratedAt.toISOString()
+      : null;
     const [row] = await trx('agent_decisions')
       .insert({
         workflow: AUTOSEND_WORKFLOW,
@@ -248,6 +255,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
         }),
         suggested_message: reply,
         reasoning_summary: 'House-voice reply auto-sent by the brand-voice loop executor (Phase E).',

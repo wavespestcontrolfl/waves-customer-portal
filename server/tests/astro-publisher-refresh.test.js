@@ -13,6 +13,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putFile: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -107,6 +108,46 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.createIssueComment.mockResolvedValue({});
   });
 
+  test.each(['false', 'true'])('citability publication honors the live gate (%s)', async (enabled) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = enabled === 'true';
+    try {
+      const result = pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } });
+      if (enabled === 'true') {
+        await expect(result).resolves.toMatchObject({ status: 'pr_open' });
+        expect(gh.createPr).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+        expect(gh.createBranch).not.toHaveBeenCalled();
+        expect(gh.putFile).not.toHaveBeenCalled();
+        expect(gh.createPr).not.toHaveBeenCalled();
+      }
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test.each(['getFile', 'createBranch', 'putFile'])('a stop during %s prevents the next publishing write', async (method) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = true;
+    gh[method].mockImplementationOnce(async () => {
+      gates.citabilityBackfill = false;
+      return method === 'getFile' ? { content: EXISTING, sha: 'existing-sha' } : {};
+    });
+    try {
+      await expect(pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } }))
+        .rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+      expect(gh.createPr).not.toHaveBeenCalled();
+      if (method !== 'putFile') expect(gh.putFile).not.toHaveBeenCalled();
+      if (method === 'getFile') expect(gh.createBranch).not.toHaveBeenCalled();
+      else expect(gh.deleteRef).toHaveBeenCalledTimes(1);
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
   // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
   // refreshed text (Codex r5 on #5146).
   test('a refresh naming an off-list company is refused before any branch is cut, and the check saw the final text', async () => {
@@ -150,6 +191,30 @@ describe('publishRefresh frontmatter freeze', () => {
     // Freshness bumped (body changed). Not the old date.
     expect(data.modified).not.toBe('2026-01-01T12:00:00');
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
+  });
+
+  test('a refreshed SERVICE page body that links a competitor is refused before any branch (owner rulings 2026-09-28: every page; refuse, don\'t rewrite)', async () => {
+    await expect(pub.publishRefresh(refreshDraft({
+      body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a competitor page listed in notes_for_reviewer reaches the editorial review as evidence, never the page (Codex r6 on #5191)', async () => {
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const filesSpy = jest.spyOn(editorialEvidence, 'filesForDocument').mockResolvedValue([]);
+    try {
+      const res = await pub.publishRefresh({
+        ...refreshDraft({ body: 'Fresh Sarasota guidance. Per the published terms, plans renew yearly.' }),
+        notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms',
+      }, BRIEF);
+      expect(res.status).toBe('pr_open');
+      expect(filesSpy).toHaveBeenCalledWith(expect.objectContaining({ evidenceUrls: ['https://www.orkin.com/terms'] }));
+      expect(gh.putFile.mock.calls[0][0].content).not.toMatch(/orkin\.com/);
+    } finally {
+      filesSpy.mockRestore();
+    }
   });
 
   test('no_changes when body and meta are identical to live', async () => {
@@ -379,6 +444,38 @@ describe('publishRefresh blog-schema validation gate', () => {
       pub.publishRefresh(blogRefreshDraft({ frontmatter: { meta_description: tooLong } }), BLOG_BRIEF),
     ).rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
     expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a blog-target refresh that links a competitor is refused too (Codex r1 P2)', async () => {
+    await expect(pub.publishRefresh(blogRefreshDraft({
+      body: 'Refreshed guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BLOG_BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('a metadata rewrite is refused when its meta, or a service page\'s untouched frontmatter, links a competitor (owner ruling: every page)', async () => {
+    gh.getFile.mockResolvedValue({ content: VALID_BLOG, sha: 'blog-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: BLOG_FILE_PATH,
+      title: 'Drywood Termite Signs vs Orkin',
+      meta_description: 'Compare our approach with https://www.orkin.com/terms and see what Waves techs check first for drywood termite signs in Sarasota homes today.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/blog/drywood-termite-signs-sarasota/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    const svcWithLink = EXISTING.replace(
+      'pageType: "city-hub"',
+      'pageType: "city-hub"\nsourceNote: "Compare to https://www.orkin.com/terms"',
+    );
+    gh.getFile.mockResolvedValue({ content: svcWithLink, sha: 'svc-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'ignored (protected metaTitle)',
+      meta_description: 'A brand-new Sarasota pest control meta description for the service page rewrite lane.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('does NOT blog-validate a non-blog (service) page refresh', async () => {

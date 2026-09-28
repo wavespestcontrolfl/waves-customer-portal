@@ -459,6 +459,8 @@ export function ComposeView({
   // Locked event ids from the last AI draft — carried into the /sends save so
   // the sent newsletter can advance events_raw.times_featured for what shipped.
   const [draftEventIds, setDraftEventIds] = useState([]);
+  // { [eventId]: ISO start } locked into the last AI draft, saved with the ids.
+  const [draftEventOccurrences, setDraftEventOccurrences] = useState({});
   // Only true when the event association changed THIS session (fresh AI draft
   // or template swap). Gates whether the save sends eventIds: on an ordinary
   // manual edit — or when editing a loaded draft whose ids the client never set
@@ -749,6 +751,7 @@ export function ComposeView({
           }
         })();
     setDraftEventIds(Array.isArray(eventIds) ? eventIds : []);
+    setDraftEventOccurrences({});
     setEventIdsDirty(false);
     const filter = saved.segment_filter || {};
     setSegmentMode(
@@ -924,6 +927,7 @@ export function ComposeView({
     // ids and mark dirty so the save writes the empty set (the prior AI events
     // no longer match this body).
     setDraftEventIds([]);
+    setDraftEventOccurrences({});
     setEventIdsDirty(true);
   };
   const saveDraft = async () => {
@@ -955,6 +959,9 @@ export function ComposeView({
         ? {
             ...body,
             eventIds: draftEventIds,
+            // The dates the drafted email shows, so the sender records the
+            // occurrence that actually went out.
+            eventOccurrences: draftEventOccurrences,
           }
         : body;
       if (draftId) {
@@ -1100,6 +1107,7 @@ export function ComposeView({
     setHtmlBody("");
     setTextBody("");
     setDraftEventIds([]);
+    setDraftEventOccurrences({});
     setEventIdsDirty(false);
     setSendConfirmId(null);
     setScheduleAt("");
@@ -1148,6 +1156,7 @@ export function ComposeView({
     // Mark dirty so the next save (POST or PATCH) writes the new set — covers
     // re-drafting an already-saved campaign with a different event lineup.
     setDraftEventIds(Array.isArray(res.eventIds) ? res.eventIds : []);
+    setDraftEventOccurrences(res.eventOccurrences || {});
     setEventIdsDirty(true);
     // Always sync — `template` is null when operator picks "Free-form" in
     // the modal, and we want that to clear the prior selection so the

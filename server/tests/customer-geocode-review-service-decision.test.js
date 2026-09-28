@@ -1,4 +1,4 @@
-const { serviceReviewDecision } = require('../services/customer-geocode-review');
+const { needsCoordinatePairRepair, serviceReviewDecision } = require('../services/customer-geocode-review');
 
 const review = {
   customer_id: 'customer-1',
@@ -59,4 +59,13 @@ test('a verified pin blocks when the matching primary pin changed', () => {
   }, {
     ...review, status: 'verified', latitude: 27.5, longitude: -82.5, primary_pin_matches_review: false,
   })).toEqual({ location: null, permanent: true, reason: 'address_review_required' });
+});
+
+test.each([
+  [{ latitude: null, longitude: null }, true],
+  [{ latitude: 27.5, longitude: null }, true],
+  [{ latitude: null, longitude: -82.5 }, true],
+  [{ latitude: 27.5, longitude: -82.5 }, false],
+])('automatic writers repair incomplete coordinate pairs for %p', (location, expected) => {
+  expect(needsCoordinatePairRepair(location)).toBe(expected);
 });

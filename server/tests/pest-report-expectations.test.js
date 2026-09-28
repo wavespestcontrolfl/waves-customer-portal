@@ -111,9 +111,15 @@ describe('buildRainExpectation', () => {
 
   it('adds the forecast heavy-rain caveat only when forecastHeavyRain is true (caller\'s job to gate LIVE-only)', () => {
     const live = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true,
     });
     expect(live.lines[0]).toMatch(/Heavy rain right after a treatment/);
+
+    // No recorded application (inspection / sweep only): no treatment caveat.
+    const untreated = buildRainExpectation({
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
+    });
+    expect(untreated.lines.join(' ')).not.toMatch(/Heavy rain right after a treatment/);
 
     const notLive = buildRainExpectation({
       weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: false,
@@ -161,10 +167,28 @@ describe('buildRainExpectation', () => {
     expect(hedgedOver.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
   });
 
-  it('the LIVE-only forecast heavy-rain signal alone adds the ants line, even with no rain data', () => {
-    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 2, forecastHeavyRain: true });
+  // codex P2 #5137 deferred finding c: settledWeekWeatherForRender
+  // (reports-public.js) drops every open trailing-week window, so a
+  // same-day live report always passes weekWeather: null here. The live
+  // forecast warning must still reach the customer as its OWN line rather
+  // than being silently swallowed by the (unrelated) missing settled total.
+  it('the LIVE-only forecast heavy-rain signal alone adds BOTH its own warning line and the ants line, even with no rain data', () => {
+    const out = buildRainExpectation({ weekWeather: null, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true });
+    expect(out.lines).toHaveLength(2);
+    expect(out.lines[0]).toMatch(/Heavy rain right after a treatment/);
+    expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+  });
+
+  it('an inspection- or sweep-only visit gets no treatment caveat from the forecast alone — only the neutral ants line', () => {
+    const out = buildRainExpectation({ weekWeather: null, products: [], serviceMonth: 2, forecastHeavyRain: true });
     expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(out.lines[0]).not.toMatch(/treatment/);
+    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors for a few days/);
+  });
+
+  it('with no rain data and NO forecast signal, no heavy-rain warning line is invented', () => {
+    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 2, forecastHeavyRain: false });
+    expect(out).toBeNull();
   });
 
   it('never claims rain can\'t affect the treatment beyond the label facts', () => {
@@ -816,6 +840,48 @@ describe('buildSpiderExpectation', () => {
     expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
   });
 
+  // codex P2 #5137 deferred finding b: "Completed the recorded eave and
+  // soffit service." (client/src/lib/service-completion-choices.js's
+  // "serviced-eaves" choice) names the eaves but records no web-removal
+  // work at all — it matched SPIDER_ACTION_RE (and so opened the section)
+  // purely because it contains "eave"/"soffit". Selecting it alone must no
+  // longer produce "We knocked down webs around the eaves and entry
+  // points." with nothing to back up that webs were ever touched.
+  describe('a location-only eave-service action records no web removal (codex P2 deferred finding b, #5137)', () => {
+    const EAVE_SERVICE_ONLY = ['Completed the recorded eave and soffit service.'];
+
+    it('no card at all — no residual, no web-removal wording of any kind', () => {
+      const out = buildSpiderExpectation({ actionLabels: EAVE_SERVICE_ONLY, applications: [] });
+      expect(out).toBeNull();
+    });
+
+    it('still no card even with a spider-labeled pyrethroid residual applied at the eaves — the "knocked down webs" claim needs web-removal evidence, not just a treatment', () => {
+      const out = buildSpiderExpectation({
+        actionLabels: EAVE_SERVICE_ONLY,
+        applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }],
+      });
+      expect(out).toBeNull();
+    });
+
+    it('paired with an actual web-removal action ("removed-webs"), the section renders with the eave-named wording as before', () => {
+      const out = buildSpiderExpectation({
+        actionLabels: [...EAVE_SERVICE_ONLY, 'Removed accessible webs from the recorded exterior areas.'],
+        applications: [],
+      });
+      expect(out).not.toBeNull();
+      expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    });
+
+    it('the protocol library\'s "Swept eaves, window frames, door frames, and lanai" action still counts as web-removal evidence (sweeping IS the act)', () => {
+      const out = buildSpiderExpectation({
+        actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
+        applications: [],
+      });
+      expect(out).not.toBeNull();
+      expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    });
+  });
+
   it('never guarantees a result, in either combo', () => {
     const combos = [
       buildSpiderExpectation({ actionLabels: EAVE_ACTION, applications: [] }),
@@ -851,6 +917,21 @@ describe('buildPestExpectations — composition', () => {
     expect(out.spiders.headline).toBe('Spiders');
     expect(out.spiders.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
     expect(out.whatToExpect.lines[0]).toMatch(/Non-repellent/);
+  });
+
+  // codex P2 #5137 deferred finding c: a same-day live report with an open
+  // trailing-week window passes weekWeather: null all the way through
+  // buildReportV1Data / reports-public.js's settledWeekWeatherForRender —
+  // the composed `rain` key must still surface the live forecast warning.
+  it('surfaces the rain key from the live forecast signal alone, with no settled weekly total', () => {
+    const out = buildPestExpectations({
+      weekWeather: null,
+      applications: [{ product: { name: 'Demand CS' }, targets: [] }],
+      actionLabels: [],
+      serviceMonth: 2,
+      forecastHeavyRain: true,
+    });
+    expect(out.rain.lines[0]).toMatch(/Heavy rain right after a treatment/);
   });
 });
 

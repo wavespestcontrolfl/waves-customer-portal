@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -4669,9 +4669,38 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // and voids the remaining safe open invoices so completion re-mints at
 // the new price instead of collecting a stale amount (completion reuses a
 // non-void invoice by scheduled_service_id).
-async function propagatePriceServiceToFollowingSiblings(conn, {
-  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+// The 'following' propagation's lock-and-refuse phase, split out so
+// update-details can run it BEFORE its first route-owned write and the
+// Bill-To combined-session Stripe cancel (Codex r4 P1 on #5253): a refusal
+// here rolls the transaction back, but a Stripe cancel cannot roll back.
+// propagatePriceServiceToFollowingSiblings runs it again on the same
+// inputs — row locks and xact advisory locks are re-entrant, so the second
+// pass only re-checks. Returns the locked sibling targets.
+async function lockAndGuardFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged,
 }) {
+  // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
+  // estimated_price below whenever billingRelevant, so each affected sibling
+  // is a repricing write like the edited visit itself — same invoice-mint
+  // race, same fix. Every mint path takes ['schedule.invoice.mint', id]
+  // BEFORE its own visit-row FOR UPDATE (acquireScheduledMintLockChain); the
+  // targetQuery just below already FOR UPDATEs every sibling row up front
+  // (see its own comment), which already blocks a concurrent mint's row
+  // lock — and each sibling's mint lock is also taken (below), so no mint
+  // on a sibling can be mid-flight while its price is rewritten.
+  //
+  // TRY, never the blocking acquire (pre-push audit P1): this call already
+  // runs with the EDITED visit's own mint lock held (taken earlier in
+  // update-details' transaction, before this function is ever reached), so
+  // waiting here for a sibling's lock risks a real ABBA deadlock — a second
+  // concurrent 'following' save on an overlapping part of the same series
+  // can hold that sibling's lock while it waits on the edited visit's,
+  // which this save already holds. A non-blocking try, sorted by id, turns
+  // that into a clean, immediate refusal instead — the whole save rolls
+  // back and the operator retries. The ids come from targetQuery's LOCKED
+  // read below (a second pre-audit P1: an unlocked candidate read could miss
+  // a sibling that joins the set in between); a try never waits, so taking
+  // it after the row locks cannot deadlock.
   const targetQuery = conn('scheduled_services')
     .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
     .where('is_recurring', true)
@@ -4685,9 +4714,35 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     // found nothing — the later UPDATE would just wait, then leave that
     // fresh invoice live and stale. Advisory locks (maintenance + comms)
     // are already held, keeping the advisory-then-rows order.
-    .forUpdate();
+    // NOWAIT (Codex r6 P2 on #5253): this txn already holds its edited
+    // row, so waiting on a peer row can close a cycle with a concurrent
+    // 'following' save from a same-day sibling — Postgres would abort one
+    // side as a raw deadlock. Contention maps to the same retry response
+    // as the sibling mint try-locks below.
+    .forUpdate()
+    .noWait();
   if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
-  const targets = await targetQuery;
+  let targets;
+  try {
+    targets = await targetQuery;
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw Object.assign(
+      new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+      { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+    );
+  }
+  if (priceChanged || serviceChanged) {
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    for (const id of targets.map((row) => String(row.id)).sort()) {
+      if (!(await tryAcquireScheduledInvoiceMintLock(conn, id))) {
+        throw Object.assign(
+          new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+          { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+        );
+      }
+    }
+  }
   // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
   // invoices describe the old service by line item, and a service-scoped
   // appointment discount keys off the service identity — so the invoice
@@ -4706,7 +4761,12 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
     // rationale): a partially applied reprice would leave the office
     // believing a series was repriced while paid visits kept old numbers.
-    const covered = await findBillingCoveredVisits(conn, guardRows);
+    // liveInvoice: this writes siblingUpdates.estimated_price below, so it
+    // is a repricing path too, not just the direct invoice-presence probe
+    // the loop runs next — a sibling whose live invoice is linked only
+    // through its service record or a combined-visit packet must refuse
+    // here for the same reason the single-visit repricing guard does.
+    const covered = await findBillingCoveredVisits(conn, guardRows, { liveInvoice: true });
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = guardRows.find((visit) => visit.id === firstId);
@@ -4743,6 +4803,16 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       }
     }
   }
+  return targets;
+}
+
+async function propagatePriceServiceToFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+}) {
+  const targets = await lockAndGuardFollowingSiblings(conn, {
+    editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged,
+  });
+  const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
   // bare so an operational failure aborts the save (see below).
   const addonTableExists = billingRelevant && targets.length > 0
@@ -12923,6 +12993,32 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         );
       }
     }
+    // Repricing guard (owner ruling 2026-09-28): a visit's price cannot
+    // change while money is already committed on it at the OLD price —
+    // staff void/release that first. The one exemption is a FREE re-service
+    // conversion (reServiceConversionZeroPrice, above), which voids this
+    // visit's own open invoices as part of the SAME save, so there is
+    // nothing stale left for the new $0 to collide with.
+    //
+    // `priceEditPosted` is ONLY "does this save's plan touch price at all" —
+    // a question about the posted request, not the stored row, so it needs
+    // no DB read and can't go stale. It decides whether to take the mint
+    // lock at all. Whether the price actually CHANGES (and so whether the
+    // coverage check has to run) is decided ONLY inside the transaction,
+    // after that lock is held — a pre-transaction row read here would be a
+    // TOCTOU: a concurrent save could change the row's price between that
+    // read and this transaction taking the mint lock, and comparing against
+    // the stale value could skip the refusal on a save that races in with
+    // the real committed-money conflict (pre-push audit P1, this PR).
+    // Every anchored price-authority key counts, not only estimated_price:
+    // under a stamped $0, dropping primary_line_price alone changes what the
+    // visit bills (hasAuthoritativeZeroPrice), so it is a re-price too.
+    const postedPriceKeys = [...ANCHORED_PRICE_AUTHORITY_KEYS].filter((key) => updates[key] !== undefined);
+    const priceEditPosted = postedPriceKeys.length > 0;
+    // A service change re-describes the visit's invoice lines, so it takes
+    // the mint lock too (Codex r1 P1 on #5253): a concurrent mint then waits
+    // and builds from the new service. The refusal itself stays price-only.
+    const serviceEditPosted = updates.service_id !== undefined || updates.service_type !== undefined;
     // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
     // catalog ids this save ADDS — the resolved primary service and any
     // add-on line not already on the visit. A grandfathered visit that keeps
@@ -13157,7 +13253,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // here — after the occupancy rung (slot-reservation's order) and
       // before any row lock — so the two run strictly one after the other
       // whichever starts first.
-      if (reServiceConversionZeroPrice) {
+      //
+      // A plain repricing save takes the SAME lock, for a different race
+      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
+      // minting path takes this lock before it mints, so acquiring it here
+      // — before the findBillingCoveredVisits check just below, and before
+      // this visit's own scheduled_services row is ever locked or written —
+      // means no invoice can be minted at the OLD price while this save is
+      // deciding whether to allow the new one. Held through the write below
+      // (transaction-scoped advisory lock — released on commit/rollback).
+      // Gated on `priceEditPosted` (the request shape), never on a
+      // pre-transaction DB comparison — see its own comment above.
+      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
         const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
         await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
@@ -13408,6 +13515,148 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           throw Object.assign(new Error('This appointment changed while saving — reload and save again.'), {
             statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'ROW_VERSION_DRIFT',
           });
+        }
+      }
+
+      // The repricing refusal (owner ruling 2026-09-28): decided HERE, under
+      // this visit's row lock — taken now if nothing above took it
+      // (re-entrant otherwise), after the customer row lock (ordering
+      // contract) — and BEFORE the first route-owned write and the Bill-To
+      // session release further down (the first Stripe cancel this route can
+      // reach; see "EVERY refusal is decided BEFORE the first Stripe
+      // cancel"). The mint lock taken above keeps every invoice minter out;
+      // the row lock serializes the writers that commit money without it — a
+      // hand prepayment, an annual-prepay term stamp, a card hold or a
+      // card-fee capture all write this row (Codex r1 P1 + parallel review on
+      // #5253). The row's CURRENT price is read under these locks, never
+      // before the transaction.
+      // A free re-service conversion is a re-price like any other (owner
+      // ruling 2026-09-28 on #5253 r3): ANY live invoice blocks it — direct,
+      // service-record, packet, or a line already on a payer statement —
+      // and staff void or release first. Its own void cleanup below never
+      // sees indirect links and skips frozen statement lines, so waiving
+      // even the direct ones left old-price money on a $0 visit. A
+      // series-wide conversion zeroes every upcoming sibling too, so each of
+      // those is locked and guarded the same way here, before the first
+      // write and the Bill-To Stripe cancel (Codex r3 P1).
+      if (priceEditPosted) {
+        const priceGuardCols = await trx('scheduled_services').columnInfo();
+        const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
+        if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
+        if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
+        if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
+        const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
+        const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
+        if (priceActuallyChanging) {
+          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
+          const estimateReason = covered.size > 0 ? null
+            : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
+          if (covered.size > 0 || estimateReason) {
+            const reason = estimateReason || [...covered.entries()][0][1];
+            throw Object.assign(
+              httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
+              { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+            );
+          }
+          // A /secure card confirmation mid-finish ('completing') is not
+          // durable yet, so the rails above can't see it (Codex r8 P1 on
+          // #5253). Refuse with a retry rather than race it. The consent
+          // amount itself is LEAST-stamped at render and caps the charge, so
+          // a confirmation that lands after this save can never charge more
+          // than the customer was shown.
+          if (await trx.schema.hasTable('appointment_card_requests')) {
+            const finishing = await trx('appointment_card_requests')
+              .where({ scheduled_service_id: req.params.id, status: 'completing' })
+              .first('id');
+            if (finishing) {
+              throw Object.assign(
+                new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            }
+          }
+        }
+      }
+      // The series-wide free conversion's sibling set — exactly the rows the
+      // conversion block below zeroes: a TEMPLATE edit (no
+      // recurring_parent_id), not scoped this_only, upcoming pending/
+      // confirmed children. Rows locked FOR UPDATE by id, then each mint lock
+      // TRIED (never waited on — this save already holds the edited visit's
+      // mint lock; same ABBA reasoning as the 'following' propagation).
+      if (reServiceConversionZeroPrice
+        && !(wantsPriceServiceScope && normalizePriceServiceScope(priceServiceScope) === 'this_only')) {
+        const sibGuardCols = await trx('scheduled_services').columnInfo();
+        const sibSelf = sibGuardCols.recurring_parent_id
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
+          : null;
+        if (sibGuardCols.recurring_parent_id && sibSelf && !sibSelf.recurring_parent_id) {
+          const sibSelect = ['id', 'scheduled_date'];
+          if (sibGuardCols.annual_prepay_term_id) sibSelect.push('annual_prepay_term_id');
+          if (sibGuardCols.prepaid_amount) sibSelect.push('prepaid_amount');
+          const convSiblings = await trx('scheduled_services')
+            .where({ recurring_parent_id: req.params.id })
+            .whereIn('status', ['pending', 'confirmed'])
+            .orderBy('id', 'asc')
+            .forUpdate()
+            .noWait()
+            .select(...sibSelect)
+            // Same NOWAIT → retry mapping as lockAndGuardFollowingSiblings.
+            .catch((err) => {
+              if (err?.code !== '55P03') throw err;
+              throw Object.assign(
+                new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            });
+          if (convSiblings.length > 0) {
+            const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+            for (const id of convSiblings.map((row) => String(row.id)).sort()) {
+              if (!(await tryAcquireScheduledInvoiceMintLock(trx, id))) {
+                throw Object.assign(
+                  new Error('Another change to a later visit in this series is in progress — try again in a moment.'),
+                  { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+                );
+              }
+            }
+            const sibCovered = await findBillingCoveredVisits(trx, convSiblings, { liveInvoice: true });
+            if (sibCovered.size > 0) {
+              const [firstId, reason] = [...sibCovered.entries()][0];
+              const when = convSiblings.find((visit) => visit.id === firstId);
+              throw Object.assign(
+                httpError(409, `Can't convert this series to a free re-service: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Void or release that first, or convert this appointment only.`),
+                { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+              );
+            }
+          }
+        }
+      }
+
+      // The 'following' price/service propagation's sibling locks and
+      // refusals, decided HERE — before the first route-owned write and the
+      // Bill-To combined-session Stripe cancel further down (Codex r4 P1 on
+      // #5253). Same conditions and inputs as the propagation call below;
+      // nothing between here and there writes the edited row's price,
+      // service, date or series fields, so the sibling set is the same.
+      if (wantsPriceServiceScope && !reServiceTransition
+        && normalizePriceServiceScope(priceServiceScope) === 'following') {
+        const earlyBeforeRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        if (earlyBeforeRow && !earlyBeforeRow.is_recurring && earlyBeforeRow.recurring_parent_id) {
+          throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
+        }
+        if (earlyBeforeRow?.is_recurring) {
+          const earlyGroups = computePriceServiceGroupChanges(earlyBeforeRow, updates);
+          if (earlyGroups.changed) {
+            await lockAndGuardFollowingSiblings(trx, {
+              editedId: req.params.id,
+              editedRow: earlyBeforeRow,
+              parentId: earlyBeforeRow.recurring_parent_id || req.params.id,
+              fromDateStr: earlyBeforeRow.recurring_parent_id
+                ? (dateOnly(earlyBeforeRow.scheduled_date) || etDateString())
+                : null,
+              serviceChanged: earlyGroups.serviceChanged,
+              priceChanged: earlyGroups.priceChanged,
+            });
+          }
         }
       }
 
@@ -16004,13 +16253,47 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // lookup failure all refuse the same way, since a MINT decision must fail
 // CLOSED. Returns the structured refusal, or null for a definitive 'none'
 // (nothing to refuse — the ordinary precedence below runs).
-function siblingCoverageRefusal(verdict) {
+// hasOwnPrice (#5237 review P2): a priced visit reaches this only as a
+// stamped covered member, where setting a price is not an escape hatch — the
+// copy must not send staff round the same 409.
+// The 'covered' copy follows the combined invoice's collection state (Codex
+// r5 P2 on #5237) — the schedule sheet's own classifier
+// (collectionStateForCoveredInvoice), never a second one. "Collect on that
+// invoice" only when it is actually collectible from this customer.
+function coveredRefusalMessage(invoice, { hasOwnPrice = false } = {}) {
+  const tail = hasOwnPrice ? ' Completing the visit will not create a new charge.' : '';
+  const state = invoice
+    ? collectionStateForCoveredInvoice(invoice, invoiceAmountDue(invoice))
+    : { state: 'collect_on_combined_invoice', reason: null };
+  if (state.state === 'settled') {
+    if (state.reason === 'invoice_processing') {
+      return `This visit is billed on the combined trip invoice, whose payment is still processing — do not collect again; verify it settles.${tail}`;
+    }
+    if (state.reason === 'payer_billed' || state.reason === 'withdrawn_from_customer') {
+      return `This visit is billed on the combined trip invoice, which is billed to a third-party payer — do not collect from the customer.${tail}`;
+    }
+    return `This visit is billed on the combined trip invoice, which is already paid — do not collect again.${tail}`;
+  }
+  return hasOwnPrice
+    ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
+    : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.';
+}
+
+function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
   if (verdict.status === 'none') return null;
   if (verdict.status === 'covered') {
     return {
       refused: true,
       reason: 'sibling_invoice_covered',
-      message: 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+      // #5237 review P2: the Invoices page's manual-create endpoint
+      // (admin-invoices.js POST /) only links via serviceRecordId — a
+      // pre-completion visit has none yet, so a "split it off from the
+      // Invoices page" instruction was a dead end that would just 409 on
+      // the next Charge Now. No staff-facing action un-stamps a covered
+      // member today; the honest instructions are collect on the combined
+      // invoice (completing the visit reuses it too — never a second
+      // charge) or have the office adjust the combined invoice by hand.
+      message: coveredRefusalMessage(verdict.invoice, { hasOwnPrice }),
     };
   }
   if (verdict.status === 'needs_review') {
@@ -16055,21 +16338,48 @@ async function resolveScheduledServiceCharge({
   // unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
+  // Priced-covered-member widening (Codex r21 P1 on PR #5021, deferred to
+  // this follow-up — see isSiblingCoverageEligibleVisit's own header,
+  // billing-lane.js): a NON-ANCHOR row staff priced AFTER its trip's
+  // combined invoice already existed must still be asked — only this one
+  // extra DB round trip (itself a no-op DB call for the common unstamped
+  // row — see isPricedCoveredMemberVisit's own fast path), and an anchor's
+  // own priced mint never reaches it (the same predicate keeps anchors out
+  // on their own scheduled_service_id match).
+  const isPricedCoveredMember = hasOwnPrice && svc && dbConn
+    ? await require('../services/estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
   const eligibleForCoverageLookup = isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType, isPricedCoveredMember,
   });
   if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
     try {
-      verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+      // Own-row refund precedence (#5237 review r2 P2): completion checks
+      // THIS VISIT's own refunded invoice BEFORE ever consulting the
+      // sibling group — a priced covered member split off by hand and
+      // refunded still carries the combined-invoice stamp, so the ordinary
+      // sibling verdict below would otherwise report 'covered' on the
+      // (still live) combined invoice while completion parks it for manual
+      // review. Scoped to the priced-covered-member widening only
+      // (isPricedCoveredMember true) — every unpriced-sibling caller is
+      // unaffected. Reuses completion's own classifier
+      // (pricedCoveredMemberOwnRefundHold → completionTerminalInvoiceLookup)
+      // so the two can never disagree.
+      const ownRefund = isPricedCoveredMember
+        ? await require('../services/estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+        : null;
+      verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
     } catch {
       verdict = { status: 'error' };
     }
-    const refusal = siblingCoverageRefusal(verdict);
+    const refusal = siblingCoverageRefusal(verdict, { hasOwnPrice });
     if (refusal) return refusal;
   }
-  // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
-  // here. The unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
+  // Owner ruling — REFUSE AFTER A VOID: an ordinary priced row (not a
+  // confirmed priced covered member, which the gate above already sent
+  // through the sibling verdict — #5237) is never refused here. The
+  // unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
   // already covers "the combined invoice died" — a priced visit's own mint
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
@@ -16148,10 +16458,36 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+  // Shape-only eligibility, PRICE-BLIND (Codex r2 P1 on 2ac5813cf0): the
+  // route's own pre-lock read of svc can be stale by the time this mint
+  // transaction's row lock (acquireScheduledMintLockChain, ahead of this
+  // recheck) actually commits — reconcileRecentUnstampedAccepts /
+  // stampGroupRevalidated can stamp a priced sibling in exactly that
+  // window. Deciding "maybe a covered member" from svc's OWN captured
+  // first_application_invoice_id column (as this used to) missed that
+  // race outright: a not-yet-stamped snapshot returned null here and the
+  // mint proceeded with NO in-lock recheck at all. So this outer gate no
+  // longer looks at price or the stamp at all — every visit whose SHAPE
+  // (estimate-linked, not a callback, not an always-free type) could ever
+  // carry a stamp gets the closure below; the closure alone decides,
+  // re-reading the stamp FRESH under the lock every time.
   if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
   return async (trx) => {
+    if (hasOwnPrice) {
+      const { isPricedCoveredMemberVisit } = require('../services/estimate-first-application-invoice');
+      // A NARROW shape ({id} only — no first_application_invoice_id key)
+      // forces readFirstApplicationStamp's own by-id fallback read instead
+      // of its fast path off svc's stale pre-lock object (that fast path
+      // is exactly what let the race above through): the row this trx
+      // already holds FOR UPDATE makes this read authoritative.
+      const isPricedCoveredMember = await isPricedCoveredMemberVisit({ id: svc?.id }, trx);
+      if (!isSiblingCoverageEligibleVisit({
+        sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+        isPricedCoveredMember,
+      })) return;
+    }
     let recheck;
     try {
       // noWait (codex round-6 P1): this recheck runs AFTER
@@ -17233,7 +17569,48 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // with a fee preview and waiver control — the dispatch series cancel — where
 // a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
 // term, prepaid_amount, an invoice holding money) is checked either way.
-async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
+// `liveInvoice` (repricing guard, PUT /:id/update-details): also count ANY
+// live attached invoice that hasn't taken money yet — a draft never sent, a
+// sent/viewed/overdue invoice sitting unpaid, or a $0 one — because
+// completion and Charge Now reuse it at the OLD price.
+// It also discovers invoices linked through a service record or a
+// combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
+// on an indirectly linked invoice blocks too. A free re-service conversion
+// gets no exemption (owner ruling 2026-09-28, #5253 r3: "same rule as any
+// re-price") — staff void or release first. None of the three
+// existing callers (the plan trim, the series-cancel fee rails, the price/
+// service sibling propagation before this option was threaded onto it) ever
+// needed to know about an invoice nobody has paid — so this stays opt-in,
+// default false, keeping every pre-existing call byte-identical.
+// Money committed at the ESTIMATE level for a visit created or adopted from
+// one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
+// keys on the visit: a received, not-yet-applied estimate deposit (keyed by
+// estimate_id; read under the deposit-ledger lock so a concurrent receipt
+// can't slip between this check and the price write), and an annual-prepay
+// term still payment_pending whose prepay invoice is live (a pending term
+// deliberately stamps nothing onto its visits until payment). Returns a
+// refusal reason, or null.
+async function findEstimateScopedCommitment(conn, estimateId) {
+  if (!estimateId) return null;
+  if (await conn.schema.hasTable('estimate_deposits')) {
+    const Deposits = require('../services/estimate-deposits');
+    await Deposits.acquireEstimateDepositLedgerLock(conn, estimateId);
+    const pending = await Deposits.pendingDepositCredit(estimateId, conn);
+    if (pending && pending.amount > 0) return 'carrying an estimate deposit that has not been applied yet';
+  }
+  if (await conn.schema.hasTable('annual_prepay_terms')) {
+    const term = await conn('annual_prepay_terms as t')
+      .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+      .where('t.source_estimate_id', estimateId)
+      .where('t.status', 'payment_pending')
+      .whereNotIn('inv.status', ['void', 'refunded', 'canceled', 'cancelled'])
+      .first('t.id');
+    if (term) return 'on an annual prepay invoice that is still open at the old price';
+  }
+  return null;
+}
+
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -17326,7 +17703,47 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
     const invoiced = await conn('invoices')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
-      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id');
+      .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+    // liveInvoice also reaches an invoice
+    // this visit carries WITHOUT its own
+    // invoices.scheduled_service_id — the two indirect links the repricing
+    // guard has to check because the direct query above misses them:
+    //   • service-record-linked — most post-completion invoices carry ONLY
+    //     service_record_id, never scheduled_service_id (invoice.js, and
+    //     invoice-issued-closeout's linkedVisitForInvoice, which resolves a
+    //     visit the very same way for the reverse lookup).
+    //   • a combined-visit packet invoice — ONE invoice bills several
+    //     visits; only the packet's anchor gets invoices.scheduled_service_id,
+    //     every other billed member is findable only through its own
+    //     visit_completion_packet_items row (scheduled_service_id → invoice_id).
+    // Both are read only under this option — the pre-existing callers never
+    // asked "does this visit carry an unpaid invoice at all," only "has
+    // money already moved," so widening the match set here would change
+    // their answer for a case they were never built to consider.
+    if (liveInvoice) {
+      if (await conn.schema.hasTable('service_records')) {
+        const srLinked = await conn('invoices as inv')
+          .join('service_records as sr', 'sr.id', 'inv.service_record_id')
+          .whereIn('sr.scheduled_service_id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'sr.scheduled_service_id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...srLinked);
+      }
+      if (await conn.schema.hasTable('visit_completion_packet_items')) {
+        const packetLinked = await conn('visit_completion_packet_items as p')
+          .join('invoices as inv', 'inv.id', 'p.invoice_id')
+          .whereIn('p.scheduled_service_id', ids)
+          .whereNotIn('inv.status', [...NO_MONEY_HELD])
+          .select(
+            'p.scheduled_service_id as scheduled_service_id',
+            'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
+          );
+        invoiced.push(...packetLinked);
+      }
+    }
     const hasDepositCreditLine = (items) => {
       try {
         const arr = typeof items === 'string' ? JSON.parse(items) : items;
@@ -17350,6 +17767,14 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
         // conservative: no Stripe round-trip in a refusal path, and an
         // already-dead PI just means the operator voids the invoice first.
         mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
+      } else if (liveInvoice) {
+        // Nothing above fired, yet a live invoice is attached: a draft never
+        // sent, a sent/viewed/overdue invoice sitting unpaid, or a $0 one.
+        // Completion and Charge Now reuse any live attached invoice, so it
+        // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
+        // the same "any live invoice" rule the sibling propagation already
+        // applies (Codex #3505 r7, owner decision).
+        mark(inv.scheduled_service_id, 'attached to an invoice that is still open at the old price');
       }
     }
   }
@@ -20627,6 +21052,24 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         // just the facts: a served brief's cached access codes must not
         // reach the former technician once the recheck has the signal.
         if (!stillOwned) return { brief: null };
+        // "Seen" stamp for the customer-flagged photos (PR 3a): same
+        // fire-and-forget, whereNull-guarded, first-time-only pattern as
+        // pest_identifications.report_first_viewed_at
+        // (public-pest-identifier.js) — never adds latency or failure to
+        // the brief read, and the guard makes concurrent reads idempotent.
+        // ASSIGNED-TECHNICIAN reads only (isTechnicianRequest): an
+        // admin/dispatcher previewing the same stop must not mark a
+        // customer's photos "seen" before the technician has actually
+        // opened them. Runs only after the reassignment recheck above
+        // confirms this request still owns the stop.
+        if (isTechnicianRequest(req) && facts.customerFlagged?.length) {
+          const submissionIds = facts.customerFlagged.map((c) => c.id);
+          void db('visit_prep_submissions')
+            .whereIn('id', submissionIds)
+            .whereNull('tech_seen_at')
+            .update({ tech_seen_at: db.fn.now() })
+            .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
+        }
         return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
@@ -20662,6 +21105,38 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     res.json(await withFacts(served));
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-prep-photos
+// Short-lived signed VIEW urls for the stop's customer-sent visit-prep
+// photos (PR 3a — the tech Visit Brief panel's "Customer flagged"
+// thumbnails). Gate off (GATE_VISIT_PREP_PHOTOS) = 404, same generic shape
+// every other gated route in this lane answers with. Authorization is
+// EXACTLY GET /:id/visit-brief's own model: one ownership-scoped fetch
+// (technicianCurrentVisitFilter — a technician request is scoped to their
+// OWN current assignment; an admin/office request is unscoped) plus a
+// reassignment recheck AFTER the (S3-signing) work, since dispatch can
+// reassign the stop while those signed urls are being minted — a former
+// technician must never receive a batch of live links into a customer's
+// home.
+router.get('/:id/visit-prep-photos', async (req, res, next) => {
+  try {
+    const { visitPrepPhotosLive } = require('../config/feature-gates');
+    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Not found' });
+    const VisitPrep = require('../services/visit-prep');
+    const photos = await VisitPrep.stopPhotoViewUrls(svc);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Not found' });
+    res.json({ photos });
   } catch (err) { next(err); }
 });
 
@@ -25367,6 +25842,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a
@@ -25557,6 +26033,7 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB
 // create_appointment proposal and executor for its single visit
 // (ADMIN-BUG-R12), same avoid-a-route-load-cycle reason as above.

@@ -79,7 +79,11 @@ describe('factor clamping', () => {
 
   test('spec penalty values hold: class -15, retail -25, screening -10', () => {
     expect(PENALTY_VALUES).toEqual({ generic_class: 15, retail_promo: 25, ordinary_screening: 10 });
-    expect(DERIVED_PENALTY_VALUES).toEqual({ short_notice: 10, missing_price: 8, unclear_age: 5 });
+    // missing_price / unclear_age removed 2026-09-27 (owner ruling) — feeds
+    // rarely carry price/age, so both penalties fired on most well-formed
+    // events and were the largest reason auto-curation approved almost
+    // nothing. Only short_notice remains.
+    expect(DERIVED_PENALTY_VALUES).toEqual({ short_notice: 10 });
   });
 });
 
@@ -93,15 +97,13 @@ describe('derived penalties', () => {
     expect(derivedPenalties(soon)).toContain('short_notice');
   });
 
-  test('no price signal → missing_price; explicit free or price_text clears it', () => {
-    expect(derivedPenalties({ ...CLEAN_EVENT, is_free: null, price_text: null })).toContain('missing_price');
-    expect(derivedPenalties({ ...CLEAN_EVENT, is_free: false, price_text: '$20/day' })).not.toContain('missing_price');
-    expect(derivedPenalties({ ...CLEAN_EVENT, is_free: true, price_text: null })).not.toContain('missing_price');
-  });
-
-  test('unknown family suitability → unclear_age; an explicit false is still known', () => {
-    expect(derivedPenalties({ ...CLEAN_EVENT, family_friendly: null })).toContain('unclear_age');
-    expect(derivedPenalties({ ...CLEAN_EVENT, family_friendly: false })).not.toContain('unclear_age');
+  // missing_price / unclear_age removed 2026-09-27 — a missing price or
+  // family-suitability signal is no longer penalized (it's a feed gap, not
+  // evidence of a low-quality event).
+  test('no price signal and unknown family suitability no longer derive a penalty', () => {
+    expect(derivedPenalties({ ...CLEAN_EVENT, is_free: null, price_text: null })).toEqual([]);
+    expect(derivedPenalties({ ...CLEAN_EVENT, family_friendly: null })).toEqual([]);
+    expect(derivedPenalties({ ...CLEAN_EVENT, is_free: null, price_text: null, family_friendly: null })).toEqual([]);
   });
 });
 
@@ -116,8 +118,18 @@ describe('computeEditorialScore', () => {
       scores: { specialness: 10 },
       penalty_flags: ['retail_promo'],
     });
-    // 10 - 25 - 8 → floored at 0
-    expect(computeEditorialScore(normalized, ['missing_price'])).toBe(0);
+    // 10 - 25 - 10 (short_notice) → floored at 0
+    expect(computeEditorialScore(normalized, ['short_notice'])).toBe(0);
+  });
+
+  // A row scored before 2026-09-27 can still carry a stored 'missing_price'
+  // / 'unclear_age' flag in score_breakdown.derived_penalty_flags (audit
+  // history). Rescoring it with the retired flags must not re-apply their
+  // old point values — computeEditorialScore silently treats any unknown
+  // flag as zero penalty, so old flags become inert rather than erroring.
+  test('a retired derived-penalty flag from an old stored breakdown is inert (no penalty)', () => {
+    const normalized = normalizeAssessment({ scores: PERFECT_SCORES });
+    expect(computeEditorialScore(normalized, ['missing_price', 'unclear_age'])).toBe(100);
   });
 
   test('a strong event with one penalty lands where the arithmetic says', () => {

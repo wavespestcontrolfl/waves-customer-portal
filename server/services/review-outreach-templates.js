@@ -27,13 +27,26 @@
  * that sends.
  */
 
+// {sender} when no technician resolves: the company speaks ("Hi Sam! It's
+// Waves. If we earned it…"), never a person's name and never the full
+// "Waves Pest Control" (owner rulings 2026-09-28). "It's Waves" is a whole
+// sentence, so it only fits where {sender} stands alone as one ("Hi Sam!
+// {sender}. If…"); an operator-edited body that uses {sender} inside a
+// sentence ("this is {sender}.", "{sender} here.") gets the bare name.
+const SENDER_FALLBACK = "It's Waves";
+const SENDER_FALLBACK_IN_SENTENCE = 'Waves';
+// Stands alone = the start, . ! ? or a new line before it and . ! ?, a new
+// line or the end after it, with any spaces or tabs in between.
+const SENTENCE_START_RE = /(?:^|[.!?]|\n)[ \t]*$/;
+const SENTENCE_END_RE = /^[ \t]*(?:[.!?]|\n|$)/;
+
 const OUTREACH_TEMPLATES = [
   {
     // The cadence's Day-0 ask (owner decision 2026-09-07, a narrow revision of
     // the 2026-07-30 personalized-drafting spec for THIS touch only): composed
     // from verified fields — the recipient's first name, the technician on the
-    // completed service ({sender} = "<tech> with Waves", or "Waves Pest
-    // Control" when no tech resolves), the tokenized link, and the uniform
+    // completed service ({sender} = "<tech> with Waves", or SENDER_FALLBACK
+    // "It's Waves" when no tech resolves), the tokenized link, and the uniform
     // reply invite everyone gets. Day-agnostic on purpose: the smart send
     // window and quiet hours can carry the ask past midnight, and a "today"
     // written at 8 PM read wrong at 8 AM. No service label — with the reply
@@ -247,7 +260,7 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     tech: vars.tech || 'Your tech',
     // Sender identity from the record: the technician's first name when one
     // resolves, else the company — never a hardcoded person.
-    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : 'Waves Pest Control'),
+    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : SENDER_FALLBACK),
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',
@@ -256,10 +269,15 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     .replace(/\{first\}/g, v.first)
     .replace(/\{name\}/g, v.name)
     .replace(/\{tech\}/g, v.tech)
-    .replace(/\{sender\}/g, v.sender)
     .replace(/\{service_type\}/g, v.service_type)
     .replace(/\{review_url\}/g, v.review_url)
-    .replace(/\{date\}/g, v.date);
+    .replace(/\{date\}/g, v.date)
+    // Last, so the sentence check reads the finished words around {sender}.
+    .replace(/\{sender\}/g, (token, offset, text) => (
+      v.sender === SENDER_FALLBACK
+        && !(SENTENCE_START_RE.test(text.slice(0, offset)) && SENTENCE_END_RE.test(text.slice(offset + token.length)))
+        ? SENDER_FALLBACK_IN_SENTENCE
+        : v.sender));
 
   // Safety net: if a link is required but the body no longer contains it
   // (operator deleted the token while editing), append it so the ask is never
@@ -285,4 +303,5 @@ module.exports = {
   isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,
+  SENDER_FALLBACK,
 };

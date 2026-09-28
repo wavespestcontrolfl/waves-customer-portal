@@ -265,6 +265,20 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     expect(captured.self_lint).toEqual({ redrafts: 2, cap_reached: true });
   });
 
+  test('a draft that links a competitor, in the body or a frontmatter field, is sent back — nothing rewrites it (owner rulings 2026-09-28)', async () => {
+    for (const [sid, frontmatter, body] of [
+      ['lint-8', { title: 'T' }, `${CLEAN_BODY} Compare [one local guide](https://www.turnerpest.com/ants).`],
+      ['lint-9', { title: 'T', next_steps: [{ label: 'See plans', href: 'https://or\tkin.com/plans' }] }, CLEAN_BODY],
+    ]) {
+      registerSessionLint(sid, {});
+      const r = await executeBriefTool('emit_draft', { frontmatter, body }, { sessionId: sid });
+      expect(r.draft_rejected).toBe(true);
+      expect(r.directives.join(' ')).toMatch(/competitor/i);
+      expect(getDraft(sid)).toBeNull();
+      clearDraft(sid);
+    }
+  });
+
   test('a supporting-blog session redraft also carries the optional citability signals (5013 Codex r2 P2)', async () => {
     registerSessionLint('lint-5', {}, { citabilityBrief: { page_type: 'supporting-blog' } });
     const r = await executeBriefTool('emit_draft', {
