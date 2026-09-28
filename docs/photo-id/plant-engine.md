@@ -22,7 +22,7 @@ identity answer ("We're pretty sure: Purple Nutsedge").
 
 ```js
 const { identifyPlantV2 } = require('./plant-engine');
-const { ok, v2, internal, error } = await identifyPlantV2({
+const { ok, v2, internal, reason } = await identifyPlantV2({
   photos, subject, chips, context, now, mode, // mode: 'workup' (default) | 'identify'
 });
 ```

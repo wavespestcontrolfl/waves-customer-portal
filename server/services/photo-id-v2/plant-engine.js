@@ -1138,7 +1138,10 @@ function buildWorkup(ctx) {
     answer,
     observed: observedFor(approvedPossibilities),
     possibilities: approvedPossibilities.map(possibilityBlockFor),
-    evidence: { photos: photosCount, chips, account: accountTurf ? { grass_type: accountTurf.slug } : {} },
+    // The account turf's slug names it, so it is echoed only once its entry is
+    // owner-approved — the same gate that keeps a draft out of `subject.plant`
+    // (Codex #5186 r8 P2).
+    evidence: { photos: photosCount, chips, account: accountTurf && isApproved(accountTurf) ? { grass_type: accountTurf.slug } : {} },
     settle_it: settleIt,
     next_step_hint: nextStepHint,
     referral,
