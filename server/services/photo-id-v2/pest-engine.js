@@ -149,7 +149,7 @@ const UNNAMED_NEXT_PHOTO = Object.freeze({
 // columns are derived from all of them, never from one group's own text.
 const NODE_MEMBERS = (() => {
   const members = new Map();
-  for (const entry of catalog.listEntries()) {
+  for (const entry of catalog.listEntries({ section: 'pest' })) {
     for (const { id } of catalog.lineage(entry.slug)) {
       if (!members.has(id)) members.set(id, []);
       members.get(id).push(entry);
@@ -192,7 +192,7 @@ function clausesFor(entry) {
 // An unknown answer (no node) could be anything, so it is triaged for the
 // whole catalog.
 function unnamedSafetyLineFor(nodeId) {
-  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries();
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : catalog.listEntries({ section: 'pest' });
   const extra = new Set(members.flatMap(clausesFor));
   if (nodeId && !extra.size && !members.some(keepsDistance)) return null;
   return [
@@ -866,7 +866,7 @@ function lookAlikeEdges(entry, shownKind = null) {
   if (!entry) return [];
   const others = [
     ...(entry.look_alikes || []).map((la) => la.slug),
-    ...catalog.listEntries().filter((o) => (o.look_alikes || []).some((la) => la.slug === entry.slug)).map((o) => o.slug),
+    ...catalog.listEntries({ section: 'pest' }).filter((o) => (o.look_alikes || []).some((la) => la.slug === entry.slug)).map((o) => o.slug),
   ];
   const seen = new Set();
   const edges = [];
@@ -1446,7 +1446,7 @@ async function identifyPestV2(photos = []) {
   const images = toImages(photos);
   if (!images.length) return { ok: false, reason: 'no_photos' };
 
-  const catalogEntries = catalog.listEntries();
+  const catalogEntries = catalog.listEntries({ section: 'pest' });
   // One overall wall-clock budget across the (up to three) SEQUENTIAL
   // provider legs, so a stalled candidates or verify call can never starve
   // escalation of its share (Codex round-0 P1, round 4).

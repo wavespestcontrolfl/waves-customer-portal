@@ -1367,3 +1367,56 @@ describe('pre-push audit on Codex #4916 r1: a "nothing" read never backs a named
     expect(result.v2.tier).toBe('needs_more_evidence');
   });
 });
+
+// ── L1 (species-catalog plant/condition sections): the pest engine reads
+// only the pest section. Every `catalog.listEntries()` call site in
+// pest-engine.js became `listEntries({ section: 'pest' })` in that PR — this
+// proves the filter actually excludes a non-pest entry, using a small
+// second fixture catalog (built with the SAME `buildFixtureCatalog` helper,
+// extended with a `section`-aware `listEntries`) rather than touching the
+// shared `FIXTURE` every other test in this file depends on. ─────────────
+describe('L1: pest engine reads only the pest section', () => {
+  const { buildFixtureCatalog } = require('./helpers/pest-engine-fixtures');
+  const { buildCatalogIndexText } = require('../services/photo-id-v2/pest-engine-prompts');
+
+  const mixedSectionCatalog = buildFixtureCatalog({
+    categories: {
+      // No explicit `section` — mirrors every pre-existing pest category,
+      // which defaults to 'pest' (see species-catalog.js#sectionOf).
+      insect: { label: 'Insect', generic: 'an insect' },
+      plant: { label: 'Plant', generic: 'a plant', section: 'plant' },
+    },
+    groups: [
+      { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
+      { id: 'turfgrasses', label: 'Lawn grasses', category: 'plant', generic: 'a lawn grass' },
+    ],
+    entries: [
+      { slug: 'fixture-pest-ant', common_name: 'Fixture Pest Ant', scientific_name: 'Testus pestus', kind: 'organism', group: 'ants', subgroup: null, look_alikes: [] },
+      { slug: 'fixture-plant-entry', common_name: 'Fixture Plant Entry', scientific_name: 'Testus plantus', kind: 'turfgrass', group: 'turfgrasses', subgroup: null, look_alikes: [] },
+    ],
+  });
+
+  test('listEntries({ section: "pest" }) excludes a plant-section entry', () => {
+    const pestOnly = mixedSectionCatalog.listEntries({ section: 'pest' });
+    expect(pestOnly.map((e) => e.slug)).toEqual(['fixture-pest-ant']);
+  });
+
+  test('the pest engine catalog index text (candidates/escalation prompt input) never names a non-pest entry', () => {
+    const pestOnly = mixedSectionCatalog.listEntries({ section: 'pest' });
+    const text = buildCatalogIndexText(pestOnly);
+    expect(text).toContain('Fixture Pest Ant');
+    expect(text).not.toContain('Fixture Plant Entry');
+    expect(text).not.toContain('turfgrasses');
+  });
+
+  test('listEntries({ section: "pest" }) equals the unfiltered list for the real (today all-pest) catalog data', () => {
+    // The real, un-mocked loader — not the FIXTURE this file mocks
+    // `../services/species-catalog` to. No plant/condition entries exist
+    // yet, so filtering to the pest section must change nothing.
+    const real = jest.requireActual('../services/species-catalog');
+    const all = real.listEntries();
+    const pestOnly = real.listEntries({ section: 'pest' });
+    expect(pestOnly.map((e) => e.slug).sort()).toEqual(all.map((e) => e.slug).sort());
+    expect(pestOnly.length).toBe(239);
+  });
+});
