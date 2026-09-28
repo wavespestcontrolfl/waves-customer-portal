@@ -36,7 +36,6 @@ async function withServer(fn) {
   }
 }
 
-const HEX = 'a'.repeat(64);
 const get = async (base, path) => {
   const res = await fetch(base + path);
   return { status: res.status, headers: res.headers, body: Buffer.from(await res.arrayBuffer()).toString() };

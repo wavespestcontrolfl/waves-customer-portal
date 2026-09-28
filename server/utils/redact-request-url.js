@@ -114,8 +114,8 @@ function redactRequestPath(rawPath) {
     // Link-preview images (routes/og-preview.js): the file segment two
     // levels under /og (/og/<kind>/<token>.jpg) is whatever token a caller
     // put there — the .jpg suffix defeats the generic rules — so it is
-    // always redacted.
-    const ogFile = segments[i - 2] === 'og' && /\.jpg$/i.test(segments[i] || '');
+    // always redacted. Case-insensitive: Express routes /OG/ here too.
+    const ogFile = String(segments[i - 2] || '').toLowerCase() === 'og' && /\.jpg$/i.test(segments[i] || '');
     if (segments[i] && (ogFile || isTokenLikePathSegment(segments[i], segments[i - 1]))) {
       segments[i] = REDACTED;
     }
