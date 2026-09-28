@@ -311,6 +311,28 @@ describe('attemptRecovery codex-fix behaviors', () => {
         expect.objectContaining({ metadata: expect.objectContaining({ status: 'sender_rendered_not_replayed' }) }));
     });
 
+  test.each([
+    ['billing_late_payment_90_day', undefined, true],
+    ['invoice.followup_90_day', 'true', true],
+    ['billing.previsit_balance', undefined, true],
+    ['invoice.followup_30_day', undefined, true],
+    ['invoice.followup_30_day', 'true', false],
+    ['billing_late_payment_60_day', undefined, false],
+  ])('a bounced %s (ladder gate %s) alert says final=%s', async (templateKey, ladder, final) => {
+    if (ladder) process.env.GATE_DUNNING_LADDER_90 = ladder; else delete process.env.GATE_DUNNING_LADDER_90;
+    db.mockImplementation(orderedDb({
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+    }));
+    await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] },
+      { event: 'bounce', type: 'bounce' },
+    );
+    const body = NotificationService.notifyAdmin.mock.calls[0][2];
+    expect(body.includes('contact the customer directly')).toBe(final);
+    expect(body.includes('the next reminder goes to the address on file')).toBe(!final);
+  });
+
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });

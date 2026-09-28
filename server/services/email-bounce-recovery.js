@@ -25,7 +25,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
 const billingReplay = require('./billing-email-provider-replay');
-const { isSenderRenderedEmail } = require('./billing-email-no-replay');
+const { isSenderRenderedEmail, isFinalSenderRenderedEmail } = require('./billing-email-no-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
@@ -1124,9 +1124,14 @@ async function alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customer
   if (stream.startsWith('marketing_')) return;
   const email = String(bouncedEmail || '').trim().toLowerCase();
   if (!email) return;
-  const reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
+  let reasonLabel = status === 'corrected_owned_by_other' && candidate?.corrected
     ? `the likely correction (${candidate.corrected}) already belongs to another customer`
     : (UNRECOVERABLE_REASONS[status] || UNRECOVERABLE_REASONS.no_candidate);
+  // The last notice in its sequence has no next reminder to carry the fixed
+  // address: say so, so fixing the address is not mistaken for enough.
+  if (status === 'sender_rendered_not_replayed' && isFinalSenderRenderedEmail(bouncedMessage)) {
+    reasonLabel = 'it was the final notice, so no later reminder will be sent — contact the customer directly';
+  }
   // Surface the suggested address only when proposing it is actionable (i.e. it
   // wasn't itself suppressed).
   const suggestion = candidate?.corrected

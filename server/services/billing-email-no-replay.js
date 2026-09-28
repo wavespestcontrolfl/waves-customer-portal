@@ -26,4 +26,13 @@ function isSenderRenderedEmail(message) {
   return SENDER_RENDERED_TEMPLATES.has(String(message?.template_key || '').trim());
 }
 
-module.exports = { SENDER_RENDERED_TEMPLATES, isSenderRenderedEmail };
+// A skipped email with no later stage: nothing else re-sends it, so staff
+// must follow up by hand. The Day 30 follow-up is final unless the Day 90
+// ladder (GATE_DUNNING_LADDER_90, read now) carries the invoice on.
+function isFinalSenderRenderedEmail(message) {
+  const key = String(message?.template_key || '').trim();
+  if (key === 'invoice.followup_30_day') return process.env.GATE_DUNNING_LADDER_90 !== 'true';
+  return ['billing_late_payment_90_day', 'invoice.followup_90_day', 'billing.previsit_balance'].includes(key);
+}
+
+module.exports = { SENDER_RENDERED_TEMPLATES, isSenderRenderedEmail, isFinalSenderRenderedEmail };
