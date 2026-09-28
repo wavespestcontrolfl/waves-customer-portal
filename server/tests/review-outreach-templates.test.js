@@ -120,6 +120,7 @@ describe('review outreach templates', () => {
     expect(renderOutreachBody('Hi {first}! {sender}\n\n{review_url}', { first: 'Sam', review_url: 'x.co/r' })).toBe("Hi Sam! It's Waves\n\nx.co/r");
     // The check reads finished words, never an unfilled placeholder.
     expect(renderOutreachBody('{date}. {sender}.', { date: '6/26' })).toBe("6/26. It's Waves.");
+    expect(renderOutreachBody('Hi {first}\n{sender}.', { first: 'Sam' })).toBe("Hi Sam\nIt's Waves.");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 
