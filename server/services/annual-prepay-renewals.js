@@ -7683,7 +7683,7 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
   try {
     const row = await db('invoice_followup_sequences')
       .where({ invoice_id: invoiceId })
-      .first('status', 'last_touch_at', 'next_touch_at');
+      .first('status', 'last_touch_at', 'next_touch_at', 'step_index', 'anchor_at', 'created_at');
     if (!row) return false;
     // A REAL recent send suppresses regardless of status — the FINAL step of
     // a sequence stamps last_touch_at and flips the row to 'completed' in the
@@ -7696,21 +7696,31 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
     if (['paused', 'autopay_hold', 'stopped'].includes(row.status)) return true;
     // 'completed' (sequence exhausted) falls through: the visit-anchored
     // reminder is the only nudge left, so only the recent-touch window above
-    // suppresses it.
-    if (row.status !== 'active') return false;
-    if (row.next_touch_at) {
+    // suppresses it. Under the Day 90 ladder (GATE_DUNNING_LADDER_90) a
+    // sequence finished at the Day 60 or Day 90 step on this open invoice is
+    // resumed by the 10:16 follow-up run (codex #5126 r1), so its touch is
+    // checked like an active one.
+    const ladder90 = process.env.GATE_DUNNING_LADDER_90 === 'true';
+    if (row.status !== 'active' && !(ladder90 && row.status === 'completed')) return false;
+    if (row.next_touch_at || (ladder90 && row.status === 'completed')) {
       // A due touch only suppresses on a day the follow-up cron can actually
       // fire (Tue–Fri per config.sendWindow). A touch that came due over the
       // weekend would otherwise suppress the Sat 3d AND Mon 1d reminders while
       // no dunning ran either day — the customer would reach the visit with no
       // pre-visit contact at all.
       const followupConfig = require('../config/invoice-followups');
+      // The day the touch really fires (codex #5126 r1/r2): this 10:12 check
+      // runs before the follow-up job, which moves a touch between the legacy
+      // and Day 90 ladder cadences (GATE_DUNNING_LADDER_90) as the gate
+      // says, without sending it on the old day. A step past the live
+      // cadence fires nothing.
+      const nextTouchAt = await require('./invoice-followups').liveNextTouchAt(invoiceId, row, now);
       const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
       const today = todayYmd || etDateString(now);
       const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
-      if (sendDays.has(todayEtDow)) {
+      if (nextTouchAt && sendDays.has(todayEtDow)) {
         const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
-        if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
+        if (new Date(nextTouchAt) <= endOfTodayEt) return true;
       }
     }
     return false;

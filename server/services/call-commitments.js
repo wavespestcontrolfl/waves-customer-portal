@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -1441,6 +1441,64 @@ function whereEstimateCustomerOwnership(query, customerId) {
         ))`, [customerId, customerId, customerId, customerId, customerId]);
 }
 
+// The basis of a scheduling promise kept by a booking for its promised slot
+// (resolveFulfillment). The visit is found through the call's CUSTOMER and
+// the slot through inputs a reprocess rewrites, so every refresh judges it
+// again (refreshFulfillment; listSlotKeptCallIds feeds the sweep).
+const SLOT_BOOKING_BASIS = "visit_booked_at_the_promised_time";
+// A visit in one of these is off the books and proves no slot: cancelled,
+// the legacy reschedule's original row, or skipped by the office
+// (scheduled-service-statuses.js; codex #5081 r3 P1, r7 P2).
+const SLOT_OFF_BOOKS_STATUSES = ["cancelled", "canceled", "rescheduled", "skipped"];
+
+// A promise's stated time as a bookable slot — its ET day and minute of the
+// day — or null: no stated time, one labeled a deadline (the latest moment
+// for the action, not an appointment), or one no later than the evidence
+// boundary (nothing left to book).
+function statedSlot(commitment, after) {
+  const at = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
+  if (!at || Number.isNaN(at.getTime()) || at.getTime() <= after.getTime()) return null;
+  const { hour, minute } = etParts(at);
+  return { at, day: etDateString(at), minutes: hour * 60 + minute, time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+}
+
+// A scheduling promise's stated time is usually the appointment itself
+// ("I'll put you on the schedule for around 3"): a visit booked for this
+// customer after the call, and before that time came, FOR exactly that slot
+// — the stated ET day, its arrival window starting at the stated minute — is
+// the promise kept, not a same-customer hint (owner ruling 2026-09-27). The
+// stated time alone is the promised ACTION's timing ("schedule the
+// follow-up after the 3 PM inspection" is a 3 PM floor), so the slot counts
+// only when the call's own V2 extraction CONFIRMED an appointment at that
+// same ET wall clock — extractConfirmedSlot, the booking-miss watchdog's
+// reader: scheduling.status 'confirmed' (a reschedule's proposed time is not
+// one), confirmed_start_at by the booking path's wall-clock rule. A promise
+// whose own time disagrees stays a hint. schedule_visit only; the follow-up
+// pager applies the same slot test to its own evidence (appointmentSlot).
+async function slotBookingProof(conn, commitment, call, customerId, after) {
+  const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
+  if (!slot) return null;
+  const v2 = await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
+  const confirmed = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
+  if (!confirmed || confirmed.dateET !== slot.day || confirmed.minutes !== slot.minutes) return null;
+  const booked = await conn("scheduled_services")
+    .where("customer_id", customerId)
+    .where("created_at", ">", after)
+    // A row entered once the slot had come is a record of it, not the
+    // booking that kept the promise (codex #5081 r6 P2).
+    .where("created_at", "<", slot.at)
+    .where("scheduled_date", slot.day)
+    .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slot.time])
+    .whereNotIn("status", SLOT_OFF_BOOKS_STATUSES)
+    .whereNull("recurring_parent_id")
+    .whereNull("parent_service_id")
+    .orderBy("created_at", "asc")
+    .first("id", "created_at");
+  return booked
+    ? { kind: "appointment_booked", record_type: "scheduled_service", record_id: booked.id, matched_at: booked.created_at, strength: "direct", basis: SLOT_BOOKING_BASIS }
+    : null;
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   // Evidence counts from the end of the call — or, for a callback card whose
@@ -1668,6 +1726,8 @@ async function resolveFulfillment(conn, commitment, call) {
         return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
       }
       if (!customerId) return null;
+      const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
+      if (slotProof) return slotProof;
       const visit = await conn("scheduled_services")
         .where("customer_id", customerId)
         .where("created_at", ">", after)
@@ -1862,6 +1922,16 @@ async function refreshFulfillment(conn, callLogId, call = null) {
   // confirm protects the promise from a later extraction withdrawing it,
   // and the card's own conversation evidence must still close it.
   const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
+  // A promise kept by a booking for its promised slot rests on facts that
+  // move after it is kept — the call's customer (a relink), the stated or
+  // confirmed slot (a reprocess), the visit itself (cancelled, moved,
+  // rescheduled) — so it is never final: every refresh judges it again,
+  // read before the open rows are settled below. Untouched AI rows only;
+  // a human verdict stands.
+  const kept = await conn("call_commitments")
+    .where({ call_log_id: callLogId, status: "fulfilled" })
+    .whereNull("human_state")
+    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]);
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1901,6 +1971,17 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // landed meanwhile moved the evidence boundary, so the write is
         // skipped and the next refresh judges the new version.
         .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
+        // A slot proof was found through the call's CUSTOMER: it is written
+        // only while the call still has that customer, read under a share
+        // lock in this same statement — a relink either waits for this write
+        // (and the refresh after it re-judges the row) or has already moved
+        // the call (and nothing is written).
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
@@ -1916,8 +1997,99 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
-  return { checked: open.length, fulfilled, hinted, cleared, failed };
+  const rejudged = await rejudgeSlotKept(conn, kept, row, callLogId);
+  failed += rejudged.failed;
+  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
 }
+
+// Judges refreshFulfillment's slot-kept rows again: still kept by the same
+// record (untouched), kept by another (re-pointed, same customer guard as
+// the open-row write), or reopened carrying whatever hint the facts support.
+async function rejudgeSlotKept(conn, kept, row, callLogId) {
+  const LOOKUP_FAILED = Symbol("lookup_failed");
+  let failed = 0;
+  let reopened = 0;
+  for (const c of kept) {
+    const proof = await resolveFulfillment(conn, c, row).catch((err) => {
+      logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
+      return LOOKUP_FAILED;
+    });
+    if (proof === LOOKUP_FAILED) { failed += 1; continue; }
+    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
+    const stillKept = proof?.strength === "direct";
+    if (stillKept && proof.basis === prior?.basis && proof.record_id === prior?.record_id) continue;
+    const unchanged = (q) => q
+      .where({ id: c.id, status: "fulfilled" })
+      .whereNull("human_state")
+      .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
+      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at]);
+    if (stillKept) {
+      // Kept by another record now (another visit at the slot, or a
+      // canonical proof): same customer guard as the open-row write above.
+      await unchanged(conn("call_commitments"))
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
+        .update({ fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
+      continue;
+    }
+    // No longer kept: owed again, carrying whatever hint the facts support.
+    reopened += await unchanged(conn("call_commitments"))
+      .update({ status: "open", fulfillment: proof ? JSON.stringify(proof) : null, fulfilled_at: null, updated_at: new Date() });
+  }
+  return { reopened, failed };
+}
+
+// Calls holding a promise kept by a booking for its promised slot whose
+// proof no longer holds in the records themselves: the visit is gone, off
+// the books, moved off the stated slot, entered once the slot had come, or
+// no longer the call's customer's. The periodic sweep refreshes them beside
+// the calls with open promises, so a lapse is caught whenever it happened —
+// long after the slot, or while the commitments gate was off (codex #5081
+// r5/r6 P1) — while the sweep's work follows the lapses, not every promise
+// this rule ever kept (r7 P2). A reprocess only rewrites rows, so the
+// grounding is checked here too: the promise turned into a deadline, or the
+// call's V2 extraction no longer confirms that wall clock (an ET-offset or
+// naive confirmed_start_at compared as written — the booking path's rule;
+// any other encoding is simply re-judged).
+async function listSlotKeptCallIds(conn) {
+  const rows = await conn.raw(
+    `SELECT DISTINCT cc.call_log_id
+       FROM call_commitments cc
+       JOIN call_log cl ON cl.id = cc.call_log_id
+       LEFT JOIN scheduled_services ss ON ss.id::text = cc.fulfillment ->> 'record_id'
+      WHERE cc.status = 'fulfilled' AND cc.human_state IS NULL
+        AND cc.fulfillment ->> 'basis' = ?
+        AND (ss.id IS NULL
+          OR ss.status = ANY(?)
+          OR ss.customer_id IS DISTINCT FROM cl.customer_id
+          OR cc.due_at IS NULL
+          OR ss.created_at >= cc.due_at
+          -- The call's end as callEndedAt reads it now: a booking made while
+          -- the call was still going (its duration posted after the proof)
+          -- is not evidence of the promise (codex #5081 r8 P2).
+          OR ss.created_at <= CASE
+               WHEN cl.bridged_at IS NOT NULL THEN cl.bridged_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               WHEN cl.direction = 'inbound' THEN cl.created_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+               ELSE cl.created_at END
+          OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
+          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI')
+          OR cc.kind IS DISTINCT FROM 'schedule_visit'
+          OR cc.due_type IS NOT DISTINCT FROM 'deadline'
+          OR cl.v2_extraction_status IS DISTINCT FROM 'valid'
+          OR cl.ai_extraction_enriched #>> '{scheduling,status}' IS DISTINCT FROM 'confirmed'
+          OR NOT COALESCE(
+            cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+){0,1}){0,1}(-0[45]:{0,1}00){0,1}$'
+            AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16)
+              = to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI'), false))`,
+    [SLOT_BOOKING_BASIS, SLOT_OFF_BOOKS_STATUSES],
+  );
+  return (rows?.rows || []).map((r) => r.call_log_id);
+}
+
 
 
 // ── Queue reads (the Owed tab, Customer 360, the lead card, the bell) ─────
@@ -2743,6 +2915,7 @@ module.exports = {
   normalizeRow,
   resolveFulfillment,
   refreshFulfillment,
+  listSlotKeptCallIds,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,

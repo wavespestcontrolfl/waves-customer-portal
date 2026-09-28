@@ -41,6 +41,8 @@ const SENDER_RENDERED_TEMPLATES = new Set([
   'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
   'billing_late_payment_60_day', 'billing_late_payment_90_day',
   'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+  // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
+  'invoice.followup_60_day', 'invoice.followup_90_day',
 ]);
 
 function isSenderRenderedEmail(message) {
