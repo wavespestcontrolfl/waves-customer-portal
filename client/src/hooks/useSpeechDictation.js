@@ -314,7 +314,15 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     lastFinalAtRef.current = Date.now();
     sessionStartedAtRef.current = Date.now();
     recognitionRef.current = rec;
-    rec.start();
+    try {
+      rec.start();
+    } catch (e) {
+      // start() can throw synchronously (state / device errors). Never keep
+      // a session that never started: the next tap would only stop() it.
+      recognitionRef.current = null;
+      alert(`Dictation error: ${e?.message || "could not start dictation"}`);
+      return;
+    }
     setListening(true);
   }, [mode, toggleUpload]);
 

@@ -57,6 +57,27 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     expect(result.current.listening).toBe(true);
   });
 
+  it("a first start() that throws leaves no stuck session: alert, not listening, and the next tap starts fresh", () => {
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    const RealFake = window.webkitSpeechRecognition;
+    window.webkitSpeechRecognition = class extends RealFake {
+      constructor() {
+        super();
+        this.start = vi.fn(() => { throw new Error("InvalidStateError"); });
+      }
+    };
+    act(() => result.current.toggle());
+    expect(alert).toHaveBeenCalledWith("Dictation error: InvalidStateError");
+    expect(result.current.listening).toBe(false);
+
+    window.webkitSpeechRecognition = RealFake;
+    act(() => result.current.toggle());
+    const fresh = FakeSpeechRecognition.instances[1];
+    expect(fresh.stop).not.toHaveBeenCalled();
+    expect(fresh.start).toHaveBeenCalledTimes(1);
+    expect(result.current.listening).toBe(true);
+  });
+
   it("a tap-to-stop calls stop() and the following onend does not restart", () => {
     const { result } = renderHook(() => useSpeechDictation(vi.fn()));
     act(() => result.current.toggle());
