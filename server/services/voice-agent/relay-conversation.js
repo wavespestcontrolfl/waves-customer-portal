@@ -3189,24 +3189,45 @@ class RelayConversation {
    * is mutated mid-call. Called at most once per call (see
    * _canSwitchToClaudeFallback).
    */
-  _switchToClaudeFallback(reason, stat) {
+  async _switchToClaudeFallback(reason, stat) {
     const from = this.model;
     this._pinClaudeFallback();
     this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(stat.turn) ? stat.turn : null };
     stat.modelSwitched = true;
     if (reason === 'stream_timeout') stat.timedOut = true; // the caller still waited out the timeout, rescued or not
     logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
-    // Stamped on the call row the moment it happens (codex r2 P2 on #5209):
-    // a reconnect leg can start before this socket's close appends its
-    // segment, and loadResumeState reads this stamp first. Best effort and
-    // bounded — the switch itself never waits on it.
-    const sw = this._modelSwitch;
-    if (this.callSid) {
-      withTimeout(Promise.resolve().then(() => db('call_log').where('twilio_call_sid', this.callSid).update({
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_model_switch', ?::jsonb)", [JSON.stringify(sw)]),
-      })), 2000, null).catch((err) => {
-        logger.warn(`[voice-relay] model switch stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`);
-      });
+    // The call row's relay_model_switch is the ONE call-level record: the
+    // first leg to persist a switch wins, and a leg that finds another's
+    // already there runs on that one's model instead (codex r6) — before any
+    // Claude round, so overlapping sockets never split the call across two
+    // models. loadResumeState reads the same stamp for a reconnect.
+    const winner = await this._claimModelSwitch(this._modelSwitch);
+    if (winner) {
+      this._pinClaudeFallback(winner.to);
+      this._modelSwitch = winner;
+    }
+  }
+
+  /**
+   * Persist `sw` as the call's switch only when none is recorded yet.
+   * Returns the switch another leg recorded first, or null when this one won
+   * or the row could not be read or written (bounded, best effort — the
+   * switch never waits more than a few seconds or fails on it).
+   */
+  async _claimModelSwitch(sw) {
+    if (!this.callSid) return null;
+    try {
+      const claimed = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .whereRaw("metadata->'relay_model_switch' IS NULL")
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_model_switch', ?::jsonb)", [JSON.stringify(sw)]) }), 2000, null);
+      if (claimed !== 0) return null;
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .first(db.raw("metadata->'relay_model_switch' AS model_switch")), 2000, null);
+      const earlier = row && row.model_switch;
+      return earlier && earlier.to && ALLOWED_OVERRIDE_MODEL_IDS.has(earlier.to) ? earlier : null;
+    } catch (err) {
+      logger.warn(`[voice-relay] model switch stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return null;
     }
   }
 
@@ -3382,7 +3403,7 @@ class RelayConversation {
       // spoke" and wrongly retries.
       if (streamState) await streamState.flushChain;
       if (this._canSwitchToClaudeFallback()) {
-        this._switchToClaudeFallback(timedOut ? 'stream_timeout' : 'provider_error', stat);
+        await this._switchToClaudeFallback(timedOut ? 'stream_timeout' : 'provider_error', stat);
         const retryable = !streamState || !(streamState.entry || streamState.failed);
         if (retryable && await this._sessionSuperseded().catch(() => false)) {
           logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${maskSid(this.callSid)}`);

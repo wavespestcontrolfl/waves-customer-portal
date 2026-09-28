@@ -910,7 +910,8 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
   test('the switch is stamped on the call row at once, so a reconnect that starts before this socket closes still sees it', async () => {
     const db = require('../models/db');
     const update = jest.fn(async () => 1);
-    db.mockImplementation(() => ({ where: () => ({ update }) }));
+    const whereRaw = jest.fn(() => ({ update }));
+    db.mockImplementation(() => ({ where: () => ({ whereRaw }) }));
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     try {
       process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
@@ -922,6 +923,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       await new Promise((resolve) => setImmediate(resolve));
 
       expect(update).toHaveBeenCalledTimes(1);
+      expect(whereRaw).toHaveBeenCalledWith("metadata->'relay_model_switch' IS NULL"); // first switch wins
       const { metadata } = update.mock.calls[0][0];
       expect(metadata.sql).toContain("'relay_model_switch'");
       expect(JSON.parse(metadata.bindings[0])).toEqual(convo._modelSwitch);
@@ -996,6 +998,36 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  test('a leg that finds another leg\'s switch already recorded runs on that model — one model per call', async () => {
+    const db = require('../models/db');
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
+    const winner = { from: LUNA, to: other, reason: 'stream_timeout', turn: 1 };
+    db.mockImplementation(() => ({
+      where: () => ({
+        whereRaw: () => ({ update: async () => 0 }), // lost the claim
+        first: async () => ({ model_switch: winner }),
+      }),
+    }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
+      mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-lost-claim', from: '+19415551234', send: () => {} });
+      await convo.handlePrompt('hello?');
+
+      expect(mockAnthropicStreamCalls).toHaveLength(1);
+      expect(mockAnthropicStreamCalls[0].model).toBe(other); // the retry already runs on the winner's model
+      expect(convo.model).toBe(other);
+      expect(convo._modelSwitch).toEqual(winner);
+    } finally {
+      db.mockReset();
+      delete db.raw;
+    }
+  });
+
   test('a superseded socket never spends a Claude retry — it ends as superseded', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
@@ -1067,7 +1099,7 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
     const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
     const convo = new RelayConversation({ callSid: 'CA-fallback-resume-late', from: '+19415551234', send: () => {} });
-    convo._switchToClaudeFallback('provider_error', { turn: 2 });
+    await convo._switchToClaudeFallback('provider_error', { turn: 2 });
     const own = convo._modelSwitch;
     await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: other, reason: 'stream_timeout', turn: 1 } });
     expect(convo.model).toBe(MODELS.DEFAULTS.VOICE); // not repinned to the predecessor's model
