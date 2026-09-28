@@ -45,6 +45,7 @@ afterEach(() => {
 
 describe('miner upsert: skipped is sticky, expired revives', () => {
   const miner = require('../services/seo/gsc-opportunity-miner');
+  const competitorMiner = require('../services/seo/competitor-gap-miner');
 
   test('the status CASE preserves skipped alongside claimed/done/pending_review — and NOT expired', async () => {
     db.raw.mockResolvedValue({ rowCount: 1 });
@@ -74,7 +75,7 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     expect(sql).toMatch(/skip_reason = NULL/);
   });
 
-  test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
+  test('the metadata refresh preserves both bounded runner retry markers across the morning mine', async () => {
     db.raw.mockResolvedValue({ rowCount: 1 });
     await miner.persistAll([{
       bucket: 'seasonal_rising', action_type: 'new_supporting_blog',
@@ -89,6 +90,23 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     // repeated blind first attempts.
     expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')");
     expect(sql).toContain("jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')");
+    expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'infrastructure_retry')");
+    expect(sql).toContain("jsonb_build_object('infrastructure_retry', opportunity_queue.signal_metadata->'infrastructure_retry')");
+  });
+
+  test('the unattended competitor re-mine preserves both bounded runner retry markers', async () => {
+    db.raw.mockResolvedValue({ rowCount: 1 });
+    await competitorMiner.persistAll([{
+      bucket: 'competitor_gap', action_type: 'new_supporting_blog',
+      query: 'termite swarm season', page_url: null, service: 'termite', city: null,
+      score: 80, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'competitor:k1',
+    }]);
+
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')");
+    expect(sql).toContain("jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')");
+    expect(sql).toContain("jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'infrastructure_retry')");
+    expect(sql).toContain("jsonb_build_object('infrastructure_retry', opportunity_queue.signal_metadata->'infrastructure_retry')");
   });
 
   test('the intercept SEEDER deliberately keeps revive-on-reseed (operator signal)', async () => {
