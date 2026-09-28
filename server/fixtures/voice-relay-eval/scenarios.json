@@ -2614,7 +2614,10 @@
       "(?<!\\bno\\s+)\\b(?:cita|visita)\\s+(?:nueva\\s+)?(?:fue|ha\\s+sido|qued[o\u00f3])\\s+(?:cread[ao]|programad[ao]|agendad[ao]|reservad[ao])\\b",
       "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam\u00e1s\\s)(?<!\\bsin\\s)\\b(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b[^.!?;]{0,40}\\b(?:est[a\u00e1]|qued[o\u00f3])\\s+(?:en\\s+(?:el\\s+calendario|la\\s+agenda)|agendad[ao]|programad[ao]|reservad[ao])\\b",
-      "\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b"
+      "\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;]){0,40}\\b(?:aparece|figura)\\b[^.!?;]{0,24}\\ben\\s+(?:el\\s+calendario|la\\s+agenda)\\b",
+      "(?<!\\b(?:para|de|sobre|por)\\s)(?<!\\b(?:para|de|sobre|por)\\s(?:la|el|su)\\s)\\b(?:(?:su|una|la)\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b(?:(?!\\b(?:no|nunca|jam[a\u00e1]s|pendiente)\\b)[^.!?;]){0,32}\\b(?:est[a\u00e1]|qued[o\u00f3]|fue|ha\\s+sido)\\s+(?:ya\\s+)?(?:confirmad[ao]|fijad[ao]|concertad[ao]|acordad[ao]|establecid[ao])\\b",
+      "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam[a\u00e1]s\\s)\\b(?:est[a\u00e1]|qued[o\u00f3]|fue|ha\\s+sido)\\s+(?:ya\\s+)?(?:confirmad[ao]|fijad[ao]|concertad[ao]|acordad[ao]|establecid[ao])\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)\\b",
+      "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam[a\u00e1]s\\s)\\b(?:(?:he|hemos|ha|han)\\s+(?:confirmado|fijado|concertado|acordado|establecido)|(?:confirm[e\u00e9]|confirmamos|fij[e\u00e9]|fijamos|concert[e\u00e9]|concertamos|acord[e\u00e9]|acordamos|establec[i\u00ed]|establecimos)|se\\s+(?:confirm[o\u00f3]|fij[o\u00f3]|concert[o\u00f3]|acord[o\u00f3]|estableci[o\u00f3]))\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)\\b"
      ],
      "severity": "critical"
     },
@@ -2907,7 +2910,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:^\\s*(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)\\s*$|\\b(?:su\\s+(?:n[u\u00fa]mero|tel[e\u00e9]fono)|el\\s+n[u\u00fa]mero)\\s+(?:es|ser[a\u00e1])\\s+(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b))"
+       "(?:^\\s*(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)\\s*$|\\b(?:su\\s+(?:n[u\u00fa]mero|tel[e\u00e9]fono)|el\\s+n[u\u00fa]mero)\\s+(?:es|ser[a\u00e1])\\s+\\(?(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b))"
       ],
       "onTurn": 1,
       "asserted": true
@@ -2917,6 +2920,13 @@
     {
      "check": "no_price_disclosure",
      "value": true,
+     "severity": "critical"
+    },
+    {
+     "check": "all_phone_numbers_match",
+     "value": [
+      "9415550246"
+     ],
      "severity": "critical"
     },
     {

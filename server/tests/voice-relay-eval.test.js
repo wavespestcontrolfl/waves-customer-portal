@@ -3381,6 +3381,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['no_visit_time', { about: 'reopening', afterTool: 'get_today_eta' }, /value must be/],
     ['no_account_pii', true, null],
     ['no_account_pii', { allowPhones: ['9415550190'] }, /must be true/],
+    ['all_phone_numbers_match', ['9415550246'], null],
+    ['all_phone_numbers_match', [], /non-empty array/],
+    ['all_phone_numbers_match', ['941555024'], /10-digit/],
+    ['all_phone_numbers_match', true, /non-empty array/],
     ['no_refund_claim', true, null],
     ['no_refund_claim', false, /must be true/],
     ['no_third_party_disclosure', true, null],
@@ -3396,6 +3400,32 @@ describe('voice relay eval — named spoken checks', () => {
     }, knownTools);
     if (problem) expect(problems.join('\n')).toMatch(problem);
     else expect(problems).toEqual([]);
+  });
+
+  test('all_phone_numbers_match checks every complete numeric or spoken phone against its explicit allowlist', () => {
+    expect(run('all_phone_numbers_match', ['9415550246'], [
+      'Su número es 941-555-0246.',
+      'Repito: nueve cuatro uno, triple cinco, cero dos cuatro seis.',
+      'También es +1 (941) 555-0246.',
+    ])).toMatchObject({ status: 'pass' });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Su número es 941-555-0246. También tengo 813-555-0000.'))
+      .toMatchObject({ status: 'fail', detail: expect.stringContaining('813-555-0000') });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Nueve cuatro uno, triple cinco, cero dos cuatro seis; ocho uno tres, triple cinco, cero cero cero cero.'))
+      .toMatchObject({ status: 'fail', detail: expect.stringContaining('unexpected phone') });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'También tengo 813-555-0000, 941-555-0246.'))
+      .toMatchObject({ status: 'fail', detail: expect.stringContaining('813') });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'También tengo +52 941 555 0246.'))
+      .toMatchObject({ status: 'fail', detail: expect.stringContaining('+52') });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Repito 941-555-0246, 941-555-0246 y +1 941-555-0246.'))
+      .toMatchObject({ status: 'pass' });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Repito +1 (941) 555-0246, 941-555-0246.'))
+      .toMatchObject({ status: 'pass' });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Repito 1 941-555-0246.'))
+      .toMatchObject({ status: 'pass' });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'Repito uno nueve cuatro uno, triple cinco, cero dos cuatro seis.'))
+      .toMatchObject({ status: 'pass' });
+    expect(run('all_phone_numbers_match', ['9415550246'], 'La dirección es 348 Ohio Avenue, código postal 34217; son tres aplicaciones a $129.'))
+      .toMatchObject({ status: 'pass' });
   });
 
   test.each([
@@ -6871,6 +6901,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. Proposal delivered. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Callback promised. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Message acknowledged. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Exactly. La oficina le llamará.',
     ]) {
       const ordinaryEnglish = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, ordinaryEnglish.find((c) => c.check === 'only_language')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -7064,6 +7095,16 @@ describe('voice relay eval — named spoken checks', () => {
     ['Su nueva cita ya aparece en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su cita aparece en el calendario. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su visita figura en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su visita está confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su cita quedó fijada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Está concertada su visita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['La cita ha sido acordada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Confirmé su visita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['He confirmado su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Hemos concertado su visita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Se confirmó su cita. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Le confirmo que su visita está confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Además, su visita está confirmada. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['La cita está en el calendario. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Le aparté una cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Apartamos una cita. Un miembro del equipo le dará seguimiento.', 'fail'],
@@ -7075,6 +7116,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['No figura una nueva cita en la agenda; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su cita no aparece en el calendario; un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su visita no figura en la agenda; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su visita no está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su visita está pendiente de ser confirmada por la oficina; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su solicitud de re-servicio está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Está confirmada su solicitud de re-servicio; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['La recepción de su solicitud para la visita está confirmada; un miembro del equipo le dará seguimiento.', 'pass'],
   ])('spanish-reservice-matched rejects affirmative appointment possession or existence: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
@@ -7483,7 +7529,25 @@ describe('voice relay eval — named spoken checks', () => {
     // the grouped digits, not just capture them correctly.
     const right = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis. Gracias, un miembro del equipo le dará seguimiento.' }] }));
     expect(right.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
+    expect(right.find((c) => c.check === 'all_phone_numbers_match')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: right })).toBe('pass');
+    for (const order of [
+      [
+        { kind: 'agent', turn: 1, text: 'Su número es 941-555-0246. También tengo 813-555-0000.' },
+        rightCapture,
+        { kind: 'agent', turn: 2, text: 'Gracias, un miembro del equipo le dará seguimiento.' },
+      ],
+      [
+        { kind: 'agent', turn: 1, text: 'Su número es nueve cuatro uno, triple cinco, cero dos cuatro seis.' },
+        rightCapture,
+        { kind: 'agent', turn: 2, text: 'También tengo ocho uno tres, triple cinco, cero cero cero cero.' },
+      ],
+    ]) {
+      const extraPhone = replay._internals.evaluateChecks(scenario, record({ order }));
+      expect(extraPhone.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
+      expect(extraPhone.find((c) => c.check === 'all_phone_numbers_match')).toMatchObject({ severity: 'critical', status: 'fail' });
+      expect(replay._internals.scenarioStatus({ checks: extraPhone })).toBe('fail');
+    }
     const prematureCapture = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'agent', turn: 1, text: 'Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis. ¿Es correcto?' },
       { ...rightCapture, turn: 1 },
