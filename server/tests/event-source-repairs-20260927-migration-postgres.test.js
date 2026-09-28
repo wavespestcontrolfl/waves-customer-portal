@@ -11,6 +11,7 @@ const knex = require('knex');
 
 const migration = require('../models/migrations/20260927120000_event_source_repairs_20260927');
 const seedMigration = require('../models/migrations/20260927140000_seed_clearwater_wellen_event_sources');
+const wellenMigration = require('../models/migrations/20260927150000_convert_legacy_wellen_event_source');
 
 const DISABLE_FEED_URLS = [
   'https://www.visitsarasota.com/events-festivals',
@@ -256,5 +257,33 @@ async function seedSource(db, overrides) {
     expect(await db('event_sources').where({ feed_url: 'https://www.myclearwater.com/Events-and-Meetings' })).toHaveLength(1);
     const rows = await db('event_sources').where('name', 'like', 'Wellen Park%');
     expect(rows).toHaveLength(1);
+  });
+
+  test('legacy Wellen conversion renames a legacy Wellen RSS row that reappears after the repair ran', async () => {
+    await migration.up(db);
+    await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' }).del();
+    await db('event_sources').insert({
+      name: 'Wellen Park — Events', url: 'https://wellenpark.com/events/',
+      feed_url: 'https://wellenpark.com/events/feed/', feed_type: 'rss', priority_tier: 2, enabled: true,
+    });
+    await seedMigration.up(db);
+    await wellenMigration.up(db);
+    expect(await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/feed/' })).toHaveLength(0);
+    const row = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' }).first();
+    expect(row.feed_type).toBe('scrape');
+    expect(row.scrape_config).toMatchObject({ contentSelector: 'section.featured-events-slider' });
+  });
+
+  test('legacy Wellen conversion disables a legacy Wellen RSS row when the repaired row already exists', async () => {
+    await migration.up(db);
+    await db('event_sources').insert({
+      name: 'Wellen Park — Events (legacy)', url: 'https://wellenpark.com/events/',
+      feed_url: 'https://wellenpark.com/events/feed/', feed_type: 'rss', priority_tier: 2, enabled: true,
+    });
+    await seedMigration.up(db);
+    await wellenMigration.up(db);
+    const legacy = await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/feed/' }).first();
+    expect(legacy.enabled).toBe(false);
+    expect(await db('event_sources').where({ feed_url: 'https://wellenpark.com/events/' })).toHaveLength(1);
   });
 });
