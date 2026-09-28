@@ -576,6 +576,19 @@ describe('extractQuotedOpenTimesWindows — pure detector: which (date, window) 
       { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
     ]);
   });
+
+  // Codex round-2 P1: requiring EVERY same-time day to hold unconditionally
+  // would retire a perfectly valid "Tuesday 9-11" reply the moment an
+  // unrelated Wednesday 9-11 gets booked by someone else. When the reply
+  // names ONE of the candidate days, narrow to just that day.
+  test('a reply that names ONE specific day for an otherwise-ambiguous window → only that day\'s pair', () => {
+    expect(extractQuotedOpenTimesWindows(block, 'How about Tuesday 9:00 AM - 11:00 AM?')).toEqual([
+      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+    ]);
+    expect(extractQuotedOpenTimesWindows(block, 'How about Wednesday 9:00 AM - 11:00 AM?')).toEqual([
+      { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+    ]);
+  });
 });
 
 describe('computeOpenTimesSnapshot — the minimum needed to recheck at send time (Codex P2)', () => {

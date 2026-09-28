@@ -329,33 +329,60 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent, estimat
 // could send a specific time the drafter offered that is no longer open.
 //
 // Which offered (date, window) pairs (from an already-rendered OPEN TIMES
-// block) does `reply` actually quote verbatim? Pure/sync — FACT DISCIPLINE
-// requires the model to copy a window string exactly out of OPEN TIMES, so a
-// plain substring check on the TIME text is a reliable detector; no NLP
-// needed. The DATE travels with it (pre-push local-audit P1: pooling window
-// strings across every returned date let a reply quoting "Tuesday 9-11"
-// pass a recheck off a still-open Wednesday 9-11, even with Tuesday fully
-// booked) — every line whose window text the reply quotes contributes its
-// OWN (date, window) pair, so a time offered on more than one day yields one
-// candidate per day; the recheck below fails closed unless EVERY candidate
-// still holds, which is the safe direction when the reply's plain text
-// can't prove which specific day the model meant. Returns [] when the reply
-// quotes none of them (including no OPEN TIMES at all).
+// block) does `reply` actually quote? Pure/sync — FACT DISCIPLINE requires
+// the model to copy a window's TIME text verbatim, so a plain substring
+// check on that text is a reliable detector; no NLP needed for the time
+// itself. The DATE is disambiguated the same way when possible (pre-push
+// local-audit P1 round 1: pooling window strings across every returned date
+// let a reply quoting "Tuesday 9-11" pass a recheck off a still-open
+// Wednesday 9-11, even with Tuesday fully booked) — but round 2 flagged the
+// opposite failure: requiring EVERY same-time day to hold, unconditionally,
+// retires a perfectly valid "Tuesday 9-11" reply the moment an UNRELATED
+// Wednesday 9-11 gets booked by someone else. So: a window text offered on
+// only one day needs no disambiguation. A window text offered on more than
+// one day is narrowed to whichever of those day(s) the reply's text
+// actually names (its weekday, e.g. "Tuesday", copied the same way OPEN
+// TIMES renders it) — conservative "every candidate day must still hold"
+// applies ONLY when the reply's plain text doesn't name any of the
+// candidate days at all, which is the one case where we genuinely can't
+// tell which day the model meant. Returns [] when the reply quotes no
+// window text (including no OPEN TIMES at all).
 function extractQuotedOpenTimesWindows(openTimesBlock, reply) {
   if (!openTimesBlock || !reply) return [];
-  const pairs = [];
-  const seen = new Set();
+  const days = [];
   for (const line of String(openTimesBlock).split('\n')) {
     const idx = line.indexOf(': ');
     if (idx === -1) continue;
     const date = line.slice(2, idx); // strip the leading "- "
-    for (const w of line.slice(idx + 2).split(', ')) {
-      const window = w.trim();
-      if (!window || !reply.includes(window)) continue;
-      const key = `${date}|${window}`;
+    const weekday = date.split(',')[0].trim(); // "Tuesday, September 29" -> "Tuesday"
+    const windows = line.slice(idx + 2).split(', ').map((w) => w.trim()).filter(Boolean);
+    days.push({ date, weekday, windows });
+  }
+  // Every weekday that offers each window text, so a same-time window
+  // spanning more than one day can be narrowed to the day(s) the reply
+  // names.
+  const weekdaysOfferingWindow = new Map();
+  for (const d of days) {
+    for (const window of d.windows) {
+      if (!weekdaysOfferingWindow.has(window)) weekdaysOfferingWindow.set(window, []);
+      weekdaysOfferingWindow.get(window).push(d.weekday);
+    }
+  }
+  const replyLower = reply.toLowerCase();
+  const pairs = [];
+  const seen = new Set();
+  for (const d of days) {
+    for (const window of d.windows) {
+      if (!reply.includes(window)) continue;
+      const offeringWeekdays = weekdaysOfferingWindow.get(window) || [];
+      const namedWeekdays = offeringWeekdays.filter((wd) => wd && replyLower.includes(wd.toLowerCase()));
+      // Ambiguous (>1 day offers this time) AND the reply named at least
+      // one of those days, but NOT this one -> the reply pointed elsewhere.
+      if (offeringWeekdays.length > 1 && namedWeekdays.length && !namedWeekdays.includes(d.weekday)) continue;
+      const key = `${d.date}|${window}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      pairs.push({ date, window });
+      pairs.push({ date: d.date, window });
     }
   }
   return pairs;
