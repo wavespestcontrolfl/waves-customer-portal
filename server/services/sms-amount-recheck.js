@@ -8,16 +8,14 @@
 // error — an unknowable account state must not send figures.
 const db = require('../models/db');
 const logger = require('./logger');
+const drafter = require('./sms-shadow-drafter');
 
-// Every amount syntax hasPriceQuote recognizes: $-prefixed, USD-prefixed,
-// and number-with-unit. Bare numerals stay out (dates, house numbers).
-const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-// Payment ACKNOWLEDGEMENTS may cite payment-history amounts ("we received
-// your $95 payment") — but only when the body reads as an ack, so a stale
-// "your balance is $X" can never re-authorize via the payment row.
-// "payment" must appear NEAR the ack verb — a generic "Thanks for reaching
-// out — your balance is $X" must not unlock payment-history amounts.
-const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+// The amount forms and the payment-acknowledgement grammar are the
+// draft-time guard's own (one definition for both amount guards): every
+// amount syntax hasPriceQuote recognizes, and payment-history amounts only
+// on a body that reads as an ack, so a stale "your balance is $X" can never
+// re-authorize via the payment row.
+const { AMOUNT_MASK_RE: AMOUNT_FORMS_RE, PAYMENT_ACK_RE } = drafter;
 
 const cents = (v) => Math.round(Number(v) * 100);
 
@@ -56,7 +54,6 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
-    const drafter = require('./sms-shadow-drafter');
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
     // With real answers on, the drafter's clause-aware guard is the whole

@@ -1043,6 +1043,12 @@ function offerSpanInText(text, day, window) {
 // Language that states what is OWED or charged on an ongoing basis.
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
 const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
+// Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
+// USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
+// unit-less numerals stay out of the deterministic guard (dates, house
+// numbers, zone counts would false-positive) — those remain the verifier's
+// + reviewer's territory. One definition, with PAYMENT_ACK_RE, for this
+// draft-time guard and the send-time recheck (sms-amount-recheck).
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 // The billing figures a reply may quote, in cents — one definition for this
@@ -1077,13 +1083,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
-  // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
-  // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
-  // unit-less numerals stay out of the deterministic guard (dates, house
-  // numbers, zone counts would false-positive) — those remain the
-  // verifier's + reviewer's territory.
-  const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-  const amountsIn = (t) => (t.match(AMOUNT_FORMS_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+  const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
   // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
   // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
@@ -2592,6 +2592,8 @@ module.exports = {
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
   billingAmountCents,
+  AMOUNT_MASK_RE,
+  PAYMENT_ACK_RE,
   replyBindsDeclaredDays,
   liveServiceType,
   requestedServiceType,
