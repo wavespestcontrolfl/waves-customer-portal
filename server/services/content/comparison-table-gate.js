@@ -1613,150 +1613,7 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   return {
     pass, findings, requiresHumanReview,
     namedCompetitors: sortedNames(known, unknown, linkedNames),
-    businessNameCandidates: businessNameCandidates(draft, body, scanText),
   };
-}
-
-// Possible business names the curated detector does not know ("Acme Pest
-// Solutions", "Bob Smith Lawn Care LLC", a link to acme-pest-solutions.com)
-// — HIGH-RECALL candidates only. Whether a Title-Case phrase is a company
-// ("Acme Pest Solutions competes with Orkin") or a topic ("Biological Pest
-// Control offers a way…") is a language judgement no word list converges
-// on (Codex r1/r2 on #5146), so the unattended blog lane confirms these
-// with one structured FAST call (business-name-confirmer.js) and fails
-// closed when it cannot. Candidates: Title-Case provider-shaped phrases and
-// legal-entity names in prose/title/meta (curated names blanked first so
-// "Orkin and Acme Pest Solutions" is not one phrase), and provider-shaped
-// tokens in link destinations. Dropped only where provably not a business:
-// statute / regulator names ("Structural Pest Control Act", "Bureau of …",
-// "Florida Department of …") and link destinations on our own fleet or a
-// .gov / .edu host. Titles and headings stay IN (pre-push r5: "Acme Pest
-// Solutions in Sarasota" as a title names a company) — the confirmer tells
-// a company from a generic service heading.
-// → [{ name, sentence }], de-duplicated by name, first (body-preferred)
-// sentence kept.
-const REGULATORY_TAIL_RE = /^\s+(?:Acts?|Laws?|Boards?|Bureaus?|Commissions?|Programs?|Divisions?|Offices?|Rules?|Statutes?|Chapters?|Licens\w*|Exams?|Examinations?|Certificat\w*|Categor\w*|Regulations?)\b/;
-const REGULATORY_HEAD_RE = /\b(?:Bureau|Division|Office|Board|Department|Commission)\s+(?:of|for)\s+$/i;
-const REGULATORY_LEAD_RE = /^(?:bureau|division|office|board|department|commission)$/i;
-const INSTITUTION_NAME_RE = /\b(?:Department|Bureau|Division|Office|Board|Commission|Agency|University|Extension)\s+(?:of|for)\b/;
-const NON_BUSINESS_HOST_RE = /\.(?:gov|edu)(?:\.[a-z]{2})?$/i;
-
-function candidateSentence(text, index, length) {
-  const start = Math.max(text.lastIndexOf('\n', index - 1), text.slice(0, index).search(/[.!?]\s[^.!?]*$/)) + 1;
-  const endRel = text.slice(index + length).search(/[.!?](?:\s|$)|\n/);
-  const end = endRel === -1 ? text.length : index + length + endRel + 1;
-  return text.slice(Math.max(0, start), end).replace(/\s+/g, ' ').trim().slice(0, 300);
-}
-
-// The candidate detector is deliberately its OWN broad pattern, not the
-// tone scans' providerNameRe (whose lead-word exclusions and suffix list
-// drop "Acme Lawn Care", "Green Turf Co" — pre-push r6): any run of
-// Title-Case words that contains an industry word or ends in a business
-// noun. Leading prose words ("Compare", "Why", "Hire") are trimmed from the
-// run, never used to drop it.
-const CANDIDATE_TOKEN = "[A-Z][A-Za-z0-9&'’.\\-]*";
-// Runs never cross a line break (a heading is its own run).
-const CANDIDATE_RUN_RE = new RegExp(`${CANDIDATE_TOKEN}(?:[ \\t]+(?:(?:of|and|&|the|de|la)[ \\t]+)?${CANDIDATE_TOKEN}){1,6}`, 'g');
-const CANDIDATE_INDUSTRY_RE = /\b(?:Pest|Pests|Termite|Termites|Bug|Bugs|Lawn|Lawns|Mosquito|Mosquitoes|Wildlife|Rodent|Rodents|Critter|Exterminat\w*|Landscap\w*|Turf|Tree|Trees|Weed|Irrigation|Environmental|Green|Yard|Garden)\b/;
-// A company name ENDS in a business noun ("Acme Lawn Care", "Green Turf
-// Co", "Bug Busters", "Acme Exterminators"); a run that merely contains an
-// industry word mid-phrase ("Lawn Turns Brown") is prose, not a name.
-const CANDIDATE_INDUSTRY_TAIL_RE = /\b(?:Control|Management|Solutions?|Services?|Care|Pros?|Experts?|Specialists?|Defen[sc]e|Prevention|Protection|Patrol|Squad|Busters?|Brigade|Exterminators?|Exterminating|Environmental|Lawns?|Landscaping|Landscapes?|Turf|Pest|Termite|Mosquito|Wildlife|Removal|Treatment|Doctors?|Guys|Man|Men|Team|Crew)$/;
-// Generic service nouns — a run made only of these plus industry words is a
-// category. Brand-style tails (Busters, Squad, Pros, Guys…) are NOT here.
-const CANDIDATE_CATEGORY_WORD_RE = /^(?:Control|Management|Care|Services?|Solutions?|Prevention|Protection|Removal|Treatments?|Lawns?|Landscaping|Landscapes?|Turf|Pests?|Termites?|Mosquito(?:es)?|Wildlife|Environmental|Rodents?|Bugs?|Trees?|Weeds?|Yards?|Gardens?|Irrigation|Green|Critter|Exterminat\w*)$/;
-const CANDIDATE_BUSINESS_TAIL_RE = /\b(?:Company|Companies|Co\.?|Corp\.?|Inc\.?|LLC|Group|Brothers|Bros\.?|Sons?|Enterprises?|Partners)$/;
-const CANDIDATE_REGULATORY_WORD_RE = /\b(?:Acts?|Laws?|Boards?|Bureaus?|Commissions?|Programs?|Divisions?|Offices?|Rules?|Statutes?|Chapters?|Regulations?)\b/;
-// Sentence-starter / function words trimmed from the FRONT of a run.
-const CANDIDATE_LEAD_TRIM = new Set(('how|what|when|where|why|who|which|compare|compared|comparing|versus|vs|choose|choosing|hire|hiring|call|calling|contact|consider|ask|try|read|see|like|unlike|with|without|for|from|about|after|before|between|than|the|a|an|and|or|is|are|was|were|your|our|their|its|this|that|these|those|if|in|on|at|by|to|best|top|local|professional|affordable|reliable|trusted|licensed').split('|'));
-
-// Abbreviations whose period does not end a sentence inside a name.
-const CANDIDATE_ABBREV_RE = /^(?:Co|Inc|Corp|Bros|St|Jr|Sr|Mt|Ft|Dr|Mr|Mrs|Ms|U\.S|L\.L\.C)\.$/;
-
-function broadCandidateRuns(blanked) {
-  const out = [];
-  for (const m of blanked.matchAll(CANDIDATE_RUN_RE)) {
-    // Token list with offsets; a token ending in sentence punctuation
-    // (other than a known abbreviation) closes its segment.
-    const tokens = [...m[0].matchAll(/\S+/g)].map((t) => ({ w: t[0], at: m.index + t.index }));
-    const segments = [[]];
-    for (const t of tokens) {
-      segments[segments.length - 1].push(t);
-      if (/[.,;:!?]$/.test(t.w) && !CANDIDATE_ABBREV_RE.test(t.w)) segments.push([]);
-    }
-    for (let seg of segments) {
-      while (seg.length > 1 && CANDIDATE_LEAD_TRIM.has(seg[0].w.toLowerCase())) seg = seg.slice(1);
-      if (seg.length < 2) continue;
-      const words = seg.map((t) => t.w.replace(/[,;:!?]+$/, '').replace(/\.$/, (d) => (CANDIDATE_ABBREV_RE.test(seg[seg.length - 1].w) ? d : '')));
-      const name = words.join(' ');
-      if (CANDIDATE_REGULATORY_WORD_RE.test(name)) continue;
-      // Made ONLY of industry nouns with no corporate suffix ("Pest Control",
-      // "Lawn Care", "Termite Treatment") — a category, not a company name.
-      if (!CANDIDATE_BUSINESS_TAIL_RE.test(name)
-        && words.every((w) => CANDIDATE_CATEGORY_WORD_RE.test(w) || /^(?:of|and|&|the)$/i.test(w))) continue;
-      const industryName = CANDIDATE_INDUSTRY_RE.test(name) && CANDIDATE_INDUSTRY_TAIL_RE.test(name);
-      if (!industryName && !CANDIDATE_BUSINESS_TAIL_RE.test(name)) continue;
-      out.push({ name, index: seg[0].at });
-    }
-  }
-  return out;
-}
-
-function businessNameCandidates(draft, body, scanText) {
-  const text = String(scanText || '');
-  const headingLines = new Set(draftMetaText(draft).split('\n').map((l) => l.trim()).filter(Boolean));
-  for (const line of String(body || '').split('\n')) if (/^\s{0,3}#{1,6}\s/.test(line)) headingLines.add(line.trim());
-  // Curated names and URLs blanked (length-preserving), so indices align.
-  let blanked = stripLinkDestinationsForNames(text).replace(/[\\"“”]/g, ' ');
-  for (const n of competitorFacts._internals.DETECTABLE_NAMES) {
-    blanked = blanked.replace(new RegExp(`\\b${escapeForNameRe(n)}\\b`, 'gi'), (m) => ' '.repeat(m.length));
-  }
-  const found = new Map(); // name → { sentence, inBody }
-  const hits = [
-    ...broadCandidateRuns(blanked),
-    ...[...blanked.matchAll(legalEntityRe('g'))].map((m) => ({ name: m[1], index: m.index + m[0].indexOf(m[1]) })),
-  ];
-  {
-    for (const hit of hits) {
-      const nm = hit.name.trim().replace(/\s+/g, ' ');
-      if (OWN_BRAND_RE.test(nm) || INSTITUTION_NAME_RE.test(nm)) continue;
-      const start = hit.index;
-      const end = start + hit.name.length;
-      if (REGULATORY_LEAD_RE.test(nm.split(' ')[0])
-        || REGULATORY_TAIL_RE.test(blanked.slice(end, end + 40))
-        || REGULATORY_HEAD_RE.test(blanked.slice(Math.max(0, start - 40), start))) continue;
-      // Prefer a body sentence as the confirmer's context over a bare
-      // heading/title line (both are sent when that is all there is).
-      const lineStart = text.lastIndexOf('\n', start - 1) + 1;
-      const lineEnd = text.indexOf('\n', end);
-      const inHeading = headingLines.has(text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd).trim());
-      const prev = found.get(nm);
-      if (prev && (prev.inBody || inHeading)) continue;
-      found.set(nm, { sentence: candidateSentence(text, start, hit.name.length), inBody: !inHeading });
-    }
-  }
-  // Link destinations: provider-shaped slug/host tokens ("acme-pest-solutions").
-  const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
-  for (const m of text.matchAll(new RegExp(NAME_SCAN_URL_RE_SRC, 'gi'))) {
-    let host = '';
-    try { host = new URL(m[0]).hostname.toLowerCase().replace(/^www\./, ''); } catch { host = ''; }
-    // A curated competitor's own host is already a recorded name
-    // (linkedCompetitorMentions), not an uncurated candidate.
-    const curatedHost = host && [...competitorHostIndex().keys()].some((h) => host === h || host.endsWith(`.${h}`));
-    if (host && (NON_BUSINESS_HOST_RE.test(host) || SPOKE_SITE_KEYS.includes(host) || curatedHost)) continue;
-    let tokens = m[0].replace(/^https?:\/\//i, '').replace(/[^a-z0-9]+/gi, ' ');
-    for (const n of competitorFacts._internals.DETECTABLE_NAMES) {
-      tokens = tokens.replace(new RegExp(`\\b${escapeForNameRe(n)}\\b`, 'gi'), ' ');
-    }
-    for (const cm of tokens.matchAll(CI_PROVIDER_NAME_RE)) {
-      const nm = cm[1].trim().replace(/\s+/g, ' ').toLowerCase();
-      if (OWN_BRAND_RE.test(nm) || found.has(nm)) continue;
-      found.set(nm, { sentence: candidateSentence(text, m.index, m[0].length), inBody: true });
-    }
-  }
-  return [...found]
-    .map(([name, v]) => ({ name, sentence: v.sentence }))
-    .sort((x, y) => x.name.localeCompare(y.name));
 }
 
 // Every competitor the draft names (prose, table, title/meta, or link
@@ -1881,7 +1738,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // Empty body alone doesn't skip the scan — a metadata-only draft can
   // still carry a disparaging title/meta (draftScanTexts covers both the
   // top-level and frontmatter shapes).
-  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false, namedCompetitors: [], businessNameCandidates: [] };
+  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false, namedCompetitors: [] };
   if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText, namedCompetitorEnabled });
 
   // Same collector as draftScanTexts: the prose-only competitor check below
@@ -2569,14 +2426,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
-  // Candidates on the table path too: a Title-Case business name in a table
-  // draft already fails as COMPARISON_UNCLASSIFIED_OPTION, but a link to an
-  // uncurated business's site is blanked out of that scan (pre-push r5).
-  return {
-    pass, findings, requiresHumanReview,
-    namedCompetitors: sortedNames(known, unknown),
-    businessNameCandidates: businessNameCandidates(draft, body, scanText),
-  };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
 }
 
 // Clean autonomous blogs need no human sign-off. The content gate and
@@ -2598,40 +2448,31 @@ function namedCompetitorAutopublishEligible(brief) {
   } catch (_) { return false; }
 }
 
-// Stable identity of a candidate set (names + their sentences): a stored
-// confirmation is reused only while the text it judged is unchanged.
-function businessNameCandidatesKey(candidates) {
-  const canon = (Array.isArray(candidates) ? candidates : [])
-    .map((c) => `${c && c.name}\u0000${c && c.sentence}`).sort().join('\u0001');
-  return require('node:crypto').createHash('sha256').update(canon).digest('hex');
-}
-
 // Owner rulings 2026-09-27 (D2) + 2026-09-28: a competitor blog publishes
 // unattended only when EVERY competitor it names is on
 // competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS — including names an
 // operator brief authorized. (The owner's fact rules for those posts ship
 // separately.) Reads the
-// PERSISTED evaluate() result, so the runner's decision and the poller's
-// merge-time recheck judge the same thing. A verdict without
-// `namedCompetitors` (written before this check existed, or unparseable)
-// fails closed.
+// PERSISTED evaluate() result plus the whole-draft company extraction the
+// runner / remediation stored on it (`companyExtraction`), so the runner's
+// decision and the poller's merge-time recheck judge the same thing. A
+// verdict without `namedCompetitors` (written before this check existed, or
+// unparseable) or without a successful extraction fails closed.
 //   → { ok: true, approved }                                  publish
 //   → { ok: false, reason: 'named_competitor_off_list', offList, approved }
+//   → { ok: false, reason: 'named_competitor_unverified_names', approved }
 function namedCompetitorListVerdict(comparisonResult) {
   let names = comparisonResult && Array.isArray(comparisonResult.namedCompetitors)
     ? comparisonResult.namedCompetitors : null;
   if (!names) return { ok: false, reason: 'named_competitor_off_list', offList: ['(names not recorded)'], approved: [] };
-  // Uncurated business-name candidates count only once the stored
-  // confirmation (business-name-confirmer.js) covers exactly these
-  // candidates; a missing, failed, or stale confirmation fails closed.
-  const candidates = Array.isArray(comparisonResult.businessNameCandidates) ? comparisonResult.businessNameCandidates : [];
-  if (candidates.length) {
-    const conf = comparisonResult.businessNameConfirmation;
-    if (!conf || conf.ok !== true || conf.key !== businessNameCandidatesKey(candidates) || !Array.isArray(conf.companies)) {
-      return { ok: false, reason: 'named_competitor_unverified_names', approved: [] };
-    }
-    names = sortedNames(new Set(names), new Set(conf.companies));
+  // Every company the whole-draft extraction (business-name-confirmer.js)
+  // found joins the deterministic names; a missing or failed extraction
+  // fails closed.
+  const extraction = comparisonResult.companyExtraction;
+  if (!extraction || extraction.ok !== true || !Array.isArray(extraction.companies)) {
+    return { ok: false, reason: 'named_competitor_unverified_names', approved: [] };
   }
+  names = sortedNames(new Set(names), new Set(extraction.companies));
   const approved = names.filter((n) => competitorFacts.isOwnerApprovedForAutopublish(n));
   const offList = names.filter((n) => !competitorFacts.isOwnerApprovedForAutopublish(n));
   if (offList.length) return { ok: false, reason: 'named_competitor_off_list', offList, approved };
@@ -2643,7 +2484,6 @@ module.exports = {
   evaluateProse,
   namedCompetitorAutopublishEligible,
   namedCompetitorListVerdict,
-  businessNameCandidatesKey,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

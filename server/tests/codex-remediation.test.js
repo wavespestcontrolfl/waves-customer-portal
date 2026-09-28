@@ -1,3 +1,8 @@
+// The whole-draft company-name check makes a model call; by default the
+// fixed drafts here name no company (tests override via deps).
+jest.mock('../services/content/business-name-confirmer', () => ({
+  extractCompanyNames: jest.fn(async () => ({ ok: true, key: 'k', companies: [] })),
+}));
 const rem = require('../services/content/codex-remediation');
 
 const {
@@ -1681,27 +1686,25 @@ describe('validateAutonomousRunGates', () => {
     }
   });
 
-  test('business-name candidates on a fix: the stored confirmation is handed over for reuse; a confirmed company or a failure refuses the fix', async () => {
-    const cands = [{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions is based in Sarasota.' }];
-    const key = require('../services/content/comparison-table-gate').businessNameCandidatesKey(cands);
-    const stored = { ok: true, key, companies: [] };
+  test('company extraction on a fix: the stored extraction is handed over for reuse; an off-list company or a failure refuses the fix', async () => {
+    const stored = { ok: true, key: 'k-stored', companies: [] };
     const deps = goodDeps();
-    deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1').comparison_table_result = JSON.stringify({ businessNameConfirmation: stored });
-    deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], businessNameCandidates: cands });
-    deps.businessNameConfirmer = { confirmBusinessNames: jest.fn(async (_c, { prior }) => prior) };
+    deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1').comparison_table_result = JSON.stringify({ companyExtraction: stored });
+    deps.businessNameConfirmer = { extractCompanyNames: jest.fn(async (_draft, { prior }) => prior) };
+    deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] });
 
     const cleared = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(cleared.ok).toBe(true);
-    expect(deps.businessNameConfirmer.confirmBusinessNames).toHaveBeenCalledWith(cands, { prior: stored });
-    expect(cleared.comparisonResult.businessNameConfirmation).toEqual(stored);
+    expect(deps.businessNameConfirmer.extractCompanyNames).toHaveBeenCalledWith(expect.objectContaining({ body: expect.any(String) }), { prior: stored });
+    expect(cleared.comparisonResult.companyExtraction).toEqual(stored);
 
-    deps.businessNameConfirmer.confirmBusinessNames = jest.fn(async () => ({ ok: true, key, companies: ['Acme Pest Solutions'] }));
+    deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: true, key: 'k2', companies: ['Bug Out'] }));
     expect(await rem.validateAutonomousRunGates(MD, RUN_REF, deps))
-      .toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Acme Pest Solutions/) });
+      .toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_off_list: Bug Out/) });
 
-    deps.businessNameConfirmer.confirmBusinessNames = jest.fn(async () => ({ ok: false, key, reason: 'timeout' }));
+    deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: false, key: 'k2', reason: 'timeout', retryable: true }));
     expect(await rem.validateAutonomousRunGates(MD, RUN_REF, deps))
-      .toMatchObject({ ok: false, reason: expect.stringMatching(/named_competitor_unverified_names/) });
+      .toMatchObject({ ok: false, reason: expect.stringMatching(/company-name check unavailable/) });
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {

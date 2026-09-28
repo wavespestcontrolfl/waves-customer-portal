@@ -2835,14 +2835,16 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
 // blog publishing to the owner list.
 describe('owner competitor list', () => {
   const OPTS = { namedCompetitorEnabled: true, operatorBriefText: 'Orkin, Terminix, Massey, Turner and Truly Nolen alternatives' };
+  // The runner stores a successful whole-draft extraction on the verdict.
+  const ext = (r, companies = []) => ({ ...r, companyExtraction: { ok: true, key: 'k', companies } });
 
   test('namedCompetitors lists every detected name; the verdict clears only the owner list', () => {
     const approved = gate.evaluate({ body: 'Orkin and Massey both offer recurring residential plans.', title: 'x' }, OPTS);
     expect(approved.namedCompetitors).toEqual(['Massey Services', 'Orkin']);
-    expect(gate.namedCompetitorListVerdict(approved)).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
+    expect(gate.namedCompetitorListVerdict(ext(approved))).toEqual({ ok: true, approved: ['Massey Services', 'Orkin'] });
 
     const offList = gate.evaluate({ body: 'Orkin and Truly Nolen both offer recurring residential plans.', title: 'x' }, OPTS);
-    expect(gate.namedCompetitorListVerdict(offList)).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
+    expect(gate.namedCompetitorListVerdict(ext(offList))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
 
     // A name only a link destination carries still counts, and the bare
     // HomeTeam / Turner aliases match lowercase URL slugs (Codex r2 P1) —
@@ -2859,7 +2861,7 @@ describe('owner competitor list', () => {
     // The owner's short "Turner" is recognized (Codex r1 P1 on #5146).
     const turner = gate.evaluate({ body: 'Turner does not offer a termite bond in every county.', title: 'x' }, OPTS);
     expect(turner.namedCompetitors).toEqual(['Turner Pest Control']);
-    expect(gate.namedCompetitorListVerdict(turner)).toEqual({ ok: true, approved: ['Turner Pest Control'] });
+    expect(gate.namedCompetitorListVerdict(ext(turner))).toEqual({ ok: true, approved: ['Turner Pest Control'] });
 
     const linked = gate.evaluate({ body: 'Compare plans on [their site](https://www.trulynolen.com/plans).', title: 'x' }, OPTS);
     expect(linked.namedCompetitors).toContain('Truly Nolen');
@@ -2867,44 +2869,12 @@ describe('owner competitor list', () => {
 
   // Uncurated business names: high-recall candidates here, semantic
   // confirmation in business-name-confirmer.js (Codex r2 on #5146).
-  test('business-name candidates are broad; only regulators, institutions and own/.gov/.edu links are dropped', () => {
-    const cands = (body, title = 'x') => gate.evaluate({ body, title }, OPTS).businessNameCandidates.map((c) => c.name);
-    expect(cands('Acme Pest Solutions competes with Orkin in Sarasota.')).toEqual(['Acme Pest Solutions']);
-    expect(cands('Acme Pest Solutions is based in Sarasota alongside Orkin.')).toEqual(['Acme Pest Solutions']);
-    expect(cands('Biological Pest Control offers a way to reduce chemical use.')).toEqual(['Biological Pest Control']);
-    expect(cands('Orkin and Bob Smith Lawn Care LLC both mow.')).toEqual(['Bob Smith Lawn Care LLC']);
-    // Its own broad detector, not the tone scans' provider regex (pre-push r6).
-    expect(cands('Compare Orkin with Acme Lawn Care for local lawn treatments.')).toEqual(['Acme Lawn Care']);
-    expect(cands('Green Turf Co mows lawns near Orkin customers.')).toEqual(['Green Turf Co']);
-    expect(cands('Hire Bug Busters for ants, or call Orkin.')).toEqual(['Bug Busters']);
-    // Category-only phrases are provably not names.
-    expect(cands('Orkin sells Pest Control and Lawn Care. Termite Treatment varies.')).toEqual([]);
-    expect(cands('Compare [their plans](https://acme-pest-solutions.com/plans) with Orkin.')).toEqual(['acme pest solutions']);
-    expect(cands('Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control and the Florida Department of Agriculture enforce it.')).toEqual([]);
-    expect(cands('Orkin offers plans. See [FDACS](https://www.fdacs.gov/pest-control-licensing) and [our page](https://www.wavespestcontrol.com/pest-control/).')).toEqual([]);
-    // Titles and headings go to the confirmer too (pre-push r5).
-    expect(cands('Plans for local homes.', 'Acme Pest Solutions in Sarasota')).toEqual(['Acme Pest Solutions']);
-    expect(cands('## Acme Pest Solutions\n\nThis company offers recurring residential plans.')).toEqual(['Acme Pest Solutions']);
-    // A link to an uncurated business on a TABLE draft is still a candidate.
-    const T = '<ComparisonTable columns={["What to weigh","National chain","Local SWFL company"]} rows={[{ label: "Plans", values: ["Yes","Yes"] }]} caption="Trade-offs." />';
-    const tabled = gate.evaluate({ body: `See [their plans](https://acme-pest-solutions.com/plans).\n\n${T}`, title: 'x' }, OPTS);
-    expect(tabled.businessNameCandidates.map((c) => c.name)).toEqual(['acme pest solutions']);
-    const first = gate.evaluate({ body: 'Acme Pest Solutions competes with Orkin in Sarasota.', title: 'x' }, OPTS).businessNameCandidates;
-    expect(first).toEqual([{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions competes with Orkin in Sarasota.' }]);
-  });
-
-  test('candidates count only through a confirmation that covers exactly them', () => {
-    const r = gate.evaluate({ body: 'Acme Pest Solutions competes with Orkin in Sarasota.', title: 'x' }, OPTS);
-    const key = gate.businessNameCandidatesKey(r.businessNameCandidates);
-    expect(gate.namedCompetitorListVerdict(r)).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
-    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: false, key, reason: 'timeout' } }))
-      .toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
-    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key: 'stale', companies: [] } }))
-      .toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
-    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key, companies: ['Acme Pest Solutions'] } }))
-      .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Acme Pest Solutions'] });
-    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key, companies: [] } }))
-      .toEqual({ ok: true, approved: ['Orkin'] });
+  test('the whole-draft company extraction joins the names; a missing or failed extraction fails closed', () => {
+    const r = gate.evaluate({ body: 'Orkin offers recurring residential plans.', title: 'x' }, OPTS);
+    expect(gate.namedCompetitorListVerdict({ ...r, companyExtraction: undefined })).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict({ ...r, companyExtraction: { ok: false, reason: 'timeout' } })).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Bug Out']))).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+    expect(gate.namedCompetitorListVerdict(ext(r, ['Orkin']))).toEqual({ ok: true, approved: ['Orkin'] });
   });
 
   test('a verdict without recorded names fails closed', () => {

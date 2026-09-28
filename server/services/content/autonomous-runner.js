@@ -134,6 +134,8 @@ function gbpLocationIdForCity(city) {
   return CITY_TO_LOCATION[key] || null;
 }
 
+// Company-name extraction outage → retry the draft after this long.
+const COMPANY_CHECK_RETRY_MS = 60 * 60 * 1000;
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 // completed_pending_review kinds that approve-and-publish (see
 // approveAndPublishNamedCompetitor). Mirrored by approve-autonomous-run.js.
@@ -905,17 +907,6 @@ class AutonomousRunner {
         logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
         comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
       }
-      // Unattended blogs only: uncurated business-name candidates get one
-      // structured confirmation call (business-name-confirmer.js), stored
-      // on the verdict so the merge-time recheck reuses it. Unavailable
-      // module → { ok: false } → the draft fails closed at the verdict.
-      const businessCandidates = Array.isArray(comparisonResult?.businessNameCandidates) ? comparisonResult.businessNameCandidates : [];
-      if (comparisonResult?.pass === true && run.action_type === 'new_supporting_blog' && businessCandidates.length) {
-        const confirmer = getBusinessNameConfirmer();
-        comparisonResult.businessNameConfirmation = confirmer
-          ? await confirmer.confirmBusinessNames(businessCandidates)
-          : { ok: false, reason: 'business_name_confirmer_unavailable' };
-      }
       run.comparison_table_result = comparisonResult;
       // A clean draft that NAMES a competitor must still never auto-publish — it
       // routes to the (approvable) human-review queue at the trust-build step.
@@ -946,6 +937,38 @@ class AutonomousRunner {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'comparison_table_failed', notes, blocking,
         });
+      }
+      // 3d'. Unattended blogs: ONE structured call lists every home-service
+      // company the whole draft names, links or references
+      // (business-name-confirmer.js); stored on the verdict so the merge-
+      // time recheck reuses it. The owner-list decision below reads it.
+      // A provider outage or bad output DEFERS the draft an hour (the
+      // attempt budget still bounds it) rather than dropping it; an
+      // unextractable draft (over the input bound) is skipped.
+      if (run.action_type === 'new_supporting_blog') {
+        const extractor = getBusinessNameConfirmer();
+        const extraction = extractor
+          ? await extractor.extractCompanyNames(draft)
+          : { ok: false, reason: 'business_name_confirmer_unavailable', retryable: true };
+        comparisonResult.companyExtraction = extraction;
+        run.comparison_table_result = comparisonResult;
+        if (extraction.ok !== true) {
+          const notes = `Company-name check unavailable (${extraction.reason || 'unknown'}) — the owner competitor list could not be applied.`;
+          if (extraction.retryable === true) {
+            const finalized = await finalize(run, t0, {
+              outcome: 'deferred_company_check',
+              skip_reason: 'named_competitor_unverified_names',
+              reviewer_notes: `${notes} Deferred one hour for a retry.`,
+            });
+            await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + COMPANY_CHECK_RETRY_MS), { claimToken });
+            return finalized;
+          }
+          const finalized = await finalize(run, t0, {
+            outcome: 'skipped', skip_reason: 'named_competitor_unverified_names', reviewer_notes: notes,
+          });
+          await this._skipClaimOrThrow(queue, opp.id, 'named_competitor_unverified_names', { claimToken });
+          return finalized;
+        }
       }
     }
 
@@ -1158,21 +1181,20 @@ class AutonomousRunner {
     // gate) AND the owner list (every name approved — owner rulings
     // 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
     // merge-time head checks remain mandatory.
-    // Uncurated business-name candidates count as competitor content unless
-    // their confirmation cleared them all (then the post is ordinary).
+    // A company the whole-draft extraction found makes the post competitor
+    // content even when the deterministic detection did not flag it.
     let namedCompetitorLaneOpen = false;
     let namedCompetitorList = null;
-    const businessCandidatesPresent = unattendedBlog
-      && (run.comparison_table_result?.businessNameCandidates?.length || 0) > 0;
+    const extractedCompanies = unattendedBlog
+      && (run.comparison_table_result?.companyExtraction?.companies?.length || 0) > 0;
     try {
       const comparisonTableGate = require('./comparison-table-gate');
       namedCompetitorLaneOpen = comparisonTableGate.namedCompetitorAutopublishEligible(brief) === true;
-      if (run.comparison_requires_review === true || businessCandidatesPresent) {
+      if (run.comparison_requires_review === true || extractedCompanies) {
         namedCompetitorList = comparisonTableGate.namedCompetitorListVerdict(run.comparison_table_result);
       }
     } catch (_) { namedCompetitorLaneOpen = false; namedCompetitorList = null; }
-    const competitorContent = run.comparison_requires_review === true
-      || (businessCandidatesPresent && namedCompetitorList?.ok !== true);
+    const competitorContent = run.comparison_requires_review === true || extractedCompanies;
     const namedCompetitorAutopublish = namedCompetitorLaneOpen && namedCompetitorList?.ok === true;
     const forceNamedCompetitorReview = competitorContent && !namedCompetitorAutopublish;
     if (namedCompetitorAutopublish && competitorContent) {
@@ -1208,14 +1230,11 @@ class AutonomousRunner {
     if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
       const reason = !autoPublish ? 'auto_publish_disabled'
         : forceNamedCompetitorReview
-          ? ((namedCompetitorList?.reason === 'named_competitor_unverified_names' && namedCompetitorList.reason)
-            || (namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
+          ? ((namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
           : 'brief_risk_blocked';
       const listNote = reason === 'named_competitor_off_list'
         ? `Names competitor(s) outside the owner-approved list: ${namedCompetitorList.offList.join(', ')} (a new owner ruling is needed to name them).`
-        : reason === 'named_competitor_unverified_names'
-          ? `Could not confirm whether these are companies (${run.comparison_table_result?.businessNameConfirmation?.reason || 'no confirmation'}): ${(run.comparison_table_result?.businessNameCandidates || []).map((c) => c.name).join(', ')}.`
-          : null;
+        : null;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped', skip_reason: reason,
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), listNote].filter(Boolean).join(' | '),

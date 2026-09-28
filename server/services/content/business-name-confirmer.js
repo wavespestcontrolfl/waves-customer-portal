@@ -1,124 +1,132 @@
 /**
- * business-name-confirmer.js — decides which of a draft's uncurated
- * business-name CANDIDATES are actual companies (owner rulings 2026-09-27
- * D2 + 2026-09-28: an unattended competitor blog may name only the six
- * owner-approved competitors).
+ * business-name-confirmer.js — lists every home-service COMPANY a blog draft
+ * names, links or references (owner rulings 2026-09-27 D2 + 2026-09-28: an
+ * unattended competitor blog may name only the six owner-approved
+ * competitors in competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS).
  *
- * Division of labor (the footprint-claim-classifier pattern): the
- * comparison-table gate's businessNameCandidates() is the cheap,
- * deterministic, HIGH-RECALL pre-filter ("Acme Pest Solutions", "Biological
- * Pest Control", a link to acme-pest-solutions.com); this module is one
- * structured FAST-tier call per draft that answers "which of these phrases
- * name a real business?" ("Acme Pest Solutions competes with Orkin" → yes;
- * "Biological Pest Control offers a way to reduce chemical use" → no).
- * New phrasing lands in this prompt, never as new word lists in the gate.
+ * Why a model and not a detector: whether a phrase is a company ("Bug Out
+ * competes with local providers", "Lawn Doctor" used both as a company and
+ * as a generic term, a /hulett-alternatives/ slug) is a language judgement
+ * no word list converges on (Codex r1–r3 on #5146). The comparison-table
+ * gate keeps its deterministic curated / operator / link detection for the
+ * named-competitor FLAG and the audit trail; this extraction only ADDS
+ * names, which namedCompetitorListVerdict holds to the owner list.
  *
- * Failure posture: any provider failure, oversized candidate list, or
- * answer that does not cover exactly the candidates asked returns
- * { ok: false } — the verdict (namedCompetitorListVerdict) then skips THAT
- * draft as named_competitor_unverified_names. A draft with no candidates
- * never calls this module.
+ * One structured FAST-tier call per unattended blog draft (about ten a
+ * week), on the fastStructured two-provider policy, lane
+ * business_name_confirm. The input is the title, slug / URL path, meta
+ * description, body and link destinations, bounded to MAX_INPUT_CHARS.
  *
- * Reuse: the result carries `key` (businessNameCandidatesKey of the exact
- * candidates + sentences judged). A stored result whose key still matches
- * is returned as-is, so the merge-time poller never re-calls and a Codex
- * fix that leaves the candidates untouched reuses the run's confirmation.
+ * Result: { ok: true, key, companies: [canonical name…], checked_at } or
+ * { ok: false, key, reason, retryable }. `key` hashes the exact input sent;
+ * a stored result with the same key is returned without a call, so the
+ * merge-time poller never re-calls and a Codex fix that leaves the text
+ * unchanged reuses the run's extraction. Never throws.
  */
 
+const crypto = require('node:crypto');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
-const { businessNameCandidatesKey } = require('./comparison-table-gate');
+const competitorFacts = require('./competitor-facts');
 
-// One call per draft. A wall of candidates is not a subtle judgement —
-// fail closed instead of sending an unbounded prompt.
-const MAX_CANDIDATES = 20;
-const CALL_TIMEOUT_MS = 20_000;
+// A supporting blog runs ~10–15k characters; anything past this bound is
+// not a normal draft and is not truncated (a name past the cut would be
+// unseen) — it fails closed instead.
+const MAX_INPUT_CHARS = 60_000;
+const CALL_TIMEOUT_MS = 30_000;
+const PROMPT_VERSION = 'company-extraction-v1';
+const OWN_BRAND_RE = /\bwaves\b/i;
 
 const SYSTEM_PROMPT = [
-  'You review blog copy for Waves Pest Control, a Florida pest control and lawn care company.',
-  'You are given candidate phrases found in a draft, each with the sentence (or link) it came from.',
-  'For each candidate, answer whether it names an actual company or business (a pest control, lawn care, or any other firm — a competitor, supplier, franchise, or brand), as used in that sentence.',
-  'NOT a business (false): a pest control method or concept ("Biological Pest Control", "Integrated Pest Management"), a service category or topic ("Home Pest Control", "Yard Mosquito Control"), a guide, heading, program, publication, government agency, university, extension service, law, or regulation.',
-  'A business (true): a specific company name ("Acme Pest Solutions competes with Orkin", "Bob Smith Lawn Care LLC", a link to a company website).',
-  'When a phrase could be either, answer true if the sentence treats it as a specific company.',
-  'Answer every candidate exactly once, copying the candidate text exactly.',
+  'You review a blog draft written for Waves Pest Control, a Florida pest control and lawn care company.',
+  'List every pest control, lawn care, landscaping, termite, mosquito, wildlife, or other home-service COMPANY that the draft names, links to, or refers to — in the title, slug/URL, meta description, body, or link destinations.',
+  'Include a company even when it is named only once, only in a link or URL slug, or only in a heading, and include it if ANY use in the draft refers to the company (a name used generically in one sentence and as a company in another is still a company).',
+  'Do NOT list: Waves Pest Control or its own websites; retailers (e.g. Home Depot, Lowe\'s, Amazon); universities, extension services, government bodies, and laws; product or chemical brands; publications and news outlets; generic service phrases or methods ("pest control", "Biological Pest Control", "Yard Mosquito Control").',
+  'Return each company once, spelled as the draft spells it. Return an empty list when the draft names no such company.',
 ].join('\n');
 
 const RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['candidates'],
+  required: ['companies'],
   properties: {
-    candidates: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['candidate', 'is_business'],
-        properties: {
-          candidate: { type: 'string' },
-          is_business: { type: 'boolean' },
-        },
-      },
-    },
+    companies: { type: 'array', items: { type: 'string' } },
   },
 };
 
-function answersCover(json, candidates) {
-  const rows = Array.isArray(json?.candidates) ? json.candidates : null;
-  if (!rows || rows.length !== candidates.length) return false;
-  const asked = new Set(candidates.map((c) => c.name));
-  const seen = new Set();
-  for (const r of rows) {
-    if (typeof r?.is_business !== 'boolean' || !asked.has(r.candidate) || seen.has(r.candidate)) return false;
-    seen.add(r.candidate);
+const LINK_RE = /https?:\/\/[^\s)"'<>\]]+/gi;
+
+/** extractionInput(draft) → the exact text sent (null when over the bound). */
+function extractionInput(draft) {
+  const fm = draft?.frontmatter || {};
+  const body = String(draft?.body || draft?.content || '');
+  const links = [...new Set(body.match(LINK_RE) || [])];
+  const text = [
+    `TITLE: ${draft?.title || fm.title || ''}`,
+    `SLUG / URL: ${[fm.slug, draft?.slug, draft?.url].filter(Boolean).join(' ')}`,
+    `META DESCRIPTION: ${draft?.meta_description || fm.meta_description || ''}`,
+    `LINK DESTINATIONS:\n${links.join('\n')}`,
+    `BODY:\n${body}`,
+  ].join('\n\n');
+  return text.length > MAX_INPUT_CHARS ? null : text;
+}
+
+function inputKey(text) {
+  return crypto.createHash('sha256').update(`${PROMPT_VERSION}\u0000${text}`).digest('hex');
+}
+
+// Canonical curated name when the extraction names a curated competitor
+// (alias spellings like "Massey" → "Massey Services"), else the name as
+// written. Own-brand mentions are dropped.
+function canonicalCompanies(names) {
+  const out = new Set();
+  for (const raw of names) {
+    const nm = String(raw || '').trim();
+    if (!nm || OWN_BRAND_RE.test(nm)) continue;
+    out.add(competitorFacts.findCompetitor(nm)?.name || nm);
   }
-  return true;
+  return [...out].sort();
 }
 
 /**
- * confirmBusinessNames(candidates, { prior }) →
- *   { ok: true,  key, companies: [name…], checked_at }
- *   { ok: false, key, reason }
- * Never throws. `prior` — a stored result; reused when its key matches.
+ * extractCompanyNames(draft, { prior }) — see the module header.
+ * `retryable: true` marks provider / output failures (an outage should
+ * delay the post); an over-long draft is `retryable: false`.
  */
-async function confirmBusinessNames(candidates, { prior = null } = {}) {
-  const list = Array.isArray(candidates) ? candidates : [];
-  const key = businessNameCandidatesKey(list);
+async function extractCompanyNames(draft, { prior = null } = {}) {
+  const text = extractionInput(draft);
+  if (text === null) return { ok: false, key: null, reason: 'draft_too_long_for_extraction', retryable: false };
+  const key = inputKey(text);
   if (prior && prior.ok === true && prior.key === key && Array.isArray(prior.companies)) return prior;
-  if (!list.length) return { ok: true, key, companies: [], checked_at: new Date().toISOString() };
-  if (list.length > MAX_CANDIDATES) {
-    return { ok: false, key, reason: `too_many_candidates:${list.length}` };
-  }
   try {
     const result = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.fastStructured,
       {
         laneId: 'business_name_confirm',
-        maxTokens: 60 * list.length + 200,
+        maxTokens: 800,
         jsonMode: true,
         jsonSchema: RESPONSE_SCHEMA,
         timeoutMs: CALL_TIMEOUT_MS,
         system: SYSTEM_PROMPT,
-        text: list.map((c, i) => `${i + 1}. CANDIDATE: ${c.name}\n   CONTEXT: ${c.sentence}`).join('\n'),
+        text,
       },
-      { validate: (r) => (answersCover(r?.json, list) ? null : 'answers_do_not_cover_candidates') },
+      { validate: (r) => (Array.isArray(r?.json?.companies) && r.json.companies.every((c) => typeof c === 'string') ? null : 'missing_companies') },
     );
-    if (!result?.ok || !answersCover(result.json, list)) {
-      const reason = result?.reason || 'invalid_json';
-      logger.warn(`[business-name-confirmer] confirmation failed (${reason}) — draft fails closed`);
-      return { ok: false, key, reason: String(reason).slice(0, 200) };
+    const companies = result?.json?.companies;
+    if (!result?.ok || !Array.isArray(companies) || !companies.every((c) => typeof c === 'string')) {
+      const reason = String(result?.reason || 'invalid_json').slice(0, 200);
+      logger.warn(`[business-name-confirmer] extraction failed (${reason}) — draft deferred`);
+      return { ok: false, key, reason, retryable: true };
     }
-    const companies = result.json.candidates.filter((r) => r.is_business).map((r) => r.candidate).sort();
-    return { ok: true, key, companies, checked_at: new Date().toISOString() };
+    return { ok: true, key, companies: canonicalCompanies(companies), checked_at: new Date().toISOString() };
   } catch (err) {
-    logger.warn(`[business-name-confirmer] confirmation threw (${err.message}) — draft fails closed`);
-    return { ok: false, key, reason: `threw:${String(err.message).slice(0, 180)}` };
+    logger.warn(`[business-name-confirmer] extraction threw (${err.message}) — draft deferred`);
+    return { ok: false, key, reason: `threw:${String(err.message).slice(0, 180)}`, retryable: true };
   }
 }
 
 module.exports = {
-  confirmBusinessNames,
-  _internals: { SYSTEM_PROMPT, MAX_CANDIDATES, answersCover },
+  extractCompanyNames,
+  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies },
 };

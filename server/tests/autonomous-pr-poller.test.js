@@ -1673,7 +1673,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   // human approved (trust_build_approved_head_sha) — any foreign push waits
   // for a human. Intercept-class runs additionally re-check the scoped
   // eligibility (raw brief marker + both gates) at the last instant.
-  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }, briefId = 'brief-1' } = {}) {
+  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'], companyExtraction: { ok: true, key: 'k', companies: ['Orkin'] } }, briefId = 'brief-1' } = {}) {
     return {
       comparison_table_result: verdict,
       draft_payload: JSON.stringify({
@@ -1714,15 +1714,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   // holds the persisted verdict to the owner list too — an off-list name or
   // a verdict recorded before names were persisted leaves the PR for a human.
   test.each([
-    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'] }],
+    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'], companyExtraction: { ok: true, key: 'k', companies: [] } }],
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
-    ['has business-name candidates with no stored confirmation', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'], businessNameCandidates: [{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions competes with Orkin.' }] }],
-    ['has an unflagged verdict whose stored confirmation found a company', (() => {
-      const businessNameCandidates = [{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions is based in Sarasota.' }];
-      const key = require('../services/content/comparison-table-gate').businessNameCandidatesKey(businessNameCandidates);
-      return { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], businessNameCandidates,
-        businessNameConfirmation: { ok: true, key, companies: ['Acme Pest Solutions'] } };
-    })()],
+    ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
+    ['is unflagged but its stored extraction found an off-list company', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: ['Bug Out'] } }],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     await withGatesOn(async () => {

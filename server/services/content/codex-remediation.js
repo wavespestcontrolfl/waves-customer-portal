@@ -1318,19 +1318,18 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
     }
-    // Uncurated business-name candidates on the FIXED body: reuse the run's
-    // stored confirmation while the candidates (names + sentences) are
-    // unchanged; a fix that changed them is confirmed afresh. Failure fails
-    // closed through the verdict below.
-    const businessCandidates = Array.isArray(comparisonResult.businessNameCandidates) ? comparisonResult.businessNameCandidates : [];
-    if (businessCandidates.length) {
-      const stored = parseJsonMaybe(run.comparison_table_result);
-      const confirmer = deps.businessNameConfirmer || require('./business-name-confirmer');
-      comparisonResult.businessNameConfirmation = await confirmer.confirmBusinessNames(businessCandidates, {
-        prior: stored && stored.businessNameConfirmation,
-      });
+    // Whole-draft company extraction on the FIXED draft: the run's stored
+    // extraction is reused when the input text is unchanged (same key);
+    // otherwise one fresh call. A failed extraction refuses the fix.
+    const stored = parseJsonMaybe(run.comparison_table_result);
+    const extractor = deps.businessNameConfirmer || require('./business-name-confirmer');
+    comparisonResult.companyExtraction = await extractor.extractCompanyNames(draft, {
+      prior: stored && stored.companyExtraction,
+    });
+    if (comparisonResult.companyExtraction.ok !== true) {
+      return { ok: false, reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})` };
     }
-    if (comparisonResult.requiresHumanReview === true || businessCandidates.length) {
+    if (comparisonResult.requiresHumanReview === true || comparisonResult.companyExtraction.companies.length) {
       // Owner list on the FIXED body (owner rulings 2026-09-27 D2 +
       // 2026-09-28) — a fix must not add an unapproved name to an
       // unattended PR.
