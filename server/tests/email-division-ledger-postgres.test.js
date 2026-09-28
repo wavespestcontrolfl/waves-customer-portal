@@ -11,6 +11,13 @@
  */
 const { randomUUID } = require('node:crypto');
 
+// The provider call is the only thing mocked: everything else — the
+// suppression classifier the eligibility check reuses included — is real.
+jest.mock('../services/email-template-library', () => ({
+  ...jest.requireActual('../services/email-template-library'),
+  sendTemplate: jest.fn(),
+}));
+
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
@@ -19,6 +26,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
   let db;
   let Ledger;
   let Eligibility;
+  let sendTemplate;
   let customerId;
   let customerEmail;
 
@@ -26,6 +34,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     db = require('../models/db');
     Ledger = require('../services/email-division/ledger');
     Eligibility = require('../services/email-division/eligibility');
+    ({ sendTemplate } = require('../services/email-template-library'));
   });
 
   afterAll(async () => {
@@ -48,6 +57,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
   });
 
   afterEach(async () => {
+    sendTemplate.mockReset();
     await db('marketing_email_ledger').where({ customer_id: customerId }).del();
     await db('notification_prefs').where({ customer_id: customerId }).del();
     await db('customers').where({ id: customerId }).del();
@@ -320,6 +330,125 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
     expect(row.status).toBe('sent');
     expect(row.reason).toBeNull(); // the rejected markFailed never wrote its reason either
+  });
+
+  test('pre-push audit P1: a broadcast passed as relationship is stored and guarded as MARKETING', async () => {
+    const first = await attempt('class-key', { marketingClass: 'relationship' });
+    expect(first.ok).toBe(true);
+    expect(first.row.marketing_class).toBe('marketing');
+    // …so the outstanding-reservation guard applies to the next key.
+    const second = await attempt('class-key-2', { marketingClass: 'relationship' });
+    expect(second.ok).toBe(false);
+    expect(second.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
+  });
+
+  test('GitHub round P1: the seeded notification_prefs row carries the schema default weather_alert_channel = sms, so alert email is refused until the customer picks email', async () => {
+    const denied = await attempt('alert-key', { stream: 'alert', emailKey: 'mkt.alert.storm' });
+    expect(denied.reason).toBe(Eligibility.REASONS.STREAM_CHANNEL_NOT_EMAIL);
+    await db('notification_prefs').where({ customer_id: customerId }).update({ weather_alert_channel: 'email' });
+    const allowed = await attempt('alert-key', { stream: 'alert', emailKey: 'mkt.alert.storm' });
+    expect(allowed.ok).toBe(true);
+  });
+
+  test('GitHub round P1 (fence): a renewed lease is respected by the sweep; a reclaimed reservation cannot be renewed', async () => {
+    const first = await attempt('lease-key');
+    expect(first.ok).toBe(true);
+    const backdate = () => db('marketing_email_ledger').where({ id: first.row.id }).update({ reserved_at: new Date(Date.now() - 45 * 60 * 1000) });
+
+    // The owner comes back late but BEFORE anyone else reserved: its
+    // heartbeat renews the lease, so the next attempt's sweep leaves the row
+    // reserved and the outstanding guard denies that attempt.
+    await backdate();
+    const renewed = await Ledger.confirmBeforeDispatch(first.row.id);
+    expect(renewed.ok).toBe(true);
+    expect(renewed.recipientEmail).toBe(customerEmail);
+    const blocked = await attempt('lease-key-2');
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
+    expect((await db('marketing_email_ledger').where({ id: first.row.id }).first()).status).toBe('reserved');
+
+    // The owner pauses again past the lifetime; another attempt's sweep
+    // settles the row and takes the slot. The owner's resumed fence fails —
+    // it must not dispatch.
+    await backdate();
+    const replacement = await attempt('lease-key-3');
+    expect(replacement.ok).toBe(true);
+    const fenced = await Ledger.confirmBeforeDispatch(first.row.id);
+    expect(fenced.ok).toBe(false);
+    expect(fenced.reason).toBe(Eligibility.REASONS.RESERVATION_RECLAIMED);
+    const settled = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+    expect(settled.status).toBe('failed');
+    expect(settled.reason).toBe('abandoned_reservation');
+  });
+
+  test('the fence asks email_messages first: a reserved row whose key was already accepted completes as sent (ALREADY_DISPATCHED) even when consent has since been withdrawn', async () => {
+    const first = await attempt('crashed-after-accept');
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'crashed-after-accept', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.broadcast.weekly', status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic-fence',
+    }).returning(['id']);
+    try {
+      await db('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: false });
+      const fence = await Ledger.confirmBeforeDispatch(first.row.id);
+      expect(fence).toMatchObject({ ok: false, reason: Eligibility.REASONS.ALREADY_DISPATCHED });
+      const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+      expect(row.status).toBe('sent');
+      expect(row.email_message_id).toBe(message.id);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
+  test('GitHub round P1 (consent at the boundary): email switched off after the reservation skips the row instead of dispatching, and frees the slot', async () => {
+    const first = await attempt('consent-key');
+    expect(first.ok).toBe(true);
+    await db('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: false });
+    const fence = await Ledger.confirmBeforeDispatch(first.row.id);
+    expect(fence).toMatchObject({ ok: false, reason: Eligibility.REASONS.EMAIL_SWITCH_OFF });
+    const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+    expect(row.status).toBe('skipped');
+    expect(row.reason).toBe(Eligibility.REASONS.EMAIL_SWITCH_OFF);
+  });
+
+  test('sendWithLedger end to end: one provider call under the reservation\'s key, the row completes with the message id, and retries or other keys never dispatch again', async () => {
+    const messageId = randomUUID();
+    sendTemplate.mockResolvedValue({ sent: true, providerAccepted: true, message: { id: messageId } });
+    const args = {
+      customerId, stream: 'broadcast', emailKey: 'mkt.broadcast.weekly', idempotencyKey: 'e2e-key',
+      template: { templateKey: 'mkt.broadcast.weekly', payload: { first_name: 'Synthetic' } },
+    };
+
+    const sent = await Ledger.sendWithLedger(args);
+    expect(sent).toMatchObject({ ok: true, sent: true, duplicate: false, message: { id: messageId } });
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'mkt.broadcast.weekly', to: customerEmail, recipientType: 'customer', recipientId: customerId,
+      idempotencyKey: 'e2e-key', suppressionGroupKey: 'marketing_newsletter',
+    }));
+    const row = await db('marketing_email_ledger').where({ idempotency_key: 'e2e-key' }).first();
+    expect(row.status).toBe('sent');
+    expect(row.email_message_id).toBe(messageId);
+    expect(row.marketing_class).toBe('marketing');
+
+    const retry = await Ledger.sendWithLedger(args);
+    expect(retry).toMatchObject({ ok: true, sent: false, duplicate: true });
+    const another = await Ledger.sendWithLedger({ ...args, idempotencyKey: 'e2e-key-2' });
+    expect(another).toMatchObject({ ok: false, sent: false, reason: Eligibility.REASONS.CAP_WEEKLY_BROADCAST });
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('sendWithLedger: a provider block settles the row as skipped with the library\'s reason and the customer\'s slot is free again', async () => {
+    sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'synthetic_block' });
+    const blocked = await Ledger.sendWithLedger({
+      customerId, stream: 'broadcast', emailKey: 'mkt.broadcast.weekly', idempotencyKey: 'blocked-key',
+      template: { templateKey: 'mkt.broadcast.weekly', payload: {} },
+    });
+    expect(blocked).toMatchObject({ ok: false, sent: false, reason: 'synthetic_block' });
+    const row = await db('marketing_email_ledger').where({ idempotency_key: 'blocked-key' }).first();
+    expect(row.status).toBe('skipped');
+    expect(row.reason).toBe('synthetic_block');
+    const next = await attempt('after-block');
+    expect(next.ok).toBe(true);
   });
 
   test('CI push audit (codex): retrying markSent on an already-sent row preserves the original sent_at and email_message_id', async () => {

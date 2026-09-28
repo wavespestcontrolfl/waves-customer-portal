@@ -14,6 +14,17 @@
  * win-back ('lc.winback*') -> marketing_nurture; broadcast/alert ->
  * marketing_newsletter.
  *
+ * The MARKETING CLASS — whether the marketing caps, the recent-human-contact
+ * check and the ledger's outstanding-reservation guard apply — is resolved
+ * HERE from the stream and email key (resolveMarketingClass), never taken on
+ * trust from the caller: broadcast, alert and nurture mail is marketing by
+ * definition, so are the referral ask and the win-back series (their
+ * suppression groups are marketing_*), and a plain lifecycle key is
+ * relationship mail unless the caller says 'marketing' (a pest tip riding
+ * the lifecycle stream). The caller's word can only tighten the class
+ * (pre-push audit P1: a broadcast passed as 'relationship' would have
+ * skipped every cap, the human-contact check and the outstanding guard).
+ *
  * eligibleForEmail is a short loop over the CHECKS list below (codex round-1
  * P2 — the single-function version tripped the repo's complexity lint at
  * 33, limit 20): each check reads whatever shared `ctx` state it needs,
@@ -50,6 +61,14 @@ const REASONS = {
   // Ledger-level (reserveWithCap): the idempotency key already names another
   // customer/stream/email operation.
   IDEMPOTENCY_KEY_CONFLICT: 'IDEMPOTENCY_KEY_CONFLICT',
+  // Ledger-level (confirmBeforeDispatch / sendWithLedger): the reservation a
+  // worker was about to hand to the provider has since been settled by the
+  // stale-reservation sweep — that worker must not send.
+  RESERVATION_RECLAIMED: 'RESERVATION_RECLAIMED',
+  // Ledger-level (confirmBeforeDispatch): the reservation's key already has
+  // a provider handoff in email_messages — the email went out, or may have —
+  // so the row completes as sent and nothing more is dispatched.
+  ALREADY_DISPATCHED: 'ALREADY_DISPATCHED',
   CAP_WEEKLY_BROADCAST: 'CAP_WEEKLY_BROADCAST',
   CAP_WEEKLY_ALERT: 'CAP_WEEKLY_ALERT',
   CAP_SAME_PEST_14D: 'CAP_SAME_PEST_14D',
@@ -71,6 +90,20 @@ function isWinbackKey(emailKey) {
   return typeof emailKey === 'string' && emailKey.startsWith('lc.winback');
 }
 
+// The one place the marketing class is decided (see the header). `requested`
+// is the caller's word: it may promote a plain lifecycle key to marketing,
+// it can never demote anything. Anything outside MARKETING_CLASSES is a
+// programming error and throws — eligibleForEmail turns that into
+// LOOKUP_FAILED, never an allow.
+function resolveMarketingClass(stream, emailKey, requested) {
+  if (requested != null && !MARKETING_CLASSES.has(requested)) {
+    throw new Error(`eligibleForEmail: unknown marketingClass (${requested})`);
+  }
+  if (stream !== 'lifecycle') return 'marketing'; // nurture, broadcast, alert
+  if (isReferralKey(emailKey) || isWinbackKey(emailKey)) return 'marketing';
+  return requested === 'marketing' ? 'marketing' : 'relationship';
+}
+
 // The suppression group each stream/emailKey combination rides on.
 // The suppression group a send answers to. A lifecycle send classified as
 // MARKETING (a pest tip riding the lifecycle stream) is marketing mail: it
@@ -89,32 +122,48 @@ function groupKeyFor(stream, emailKey, marketingClass = 'relationship') {
 // Whether the stream's own opt-in/opt-out flag on notification_prefs passes.
 // `prefs` may be undefined (no row yet) — every flag column defaults to
 // true in the schema, so a missing row reads the same as an unset column.
-function streamFlagOk(stream, emailKey, prefs, marketingClass = 'relationship') {
+// Key-specific rules come first: the referral ask answers to referral_nudge
+// and the win-back series to its marketing_nurture unsubscribe (like
+// nurture), whatever their class; marketing_offers governs broadcast and a
+// pest tip riding the lifecycle stream.
+function streamFlagOk(stream, emailKey, prefs, marketingClass) {
   if (stream === 'broadcast') return prefs?.marketing_offers === true;
-  if (stream === 'lifecycle' && marketingClass === 'marketing') return prefs?.marketing_offers === true;
   if (stream === 'alert') return prefs?.weather_alerts !== false;
   if (stream === 'lifecycle' && isReferralKey(emailKey)) return prefs?.referral_nudge !== false;
-  return true; // plain lifecycle relationship mail, win-back, nurture
+  if (stream === 'lifecycle' && isWinbackKey(emailKey)) return true;
+  if (stream === 'lifecycle' && marketingClass === 'marketing') return prefs?.marketing_offers === true;
+  return true; // plain lifecycle relationship mail, nurture
 }
 
 // notification_prefs carries a channel column per category ('sms' | 'email'
-// | 'both', server/routes/notification-prefs.js's legacyChannel allowlist):
-// broadcast -> marketing_channel, alert -> weather_alert_channel, referral
-// -> referral_channel. Only a literal 'sms' means "email is unwanted" here;
-// null/unset/'email'/'both'/anything unrecognized passes (never fail-closed
-// on a channel value we don't understand — that mirrors legacyChannel's own
-// permissive fallback, not a stricter allowlist of our own).
-function streamChannelColumn(stream, emailKey, marketingClass = 'relationship') {
+// | 'both'): broadcast (and a lifecycle pest tip) -> marketing_channel,
+// alert -> weather_alert_channel, referral -> referral_channel. A missing
+// row, a null column or a value outside the allowlist reads as the column's
+// SCHEMA DEFAULT — the same rule server/routes/notification-prefs.js's
+// legacyChannel applies when it reports the customer's choice back to them
+// (20260401000104_notification_prefs_enhanced.js: referral and weather
+// alerts default to 'sms', marketing to 'email'). A customer with no seeded
+// row is therefore SMS-only for referral and alert mail, exactly as the
+// portal shows them (codex GitHub round P1). Only a resolved 'sms' means
+// "email is unwanted".
+const CHANNEL_VALUES = new Set(['sms', 'email', 'both']);
+const CHANNEL_DEFAULTS = { marketing_channel: 'email', weather_alert_channel: 'sms', referral_channel: 'sms' };
+function channelFor(prefs, column) {
+  const value = String(prefs?.[column] || '').trim().toLowerCase();
+  return CHANNEL_VALUES.has(value) ? value : CHANNEL_DEFAULTS[column];
+}
+function streamChannelColumn(stream, emailKey, marketingClass) {
   if (stream === 'broadcast') return 'marketing_channel';
-  if (stream === 'lifecycle' && marketingClass === 'marketing') return 'marketing_channel';
   if (stream === 'alert') return 'weather_alert_channel';
   if (stream === 'lifecycle' && isReferralKey(emailKey)) return 'referral_channel';
-  return null; // plain lifecycle relationship mail, win-back, nurture: no channel gate
+  if (stream === 'lifecycle' && isWinbackKey(emailKey)) return null;
+  if (stream === 'lifecycle' && marketingClass === 'marketing') return 'marketing_channel';
+  return null; // plain lifecycle relationship mail, nurture: no channel gate
 }
-function streamChannelBlocksEmail(stream, emailKey, prefs, marketingClass = 'relationship') {
+function streamChannelBlocksEmail(stream, emailKey, prefs, marketingClass) {
   const column = streamChannelColumn(stream, emailKey, marketingClass);
   if (!column) return false;
-  return String(prefs?.[column] || '').trim().toLowerCase() === 'sms';
+  return channelFor(prefs, column) === 'sms';
 }
 
 function isLiveCustomer(customer) {
@@ -203,7 +252,7 @@ async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   // …and the customer's marketing channel must include email: an SMS-only
   // marketing choice keeps promotional copy out of an operational email too
   // (codex GitHub round P1).
-  const marketingChannelIsSmsOnly = String(prefs?.marketing_channel || '').trim().toLowerCase() === 'sms';
+  const marketingChannelIsSmsOnly = channelFor(prefs, 'marketing_channel') === 'sms';
   checks.allowPitch = prefs?.marketing_offers === true && !marketingChannelIsSmsOnly && !(await marketingSuppressed(ctx));
   if (!streamFlagOk(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_FLAG_OFF;
   if (streamChannelBlocksEmail(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
@@ -312,13 +361,14 @@ const CHECKS = [
 ];
 
 async function eligibleForEmail({
-  customerId, stream, marketingClass, emailKey, pestKey = null, now = new Date(), conn,
+  customerId, stream, marketingClass: requestedClass, emailKey, pestKey = null, now = new Date(), conn,
 } = {}) {
   const checks = {};
   try {
-    if (!STREAMS.has(stream) || !MARKETING_CLASSES.has(marketingClass)) {
-      throw new Error(`eligibleForEmail: unknown stream/marketingClass (${stream}/${marketingClass})`);
-    }
+    if (!STREAMS.has(stream)) throw new Error(`eligibleForEmail: unknown stream (${stream})`);
+    const marketingClass = resolveMarketingClass(stream, emailKey, requestedClass);
+    // Surfaced so the ledger stores the class that was actually judged.
+    checks.marketingClass = marketingClass;
     const ctx = {
       customerId, stream, marketingClass, emailKey, pestKey,
       nowDate: now instanceof Date ? now : new Date(now),
@@ -337,4 +387,6 @@ async function eligibleForEmail({
   }
 }
 
-module.exports = { eligibleForEmail, REASONS, groupKeyFor };
+module.exports = {
+  eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor,
+};

@@ -7,10 +7,22 @@
  * reserved BEFORE the provider call, so a crash between reserve and send only
  * leaves a `reserved` row (safe — it never counts toward the eligibility
  * caps, which read `sent` rows only), never a contact with no record of it.
+ *
+ * sendWithLedger is the documented entry point: reserve → prove the
+ * reservation is still ours and re-run consent at the provider boundary →
+ * sendTemplate under the reservation's own idempotency key → settle from the
+ * outcome. The primitives (reserveWithCap, confirmBeforeDispatch, markSent,
+ * markSkipped, markFailed) stay exported for a sender that must hold other
+ * authority rows around the provider call, under the contract each one
+ * documents — confirmBeforeDispatch immediately before sendTemplate is not
+ * optional on that path (codex GitHub round P1s).
  */
 
 const db = require('../../models/db');
-const { eligibleForEmail, REASONS } = require('./eligibility');
+const { sendTemplate } = require('../email-template-library');
+const {
+  eligibleForEmail, resolveMarketingClass, groupKeyFor, REASONS,
+} = require('./eligibility');
 
 // A 'reserved' row a worker never resolved (crashed, deployed over, timed
 // out) must not block this customer's marketing email forever — codex
@@ -86,8 +98,14 @@ async function settleAbandonedReservations(trx, customerId, now) {
     if (state.kind === 'accepted' || state.kind === 'uncertain') {
       await completeFromMessage(trx, row.id, state);
     } else {
+      // The staleness is re-checked in the UPDATE itself: a lease renewal
+      // (confirmBeforeDispatch) landing between the select above and here
+      // means the owner is alive and about to dispatch, so the row is no
+      // longer stale and stays reserved. Both run under the same customer
+      // lock, so this is belt-and-braces, not the primary fence.
       await trx('marketing_email_ledger')
         .where({ id: row.id, status: 'reserved' })
+        .where('reserved_at', '<=', staleCutoff)
         .update({
           status: 'failed',
           reason: state.kind === 'rejected' ? 'provider_rejected' : 'abandoned_reservation',
@@ -107,18 +125,27 @@ async function settleAbandonedReservations(trx, customerId, now) {
 }
 
 // The row an idempotency key names must be THIS operation's: same customer,
-// stream and email key. A key reused for another customer (a batch sender's
-// campaign-level key, or two concurrent reservations resolving a conflict to
-// each other's row) is refused, never returned as a duplicate that would
-// silently skip a recipient (codex GitHub round P2).
-function sameOperation(row, { customerId, stream, emailKey }) {
-  return row.customer_id === customerId && row.stream === stream && row.email_key === emailKey;
+// stream, email key, marketing class and pest. A key reused for another
+// customer (a batch sender's campaign-level key, or two concurrent
+// reservations resolving a conflict to each other's row) is refused, never
+// returned as a duplicate that would silently skip a recipient (codex GitHub
+// round P2). So is a same-key retry that changes the policy fields: the
+// failed-row reopen below would otherwise judge eligibility on the new class
+// or pest while the row kept the old ones, and a relationship row retried as
+// marketing could be delivered outside every marketing cap (codex GitHub
+// round P2).
+function sameOperation(row, {
+  customerId, stream, emailKey, marketingClass, pestKey = null,
+}) {
+  return row.customer_id === customerId && row.stream === stream && row.email_key === emailKey
+    && row.marketing_class === marketingClass && (row.pest_key ?? null) === (pestKey ?? null);
 }
 
 async function reserve({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, recipientEmail, pestKey = null, conn,
+  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, recipientEmail, pestKey = null, conn,
 } = {}) {
   const database = conn || db;
+  const marketingClass = resolveMarketingClass(stream, emailKey, requestedClass);
   const inserted = await database('marketing_email_ledger')
     .insert({
       customer_id: customerId,
@@ -139,8 +166,10 @@ async function reserve({
     .where({ idempotency_key: idempotencyKey })
     .first();
   if (!existing) throw new Error('marketing email ledger reservation neither inserted nor found');
-  if (!sameOperation(existing, { customerId, stream, emailKey })) {
-    const err = new Error(`idempotency key ${idempotencyKey} already belongs to another customer/stream/email`);
+  if (!sameOperation(existing, {
+    customerId, stream, emailKey, marketingClass, pestKey,
+  })) {
+    const err = new Error(`idempotency key ${idempotencyKey} already belongs to another customer/stream/email/class/pest`);
     err.code = 'IDEMPOTENCY_KEY_CONFLICT';
     throw err;
   }
@@ -260,8 +289,19 @@ async function markFailed(id, reason, { conn } = {}) {
  *     COMMITTED and store an address that was never actually checked).
  */
 async function reserveWithCap({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(),
+  customerId, stream, marketingClass: requestedClass, emailKey, idempotencyKey, pestKey = null, now = new Date(),
 } = {}) {
+  // The class the caps, the human-contact check and the outstanding guard
+  // key off is the RESOLVED one (eligibility.js resolveMarketingClass), and
+  // it is what the row stores — a caller's 'relationship' on a broadcast
+  // changes nothing (pre-push audit P1). An unknown class is the same
+  // fail-closed denial eligibleForEmail gives it.
+  let marketingClass;
+  try {
+    marketingClass = resolveMarketingClass(stream, emailKey, requestedClass);
+  } catch {
+    return { ok: false, reason: REASONS.LOOKUP_FAILED, row: null, duplicate: false };
+  }
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${customerId}`]);
     await settleAbandonedReservations(trx, customerId, now);
@@ -270,7 +310,9 @@ async function reserveWithCap({
       .where({ idempotency_key: idempotencyKey })
       .first();
     if (existingByKey) {
-      if (!sameOperation(existingByKey, { customerId, stream, emailKey })) {
+      if (!sameOperation(existingByKey, {
+        customerId, stream, emailKey, marketingClass, pestKey,
+      })) {
         return { ok: false, reason: REASONS.IDEMPOTENCY_KEY_CONFLICT, row: null, duplicate: false };
       }
       if (existingByKey.status === 'failed') {
@@ -340,4 +382,145 @@ function capReasonFor(stream, outstandingStream) {
     : REASONS.CAP_SAME_DAY;
 }
 
-module.exports = { reserve, markSent, markSkipped, markFailed, reserveWithCap };
+/**
+ * The provider-boundary fence, run IMMEDIATELY before sendTemplate (codex
+ * GitHub round P1s — sendWithLedger calls it for you; a sender on the
+ * primitives must call it itself and must not dispatch on `ok: false`).
+ * Under the same per-customer lock the stale-reservation sweep runs under:
+ *
+ *   0. the delivery authority is asked first: a row whose key
+ *      email_messages shows accepted — or handed off with the response
+ *      lost — is an email that went out (a crash between acceptance and
+ *      markSent inside the sweep's lifetime). It completes as `sent` here,
+ *      answers ALREADY_DISPATCHED, and is never dispatched again; a consent
+ *      change since can no longer make it read as skipped.
+ *   1. the row must still be `reserved`, and its lease is renewed
+ *      (reserved_at = now). A worker paused past RESERVATION_LIFETIME_MS
+ *      finds its row settled by the sweep — another key may since have been
+ *      reserved and sent — and gets RESERVATION_RECLAIMED: its resumed
+ *      dispatch would be the duplicate marketing email the cap exists to
+ *      prevent. Serializing on the lock is what closes the
+ *      select/renew/settle interleaving: whichever transaction holds it
+ *      first runs to completion.
+ *   2. consent is judged AGAIN, from the row's own stream/key/class/pest
+ *      (never caller arguments): a customer who switched email off, turned
+ *      marketing offers off, moved the category to SMS, was suppressed or
+ *      put on the staff do-not-contact list since the reservation is
+ *      skipped here, with the verdict's reason — the reservation was a
+ *      snapshot, never continuing authorization. The preference endpoints
+ *      write notification_prefs only (no suppression row), so nothing
+ *      downstream would catch this.
+ *
+ * Returns `{ ok: true, row, recipientEmail }` — the address to hand to
+ * sendTemplate is the one this recheck just cleared (stored back on the row
+ * if it changed) — or `{ ok: false, reason, row }`.
+ */
+async function confirmBeforeDispatch(id, { now = new Date() } = {}) {
+  return db.transaction(async (trx) => {
+    const row = await trx('marketing_email_ledger').where({ id }).first();
+    if (!row) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row: null };
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${row.customer_id}`]);
+    const state = await messageStateFor(trx, row.idempotency_key);
+    if (state.kind === 'accepted' || state.kind === 'uncertain') {
+      await completeFromMessage(trx, id, state, ['reserved', 'failed']);
+      return { ok: false, reason: REASONS.ALREADY_DISPATCHED, row };
+    }
+    const renewed = await trx('marketing_email_ledger')
+      .where({ id, status: 'reserved' })
+      .update({ reserved_at: now, updated_at: trx.fn.now() });
+    if (!renewed) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row };
+
+    const verdict = await eligibleForEmail({
+      customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
+      emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
+    });
+    if (!verdict.ok) {
+      await trx('marketing_email_ledger')
+        .where({ id, status: 'reserved' })
+        .update({ status: 'skipped', reason: verdict.reason, updated_at: trx.fn.now() });
+      return { ok: false, reason: verdict.reason, row };
+    }
+    const recipientEmail = verdict.checks.customerEmail;
+    if (recipientEmail !== row.recipient_email) {
+      await trx('marketing_email_ledger').where({ id }).update({ recipient_email: recipientEmail, updated_at: trx.fn.now() });
+    }
+    return { ok: true, reason: null, row: { ...row, recipient_email: recipientEmail }, recipientEmail };
+  });
+}
+
+/**
+ * The one dispatch path for an email-division sender. `template` is handed
+ * to sendTemplate as given, except that the recipient (`to`, recipientType
+ * 'customer', recipientId), the `idempotencyKey` and the
+ * `suppressionGroupKey` are ALWAYS the reservation's own — the shared key is
+ * what lets this ledger be reconciled from email_messages, and the group is
+ * the one eligibility judged. Never throws for a delivery outcome; returns
+ *   { ok, sent, reason, row, duplicate, message?, error? }
+ *   - denied / fenced / skipped: ok false, reason = the REASONS value or
+ *     the library's own block reason;
+ *   - duplicate: ok true, sent false, duplicate true — an earlier attempt
+ *     under this key already owns the send (sent, or still in flight; a
+ *     crashed owner's row is settled by the sweep after 30 minutes and a
+ *     retry then reopens it);
+ *   - sent: ok true, sent true, message = the email_messages row.
+ * A thrown library error is settled through markFailed, which asks
+ * email_messages first: a handoff that started (the library's own
+ * EMAIL_PROVIDER_RETRY_HELD hold) or was accepted completes the row as
+ * SENT and keeps counting toward the caps; a throw before any handoff
+ * settles it as failed and frees the customer's slot at once.
+ */
+async function sendWithLedger({
+  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {},
+} = {}) {
+  const reservation = await reserveWithCap({
+    customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now,
+  });
+  if (!reservation.ok) {
+    return { ok: false, sent: false, reason: reservation.reason, row: null, duplicate: false };
+  }
+  if (reservation.duplicate) {
+    return { ok: true, sent: false, reason: 'duplicate', row: reservation.row, duplicate: true };
+  }
+  const fence = await confirmBeforeDispatch(reservation.row.id, { now });
+  if (!fence.ok) {
+    return { ok: false, sent: false, reason: fence.reason, row: fence.row || reservation.row, duplicate: false };
+  }
+  const { row } = fence;
+
+  let outcome;
+  try {
+    outcome = await sendTemplate({
+      ...template,
+      to: fence.recipientEmail,
+      recipientType: 'customer',
+      recipientId: row.customer_id,
+      idempotencyKey: row.idempotency_key,
+      suppressionGroupKey: groupKeyFor(row.stream, row.email_key, row.marketing_class),
+    });
+  } catch (err) {
+    await markFailed(row.id, `dispatch_error:${err.code || err.status || 'unknown'}`);
+    return { ok: false, sent: false, reason: 'dispatch_failed', row, duplicate: false, error: err };
+  }
+
+  return settleDispatchOutcome(row, outcome);
+}
+
+// A library result that is not `sent` is either a block (the library's own
+// suppression/consent/recipient guards said no — a policy skip) or an abort
+// (queued, never handed off — a failure); both settle through the
+// reconciling primitives, so a result the delivery authority contradicts is
+// corrected from email_messages rather than trusted.
+async function settleDispatchOutcome(row, outcome) {
+  if (outcome?.sent) {
+    await markSent(row.id, { emailMessageId: outcome.message?.id || null });
+    return { ok: true, sent: true, reason: null, row, duplicate: false, message: outcome.message || null };
+  }
+  const reason = String(outcome?.reason || (outcome?.blocked ? 'blocked' : 'aborted'));
+  if (outcome?.blocked) await markSkipped(row.id, reason);
+  else await markFailed(row.id, reason);
+  return { ok: false, sent: false, reason, row, duplicate: false };
+}
+
+module.exports = {
+  reserve, markSent, markSkipped, markFailed, reserveWithCap, confirmBeforeDispatch, sendWithLedger,
+};

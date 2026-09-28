@@ -6,13 +6,15 @@
  * the stream-flag matrix (broadcast strict === true, alert/referral loose
  * !== false); the lifecycle/win-back/nurture relationship rule; caps read
  * `sent` rows only and are marketing-class-scoped; a happy path returns
- * ok:true with checks.allowPitch.
+ * ok:true with checks.allowPitch; the marketing class is resolved from the
+ * stream and key (a caller can only tighten it); an absent channel column
+ * reads as its schema default (referral/alert SMS, marketing email).
  */
 
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { eligibleForEmail, REASONS } = require('../services/email-division/eligibility');
+const { eligibleForEmail, resolveMarketingClass, REASONS } = require('../services/email-division/eligibility');
 
 const NOW = new Date('2026-09-28T15:00:00Z'); // Mon Sep 28, 11:00 ET
 
@@ -37,7 +39,12 @@ function customerRow(overrides = {}) {
 // replaces the table map (used by the relationship-class exemption and
 // LOOKUP_FAILED cases, which must not wire ledger/sms_log/call_log at all).
 function evalWith({
-  customer = customerRow(), suppressions = [], dnc, prefs = { email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true },
+  customer = customerRow(), suppressions = [], dnc,
+  // Channel columns set to 'email' so the alert/referral cases below exercise
+  // their own rule, not the SMS schema default (tested on its own).
+  prefs = {
+    email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true, weather_alert_channel: 'email', referral_channel: 'email',
+  },
   estimates, ledger = [], smsOutbound, smsInbound, callInbound, callOutbound, tables,
 } = {}, args = {}) {
   db.mockImplementation((table) => {
@@ -114,10 +121,15 @@ describe('email-division eligibility', () => {
   });
 
   test('an alert passes the stream flag when weather_alerts is merely unset (loose rule)', async () => {
-    const r = await evalWith({ prefs: { email_enabled: true, weather_alerts: undefined, marketing_offers: null } },
-      { stream: 'alert', emailKey: 'lc.alert.storm' });
+    // An alert is marketing class whatever the caller says, so the caps and
+    // recent-contact legs run: one weekly-cap read, one same-day read.
+    const r = await evalWith({
+      prefs: { email_enabled: true, weather_alerts: undefined, marketing_offers: null, weather_alert_channel: 'email' },
+      ledger: [chain({ first: undefined }), chain({ result: [] })],
+    }, { stream: 'alert', emailKey: 'lc.alert.storm' });
     expect(r.ok).toBe(true);
     expect(r.checks.allowPitch).toBe(false);
+    expect(r.checks.marketingClass).toBe('marketing');
   });
 
   test.each([
@@ -132,13 +144,69 @@ describe('email-division eligibility', () => {
     expect(r.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
   });
 
-  test.each([undefined, null, 'email', 'both'])('a broadcast passes the channel check when marketing_channel is %s', async (value) => {
-    // marketingClass 'relationship' here so the pass only exercises the
-    // channel gate itself, not the marketing-only caps/recent-contact
-    // checks that follow it (covered separately above).
+  test.each([undefined, null, 'email', 'both', 'carrier-pigeon'])('a broadcast passes the channel check when marketing_channel is %s (the schema default is email; an unknown value reads as the default, as legacyChannel does)', async (value) => {
     const prefs = { email_enabled: true, marketing_offers: true, marketing_channel: value };
-    const r = await evalWith({ prefs }, { stream: 'broadcast', marketingClass: 'relationship', emailKey: 'mkt.broadcast.fall' });
+    const r = await evalWith({ prefs, ledger: [chain({ first: undefined }), chain({ result: [] })] },
+      { stream: 'broadcast', emailKey: 'mkt.broadcast.fall' });
     expect(r.ok).toBe(true);
+  });
+
+  describe('channel columns read as their schema defaults when absent (codex GitHub round P1)', () => {
+    test('no notification_prefs row at all: alert and referral mail are SMS-only, as the portal reports them', async () => {
+      const alert = await evalWith({ prefs: null }, { stream: 'alert', emailKey: 'lc.alert.storm' });
+      expect(alert.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
+      const referral = await evalWith({ prefs: null }, { emailKey: 'lc.referral_ask' });
+      expect(referral.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
+    });
+
+    test.each([
+      ['a null weather_alert_channel', 'alert', 'lc.alert.storm', { weather_alert_channel: null }],
+      ['an unrecognised weather_alert_channel', 'alert', 'lc.alert.storm', { weather_alert_channel: 'carrier-pigeon' }],
+      ['a null referral_channel', 'lifecycle', 'lc.referral_ask', { referral_channel: null }],
+    ])('%s reads as the SMS default and blocks email', async (_label, stream, emailKey, column) => {
+      const prefs = {
+        email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true, weather_alert_channel: 'email', referral_channel: 'email', ...column,
+      };
+      const r = await evalWith({ prefs }, { stream, emailKey });
+      expect(r.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
+    });
+  });
+
+  describe('the marketing class is resolved from the stream and key, never trusted from the caller (pre-push audit P1)', () => {
+    test.each([
+      ['broadcast', 'mkt.broadcast.fall', 'relationship', 'marketing'],
+      ['alert', 'lc.alert.storm', undefined, 'marketing'],
+      ['nurture', 'nur.tip1', 'relationship', 'marketing'],
+      ['lifecycle', 'lc.referral_ask', 'relationship', 'marketing'],
+      ['lifecycle', 'lc.winback_60', undefined, 'marketing'],
+      ['lifecycle', 'lc.welcome', undefined, 'relationship'],
+      ['lifecycle', 'lc.welcome', 'relationship', 'relationship'],
+      ['lifecycle', 'lc.pest_tip', 'marketing', 'marketing'],
+    ])('%s / %s requested as %s resolves to %s', (stream, emailKey, requested, expected) => {
+      expect(resolveMarketingClass(stream, emailKey, requested)).toBe(expected);
+    });
+
+    test('an unknown requested class is refused outright', () => {
+      expect(() => resolveMarketingClass('lifecycle', 'lc.welcome', 'promo')).toThrow(/marketingClass/);
+    });
+
+    test('a broadcast passed as relationship is still capped, and the resolved class is surfaced on checks', async () => {
+      const r = await evalWith({ ledger: [chain({ first: { id: 'led-1' } })] },
+        { stream: 'broadcast', marketingClass: 'relationship', emailKey: 'mkt.broadcast.fall' });
+      expect(r.reason).toBe(REASONS.CAP_WEEKLY_BROADCAST);
+      expect(r.checks.marketingClass).toBe('marketing');
+    });
+
+    test('the referral ask is marketing class (capped, human-contact checked) but answers to referral_nudge and referral_channel, never marketing_offers', async () => {
+      const prefs = { email_enabled: true, marketing_offers: false, referral_nudge: true, referral_channel: 'email' };
+      const ok = await evalWith({ prefs, ledger: [chain({ result: [] })] }, { emailKey: 'lc.referral_ask' });
+      expect(ok.ok).toBe(true);
+      expect(ok.checks.marketingClass).toBe('marketing');
+      const nudgeOff = await evalWith({ prefs: { ...prefs, referral_nudge: false } }, { emailKey: 'lc.referral_ask' });
+      expect(nudgeOff.reason).toBe(REASONS.STREAM_FLAG_OFF);
+      const capped = await evalWith({ prefs, ledger: [chain({ result: [{ sent_at: NOW.toISOString() }] })] }, { emailKey: 'lc.referral_ask' });
+      expect(capped.reason).toBe(REASONS.CAP_SAME_DAY);
+    });
   });
 
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
@@ -174,12 +242,14 @@ describe('email-division eligibility', () => {
 
   test('win-back is eligible on pipeline_stage churned even with no churned_at timestamp (codex push-audit P1)', async () => {
     // A legacy churned row can lack the historical churned_at column
-    // entirely — the live pipeline_stage is what must decide this.
+    // entirely — the live pipeline_stage is what must decide this. Win-back
+    // is marketing class, so the same-day cap read runs too.
     const r = await evalWith(
-      { customer: customerRow({ pipeline_stage: 'churned', churned_at: null }) },
+      { customer: customerRow({ pipeline_stage: 'churned', churned_at: null }), ledger: [chain({ result: [] })] },
       { emailKey: 'lc.winback.60d' },
     );
     expect(r.ok).toBe(true);
+    expect(r.checks.marketingClass).toBe('marketing');
   });
 
   test('win-back is RELATIONSHIP_NOT_ELIGIBLE once re-activated, even with a stale churned_at still on file', async () => {
