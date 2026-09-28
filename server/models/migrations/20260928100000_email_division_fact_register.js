@@ -71,7 +71,7 @@ const FACTS = [
     tags: ['termites', 'subterranean-termites', 'swarm-season', 'negative-fact'],
     sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN369'],
     quote: 'Reticulitermes flavipes: "flights start in early January and end in April". Reticulitermes virginicus flights "occur between early February and late May".',
-    content: 'UF/IFAS gives each native subterranean termite a single flight season that ends by late May. It describes no second swarm later in the year and none triggered by summer storms or hurricanes. Copy must not describe a repeat flight, or one set off by summer storms, for these species. Termites seen flying in late summer or fall in Florida are more likely drywood termites, whose flights UF records in those months.',
+    content: 'UF/IFAS gives each native subterranean termite a single flight season that ends by late May. It describes no second swarm later in the year and none triggered by summer storms or hurricanes. Copy must not describe a repeat flight, or one set off by summer storms, for these species. Separately, UF records western drywood termite flights in September, October and November; this entry makes no claim about which termite a reader has seen.',
     derived: true,
   },
   {
@@ -104,7 +104,7 @@ const FACTS = [
     tags: ['ants', 'fire-ants', 'mating-flights'],
     sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN352'],
     quote: '"Six to eight mating flights consisting of up to 4,500 alates each" occur "between the spring and fall", "on a warm (>74°F/24°C), sunny day" "following rain", and "usually occur midday".',
-    content: 'Red imported fire ant colonies make six to eight mating flights of up to 4,500 winged ants each between spring and fall, usually at midday on a warm (above 74°F), sunny day following rain. Newly mated queens land under rocks or leaves or in a small crack or crevice, such as the edge of a sidewalk, driveway or street. New mounds after a storm are new colonies starting, not a treatment failing.',
+    content: 'Red imported fire ant colonies make six to eight mating flights of up to 4,500 winged ants each between spring and fall, usually at midday on a warm (above 74°F), sunny day following rain. After mating, queens land in protected areas: under rocks or leaves, or in a small crack or crevice such as the edge of a sidewalk, driveway or street. The source says nothing about treatments, so copy must not tie new mounds to whether a treatment worked.',
   },
   {
     slug: 'fact-american-cockroach-indoors',
@@ -112,7 +112,7 @@ const FACTS = [
     tags: ['cockroaches', 'american-cockroach'],
     sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN298'],
     quote: 'American cockroaches "wander indoors to search for food and water or to avoid extreme weather conditions."',
-    content: 'American cockroaches live mainly outdoors and wander indoors to search for food and water or to avoid extreme weather. The UF publication does not use the nickname "palmetto bug"; copy may use that word as the local name but must not attribute it to the source.',
+    content: 'UF says American cockroaches wander indoors to search for food and water or to avoid extreme weather conditions. The UF publication does not use the nickname "palmetto bug"; copy may use that word as the local name but must not attribute it to the source.',
   },
   {
     slug: 'fact-ghost-ants-florida',
@@ -120,7 +120,7 @@ const FACTS = [
     tags: ['ants', 'ghost-ants'],
     sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN532'],
     quote: '"Indoors, the ant colonizes wall void or spaces between cabinetry and baseboards. It will also nest in potted plants." "New colonies are probably formed by budding." "Reduce moisture sources, including condensation and leaks."',
-    content: 'Ghost ants were among the key pest ants in a Florida survey, each of those species making up 14% of the samples submitted. Indoors they colonize wall voids and the spaces between cabinetry and baseboards, and nest in potted plants. New colonies are probably formed by budding, when one or more reproductive females leave with workers for a new nesting site. UF recommends reducing moisture sources, including condensation and leaks.',
+    content: 'In the survey UF cites, the ghost ant was one of the key pest ant species, each comprising 14% of the samples submitted. Indoors they colonize wall voids and the spaces between cabinetry and baseboards, and nest in potted plants. New colonies are probably formed by budding, when one or more reproductive females leave with workers for a new nesting site. UF recommends reducing moisture sources, including condensation and leaks.',
   },
   {
     slug: 'fact-roof-rats-access',
@@ -128,15 +128,15 @@ const FACTS = [
     tags: ['rodents', 'roof-rats', 'exclusion'],
     sourceUrls: ['https://ask.ifas.ufl.edu/publication/IN1397'],
     quote: '"Rats, such as the roof rat (Rattus rattus) can jump three feet in the air vertically and more than four feet horizontally." "Prune any overhanging or touching limbs away from your house" and "Prune dead leaves from palm trees that are close to buildings."',
-    content: 'Roof rats can jump three feet vertically and more than four feet horizontally, and tree limbs serve as routes onto a house. UF advises pruning overhanging or touching limbs away from the house and pruning dead leaves from palms close to buildings, since palms with many dead leaves make good rodent habitat. Plants that will sit less than two feet from the house at maturity are too close. This source states no season or months of peak activity, so copy must not state one.',
+    content: 'UF says roof rats can jump three feet in the air vertically and more than four feet horizontally. UF advises pruning overhanging or touching limbs away from the house and pruning dead leaves from palms close to buildings, since palms with many dead leaves make good rodent habitat. Plants that will sit less than two feet from the house at maturity are too close. This source states no season or months of peak activity, so copy must not state one.',
   },
   {
     slug: 'fact-container-mosquitoes',
-    title: 'Aedes mosquitoes: containers and the 7–10 day life cycle',
+    title: 'Aedes mosquitoes: containers and egg-to-adult time',
     tags: ['mosquitoes', 'aedes'],
     sourceUrls: ['https://www.cdc.gov/mosquitoes/about/life-cycle-of-aedes-mosquitoes.html', 'https://ask.ifas.ufl.edu/publication/IN792'],
     quote: '"A mosquito egg takes 7–10 days to develop into an adult mosquito." "Adult female mosquitoes lay eggs on the inner walls of containers with water, above the waterline." "Eggs can survive drying out for up to 8 months." "Mosquitoes only need a small amount of water to lay eggs."',
-    content: 'Per CDC, an Aedes mosquito egg takes 7 to 10 days to develop into an adult, females lay eggs on the inner walls of containers with water above the waterline, eggs can survive drying out for up to 8 months, and only a small amount of water is needed. UF/IFAS describes the yellow fever mosquito as container-inhabiting, often breeding in unused flowerpots, spare tires, untreated swimming pools and drainage ditches. Mosquitoes from a rain event therefore become biting adults about 7 to 10 days later.',
+    content: 'Per CDC, an Aedes mosquito egg takes 7 to 10 days to develop into an adult, females lay eggs on the inner walls of containers with water above the waterline, eggs can survive drying out for up to 8 months, and only a small amount of water is needed. UF/IFAS describes the yellow fever mosquito as container-inhabiting, often breeding in unused flowerpots, spare tires, untreated swimming pools and drainage ditches.',
   },
   {
     slug: 'fact-fertilizer-ordinance-sarasota-county',
@@ -168,7 +168,7 @@ const FACTS = [
     tags: ['products', 'taurus-sc', 'fipronil', 'ants', 'cockroaches'],
     sourceUrls: ['https://www.controlsolutionsinc.com/csi-pest/products/taurus-sc'],
     quote: '"Taurus SC is a non-repellent insecticide that is undetectable to target pests, allowing them to touch, ingest and spread the insecticide throughout the entire colony".',
-    content: 'Taurus SC (9.1% fipronil) is a non-repellent: target pests cannot detect it, so they touch it, ingest it and spread it through the colony. It works through the colony rather than killing on contact, so ants may remain visible after a treatment. The manufacturer states no time to control and no length of visible activity, so copy must not state a number of days or weeks for either.',
+    content: 'Per the manufacturer, Taurus SC (9.1% fipronil) is a non-repellent insecticide that target pests cannot detect, which lets them touch it, ingest it and spread it throughout the colony. The manufacturer states no time to control, no speed of action and no length of visible activity, so copy must not state a number of days or weeks for any of them, and must not attribute to the manufacturer any statement about how long pests stay visible.',
   },
   {
     slug: 'fact-bifenthrin-talstar-p-label',
@@ -187,7 +187,7 @@ const FACTS = [
       'https://www.zoecon.com/all-products/gentrol/gentrol-igr-concentrate',
     ],
     quote: '"Cockroaches and bedbugs exposed to the GENTROL IGR will become adults incapable of reproducing." Manufacturer page: "120 days of control".',
-    content: 'Gentrol IGR Concentrate (hydroprene) is an insect growth regulator, a synthetic juvenile hormone look-alike that disrupts normal growth and development. Per the label, cockroaches exposed to it become adults incapable of reproducing, and the cycle of the infestation ends. The manufacturer states 120 days of control. Neither source states how long until results are visible, and neither says it makes already-mature adults sterile, so copy must not state a number of days to results or claim it sterilises adults.',
+    content: 'Gentrol IGR Concentrate (hydroprene) is an insect growth regulator, a synthetic juvenile hormone look-alike that disrupts normal growth and development. Per the label, cockroaches and bedbugs exposed to it will become adults incapable of reproducing. The manufacturer states 120 days of control. Neither source states how long until results are visible, and neither says it makes already-mature adults sterile, so copy must not state a number of days to results or claim it sterilises adults.',
   },
   {
     slug: 'fact-flea-vacuuming-after-treatment',
