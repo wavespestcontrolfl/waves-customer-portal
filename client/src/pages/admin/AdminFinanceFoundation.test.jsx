@@ -471,6 +471,8 @@ describe("Finance workflow preservation", () => {
       transactions: [
         { ...base, id: "row-linked", description: "Linked purchase", status: "matched_expense",
           suggestion: { plaidModified: { amount: 12.34, direction: "debit", txn_date: "2026-09-06", description: "FIXED" } } },
+        { ...base, id: "row-created", description: "Created purchase", status: "created_expense",
+          suggestion: { plaidModified: { amount: 8, direction: "debit", txn_date: "2026-09-04", description: "FIXED 3" } } },
         { ...base, id: "row-open", description: "Open purchase", status: "unmatched",
           suggestion: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" } } },
       ],
@@ -480,6 +482,7 @@ describe("Finance workflow preservation", () => {
     await taxSection("Expenses", "Import");
     expect(await screen.findByText(/The bank changed this to \$12\.34 debit on 2026-09-06 — unlink to apply it\./)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Changed by bank 2" })).toBeInTheDocument();
+    expect(screen.getByText(/\$8\.00 debit on 2026-09-04 — edit the expense created from this row to match, then dismiss\./)).toBeInTheDocument();
     const apply = screen.getAllByRole("button", { name: "Apply bank's change" });
     expect(apply).toHaveLength(1); // only the unlinked row
     fireEvent.click(apply[0]);

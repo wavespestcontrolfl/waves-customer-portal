@@ -6017,7 +6017,7 @@ function BankImportTab() {
                     >
                       {r.suggestion.plaidRemoved
                         ? "The bank withdrew this transaction."
-                        : `The bank changed this to $${Number(r.suggestion.plaidModified.amount).toFixed(2)} ${r.suggestion.plaidModified.direction} on ${r.suggestion.plaidModified.txn_date}${r.status === "unmatched" ? "." : " — unlink to apply it."}`}
+                        : `The bank changed this to $${Number(r.suggestion.plaidModified.amount).toFixed(2)} ${r.suggestion.plaidModified.direction} on ${r.suggestion.plaidModified.txn_date}${r.status === "unmatched" ? "." : r.status === "created_expense" ? " — edit the expense created from this row to match, then dismiss." : " — unlink to apply it."}`}
                       {plaidEnabled && (
                         <span className="ml-2 inline-flex gap-2">
                           {r.suggestion.plaidModified &&

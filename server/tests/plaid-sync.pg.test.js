@@ -65,9 +65,9 @@ function page(added = [], modified = [], removed = [], nextCursor = 'c1') {
   return { added, modified, removed, next_cursor: nextCursor, has_more: false };
 }
 
-async function connect() {
+async function connect(suffix = '') {
   plaid.exchangePublicToken.mockResolvedValueOnce({ accessToken: 'access-sandbox-secret', itemId: `item-${Date.now()}-${Math.random()}` });
-  plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS, institutionId: 'ins_128026' });
+  plaid.getAccounts.mockResolvedValueOnce({ accounts: ACCOUNTS.map(x => ({ ...x, account_id: `${x.account_id}${suffix}` })), institutionId: 'ins_128026' });
   return plaidSync.connectItem({ publicToken: 'public-sandbox-x', institutionName: 'Capital One' });
 }
 
@@ -120,6 +120,9 @@ async function activate(itemId, overrides = {}) {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    // clearAllMocks keeps queued mockResolvedValueOnce values — a test that
+    // queues one it never consumes would hand it to the next test
+    for (const fn of [plaid.exchangePublicToken, plaid.getAccounts, plaid.transactionsSync]) fn.mockReset();
     await mockPg('bank_transactions').del();
     await mockPg('plaid_accounts').del();
     await mockPg('plaid_items').del();
@@ -178,6 +181,19 @@ async function activate(itemId, overrides = {}) {
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('setup');
     await activate(itemId, { 'acc-chk': { accountLabel: 'capone-checking' } });
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('active');
+  });
+
+  test('two connections set up concurrently cannot both claim one label', async () => {
+    const a = await connect();
+    const b = await connect('-b');
+    const results = await Promise.allSettled([
+      activate(a, { 'acc-card': { accountLabel: 'shared-label' } }),
+      activate(b, { 'acc-card-b': { accountLabel: 'shared-label' }, 'acc-chk-b': { accountLabel: 'b-checking' } }),
+    ]);
+    expect(results.map(r => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(results.find(r => r.status === 'rejected').reason.message).toMatch(/already fed by another bank connection/);
+    const owners = await mockPg('plaid_accounts').where({ account_label: 'shared-label', enabled: true });
+    expect(owners).toHaveLength(1);
   });
 
   test('sync imports posted transactions only, maps direction, dedupes, and saves the cursor', async () => {

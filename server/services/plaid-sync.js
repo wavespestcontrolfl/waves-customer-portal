@@ -341,7 +341,15 @@ async function setupItem(itemId, input) {
     if (cleaned.some(a => !byId.has(a.id)) || cleaned.length !== current.length) {
       throw badRequest('account list does not match this connection — reload and try again');
     }
-    // label uniqueness across OTHER live connections' enabled accounts
+    // Every enabled label's lock FIRST (sorted — a fixed order across
+    // concurrent setups and syncs), THEN the ownership + type reads: a
+    // concurrent setup of another connection claiming the same label either
+    // committed before these reads (and is seen) or waits behind the lock.
+    // Same lock the CSV upload takes for the label→type invariant.
+    const lockLabels = [...new Set(cleaned.filter(a => a.enabled).map(a => a.label.toUpperCase()))].sort();
+    for (const label of lockLabels) {
+      await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${label}`]);
+    }
     const others = await trx('plaid_accounts as pa')
       .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
       .whereNot('pa.plaid_item_id', itemId)
@@ -355,9 +363,6 @@ async function setupItem(itemId, input) {
         throw badRequest(`"${a.label}" is already fed by another bank connection`);
       }
       if (a.enabled) {
-        // Same label→type invariant (and the same advisory lock) as the CSV
-        // upload: one account_type per canonical label.
-        await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`bank-import-label:${a.label.toUpperCase()}`]);
         const existing = await trx('bank_transactions')
           .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
           .first('account_type');
