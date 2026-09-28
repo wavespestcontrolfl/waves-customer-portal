@@ -103,13 +103,13 @@ Use for: "ignore WAVES-PORTAL-1A", "mute that error, it's expected"`,
   },
   {
     name: 'assign_sentry_issue',
-    description: `Assign a Sentry issue by its short id to a Sentry org member (by their Sentry username or the email on their Sentry account). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+    description: `Assign a Sentry issue by its short id to a Sentry org member — matched EXACTLY (case-insensitive) against their real Sentry username, account email, or display name; no match or more than one match refuses rather than guess. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
 Use for: "assign WAVES-PORTAL-1A to Adam", "who should look at that error?"`,
     input_schema: {
       type: 'object',
       properties: {
         issue_short_id: { type: 'string', description: 'The Sentry short id shown in issue lists' },
-        assignee: { type: 'string', description: 'Sentry username or account email to assign the issue to' },
+        assignee: { type: 'string', description: 'Sentry username, account email, or display name to assign the issue to' },
       },
       required: ['issue_short_id', 'assignee'],
     },
@@ -264,6 +264,43 @@ async function getSentryIssueDetail(input) {
   };
 }
 
+// Exact (case-insensitive, trimmed) match against the REAL Sentry org member
+// roster — never the operator's raw string as-typed, and never a fuzzy or
+// substring match (same discipline as resolveRepoLabel in github-ops-tools.js
+// and the fleet-domain resolution in seo-tools.js). Checked against username,
+// account email, and display name; zero or several matches refuse rather than
+// guess. A refusal never echoes the operator's input back — an account email
+// must not reach logs/telemetry (codex r2 P2 on #5275; the route already
+// taints/redacts the whole turn's prompt/response because this tool is in
+// FULL_ACCESS_TWO_STEP_TOOL_NAMES, but a thrown Error's message also reaches
+// the shared executeSentryOpsTool catch's logger.error, which does not get
+// that redaction).
+async function resolveSentryAssignee(rawAssignee) {
+  const needle = String(rawAssignee).trim().toLowerCase();
+  const org = process.env.SENTRY_ORG || DEFAULT_ORG;
+  const members = await sentryGet(`/organizations/${org}/members/`, { per_page: 100 });
+  const list = Array.isArray(members) ? members : [];
+  const matches = list.filter((m) => {
+    const email = String(m.email || m.user?.email || '').trim().toLowerCase();
+    const username = String(m.user?.username || '').trim().toLowerCase();
+    const name = String(m.name || m.user?.name || '').trim().toLowerCase();
+    return (email && email === needle) || (username && username === needle) || (name && name === needle);
+  });
+  if (matches.length === 0) {
+    throw new Error('No Sentry org member matches that assignee — use their exact Sentry username or account email.');
+  }
+  if (matches.length > 1) {
+    throw new Error('More than one Sentry org member matches that assignee — use their exact Sentry username or account email to pick one.');
+  }
+  const member = matches[0];
+  // Canonical id + display name only — STABLE fields fit for a preview that
+  // gets fingerprinted at confirm, and never the member's email.
+  return {
+    id: member.user?.id || member.id,
+    display_name: member.name || member.user?.name || member.user?.username || 'Sentry member',
+  };
+}
+
 // Shared preview/refuse-commit executor for resolve/ignore/assign — the
 // structural two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full
 // access is enforced by the route, not here (ib-access.js ibFullAccess).
@@ -295,8 +332,12 @@ async function writeSentryIssue(toolName, input) {
       note: `${action.verb} "${issue.title}" (${issue.shortId}) in Sentry.`,
     };
     if (toolName === 'assign_sentry_issue') {
-      preview.assignee = String(input.assignee).trim();
-      preview.note = `Assign "${issue.title}" (${issue.shortId}) to ${preview.assignee} in Sentry.`;
+      const member = await resolveSentryAssignee(input.assignee);
+      // The pinned canonical member (id + display name) — never the
+      // operator's raw string, and never their email — is what a future
+      // commit path must assign to.
+      preview.assignee = { id: member.id, name: member.display_name };
+      preview.note = `Assign "${issue.title}" (${issue.shortId}) to ${member.display_name} in Sentry.`;
     }
     return preview;
   }

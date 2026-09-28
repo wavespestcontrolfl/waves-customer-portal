@@ -175,16 +175,16 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     expect(result.note).toContain(PR_FIXTURE.title);
   });
 
-  test('rerun_failed_github_checks: no failed checks still previews, names nothing to rerun', async () => {
+  test('rerun_failed_github_checks: no failed checks refuses as a no-op, never a preview/card', async () => {
     process.env.GITHUB_TOKEN = 'ghp_x';
     global.fetch
       .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
       .mockResolvedValueOnce(jsonResponse({ check_runs: [{ name: 'tests', status: 'completed', conclusion: 'success', id: 111 }] }));
 
     const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
-    expect(result.error).toBeUndefined();
-    expect(result.failed_checks).toEqual([]);
-    expect(result.note).toMatch(/nothing to rerun/);
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('no_failed_checks');
+    expect(result.error).toMatch(/nothing to rerun/);
   });
 
   test('add_github_pr_label: unconfirmed names the PR, resolves the label against the real repo catalog, and existing labels', async () => {
@@ -223,6 +223,19 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
     expect(result.error).toMatch(/No label named "needs-review" exists/);
     expect(result.error).toContain('needs-review-urgent');
+  });
+
+  test('add_github_pr_label: label already on the PR refuses as a no-op, never a preview/card', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    // PR_FIXTURE.labels already carries 'existing-label'.
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'existing-label' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'existing-label' });
+    expect(result.preview).toBeUndefined();
+    expect(result.code).toBe('label_already_present');
+    expect(result.error).toMatch(/already has the "existing-label" label/);
   });
 
   test('add_github_pr_label: wildcard characters in the input are literal, never widen the match', async () => {

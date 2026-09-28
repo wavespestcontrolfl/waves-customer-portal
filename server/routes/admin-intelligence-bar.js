@@ -1963,9 +1963,9 @@ RESPONSE STYLE:
 // context (getToolsForContext), so this block is appended for every admin
 // request rather than living inside one context prompt. Tech and non-admin
 // requests never load the tools, so their prompts must not describe them.
-const INFRA_PROMPT = `INFRASTRUCTURE (all READ-ONLY):
+const INFRA_PROMPT = `INFRASTRUCTURE (read-only, except the owner-only preview actions listed below):
 The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; email is SendGrid; ads run on Google Ads; the four local listings are Google Business Profiles; site analytics is GA4; rank tracking is DataForSEO; code lives on GitHub.
-A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card, and each is preview-only for now (the card cannot yet be confirmed — say so plainly if the operator tries). Never claim any of this for anyone else, and never claim you can restart/redeploy/purge/resolve/change anything beyond that short list — point the operator to the relevant dashboard for everything else.
+A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignore/assign a Sentry issue, purge the Cloudflare cache or retry a Pages build, redeploy/restart a Railway service, rerun failed GitHub checks, add a PR label, post "@codex review", submit a Search Console sitemap — but ONLY for the owner's own login, through the usual confirmation card, and each is preview-only for now (the card cannot yet be confirmed — say so plainly if the operator tries). Never claim any of this for anyone else, and never claim any of these cards can be confirmed yet — point the operator to the relevant dashboard for everything else.
 - Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available). redeploy_railway_service / restart_railway_service prepare a card (owner-only, preview-only).
 - Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces). resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue prepare a card (owner-only, preview-only).
 - Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone). purge_cloudflare_cache / retry_cloudflare_pages_build prepare a card (owner-only, preview-only).
@@ -1989,7 +1989,7 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) + tokens healthy = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
-- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
+- Beyond the short owner-only preview list above, you CANNOT restart, redeploy, purge caches, resolve issues, or change configuration for anyone — never claim otherwise. Point the operator to the relevant dashboard for any other change.`;
 
 
 // Default-off capability gates applied to EVERY context's list in one place
@@ -2814,8 +2814,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // or an earlier image turn is still in the window and its OCR-derived
     // answer can be echoed by a follow-up that carries no images itself.
     // Either way Claude can surface a customer's name/address/phone with no
-    // tool call at all.
-    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name));
+    // tool call at all. Outside-write tools (Sentry/Cloudflare/Railway/GitHub/
+    // GSC, #5275 Codex r2 P1) have scope 'none' — with GATE_IB_PLATFORM off
+    // that keeps them out of PII_TOOL_NAMES entirely, so their raw
+    // prompt/response (assignee email, Sentry titles/culprits, GitHub PR
+    // titles, Pages branch names) would otherwise persist unredacted.
+    // FULL_ACCESS_TWO_STEP_TOOL_NAMES already isolates exactly that set.
+    const usedPiiTool = toolCalls.some(c => PII_TOOL_NAMES.has(c.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(c.name));
     const piiTainted = platformEnabled || usedPiiTool || piiTaintedHistory;
     const redactPii = platformEnabled || piiTainted || imageTainted || context === 'agent_estimate';
     const redactNote = context === 'agent_estimate'

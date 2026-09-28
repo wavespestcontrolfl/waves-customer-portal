@@ -18,7 +18,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { extractDomain } = require('../../utils/normalize-url');
+const { extractDomain, NETWORK_DOMAINS, HUB_DOMAINS } = require('../../utils/normalize-url');
 const { dispatchSeoPipeline } = require('../seo/seo-pipeline-dispatcher');
 
 const SEO_TOOLS = [
@@ -1476,6 +1476,14 @@ async function internalLinkGraphReport(input) {
 // call) is not built in this PR. Full access is enforced by the route
 // (ib-access.js ibFullAccess) — GOOGLE_SERVICE_ACCOUNT_JSON is read-scoped
 // (webmasters.readonly) today regardless; a write needs the webmasters scope.
+// The two hub domains never have a fleet_sites row (see the NETWORK_DOMAINS
+// import note below), so their display name is fixed here rather than read
+// from a table that doesn't carry them.
+const HUB_SITE_NAMES = {
+  'wavespestcontrol.com': 'Waves Pest Control (hub)',
+  'waveslawncare.com': 'Waves Lawn Care (hub)',
+};
+
 async function submitGscSitemap(input) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
     return { configured: false, message: GSC_NOT_CONFIGURED_MESSAGE };
@@ -1484,34 +1492,46 @@ async function submitGscSitemap(input) {
   if (!domain) throw new Error('domain is required.');
   const sitemapPath = String(input.sitemap_path || DEFAULT_SITEMAP_PATH).trim() || DEFAULT_SITEMAP_PATH;
   if (input.confirmed !== true) {
-    // Exact (case-insensitive, trimmed) match ONLY — never the substring
-    // whereILike this used to run (pre-push audit #5275): an unescaped
-    // "%"/"_" in the operator's input was interpreted as a SQL wildcard,
-    // and even without one, a substring match with no ORDER BY could pick
-    // a DIFFERENT row than a later lookup of the same raw string. Fetch
-    // every tracked site and filter in JS, exactly like the Cloudflare/
-    // Railway/GitHub write tools do.
     const normalized = domain.toLowerCase();
-    const rows = await db('fleet_sites').select('domain', 'name', 'area');
-    const matches = rows.filter((r) => String(r.domain || '').trim().toLowerCase() === normalized);
-    if (matches.length > 1) {
-      throw new Error(`Multiple tracked sites share the domain "${domain}" — this should not happen; contact engineering before submitting.`);
-    }
-    const site = matches[0] || null;
-    // Tracked sites only: an untracked string ("bradenton", "%.com") would
-    // put an arbitrary target on the card, and every real sitemap target is
-    // a fleet site. Near misses are offered, never picked.
-    if (!site) {
-      const close = rows
-        .map((r) => String(r.domain || '').trim())
-        .filter((d) => d && d.toLowerCase().includes(normalized))
-        .slice(0, 5);
+    // "Tracked" is decided against the canonical network-domain registry
+    // (normalize-url.js), not fleet_sites — fleet_sites is the SPOKE-ONLY
+    // table (renamed from wordpress_sites, migration
+    // 20260423000006_remove_legacy_integrations.js) and carries no rows for
+    // the two hub domains, so resolving against it alone refused every hub
+    // sitemap submission as "not a tracked site" (codex r2 P2 on #5275).
+    const canonical = NETWORK_DOMAINS.find((d) => d.toLowerCase() === normalized);
+    // Untracked (not on the canonical list at all) is still a refusal, with
+    // near misses offered — never picked.
+    if (!canonical) {
+      const close = NETWORK_DOMAINS.filter((d) => d.toLowerCase().includes(normalized)).slice(0, 5);
       throw new Error(`"${domain}" is not a tracked site.${close.length ? ` Close matches: ${close.join(', ')}.` : ''} Use the exact domain.`);
     }
-    // The pinned canonical domain (the tracked row's own value, lowercased)
-    // — never the operator's raw casing — is what a future commit path must
+    const canonicalDomain = canonical.toLowerCase();
+    let site;
+    if (HUB_DOMAINS.has(canonicalDomain)) {
+      site = { domain: canonicalDomain, name: HUB_SITE_NAMES[canonicalDomain] || canonicalDomain, area: 'hub' };
+    } else {
+      // Spoke domain — resolve the real fleet_sites row for its display
+      // name/area. Exact (case-insensitive, trimmed) match ONLY — never the
+      // substring whereILike this used to run (pre-push audit #5275): an
+      // unescaped "%"/"_" in the operator's input was interpreted as a SQL
+      // wildcard, and even without one, a substring match with no ORDER BY
+      // could pick a DIFFERENT row than a later lookup of the same raw
+      // string. Fetch every tracked site and filter in JS, exactly like the
+      // Cloudflare/Railway/GitHub write tools do.
+      const rows = await db('fleet_sites').select('domain', 'name', 'area');
+      const matches = rows.filter((r) => String(r.domain || '').trim().toLowerCase() === canonicalDomain);
+      if (matches.length > 1) {
+        throw new Error(`Multiple tracked sites share the domain "${domain}" — this should not happen; contact engineering before submitting.`);
+      }
+      // The canonical registry already proved this domain belongs to the
+      // fleet even if its fleet_sites row hasn't landed yet — fall back to
+      // the bare domain rather than refuse a site the registry confirms.
+      site = matches[0] || { domain: canonicalDomain, name: canonicalDomain, area: null };
+    }
+    // The pinned canonical domain (the registry's own value, lowercased) —
+    // never the operator's raw casing — is what a future commit path must
     // submit.
-    const canonicalDomain = site.domain.trim().toLowerCase();
     const siteUrl = `https://${canonicalDomain}`;
     const sitemapUrl = `${siteUrl}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
     return {

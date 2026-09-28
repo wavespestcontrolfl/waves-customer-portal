@@ -77,11 +77,38 @@ describe('submit_gsc_sitemap (preview only)', () => {
 
   test('the match is case-insensitive but still exact — a mixed-case domain resolves the same row', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
-    load([{ domain: 'wavespestcontrol.com', name: 'Hub', area: 'Hub' }]);
+    load([
+      { domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control', area: 'Bradenton' },
+      { domain: 'bradenton-lawn-care.com', name: 'Bradenton Lawn Care', area: 'Bradenton' },
+    ]);
 
-    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'WavesPestControl.COM' });
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'BradentonFLPestControl.COM' });
     expect(result.error).toBeUndefined();
-    expect(result.site.domain).toBe('wavespestcontrol.com');
+    expect(result.site.domain).toBe('bradentonflpestcontrol.com');
+  });
+
+  test('hub domains resolve against the canonical network-domain registry — fleet_sites is spoke-only and has no hub row', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    // fleet_sites (the renamed wordpress_sites table) is deliberately empty:
+    // a real fleet_sites has no wavespestcontrol.com/waveslawncare.com rows
+    // at all, and the hub path must never depend on one existing.
+    const dbMock = load([]);
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.site).toEqual({ domain: 'wavespestcontrol.com', name: 'Waves Pest Control (hub)', area: 'hub' });
+    expect(result.sitemap_url).toBe('https://wavespestcontrol.com/sitemap-index.xml');
+    expect(dbMock).not.toHaveBeenCalled();
+  });
+
+  test('the other hub domain also resolves with no fleet_sites row', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    load([]);
+
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'waveslawncare.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.site).toEqual({ domain: 'waveslawncare.com', name: 'Waves Lawn Care (hub)', area: 'hub' });
   });
 
   test('a substring is never enough — a partial phrase does not resolve to a fleet site it merely contains', async () => {
@@ -113,18 +140,20 @@ describe('submit_gsc_sitemap (preview only)', () => {
 
   test('several tracked rows exactly sharing a domain is a refusal, never an arbitrary pick', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
+    // A spoke domain: hub domains no longer query fleet_sites at all, so the
+    // ambiguity guard is exercised on a spoke row instead.
     load([
-      { domain: 'wavespestcontrol.com', name: 'Hub (dup 1)', area: 'Hub' },
-      { domain: 'WavesPestControl.com', name: 'Hub (dup 2)', area: 'Hub' },
+      { domain: 'bradentonflpestcontrol.com', name: 'Bradenton Pest Control (dup 1)', area: 'Bradenton' },
+      { domain: 'BradentonFLPestControl.com', name: 'Bradenton Pest Control (dup 2)', area: 'Bradenton' },
     ]);
 
-    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com' });
+    const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'bradentonflpestcontrol.com' });
     expect(result.error).toMatch(/Multiple tracked sites share the domain/);
   });
 
   test('a custom sitemap_path overrides the @astrojs/sitemap default', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
-    load([{ domain: 'wavespestcontrol.com', name: 'Hub', area: 'Hub' }]);
+    load([]);
 
     const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com', sitemap_path: '/sitemap.xml' });
     expect(result.error).toBeUndefined();
@@ -151,7 +180,7 @@ describe('submit_gsc_sitemap (preview only)', () => {
 
   test('confirmed:true refuses — the commit path is not built in this PR', async () => {
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = '{"type":"service_account"}';
-    const dbMock = load([{ domain: 'wavespestcontrol.com', name: 'Hub', area: 'Hub' }]);
+    const dbMock = load([]);
 
     const result = await executeSeoTool('submit_gsc_sitemap', { domain: 'wavespestcontrol.com', confirmed: true });
     expect(result.error).toMatch(/not enabled yet/);

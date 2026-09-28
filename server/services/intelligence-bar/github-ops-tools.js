@@ -228,14 +228,21 @@ async function rerunFailedGithubChecks(input) {
     const failed = (checkRuns?.check_runs || [])
       .filter(r => r.status === 'completed' && ['failure', 'timed_out', 'cancelled'].includes(r.conclusion))
       .map(r => ({ name: r.name, conclusion: r.conclusion, run_id: r.id }));
+    if (!failed.length) {
+      // No failed checks on the head commit — a rerun would have nothing to
+      // do. A refusal (isToolFailure) so no confirmation card is offered for
+      // an action that could only be a no-op (codex r2 P2 on #5275).
+      return {
+        error: `No failed checks found on PR #${pr.number} "${pr.title}"'s current head commit — nothing to rerun.`,
+        code: 'no_failed_checks',
+      };
+    }
     return {
       preview: true,
       tool: 'rerun_failed_github_checks',
       pr: { number: pr.number, title: pr.title, head_sha: sha.slice(0, 10) },
       failed_checks: failed,
-      note: failed.length
-        ? `Rerun ${failed.length} failed job(s) on PR #${pr.number} "${pr.title}" (${failed.map(f => f.name).join(', ')}) — only the failed jobs, not the whole run.`
-        : `No failed checks found on PR #${pr.number} "${pr.title}"'s current head commit — nothing to rerun.`,
+      note: `Rerun ${failed.length} failed job(s) on PR #${pr.number} "${pr.title}" (${failed.map(f => f.name).join(', ')}) — only the failed jobs, not the whole run.`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
@@ -275,6 +282,15 @@ async function addGithubPrLabel(input) {
     const pr = await resolvePr(input.pr_number);
     const label = await resolveRepoLabel(rawLabel);
     const existing = (pr.labels || []).map(l => l.name);
+    if (existing.includes(label.name)) {
+      // Already present — adding it again would be a no-op. A refusal
+      // (isToolFailure) so no confirmation card is offered (codex r2 P2 on
+      // #5275).
+      return {
+        error: `PR #${pr.number} "${pr.title}" already has the "${label.name}" label.`,
+        code: 'label_already_present',
+      };
+    }
     return {
       preview: true,
       tool: 'add_github_pr_label',
@@ -283,9 +299,7 @@ async function addGithubPrLabel(input) {
       // the operator's raw string — is what a future commit path must use.
       label: label.name,
       existing_labels: existing,
-      note: existing.includes(label.name)
-        ? `PR #${pr.number} "${pr.title}" already has the "${label.name}" label.`
-        : `Add the "${label.name}" label to PR #${pr.number} "${pr.title}".`,
+      note: `Add the "${label.name}" label to PR #${pr.number} "${pr.title}".`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };

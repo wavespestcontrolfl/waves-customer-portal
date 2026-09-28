@@ -29,6 +29,13 @@ const issueFixture = {
   permalink: 'https://sentry.io/organizations/waves/issues/111/',
 };
 
+const memberFixture = {
+  id: 'member-1',
+  email: 'adam@wavespestcontrol.com',
+  name: 'Adam Benetti',
+  user: { id: 'user-1', username: 'adam', name: 'Adam Benetti', email: 'adam@wavespestcontrol.com' },
+};
+
 beforeAll(() => {
   for (const key of SENTRY_ENV_KEYS) savedEnv[key] = process.env[key];
 });
@@ -211,14 +218,66 @@ describe('intelligence bar Sentry write tools (preview only)', () => {
     expect(result.issue.short_id).toBe('WAVES-PORTAL-1A');
   });
 
-  test('assign_sentry_issue: unconfirmed names the issue and the proposed assignee', async () => {
+  test('assign_sentry_issue: unconfirmed resolves the assignee against the real org roster by email, pins id + display name, never the email', async () => {
     process.env.SENTRY_API_TOKEN = 'sentry-token';
-    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse([issueFixture]))
+      .mockResolvedValueOnce(jsonResponse([memberFixture]));
 
-    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam@wavespestcontrol.com' });
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'Adam@WavesPestControl.com' });
     expect(result.error).toBeUndefined();
-    expect(result.assignee).toBe('adam@wavespestcontrol.com');
-    expect(result.note).toContain('adam@wavespestcontrol.com');
+    expect(result.assignee).toEqual({ id: 'user-1', name: 'Adam Benetti' });
+    expect(result.note).toContain('Adam Benetti');
+    // The account email must never ride into the preview surface at all.
+    expect(JSON.stringify(result)).not.toContain('adam@wavespestcontrol.com');
+  });
+
+  test('assign_sentry_issue: also resolves by exact Sentry username', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse([issueFixture]))
+      .mockResolvedValueOnce(jsonResponse([memberFixture]));
+
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam' });
+    expect(result.error).toBeUndefined();
+    expect(result.assignee).toEqual({ id: 'user-1', name: 'Adam Benetti' });
+  });
+
+  test('assign_sentry_issue: also resolves by exact display name', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse([issueFixture]))
+      .mockResolvedValueOnce(jsonResponse([memberFixture]));
+
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'Adam Benetti' });
+    expect(result.error).toBeUndefined();
+    expect(result.assignee).toEqual({ id: 'user-1', name: 'Adam Benetti' });
+  });
+
+  test('assign_sentry_issue: no matching org member refuses without ever echoing the operator\'s input', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse([issueFixture]))
+      .mockResolvedValueOnce(jsonResponse([memberFixture]));
+
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'nobody@wavespestcontrol.com' });
+    expect(result.error).toMatch(/No Sentry org member matches/);
+    expect(result.error).not.toContain('nobody@wavespestcontrol.com');
+    expect(result.assignee).toBeUndefined();
+  });
+
+  test('assign_sentry_issue: several matching org members refuses, never an arbitrary pick', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse([issueFixture]))
+      .mockResolvedValueOnce(jsonResponse([
+        memberFixture,
+        { id: 'member-2', email: 'adam2@wavespestcontrol.com', name: 'Adam Benetti', user: { id: 'user-2', username: 'adam2', name: 'Adam Benetti' } },
+      ]));
+
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'Adam Benetti' });
+    expect(result.error).toMatch(/More than one Sentry org member matches/);
+    expect(result.assignee).toBeUndefined();
   });
 
   test('assign_sentry_issue: missing assignee refuses before any network call', async () => {

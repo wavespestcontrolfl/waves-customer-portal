@@ -28,6 +28,7 @@ const {
   WRITE_TWO_STEP_TOOL_NAMES,
   LEGACY_BARE_WRITE_TOOL_NAMES,
   CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES,
+  OUTSIDE_WRITE_TOOL_NAMES,
 } = require('./write-gates');
 
 const CONTRACT_VERSION = 1;
@@ -61,9 +62,19 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'request_standard_payout',
   'cancel_pending_payout',
   'run_seo_pipeline',
-  // request_codex_review posts a public GitHub comment — like
-  // submit_review_reply, once sent it can only be followed up, not unsent.
-  'request_codex_review',
+  // The outside-write tools (Sentry/Cloudflare/Railway/GitHub/GSC, owner
+  // ruling 2026-09-28) act on services the portal doesn't own state for —
+  // there is no portal-side undo for any of them (codex r2 P2 on #5275):
+  // resolve/ignore/assign only exist as Sentry's own issue actions with no
+  // portal mirror to revert; a Cloudflare cache purge cannot be "unpurged"
+  // and a Pages build retry cannot be un-retried; a Railway redeploy/restart
+  // cannot be undone (the previous running instance is gone); a GitHub
+  // checks rerun cannot be un-run; a PR label and the "@codex review"
+  // comment are both public GitHub state, like submit_review_reply, once
+  // posted only followed up, never unsent; a GSC sitemap submission has no
+  // withdraw call. Pulling in the whole set (rather than hand-copying it)
+  // means a future outside-write tool inherits this by construction.
+  ...OUTSIDE_WRITE_TOOL_NAMES,
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule

@@ -630,7 +630,15 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   const OUTSIDE_WRITE_FIXTURES = {
     resolve_sentry_issue: { env: { SENTRY_API_TOKEN: 'test-sentry-token' }, responses: [SENTRY_ISSUE_FIXTURE] },
     ignore_sentry_issue: { env: { SENTRY_API_TOKEN: 'test-sentry-token' }, responses: [SENTRY_ISSUE_FIXTURE] },
-    assign_sentry_issue: { env: { SENTRY_API_TOKEN: 'test-sentry-token' }, responses: [SENTRY_ISSUE_FIXTURE] },
+    // Second response is the org-member roster assign_sentry_issue now
+    // resolves the assignee against (codex r2 P2 on #5275).
+    assign_sentry_issue: {
+      env: { SENTRY_API_TOKEN: 'test-sentry-token' },
+      responses: [SENTRY_ISSUE_FIXTURE, [{
+        id: 'member-1', email: 'adam@wavespestcontrol.com', name: 'Adam Benetti',
+        user: { id: 'user-1', username: 'adam', name: 'Adam Benetti' },
+      }]],
+    },
     purge_cloudflare_cache: {
       env: { CF_API_TOKEN: 'test-cf-token' },
       responses: [{ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }],
