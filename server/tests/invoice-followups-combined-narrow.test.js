@@ -408,6 +408,10 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     // The higher-step sibling advances its OWN step (1 -> 2), not re-timed
     // in place.
     expect(siblingUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 2 }));
+    // Only the anchor may render combined: the sibling's own touch never
+    // resolves a combined variant, so the customer cannot get a second
+    // "N invoices" message in the same run.
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledTimes(1);
   });
 
   test('invoice_count/total_due come from the pay-balance link\'s own snapshot, not from how many rows are due this run', async () => {

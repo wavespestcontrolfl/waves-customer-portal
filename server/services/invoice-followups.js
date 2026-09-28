@@ -1092,9 +1092,9 @@ async function runPending() {
  */
 async function fireGroupedRows(toFire) {
   let sent = 0, skipped = 0;
-  const fireOne = async (row) => {
+  const fireOne = async (row, opts) => {
     try {
-      const outcome = await fireStep(row);
+      const outcome = await fireStep(row, opts);
       sent++;
       return outcome;
     } catch (err) {
@@ -1135,7 +1135,7 @@ async function fireGroupedRows(toFire) {
       // rare, but never deferred: it fires exactly as it would ungrouped.
       // Same for one the anchor's own send did not actually cover.
       if (sibling.step_index > anchor.step_index || !anchorSent || !siblingCovered) {
-        await fireOne(sibling);
+        await fireOne(sibling, { allowCombined: false });
         continue;
       }
       // The anchor's combined reminder covered this invoice this run — the
@@ -1185,7 +1185,7 @@ async function fireGroupedRows(toFire) {
           try {
             await db('customer_interactions').insert({
               customer_id: sibling.customer_id,
-              interaction_type: 'sms_outbound',
+              interaction_type: anchorOutcome.interactionType || 'sms_outbound',
               subject: `Invoice follow-up — combined with invoice ${anchor.invoice_number || anchor.invoice_id} (${sibling.invoice_number || sibling.invoice_id})`,
               body: `Included in the combined reminder sent for invoice ${anchor.invoice_number || anchor.invoice_id} this run.`,
               metadata: JSON.stringify({
@@ -1508,7 +1508,7 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row, { operatorInitiated = false } = {}) {
+async function fireStep(row, { operatorInitiated = false, allowCombined = true } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -1614,7 +1614,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
     // GATE_DUNNING_COMBINED_MESSAGE) — see fireTouch's own return-value
     // comment. Every OTHER caller (sendNextTouchNow) already ignores
     // fireStep's return value, so this is additive.
-    return await fireTouch(row, { operatorInitiated });
+    return await fireTouch(row, { operatorInitiated, allowCombined });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1627,7 +1627,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   }
 }
 
-async function fireTouch(row, { operatorInitiated = false } = {}) {
+async function fireTouch(row, { operatorInitiated = false, allowCombined = true } = {}) {
   const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -1699,7 +1699,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // below except the one that renders the combined copy — computed once,
   // ahead of the mdPending diversion, which never uses it (a bank-
   // verification nudge is not a dunning message).
-  const combinedVariant = await resolveCombinedVariant(customer, row.invoice_id, step);
+  // A grouped sibling (fireGroupedRows) never renders combined: only the
+  // group's anchor may, so a customer gets at most one "N invoices" message
+  // per run.
+  const combinedVariant = allowCombined
+    ? await resolveCombinedVariant(customer, row.invoice_id, step)
+    : null;
   const mdPending = gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
@@ -2247,11 +2252,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   }
 
   // Log to customer_interactions for the 360 view
+  const interactionType = selectedChannels === null || actualSmsSent ? 'sms_outbound'
+    : appSent ? 'app_outbound' : 'email_outbound';
   try {
     await db('customer_interactions').insert({
       customer_id: customer.id,
-      interaction_type: selectedChannels === null || actualSmsSent ? 'sms_outbound'
-        : appSent ? 'app_outbound' : 'email_outbound',
+      interaction_type: interactionType,
       subject: `Invoice follow-up — ${step.label} (${row.invoice_number || row.invoice_id})`,
       body: `Step ${row.step_index + 1}/${followupSteps().length} fired. Amount: $${amount}.`,
       metadata: JSON.stringify({
@@ -2265,7 +2271,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }),
     });
   } catch { /* non-critical */ }
-  return { sent: true, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
+  return { sent: true, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null, interactionType };
 }
 
 /**
