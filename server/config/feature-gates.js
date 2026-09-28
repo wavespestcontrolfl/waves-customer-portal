@@ -3253,6 +3253,15 @@ const gates = {
   // latePaymentCheckerRetiredLive() (reopened-invoice revival).
   latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
 
+  // Orphan-invoice adoption sweep (dunning unification, PR 3b): invoices sent
+  // outside the direct-send path never got an invoice_followup_sequences row.
+  // Ships DARK: off unless exactly 'true', and only runs while
+  // GATE_LATE_PAYMENT_CHECKER_OFF is honoured (the sweep never adopts beside
+  // a running checker, nor an invoice the checker ever contacted). This
+  // entry is for logGateStatus only: services/invoice-followups.js reads
+  // GATE_DUNNING_ADOPT_ORPHANS at call time inside runPending().
+  dunningAdoptOrphans: process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true',
+
   // Pre-visit balance reminder window widens from 3 to 5 days before the
   // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead
   // of the 72-hour appointment reminder. Ships DARK: off unless exactly
