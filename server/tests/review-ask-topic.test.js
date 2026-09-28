@@ -233,6 +233,37 @@ describe('collectTopicEvidence', () => {
     expect(evidence.texts).toEqual([]);
   });
 
+  test('service lines come from the record\'s stamped line, else the service name; a grouped stop carries every member\'s line', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [
+        { id: 'ss-pest', customer_id: 'c1', status: 'completed', visit_id: 'v-2', service_type: 'Quarterly Pest Control Service', completed_at: NOW },
+        { id: 'ss-lawn', customer_id: 'c1', status: 'completed', visit_id: 'v-2', service_type: 'Every 6 Weeks Lawn Care Service', completed_at: NOW },
+      ],
+      service_records: [
+        { id: 'sr-pest', scheduled_service_id: 'ss-pest', service_line: 'pest', service_type: 'Quarterly Pest Control Service', structured_notes: null },
+      ],
+      sms_log: [],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-pest', scheduledServiceId: 'ss-pest' });
+    expect([...evidence.serviceLines].sort()).toEqual(['lawn', 'pest']);
+  });
+
+  test('an unknown service line reads as none (never the name-less "pest" default), so nothing is sent to the model', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [{ id: 'ss-x', customer_id: 'c1', status: 'completed', completed_at: NOW }],
+      service_records: [],
+      sms_log: [
+        { id: 's-1', customer_id: 'c1', direction: 'inbound', message_body: 'Ants all over the kitchen again', created_at: new Date(NOW.getTime() - 3600000) },
+      ],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', scheduledServiceId: 'ss-x' });
+    expect(evidence.serviceLines).toEqual([]);
+    await expect(classifyTopic(evidence)).resolves.toMatchObject({ status: 'no_evidence' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('excludes reactions and bodies under 12 characters', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [],
@@ -293,14 +324,14 @@ describe('collectTopicEvidence', () => {
   test('never throws — a lookup failure returns fully empty evidence (readTopicEvidence, the replay\'s variant, throws it instead)', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
     const evidence = await collectTopicEvidence({ customerId: 'c1', completedAt: NOW });
-    expect(evidence).toEqual({ completion: { concernText: null }, texts: [] });
+    expect(evidence).toEqual({ completion: { concernText: null }, texts: [], serviceLines: [] });
     await expect(readTopicEvidence({ customerId: 'c1', completedAt: NOW })).rejects.toThrow('pool exhausted');
   });
 });
 
 describe('extractReviewTopic', () => {
   test('empty evidence never calls the model and returns null', async () => {
-    const result = await extractReviewTopic({ completion: { concernText: null }, texts: [] });
+    const result = await extractReviewTopic({ completion: { concernText: null }, serviceLines: ['pest'], texts: [] });
     expect(result).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -309,7 +340,7 @@ describe('extractReviewTopic', () => {
     // Simulates a caller (or a stale shape) that still carries `observations`
     // on the completion object — hasEvidenceToClassify only ever looks at
     // concernText, so this must never trigger a model call.
-    const evidence = { completion: { concernText: null, observations: ['ghost ants, widow spiders'] }, texts: [] };
+    const evidence = { completion: { concernText: null, observations: ['ghost ants, widow spiders'] }, serviceLines: ['pest'], texts: [] };
     const result = await extractReviewTopic(evidence);
     expect(result).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
@@ -318,69 +349,70 @@ describe('extractReviewTopic', () => {
   test('a logistics classification returns null', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+      json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', service_line: 'other', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('an ungrounded topic (tokens not present in the cited evidence) is rejected', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'termite swarm activity', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+      json: { topic: 'termite swarm activity', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('a topic of only short words ("air wig") is grounded word for word — the production replay miss', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'air wig', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.92 },
+      json: { topic: 'air wig', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.92 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'We should be around Had an air wig in the bathroom last week' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'We should be around Had an air wig in the bathroom last week' }] };
     expect(await extractReviewTopic(evidence)).toMatchObject({ topic: 'air wig', kind: 'service_concern' });
   });
 
   test('a short-word topic never grounds on a longer word that merely contains it ("rat" in "rather")', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'rat', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+      json: { topic: 'rat', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: "I'd rather move the visit to Friday" }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: "I'd rather move the visit to Friday" }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('an invented short pest never rides along with grounded longer words ("rat noise in attic")', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'rat noise in attic', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
+      json: { topic: 'rat noise in attic', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There is a noise in the attic at night' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There is a noise in the attic at night' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('a topic longer than six words is rejected even when every word is grounded', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants all over the kitchen counter again', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.95 },
+      json: { topic: 'ants all over the kitchen counter again', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.95 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There are ants all over the kitchen counter again' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'There are ants all over the kitchen counter again' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('a grounded service_concern from an sms citation is stored with the version', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.85 },
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.85 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     const result = await extractReviewTopic(evidence, { firstName: 'Pat' });
     expect(result).toEqual({
       topic: 'ants in kitchen',
       kind: 'service_concern',
       source: 'sms',
       evidenceId: 's-1',
+      serviceLine: 'pest',
       confidence: 0.85,
       version: TOPIC_VERSION,
     });
@@ -389,9 +421,9 @@ describe('extractReviewTopic', () => {
   test('a grounded question from completion notes (customerConcernText) is stored', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidence_id: 'completion', confidence: 0.85 },
+      json: { topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidence_id: 'completion', service_line: 'pest', confidence: 0.85 },
     });
-    const evidence = { completion: { concernText: 'asked about the wasp nest treatment' }, texts: [] };
+    const evidence = { completion: { concernText: 'asked about the wasp nest treatment' }, serviceLines: ['pest'], texts: [] };
     const result = await extractReviewTopic(evidence);
     expect(result).toMatchObject({ topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidenceId: 'completion' });
   });
@@ -399,33 +431,33 @@ describe('extractReviewTopic', () => {
   test('confidence below 0.8 is rejected even when grounded', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.4 },
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.4 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('confidence just under the 0.8 floor (0.79) is rejected even when grounded', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.79 },
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.79 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
   test('confidence exactly at the 0.8 floor is accepted when grounded', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.8 },
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', service_line: 'pest', confidence: 0.8 },
     });
-    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toMatchObject({ topic: 'ants in kitchen' });
   });
 
   test('a model throw or provider failure never throws — returns null', async () => {
     mockDispatch.mockRejectedValue(new Error('provider timeout'));
-    const evidence = { completion: { concernText: 'ants in the kitchen' }, texts: [] };
+    const evidence = { completion: { concernText: 'ants in the kitchen' }, serviceLines: ['pest'], texts: [] };
     await expect(extractReviewTopic(evidence)).resolves.toBeNull();
 
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
@@ -434,10 +466,10 @@ describe('extractReviewTopic', () => {
 });
 
 describe('classifyTopic (the replay\'s raw outcome)', () => {
-  const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
+  const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
 
   test('keeps the model\'s own kind when the topic is refused, so the replay can count logistics/praise/none', async () => {
-    mockDispatch.mockResolvedValue({ ok: true, json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', confidence: 0.9 } });
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', service_line: 'other', confidence: 0.9 } });
     await expect(classifyTopic(evidence)).resolves.toMatchObject({ status: 'classified', raw: { kind: 'logistics' }, topic: null });
   });
 
@@ -448,8 +480,44 @@ describe('classifyTopic (the replay\'s raw outcome)', () => {
     await expect(classifyTopic(evidence)).rejects.toThrow('provider timeout');
   });
 
+  test('owner rule: a grounded, confident topic from another service is kept out (a pest topic after a lawn visit)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'earwigs in the house', kind: 'service_concern', source: 'sms', evidence_id: 's-2', service_line: 'pest', confidence: 0.95 } });
+    const lawnVisit = { completion: { concernText: null }, serviceLines: ['lawn'], texts: [{ id: 's-2', at: NOW.toISOString(), body: 'We keep finding earwigs in the house' }] };
+    await expect(classifyTopic(lawnVisit)).resolves.toMatchObject({ status: 'classified', topic: null, refusal: 'off_service' });
+  });
+
+  test('owner rule: something Waves does not treat ("other", e.g. snakes) is never kept', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'lots of snakes', kind: 'service_concern', source: 'sms', evidence_id: 's-3', service_line: 'other', confidence: 0.98 } });
+    const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-3', at: NOW.toISOString(), body: 'We are noticing lots of snakes' }] };
+    await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'off_service' });
+  });
+
+  test('owner rule: a topic for the service just done is kept, with its line', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'Bermuda grass', kind: 'service_concern', source: 'sms', evidence_id: 's-4', service_line: 'lawn', confidence: 0.99 } });
+    const lawnVisit = { completion: { concernText: null }, serviceLines: ['lawn'], texts: [{ id: 's-4', at: NOW.toISOString(), body: "Let's hope ya can get rid of the Bermuda grass" }] };
+    await expect(classifyTopic(lawnVisit)).resolves.toMatchObject({ topic: { topic: 'Bermuda grass', serviceLine: 'lawn' }, refusal: null });
+  });
+
+  test('a plural pest never grounds inside a longer word ("ants" in "plants")', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'ants in yard', kind: 'service_concern', source: 'sms', evidence_id: 's-5', service_line: 'pest', confidence: 0.9 } });
+    const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-5', at: NOW.toISOString(), body: 'The plants in the yard are dying' }] };
+    await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'ungrounded' });
+  });
+
+  test('a confidence outside 0-1 (a percentage like 85) is refused, never read as confident', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-6', service_line: 'pest', confidence: 85 } });
+    const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-6', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'confidence_out_of_range' });
+  });
+
+  test('the 8s budget is split so a stalled primary leaves the fallback time to answer', async () => {
+    mockDispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+    await classifyTopic(evidence);
+    expect(mockDispatch).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeoutMs: 8000 }), expect.objectContaining({ reserveFallbackBudget: true }));
+  });
+
   test('empty evidence is "no_evidence" with no model call', async () => {
-    await expect(classifyTopic({ completion: { concernText: null }, texts: [] })).resolves.toMatchObject({ status: 'no_evidence' });
+    await expect(classifyTopic({ completion: { concernText: null }, serviceLines: ['pest'], texts: [] })).resolves.toMatchObject({ status: 'no_evidence' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
@@ -475,12 +543,12 @@ describe('resolveReviewTopicForEnrollment', () => {
     mockGates.reviewDay0Context = true;
     db.mockImplementation(makeDb({
       scheduled_services: [],
-      service_records: [{ id: 'sr-1', structured_notes: { customerConcernText: 'ants in the kitchen', observations: [], customerRecap: null } }],
+      service_records: [{ id: 'sr-1', service_line: 'pest', structured_notes: { customerConcernText: 'ants in the kitchen', observations: [], customerRecap: null } }],
       sms_log: [],
     }));
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'completion', evidence_id: 'completion', confidence: 0.9 },
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'completion', evidence_id: 'completion', service_line: 'pest', confidence: 0.9 },
     });
     const result = await resolveReviewTopicForEnrollment({ customerId: 'c1', serviceRecordId: 'sr-1', completedAt: NOW, plan: RECURRING_PLAN });
     expect(result).toMatchObject({ topic: 'ants in kitchen', kind: 'service_concern', source: 'completion' });

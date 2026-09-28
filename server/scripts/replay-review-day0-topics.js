@@ -3,12 +3,12 @@
 
 /**
  * READ-ONLY replay: runs the Day-0 review-ask contextual topic classifier
- * (review-ask-topic.js) over recent completed RECURRING visits and reports
- * what topic (if any) it would have found. Evidence sources are exactly the
- * two the live path is allowed to read — the customer's inbound texts since
- * their previous completed visit and what the customer told the technician on
- * THIS visit (customerConcernText) — through the same collectTopicEvidence
- * call, anchored on that visit's own completed_at.
+ * (review-ask-topic.js) over recent completed visits that get the single
+ * recurring ask — chosen by the live plan resolver
+ * (resolveSequencePlanForEnrollment, as of today's data), one per grouped
+ * stop — and reports what topic (if any) it would have stored. Evidence and
+ * classification run through the same code as the live path (its throwing
+ * variants, so failures are reported).
  *
  * This script makes no writes: no DB write, no send, no gate flip. It DOES
  * make one live LLM classification call per matched visit (the same
@@ -36,7 +36,8 @@ if (!process.env.DATABASE_URL && !process.env.DATABASE_PUBLIC_URL) {
 const fs = require('fs');
 const path = require('path');
 const db = require('../models/db');
-const { readTopicEvidence, classifyTopic } = require('../services/review-ask-topic');
+const { readTopicEvidence, classifyTopic, isRecurringAskPlan } = require('../services/review-ask-topic');
+const ReviewService = require('../services/review-request');
 const { runAsReplay } = require('../services/llm-dispatch-metrics');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { formatETDate } = require('../utils/datetime-et');
@@ -79,20 +80,36 @@ function mdEscape(value) {
   return String(value == null ? '' : value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-async function fetchCompletedRecurringVisits(since, now) {
-  return db('scheduled_services as ss')
+// Completed visits in the window, one per grouped stop (the live packet
+// path enrolls only its first member), kept only where the live plan
+// resolver gives the single recurring ask — not ss.is_recurring, which
+// misses a one-off visit for a customer with live recurring coverage.
+async function fetchRecurringAskVisits(since, now) {
+  const rows = await db('scheduled_services as ss')
     .join('service_records as sr', 'sr.scheduled_service_id', 'ss.id')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
-    .where('ss.is_recurring', true)
     .where('ss.status', 'completed')
     .where('ss.completed_at', '>=', since)
     .where('ss.completed_at', '<=', now)
     .select(
-      'ss.id as visit_id', 'ss.completed_at', 'ss.customer_id',
+      'ss.id as visit_id', 'ss.visit_id as stop_id', 'ss.completed_at', 'ss.customer_id',
       'sr.id as service_record_id', 'sr.service_type',
       'c.first_name as customer_first_name',
     )
     .orderBy('ss.completed_at', 'asc');
+  const seenStops = new Set();
+  const visits = [];
+  let planErrors = 0;
+  for (const row of rows) {
+    if (row.stop_id && seenStops.has(row.stop_id)) continue;
+    if (row.stop_id) seenStops.add(row.stop_id);
+    const resolved = await ReviewService.resolveSequencePlanForEnrollment({
+      customerId: row.customer_id, serviceRecordId: row.service_record_id, scheduledServiceId: row.visit_id,
+    });
+    if (resolved.error) { planErrors += 1; continue; }
+    if (!resolved.skip && isRecurringAskPlan(resolved.plan)) visits.push(row);
+  }
+  return { visits, scanned: rows.length, planErrors };
 }
 
 // One visit -> one evidence-gather + classification, guarded so a single bad
@@ -124,20 +141,25 @@ async function classifyVisit(visit) {
     serviceType: visit.service_type || null,
     evidence: evidence || { completion: { concernText: null }, texts: [] },
     evidenceRead: !!evidence,
-    // The model's own answer before the confidence/grounding checks.
+    // The model's own answer before the checks, and the check that refused it.
     rawKind: outcome?.raw?.kind || null,
+    rawTopic: outcome?.raw?.topic || null,
+    rawServiceLine: outcome?.raw?.service_line || null,
+    refusal: outcome?.refusal || null,
     topic,
     wouldFire: !!topic,
     error,
   };
 }
 
-// `summary` counts the model's own kinds (before the checks); `rejected` is a
-// service_concern/question the confidence or grounding check refused;
-// `no_evidence` never reached the model; `failed` is a lookup or provider
-// error, kept out of every other count.
+// `summary` counts the model's own kinds (before the checks); `off_service`
+// is a service_concern/question kept out because it belongs to another
+// service than the visit's (owner ruling 2026-09-28); `rejected` is one the
+// confidence, length or grounding check refused; `no_evidence` never reached
+// the model; `failed` is a lookup or provider error, kept out of every other
+// count.
 function summarize(results) {
-  const summary = { service_concern: 0, question: 0, logistics: 0, praise: 0, none: 0, rejected: 0, no_evidence: 0, failed: 0 };
+  const summary = { service_concern: 0, question: 0, logistics: 0, praise: 0, none: 0, off_service: 0, rejected: 0, no_evidence: 0, failed: 0 };
   let wouldFireCount = 0;
   let withTextsCount = 0;
   let withTextsFiredCount = 0;
@@ -146,7 +168,10 @@ function summarize(results) {
     if (r.wouldFire) wouldFireCount += 1;
     if (!r.rawKind) summary.no_evidence += 1;
     else summary[r.rawKind] = (summary[r.rawKind] || 0) + 1;
-    if (!r.topic && (r.rawKind === 'service_concern' || r.rawKind === 'question')) summary.rejected += 1;
+    if (!r.topic && (r.rawKind === 'service_concern' || r.rawKind === 'question')) {
+      if (r.refusal === 'off_service') summary.off_service += 1;
+      else summary.rejected += 1;
+    }
     if (hasCustomerTexts(r.evidence)) {
       withTextsCount += 1;
       if (r.wouldFire) withTextsFiredCount += 1;
@@ -160,7 +185,7 @@ function renderMarkdownRow(result, customerFirstName) {
     mdEscape(formatETDate(new Date(result.completedAt))),
     mdEscape(result.serviceType || ''),
     mdEscape(customerFirstName || ''),
-    mdEscape(result.error ? 'error' : (result.rawKind || 'no evidence')),
+    mdEscape(result.error ? 'error' : [result.rawKind || 'no evidence', result.refusal && result.refusal !== 'kind' ? `refused: ${result.refusal} ("${result.rawTopic || ''}", ${result.rawServiceLine})` : ''].filter(Boolean).join(' — ')),
     mdEscape(result.topic?.topic || ''),
     mdEscape(result.topic?.source || ''),
     result.topic ? result.topic.confidence.toFixed(2) : '',
@@ -174,7 +199,7 @@ function renderMarkdown({ days, since, now, visits, results, summary, wouldFireC
   const lines = [
     `# Review Day-0 context topics — replay (${days}-day window)`,
     '',
-    `Window: ${formatETDate(since)} – ${formatETDate(now)}. ${visits.length} completed recurring visit(s) scanned.`,
+    `Window: ${formatETDate(since)} – ${formatETDate(now)}. ${visits.length} completed visit(s) that get the single recurring ask (live plan resolver) scanned.`,
     '',
     'This is a READ-ONLY replay for review. No sends, no writes, no gate flip.',
     '',
@@ -189,7 +214,8 @@ function renderMarkdown({ days, since, now, visits, results, summary, wouldFireC
     `- logistics: ${summary.logistics}`,
     `- praise: ${summary.praise}`,
     `- none: ${summary.none}`,
-    `- service_concern/question refused by the confidence or grounding check: ${summary.rejected}`,
+    `- service_concern/question kept out because it belongs to another service than the visit's: ${summary.off_service}`,
+    `- service_concern/question refused by the confidence, length or grounding check: ${summary.rejected}`,
     `- no evidence (never sent to the model): ${summary.no_evidence}`,
     `- failed (lookup or provider error — not counted anywhere else): ${summary.failed}`,
     `- would fire (topic stored): ${wouldFireCount} / ${visits.length}`,
@@ -213,9 +239,9 @@ async function main() {
   const now = new Date();
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
-  console.log(`[replay] scanning completed recurring visits from ${since.toISOString()} to ${now.toISOString()}`);
-  const visits = await fetchCompletedRecurringVisits(since, now);
-  console.log(`[replay] ${visits.length} completed recurring visit(s) with a service record in window`);
+  console.log(`[replay] scanning completed visits from ${since.toISOString()} to ${now.toISOString()}`);
+  const { visits, scanned, planErrors } = await fetchRecurringAskVisits(since, now);
+  console.log(`[replay] ${visits.length} of ${scanned} completed visit(s) get the single recurring ask (plan lookup errors: ${planErrors})`);
 
   // Recorded as replay workload (`<policy>:replay`), never as live
   // review_topic traffic in the dispatch metrics or the call ledger.

@@ -6,7 +6,10 @@
  * their previous completed visit and the CUSTOMER's OWN WORDS as recorded on
  * the completion (`customerConcernText` — "what the customer told the
  * technician"), never calls, never transcripts; a topic only ever changes the
- * wording of the ask later — it never changes whether an ask is sent.
+ * wording of the ask later — it never changes whether an ask is sent — and
+ * is kept only when it belongs to the service just done (owner ruling
+ * 2026-09-28: a lawn topic after a lawn visit, a pest topic after a pest
+ * visit; anything else gets the fixed Day-0 text).
  *
  * The technician's own findings (`observations`, `customerRecap`) are NOT a
  * topic source (production replay 2026-09-28, 181 recurring visits: 80/95
@@ -31,6 +34,7 @@ const { isEnabled } = require("../config/feature-gates");
 const { redactAccessCodes } = require("./context-aggregator");
 const { isSmsReaction } = require("./sms-intent");
 const OUTREACH = require("./review-outreach-templates");
+const { SERVICE_LINE_IDS, detectServiceLine } = require("./service-report/service-line-configs");
 
 // Bump on any prompt/schema change so stored topics carry their own
 // provenance (same convention as sms-operational-actions' VERSION).
@@ -39,7 +43,9 @@ const OUTREACH = require("./review-outreach-templates");
 // the tech's findings, not the customer's own words), MIN_CONFIDENCE raised
 // 0.6 -> 0.8, and the prompt tightened against a bare place ("outside") and
 // a buy/add/price question reading as a topic.
-const TOPIC_VERSION = "review-day0-context-v2";
+// v3 (owner ruling 2026-09-28): the model also names the service line the
+// topic belongs to; a topic is kept only when that is the service just done.
+const TOPIC_VERSION = "review-day0-context-v3";
 
 const EVIDENCE_WINDOW_DAYS = 14;
 const EVIDENCE_WINDOW_MS = EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
@@ -55,6 +61,14 @@ const MAX_TOPIC_WORDS = 6;
 // the enrollment path the way a customer-facing draft would need to.
 const TOPIC_TIMEOUT_MS = 8 * 1000;
 
+// Service lines on the service report's own ids (service-line-configs.js),
+// with palm folded into tree & shrub — one family, as tree-shrub-closeout.js
+// treats them. "other" = something Waves does not treat (snakes, wildlife).
+function serviceFamilyOf(line) {
+  return line === "palm" ? "tree_shrub" : line || null;
+}
+const TOPIC_SERVICE_LINES = [...new Set(SERVICE_LINE_IDS.map(serviceFamilyOf)), "other"];
+
 const TOPIC_SCHEMA = {
   type: "object",
   properties: {
@@ -62,9 +76,10 @@ const TOPIC_SCHEMA = {
     kind: { type: "string", enum: ["service_concern", "question", "logistics", "praise", "none"] },
     source: { type: "string", enum: ["completion", "sms", "none"] },
     evidence_id: { type: "string" },
+    service_line: { type: "string", enum: TOPIC_SERVICE_LINES },
     confidence: { type: "number" },
   },
-  required: ["topic", "kind", "source", "evidence_id", "confidence"],
+  required: ["topic", "kind", "source", "evidence_id", "service_line", "confidence"],
   additionalProperties: false,
 };
 
@@ -80,6 +95,8 @@ Read the evidence — what the customer told the technician on this visit (their
 - kind = "none": nothing above applies, only a bare place/room is named with no condition, or the evidence is too vague to name a topic.
 
 When kind is "service_concern" or "question", set topic to AT MOST 6 WORDS using the customer's OWN nouns from the evidence, and it MUST name the pest/animal/plant/lawn/property condition itself — never a place alone, never invent a pest, condition, or word that isn't in the evidence. Otherwise set topic to "".
+
+service_line is the Waves service that treats the topic itself, judged from the topic alone: "pest" (household insects and spiders — ants, roaches, earwigs, spiders, wasps, fleas, silverfish), "lawn" (grass, turf, weeds, lawn disease, lawn insects such as chinch bugs or grubs), "tree_shrub" (trees, shrubs, palms, ornamental plants), "mosquito", "termite" (termites and other wood-destroying insects), "rodent" (rats, mice), or "other" (anything Waves does not treat — snakes, birds, raccoons and other wildlife — or when you cannot tell). When kind is not "service_concern" or "question", service_line is "other".
 
 source is "completion" when the topic comes from what the customer told the technician, "sms" when it comes from a customer text, or "none" otherwise. When source is "sms", evidence_id is the id of the cited text message exactly as given. When source is "completion", evidence_id is the literal string "completion". Otherwise evidence_id is "".
 
@@ -110,35 +127,56 @@ function earliestDate(values) {
     .sort((a, b) => a - b)[0] || null;
 }
 
+// A record's service line the way the service report resolves it
+// (premium-experience.js resolveServiceLine): the stamped line, else the
+// service name. Null when neither is known — never the name-less "pest"
+// default detectServiceLine would return.
+function visitServiceLine(serviceLine, serviceType) {
+  return serviceFamilyOf(serviceLine || (serviceType ? detectServiceLine(serviceType) : null));
+}
+
 // The visit, its grouped-visit members (scheduled_services.visit_id — one
-// physical stop), and what the customer told the technician:
-// customerConcernText ONLY, from every member's record (each member has its
-// own completion form; enrollment names only the first). `observations` /
-// `customerRecap` are the technician's own findings (see module header).
-// windowEnd is the visit's real start, else its completed_at: a closeout
-// submitted hours after the stop must not turn a post-visit text into a
-// pre-visit topic.
+// physical stop), the service lines done there, and what the customer told
+// the technician: customerConcernText ONLY, from every member's record (each
+// member has its own completion form; enrollment names only the first).
+// `observations` / `customerRecap` are the technician's own findings (see
+// module header). windowEnd is the visit's real start, else its
+// completed_at: a closeout submitted hours after the stop must not turn a
+// post-visit text into a pre-visit topic.
 async function loadVisit({ serviceRecordId, scheduledServiceId }) {
   const sr = serviceRecordId
-    ? await db("service_records").where({ id: serviceRecordId }).select("structured_notes", "scheduled_service_id").first()
+    ? await db("service_records").where({ id: serviceRecordId })
+      .select("structured_notes", "scheduled_service_id", "service_line", "service_type").first()
     : null;
   const visitId = scheduledServiceId || sr?.scheduled_service_id || null;
   const visit = visitId
-    ? await db("scheduled_services").where({ id: visitId }).select("id", "visit_id", "completed_at", ...VISIT_START_FIELDS).first()
+    ? await db("scheduled_services").where({ id: visitId })
+      .select("id", "visit_id", "completed_at", "service_type", ...VISIT_START_FIELDS).first()
     : null;
-  const memberIds = visit?.visit_id
-    ? (await db("scheduled_services").where({ visit_id: visit.visit_id }).select("id")).map((r) => r.id)
+  const members = visit?.visit_id
+    ? await db("scheduled_services").where({ visit_id: visit.visit_id }).select("id", "service_type")
     : [];
+  const memberIds = members.map((m) => m.id);
   const memberRecords = memberIds.length
-    ? await db("service_records").whereIn("scheduled_service_id", memberIds).select("structured_notes")
+    ? await db("service_records").whereIn("scheduled_service_id", memberIds)
+      .select("structured_notes", "scheduled_service_id", "service_line", "service_type")
     : [];
   const concerns = [...new Set([sr, ...memberRecords].map((r) => concernTextOf(r?.structured_notes)).filter(Boolean))];
+  const serviceLines = new Set([
+    visitServiceLine(sr?.service_line, sr?.service_type || visit?.service_type),
+    ...members.map((m) => {
+      const rec = memberRecords.find((r) => r.scheduled_service_id === m.id);
+      return visitServiceLine(rec?.service_line, rec?.service_type || m.service_type);
+    }),
+  ]);
+  serviceLines.delete(null);
   return {
     // Same redact-then-cap as the texts: free-text concerns can carry a gate
     // or lockbox code.
     concernText: concerns.length ? redactAccessCodes(concerns.join(" / ")).slice(0, MAX_TEXT_CHARS) : null,
     windowEnd: visit ? earliestDate(VISIT_START_FIELDS.map((f) => visit[f])) || earliestDate([visit.completed_at]) : null,
     sameStopIds: visit ? [...new Set([visit.id, ...memberIds])] : [],
+    serviceLines: [...serviceLines],
   };
 }
 
@@ -157,8 +195,9 @@ async function loadVisit({ serviceRecordId, scheduledServiceId }) {
 async function readTopicEvidence({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null } = {}) {
   const visit = await loadVisit({ serviceRecordId, scheduledServiceId });
   const completion = { concernText: visit.concernText };
+  const { serviceLines } = visit;
   const at = visit.windowEnd || (completedAt ? new Date(completedAt) : null);
-  if (!at || Number.isNaN(at.getTime())) return { completion, texts: [] };
+  if (!at || Number.isNaN(at.getTime())) return { completion, texts: [], serviceLines };
 
   let prevQuery = db("scheduled_services")
     .where({ customer_id: customerId, status: "completed" })
@@ -196,7 +235,7 @@ async function readTopicEvidence({ customerId, serviceRecordId = null, scheduled
     body: redactAccessCodes(String(r.message_body || "")).slice(0, MAX_TEXT_CHARS),
   }));
 
-  return { completion, texts };
+  return { completion, texts, serviceLines };
 }
 
 // Fail-soft readTopicEvidence for the live enrollment path: any lookup
@@ -206,7 +245,7 @@ async function collectTopicEvidence(args = {}) {
     return await readTopicEvidence(args);
   } catch (err) {
     logger.warn(`[review-topic] evidence collection failed (customerId=${args.customerId}): ${err.message}`);
-    return { completion: { concernText: null }, texts: [] };
+    return { completion: { concernText: null }, texts: [], serviceLines: [] };
   }
 }
 
@@ -234,9 +273,9 @@ function resolveCitedText(evidence, source, evidenceId) {
   return "";
 }
 
-// Simple plural-insensitive normalization (strip a trailing 's') — deliberately
-// not full lemmatization; substring matching against the evidence absorbs the
-// rest (e.g. topic "roaches" -> "roache" is still a substring of "roaches").
+// Plural-insensitive stem (strip one trailing 's') — deliberately not full
+// lemmatization; the (s|es) suffix in isWordInEvidence absorbs the rest
+// (topic "roaches" -> "roache" still matches "roaches").
 function normalizePluralToken(token) {
   return token.length > 1 && token.endsWith("s") ? token.slice(0, -1) : token;
 }
@@ -246,52 +285,74 @@ function normalizePluralToken(token) {
 // "ant", "bug", "fly", "air wig" — and must be grounded like a long word.
 const SHORT_FILLER_WORDS = new Set(["the", "and", "for", "are", "was", "has", "had", "our", "you", "any", "all", "not", "but", "its", "his", "her", "out", "off", "too", "can", "get", "got", "one", "two", "lot", "new", "old", "few", "per", "via", "yet", "now", "how", "why", "who", "did", "may", "own", "see", "day", "way"]);
 
+// Whole word, plural-insensitive ("ants" grounds on "ant" or "ants"): a
+// substring is too loose — "ants" is inside "plants", "rat" inside "rather".
+// `word` is letters only, so it is safe inside the pattern.
+function isWordInEvidence(word, evidenceLower) {
+  const stem = word.length > 3 ? normalizePluralToken(word) : word;
+  return new RegExp(`\\b${stem}(?:s|es)?\\b`).test(evidenceLower);
+}
+
 /**
- * Deterministic grounding check (never trusts the model alone): every
- * alphabetic topic word longer than 3 characters must appear in the cited
- * evidence text, and every meaningful three-letter word must appear there as
- * a whole word (a short substring is too loose: "rat" is inside "rather"), or
- * the topic is rejected. So an invented short pest never rides along with a
- * grounded longer word ("rat noise in attic" against "noise in the attic").
+ * Deterministic grounding check (never trusts the model alone): every topic
+ * word longer than 3 letters, and every meaningful three-letter word, must
+ * appear in the cited evidence as a whole word, or the topic is rejected. So
+ * an invented pest never rides along with grounded words ("rat noise in
+ * attic" against "noise in the attic", "ants in yard" against "plants in the
+ * yard").
  */
 function isTopicGrounded(topic, citedText) {
   const evidenceLower = String(citedText || "").toLowerCase();
   if (!evidenceLower) return false;
   const words = String(topic || "").toLowerCase().match(/[a-z]+/g) || [];
-  const long = words.filter((w) => w.length > 3);
-  const short = words.filter((w) => w.length === 3 && !SHORT_FILLER_WORDS.has(w));
-  if (!long.length && !short.length) return false;
-  return long.every((w) => evidenceLower.includes(normalizePluralToken(w)))
-    && short.every((w) => new RegExp(`\\b${w}s?\\b`).test(evidenceLower));
+  const checked = words.filter((w) => w.length > 3 || (w.length === 3 && !SHORT_FILLER_WORDS.has(w)));
+  return checked.length > 0 && checked.every((w) => isWordInEvidence(w, evidenceLower));
 }
 
+// Nothing to classify without the customer's words, or without a known
+// service line for the visit (no topic could be kept against it).
 function hasEvidenceToClassify(ev) {
   const hasCompletion = !!ev?.completion?.concernText;
   const hasTexts = Array.isArray(ev?.texts) && ev.texts.length > 0;
-  return hasCompletion || hasTexts;
+  const hasServiceLine = Array.isArray(ev?.serviceLines) && ev.serviceLines.length > 0;
+  return (hasCompletion || hasTexts) && hasServiceLine;
 }
 
-// Pulled out of extractReviewTopic so the model-shape checks and the
-// deterministic grounding check each read as one small pure step.
+// The model-shape checks, the deterministic grounding check and the service
+// check, each one small pure step. Returns the topic to store, or the first
+// check it failed (the replay reports which).
 function validateTopicResult(json, ev) {
-  if (!json) return null;
+  const refuse = (refusal) => ({ topic: null, refusal });
+  if (!json) return refuse("no_result");
   const { kind, source, confidence } = json;
   const evidenceId = json.evidence_id;
-  if (kind !== "service_concern" && kind !== "question") return null;
-  if (!(Number(confidence) >= MIN_CONFIDENCE)) return null;
+  if (kind !== "service_concern" && kind !== "question") return refuse("kind");
+  // A 0–1 probability: a percentage-scaled 85 is out of range, never "confident".
+  const score = Number(confidence);
+  if (!(score >= 0 && score <= 1)) return refuse("confidence_out_of_range");
+  if (score < MIN_CONFIDENCE) return refuse("low_confidence");
 
   const topic = String(json.topic || "").trim();
-  if (!topic) return null;
-  if (topic.split(/\s+/).length > MAX_TOPIC_WORDS) return null;
-  if (!isTopicGrounded(topic, resolveCitedText(ev, source, evidenceId))) return null;
+  if (!topic) return refuse("empty");
+  if (topic.split(/\s+/).length > MAX_TOPIC_WORDS) return refuse("too_long");
+  if (!isTopicGrounded(topic, resolveCitedText(ev, source, evidenceId))) return refuse("ungrounded");
+  // Owner ruling 2026-09-28: the Day-0 text references a topic only when it
+  // belongs to the service just done (a lawn topic after a lawn visit, a pest
+  // topic after a pest visit). Anything else gets the fixed Day-0 text.
+  const serviceLine = json.service_line;
+  if (serviceLine === "other" || !(ev?.serviceLines || []).includes(serviceLine)) return refuse("off_service");
 
   return {
-    topic,
-    kind,
-    source,
-    evidenceId: evidenceId != null ? String(evidenceId) : null,
-    confidence: Number(confidence),
-    version: TOPIC_VERSION,
+    topic: {
+      topic,
+      kind,
+      source,
+      evidenceId: evidenceId != null ? String(evidenceId) : null,
+      serviceLine,
+      confidence: score,
+      version: TOPIC_VERSION,
+    },
+    refusal: null,
   };
 }
 
@@ -305,7 +366,7 @@ function validateTopicResult(json, ev) {
  */
 async function classifyTopic(evidence, { firstName = null } = {}) {
   const ev = evidence || { completion: {}, texts: [] };
-  if (!hasEvidenceToClassify(ev)) return { status: "no_evidence", reason: null, raw: null, topic: null };
+  if (!hasEvidenceToClassify(ev)) return { status: "no_evidence", reason: null, raw: null, topic: null, refusal: null };
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
     laneId: "review_topic",
     system: TOPIC_SYSTEM_PROMPT,
@@ -314,9 +375,15 @@ async function classifyTopic(evidence, { firstName = null } = {}) {
     maxTokens: 200,
     timeoutMs: TOPIC_TIMEOUT_MS,
     promptVersion: TOPIC_VERSION,
+  }, {
+    // Split the 8s between the legs: a stalled primary must leave the
+    // fallback time to answer (an explicit budget otherwise goes whole to
+    // the first leg), since a sequence enrolled without a topic never gets one.
+    reserveFallbackBudget: true,
   });
-  if (!result.ok) return { status: "failed", reason: result.reason || "error", raw: null, topic: null };
-  return { status: "classified", reason: null, raw: result.json || null, topic: validateTopicResult(result.json, ev) };
+  if (!result.ok) return { status: "failed", reason: result.reason || "error", raw: null, topic: null, refusal: null };
+  const checked = validateTopicResult(result.json, ev);
+  return { status: "classified", reason: null, raw: result.json || null, topic: checked.topic, refusal: checked.refusal };
 }
 
 // Fail-soft classifyTopic for the live enrollment path: the stored topic, or
@@ -336,21 +403,27 @@ async function extractReviewTopic(evidence, options = {}) {
  * touches (owner scope: recurring customers only). Gate off is a pure no-op:
  * no DB read, no model call. Never throws.
  */
+// The recurring one-step plan — the ONLY plan this lane touches (owner
+// scope: recurring customers only). Shared with the replay so it selects
+// exactly the visits the live resolver would classify.
+function isRecurringAskPlan(plan) {
+  return Array.isArray(plan) && plan.length === 1 && plan[0]?.templateKey === OUTREACH.DAY0_ASK_TEMPLATE_KEY;
+}
+
 async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null, plan, firstName = null } = {}) {
   try {
     if (!isEnabled("reviewDay0Context")) {
       logger.info(`[review-topic] skipped (customerId=${customerId} reason=gate_off)`);
       return null;
     }
-    const isRecurringPlan = Array.isArray(plan) && plan.length === 1 && plan[0]?.templateKey === OUTREACH.DAY0_ASK_TEMPLATE_KEY;
-    if (!isRecurringPlan) {
+    if (!isRecurringAskPlan(plan)) {
       logger.info(`[review-topic] skipped (customerId=${customerId} reason=not_recurring_plan)`);
       return null;
     }
     const evidence = await collectTopicEvidence({ customerId, serviceRecordId, scheduledServiceId, completedAt });
     const result = await extractReviewTopic(evidence, { firstName });
     if (result) {
-      logger.info(`[review-topic] topic stored (customerId=${customerId} kind=${result.kind} source=${result.source})`);
+      logger.info(`[review-topic] topic stored (customerId=${customerId} kind=${result.kind} source=${result.source} line=${result.serviceLine})`);
     } else {
       logger.info(`[review-topic] no topic (customerId=${customerId})`);
     }
@@ -363,6 +436,7 @@ async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = n
 
 module.exports = {
   TOPIC_VERSION,
+  isRecurringAskPlan,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,
