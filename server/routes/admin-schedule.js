@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, visitPrepPhotosLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -40,7 +40,7 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
-  formatETDay, formatETDate, formatETTime,
+  formatETDay, formatETDate, formatETTime, dateOnlyString,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
@@ -5721,6 +5721,62 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    // Customer-sent visit-prep photos chip (customer-visit-photos scope doc
+    // §5.4 item 2, PR 3b) — dark unless visitPrepPhotosLive() (gate off
+    // keeps the payload byte-identical: the field is omitted below, not
+    // sent false). Codex r1 P2 on this PR: the day-view `services` array is
+    // ALREADY filtered to live statuses (`.whereNotIn(... 'cancelled',
+    // 'rescheduled')`), so grouping off it alone misses a HIDDEN member of
+    // a frozen visit (e.g. a cancelled row a regroup left behind) that
+    // still carries photos — that member's own stop would read false. This
+    // resolves membership with its OWN batched query straight off
+    // scheduled_services (every status), one extra query, never per-row:
+    // for a row with a visit_id, its members are every scheduled_services
+    // row sharing that visit_id with the SAME technician_id (null-safe —
+    // two nulls match) AND the SAME calendar date (`dateOnlyString`, since
+    // pg returns a DATE column as a JS Date), in ANY status, plus the row
+    // itself. This is deliberately the SAME technician+date restriction PR
+    // 3a's Visit Brief section uses (its own techStopMemberIds, Codex r1
+    // P1 there) — a frozen visit can keep visit_id on a member dispatch
+    // reassigned or moved to another day, and that member's photos belong
+    // to someone ELSE's stop now; the chip and the brief must always agree
+    // on who owns a photo. The ONE photo query then runs over the UNION of
+    // every candidate id this membership query found (not just today's
+    // `services` ids), so a hidden member's own photos are found too.
+    const prepPhotosLive = visitPrepPhotosLive();
+    const customerSentPhotosByServiceId = new Map();
+    if (prepPhotosLive) {
+      const visitIds = [...new Set(services.map((s) => s.visit_id).filter(Boolean))];
+      const visitMemberRows = visitIds.length
+        ? await db('scheduled_services').whereIn('visit_id', visitIds)
+          .select('id', 'visit_id', 'technician_id', 'scheduled_date')
+        : [];
+      const candidatesByVisitId = new Map();
+      for (const row of visitMemberRows) {
+        if (!candidatesByVisitId.has(row.visit_id)) candidatesByVisitId.set(row.visit_id, []);
+        candidatesByVisitId.get(row.visit_id).push(row);
+      }
+      const allCandidateIds = new Set(services.map((s) => s.id));
+      for (const row of visitMemberRows) allCandidateIds.add(row.id);
+      const photoRows = allCandidateIds.size
+        ? await db('visit_prep_photos').whereIn('scheduled_service_id', [...allCandidateIds]).distinct('scheduled_service_id')
+        : [];
+      const serviceIdsWithPhotos = new Set(photoRows.map((r) => r.scheduled_service_id));
+      for (const s of services) {
+        let memberIds;
+        if (s.visit_id) {
+          const sDate = dateOnlyString(s.scheduled_date);
+          memberIds = (candidatesByVisitId.get(s.visit_id) || [])
+            .filter((c) => (c.technician_id || null) === (s.technician_id || null) && dateOnlyString(c.scheduled_date) === sDate)
+            .map((c) => c.id);
+          if (!memberIds.includes(s.id)) memberIds.push(s.id);
+        } else {
+          memberIds = [s.id];
+        }
+        customerSentPhotosByServiceId.set(s.id, memberIds.some((id) => serviceIdsWithPhotos.has(id)));
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -5933,6 +5989,7 @@ router.get('/', async (req, res, next) => {
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
         // Verdict computed once per row; traceVariant drives the tracer's
         // capture mode client-side (codex P2 r3: typed lawn visits must
         // outline the lawn, not run the building-perimeter workflow).

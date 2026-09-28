@@ -47,6 +47,7 @@ jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}) }));
+jest.mock('../services/messaging/sync-optout', () => ({ recordSyncProviderOptOut: jest.fn(async () => {}) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -1281,5 +1282,117 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(mockTwilioCreate.mock.calls[0][0].body).toBe('Reminder body');
     expect(result.withheldLinksRewritten).toBeUndefined();
+  });
+});
+
+// codex #5196 r4 P2: onDispatchRejected fires from INSIDE dispatch()'s own
+// messages.create() catch, still holding whatever lock the caller's
+// withSmsHandoff acquired — the sibling of onDispatchAbort/onDispatchStart
+// above, for the "Twilio definitively rejected it" outcome instead of a
+// pre-provider window close.
+describe('onDispatchRejected (codex #5196 r4 P2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTwilioCreate.mockResolvedValue({ sid: 'SM_ok' });
+    annualHandoffGuard.mockReturnValue(async () => ({ blocked: false, reason: null, estimateId: null }));
+  });
+
+  test('a definitive 4xx rejection calls onDispatchRejected BEFORE the withSmsHandoff callback settles', async () => {
+    const events = [];
+    const onDispatchRejected = jest.fn(async () => { events.push('onDispatchRejected'); });
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+      withSmsHandoff: async dispatch => {
+        events.push('locked');
+        try {
+          await dispatch();
+        } finally {
+          events.push('lock-released');
+        }
+      },
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+
+    expect(events).toEqual(['locked', 'onDispatchRejected', 'lock-released']);
+    expect(onDispatchRejected).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['timeout', Object.assign(new Error('request timed out'), { code: 'ETIMEDOUT' })],
+    ['reset', Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })],
+    ['HTTP 408', Object.assign(new Error('request timeout'), { status: 408 })],
+    ['HTTP 503', Object.assign(new Error('provider unavailable'), { status: 503 })],
+    ['unknown transport error', new Error('unexpected transport failure')],
+  ])('an SDK %s never calls onDispatchRejected', async (_label, failure) => {
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockRejectedValueOnce(failure);
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toBeTruthy();
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  // 21610's opt-out is recorded after the lock releases (outer catch), so
+  // the attempt marker must survive until then — the hook must not fire.
+  test('a 21610 opt-out rejection never calls onDispatchRejected, and still records the opt-out', async () => {
+    const { recordSyncProviderOptOut } = require('../services/messaging/sync-optout');
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('unsubscribed recipient'), { status: 400, code: 21610 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+      withSmsHandoff: async dispatch => dispatch(),
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+    expect(recordSyncProviderOptOut).toHaveBeenCalledTimes(1);
+  });
+
+  test('a missing SID never calls onDispatchRejected', async () => {
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockResolvedValueOnce({});
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toBeTruthy();
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  test('a successful send never calls onDispatchRejected', async () => {
+    const onDispatchRejected = jest.fn();
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    });
+
+    expect(result.success).toBe(true);
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  test('onDispatchRejected throwing is swallowed — the classified failure still surfaces unchanged', async () => {
+    const onDispatchRejected = jest.fn(async () => { throw new Error('marker table unreachable'); });
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400, code: 21211 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: 21211,
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+    });
+
+    expect(onDispatchRejected).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller that never passes onDispatchRejected is unaffected by a definitive rejection', async () => {
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM,
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
   });
 });

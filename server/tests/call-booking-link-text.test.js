@@ -2658,6 +2658,45 @@ describe('dispatchClaimedCall', () => {
       expect(outcome.ambiguous).toBe(false);
     });
 
+    // codex #5196 r4 P2: onDispatchRejected fires from INSIDE twilio.js's
+    // own dispatch() when messages.create() throws a definitive rejection —
+    // still holding lockSmsPhone, before sendCustomerMessage ever returns.
+    // The lane passes it clearDispatchMarkers(call) directly, the SAME
+    // both-tables clear onDispatchAbort already uses.
+    test('onDispatchRejected clears both dispatch marker tables, the same as onDispatchAbort', async () => {
+      // makeDb() below points markerDb() at its OWN conn by default (whose
+      // consultation-attempt del is an untracked no-op) — override it,
+      // AFTER makeDb() runs, to a dedicated double that tracks every
+      // table a delete lands on, the same way onDispatchAbort's own
+      // clearDispatchMarkers call needs to be observed.
+      const del = jest.fn(async () => 1);
+      const deletedTables = [];
+      const markerConn = jest.fn((table) => {
+        deletedTables.push(table);
+        return { where: jest.fn(() => ({ del })) };
+      });
+      markerConn.transaction = jest.fn(async (fn) => fn(markerConn));
+
+      const conn = makeDb();
+      markerDb.mockReturnValue(markerConn);
+      let deletedAfterHook;
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        expect(typeof opts.onDispatchRejected).toBe('function');
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        // twilio.js's own messages.create() throw, reclassified as a
+        // definitive rejection — fires onDispatchRejected INSTEAD of
+        // onDispatchStart/onDispatchAbort, still inside the handoff.
+        await opts.onDispatchRejected();
+        deletedAfterHook = del.mock.calls.length;
+        return { sent: false, blocked: true, code: 'TWILIO_INVALID_NUMBER', reason: 'invalid To number' };
+      });
+      await dispatchClaimedCall(conn, CALL, NOW);
+
+      expect(deletedAfterHook).toBe(2); // both tables, cleared by the hook itself
+      expect(deletedTables.slice(0, 2)).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
+    });
+
     // The actual r8 P2 fix: a failure in sendCustomerMessage's OWN
     // pre-provider work — before it ever reaches providerPreSendCheck —
     // must leave NO handoff_started_at at all, unlike the old behavior

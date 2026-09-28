@@ -224,8 +224,8 @@ requires. Internal optional fields are office-only data, not report facts.
   `TYPED_AREA_FIELD_KEYS` (areas treated), `cockroach-report-v2.js`
   `COCKROACH_V2_DASHBOARD_FIELD_KEYS`, and the `values.<key>` reads in
   `termite-report-v2.js` (`TYPED_REPORT_BUILDERS` in the registry). A few
-  per-key readers (Today's Result stories, the rodent narrative, cross-sell
-  V2) are registered by hand, and the test checks that the key appears in
+  per-key readers (Today's Result stories, the rodent narrative) are
+  registered by hand, and the test checks that the key appears in
   each reader file.
 - **Storage** is `service_data.typedReportSnapshot.values.<key>` for a
   `both`-applicability field, and `service_data.companionReportSnapshots[].values.<key>`
@@ -423,17 +423,12 @@ only the *other* facts each line adds by hand are named here.
   `german_roach`, `german_roach_initial`. Has a gauge
   (`typed_activity_score`, `roach_activity`, derived from `activity_level`).
   Adds the typed photo summary,
-  product facts, photos and the `cockroach_work_from_products` **gap**. The
-  cross-sell V2 roach signal reads `activity_level` only from a **companion**
-  cockroach snapshot under a non-cockroach primary, so it is not a reader on
-  this line.
+  product facts, photos and the `cockroach_work_from_products` **gap**.
 - **Termite bait** (`termite_bait`, form `termite_bait_station`,
   `20260612000001`): `termite_bait`, `termite_active_annual`,
   `termite_active_bait_quarterly`, `termite_monitoring`,
   `termite_cartridge_replacement`, `termite_installation_setup`. Adds the
-  typed photo summary, product facts and photos. The cross-sell V2 termite
-  signal reads `termite_activity` only; `cross-sell.js` reads
-  `bait_consumption` for rodent bait stations, never for termite.
+  typed photo summary, product facts and photos.
 - **Rodent trapping** (`rodent_trapping`, form `rodent_trapping`):
   `rodent_trapping`, `rodent_trapping_exclusion`,
   `rodent_trapping_sanitation`, `rodent_trapping_exclusion_sanitation`,
@@ -578,9 +573,9 @@ These are not registry facts, so the test doesn't check them:
   `GATE_REPORT_PHOTO_CONTENT` on (#5145) it gets up to 5 tech-reviewed
   captions and a photo summary; with it off, only `photoCount`. An
   uncaptioned photo gives the writer nothing to ground on.
-- The dark sections (pest "what to expect", cross-sell V2) must read only the
-  facts above: method, area and targets per product for expectations, and
-  typed findings fields for cross-sell, never free text.
+- The pest "what to expect" section must read only the facts above: method,
+  area and targets per product, never free text. (Cross-sell V2 was deleted
+  2026-09-28; report offers read no typed findings.)
 
 ## Typed form facts (generated)
 
@@ -665,7 +660,7 @@ means the field is legal on a primary OR a companion submission.
 | `evidence_observed` | Evidence observed | chips | both | hidden | — |
 | `trap_visit_type` | This visit (internal) | select | both | required | Today's Result trap-setup wording (isInitialRodentTrapSetup) (activity-indicators.js); Narrative visitStage "initial_trap_setup" (rodent-report-narrative.js) |
 | `traps_checked` | Traps checked | count | both | hidden | Trap counts (station summary) (report-data.js) |
-| `captures` | Captures | count | both | hidden | Grounded capture sentence (rodent-report-narrative.js); Cross-sell V2 findings signal (rodent trapping) (cross-sell.js) |
+| `captures` | Captures | count | both | hidden | Grounded capture sentence (rodent-report-narrative.js) |
 | `trap_actions` | Trap actions | chips | both | hidden | — |
 | `trap_activity_locations` | Locations with activity | text | both | hidden | — |
 | `sanitation_recommendations` | Sanitation recommendations | chips | both | hidden | — |
@@ -696,7 +691,7 @@ means the field is legal on a primary OR a companion submission.
 | `stations_checked` | Stations checked | count | both | required | — |
 | `stations_inaccessible` | Stations inaccessible | count | both | hidden | — |
 | `station_actions` | Station service performed | chips | both | hidden | — |
-| `bait_consumption` | Bait consumption level | select | both | required | Cross-sell V2 findings signal (rodent bait stations) (cross-sell.js) |
+| `bait_consumption` | Bait consumption level | select | both | required | — |
 | `bait_replaced` | Bait replaced | select | both | hidden | — |
 | `highest_activity_location` | Highest-activity station / location | text | both | hidden | — |
 | `bait_issues` | Bait / station contents | chips | both | hidden | — |

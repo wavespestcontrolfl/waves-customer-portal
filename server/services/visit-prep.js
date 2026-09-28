@@ -436,8 +436,13 @@ async function withStopLock(svcId, fn) {
  *   `svc`, at least id/customer_id/property_id/visit_id) or null when the
  *   visit is no longer eligible. REQUIRED — the caller (appointment-public.js)
  *   owns the eligibility rule and must not let this service go stale.
- * @returns {Promise<{ created: boolean, stored: number, summary: { photoCount, photosRemaining, submissionCount } }>}
+ * @returns {Promise<{ created: boolean, stored: number, summary: { photoCount, photosRemaining, submissionCount }, svc: object }>}
  *   `stored` = NEW photos this request stored (0 for an all-duplicate resubmit).
+ *   `svc` is the RECHECKED row (`recheck`'s own return value, read fresh
+ *   under the stop lock) — additive, for callers (the office feed item)
+ *   that must not build off the stale pre-lock row a caller passed in: the
+ *   visit can be rescheduled between the pre-lock read and the locked
+ *   write, and the pre-lock `svc` argument is never mutated to match.
  */
 async function createVisitPrepSubmission({
   svc, files, note, topic, locationOnProperty, entry, recheck,
@@ -461,7 +466,7 @@ async function createVisitPrepSubmission({
   // their already-uploaded objects are cleaned up regardless of outcome.
   await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
-  return { created: result.created, stored: result.stored, summary: result.summary };
+  return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
 }
 
 module.exports = {

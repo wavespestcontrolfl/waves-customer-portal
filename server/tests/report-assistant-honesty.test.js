@@ -4,7 +4,7 @@
 // the consistency layer must never fabricate a "Follow-up already planned"
 // card from routine sign-off prose.
 
-const { answerServiceReportQuestion, answerAppliedToday } = require('../services/service-report/report-assistant');
+const { answerServiceReportQuestion, answerAppliedToday, routeServiceReportQuestion } = require('../services/service-report/report-assistant');
 const { reconcileLawnReport } = require('../services/service-report/report-consistency');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
@@ -151,7 +151,18 @@ describe('watering questions answer with the weekly plan when the report carries
   const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
   test('plan present → the plan, before re-entry / trend routing', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: plan } } };
-    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?']) {
+    for (const q of [
+      'How should I water this week?',
+      'What is my irrigation plan?',
+      'Should I run the sprinklers?',
+      'I found mushrooms; should I water this week?',
+      'I spotted dry areas; how often should I water?',
+      'I observed dry spots; do I need to water?',
+      'I found mushrooms; is it okay to water?',
+      'I spotted fungus; do we need to run the sprinklers?',
+      'I observed dry spots; do I still need to water?',
+      'I found mushrooms; is it okay to still water?',
+    ]) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r38: controller phrasing without the word "water" is a watering question too.
@@ -168,32 +179,161 @@ describe('watering questions answer with the weekly plan when the report carries
       pressureIndex: null, dynamicContext: {},
       reportV2: {
         water: { weekPlan: { ...plan, visitInPlanWeek: true, prescribesRun: true, afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' } } },
-        aftercare: { watering: 'Water in today’s application — give the lawn a normal watering within the next 24 hours.', waterInRequired: true },
+        aftercare: {
+          watering: 'Water in with 0.25 inches today.', waterInRequired: true,
+          creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
+        },
       },
     };
     expect(answerServiceReportQuestion({ question: 'How many minutes until my dog can go outside?', data })).not.toMatch(/check the rain|turf irrigation/);
     const after = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data });
-    expect(after).toMatch(/^Water in today’s application/);
+    expect(after).toMatch(/^Water in with 0.25 inches/);
     expect(after).toMatch(/covered by today’s treatment watering-in\. No further turf runs this week\./);
     expect(answerServiceReportQuestion({ question: 'How should I water this week?', data })).toBe(`${plan.title} ${plan.detail}`);
     // gh-r45: a HOLD plan beside a required watering-in — the answer carries the plan's
     // no-extra-runs guidance, never the label instruction alone.
     const holdData = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs for the week.', visitInPlanWeek: true, prescribesRun: false } } } };
     const holdAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: holdData });
-    expect(holdAnswer).toMatch(/^Water in today’s application/);
+    expect(holdAnswer).toMatch(/^Water in with 0.25 inches/);
     expect(holdAnswer).toMatch(/skip your turf watering\. Your lawn has what it needs for the week\./);
     // gh-r31: a reopened HISTORICAL report (visit outside the plan week) never answers with the reduced plan.
     const old = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { ...data.reportV2.water.weekPlan, visitInPlanWeek: false } } } };
     const oldAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: old });
-    expect(oldAnswer).toMatch(/^Water in today’s application/);
+    expect(oldAnswer).toMatch(/^Water in with 0.25 inches/);
     expect(oldAnswer).not.toMatch(/No further turf runs this week/);
+    for (const incompleteAftercare of [
+      { ...data.reportV2.aftercare, evidenceSource: undefined },
+      { ...data.reportV2.aftercare, evidenceSource: 'irrigation_requirement' },
+      { ...data.reportV2.aftercare, needsReview: true },
+      { ...data.reportV2.aftercare, wateringHold: true },
+    ]) {
+      const incomplete = { ...data, reportV2: { ...data.reportV2, aftercare: incompleteAftercare } };
+      const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: incomplete });
+      expect(answer).toMatch(/check the rain before you water/);
+      expect(answer).not.toMatch(/covered by today’s treatment watering-in|No further turf runs this week/);
+    }
     // Bare "minutes"/"zones" are not plan intent.
     expect(answerServiceReportQuestion({ question: 'How many minutes did the visit take?', data })).not.toMatch(/check the rain/);
   });
 
-  test('no plan → existing routing (irrigation → re-entry) is unchanged', () => {
+  test('no plan without aftercare → existing routing (irrigation → re-entry) is unchanged', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
     expect(answerServiceReportQuestion({ question: 'What is my irrigation plan?', data })).not.toMatch(/This week:/);
+  });
+
+  test.each([
+    [{ watering: 'Turn irrigation off for 24 hours after application.', wateringHold: true, needsReview: false, evidenceSource: 'product_instruction' }, /Turn irrigation off for 24 hours/],
+    [{ watering: 'Use the recorded product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' }, /Use the recorded product note/],
+  ])('no plan preserves restricted or review-required aftercare for watering questions', (aftercare, expected) => {
+    const data = {
+      pressureIndex: null,
+      dynamicContext: {},
+      findings: [{ title: 'Sprinkler area checked', detail: 'No pest activity was observed there.' }],
+      reportV2: { aftercare, water: { weekPlan: null } },
+    };
+    for (const question of [
+      'How should I water?',
+      'What is my irrigation plan?',
+      'I found mushrooms; should I water this week?',
+      'I spotted dry areas; how often should I water?',
+      'I observed mushrooms; what is my irrigation plan?',
+      'I observed dry spots; do I need to water?',
+      'I found mushrooms; is it okay to water?',
+      'I spotted fungus; do we need to run the sprinklers?',
+      'I observed dry spots; do I still need to water?',
+      'I found mushrooms; is it still okay to water?',
+      'I found mushrooms; is it fine to water?',
+      'I spotted fungus; am I allowed to water?',
+    ]) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).toMatch(expected);
+      expect(answer).not.toMatch(/This week:|re-entry guidance/);
+    }
+    for (const question of [
+      'What did you observe in the dry spots?',
+    ]) {
+      const findingsAnswer = answerServiceReportQuestion({ question, data });
+      expect(findingsAnswer).toMatch(/Sprinkler area checked/);
+      expect(findingsAnswer).not.toMatch(expected);
+    }
+  });
+
+  // Round 8 (codex P1 #5033 on report-assistant.js:577): a verified
+  // instruction still marked needsReview resolves to the SAME 'review'
+  // verdict as the legacy-unverified case above, but wateringPlanCondition()
+  // used to return null with no weekPlan at all — dropping the mandatory
+  // confirmation task and leaving the customer with only the unreviewed
+  // label instruction, as if it were settled guidance.
+  test('a review-marked instruction still carries its confirmation task with no weekly plan at all', () => {
+    const aftercare = {
+      watering: 'Apply 0.25 inches within 24 hours.',
+      evidenceSource: 'product_instruction',
+      needsReview: true,
+    };
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { aftercare, water: { weekPlan: null } } };
+    const answer = answerServiceReportQuestion({ question: 'Should I water?', data });
+    expect(answer).toContain(aftercare.watering);
+    expect(answer).toMatch(/Confirm the product watering directions with your technician before changing irrigation\./);
+  });
+
+  test.each([
+    [true, true],
+    [undefined, true],
+    [false, false],
+  ])('a review condition applies only when visitInPlanWeek=%s is current or legacy', (visitInPlanWeek, conditioned) => {
+    const aftercare = {
+      watering: 'Apply 0.25 inches within 24 hours.',
+      needsReview: true,
+      evidenceSource: 'legacy_unverified_instruction',
+    };
+    const data = {
+      pressureIndex: null,
+      dynamicContext: {},
+      reportV2: { aftercare, water: { weekPlan: { ...plan, visitInPlanWeek } } },
+    };
+    const answer = answerServiceReportQuestion({
+      question: 'I found mushrooms; is it okay to water?',
+      data,
+    });
+    expect(answer).toContain(aftercare.watering);
+    expect(answer).toContain(plan.title);
+    expect(answer.includes('before applying the plan below')).toBe(conditioned);
+  });
+
+  test.each(['snapshot', 'recommendation', 'fallback'])('generic next-step questions retain mandatory aftercare in the %s answer', (source) => {
+    const mowing = 'Keep mowing at 3.5 inches.';
+    const data = {
+      serviceLine: 'lawn',
+      dynamicContext: source === 'recommendation' ? { aiSummary: { recommendedNextStep: { text: mowing } } } : {},
+      lawnAssessment: source === 'snapshot' ? { snapshot: {}, recommendationCards: [{ customerCopy: mowing }] } : {},
+      findings: [{ title: 'Mushrooms observed' }],
+      reportV2: { aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' } },
+    };
+    for (const question of ['What should I do next?', 'What should I do to take care of my lawn?', 'What do you recommend for my lawn?', 'What is the next step for my lawn?', 'What action should I take?']) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+      if (source !== 'fallback') expect(answer).toContain(mowing);
+    }
+  });
+
+  // Round 7 (codex P2 #5033 on report-assistant.js:391): the same mandatory
+  // aftercare above is a PAST visit's note once its own weekPlan carries
+  // visitInPlanWeek: false — the generic next-step route must still classify
+  // as 'next_steps' (routeServiceReportQuestion), but never promote that
+  // historical confirmation into today's answer.
+  test('generic next-step question drops a past-visit review confirmation once its weekPlan is out of scope', () => {
+    const data = {
+      dynamicContext: {},
+      findings: [{ title: 'Mushrooms observed' }],
+      reportV2: {
+        aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' },
+        water: { weekPlan: { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now.', visitInPlanWeek: false } },
+      },
+    };
+    const routed = routeServiceReportQuestion({ question: 'What should I do next?', data });
+    expect(routed.topic).toBe('next_steps');
+    expect(routed.answer).not.toMatch(/Confirm the product watering directions/);
+    expect(routed.answer).toMatch(/^No special repair or prep was flagged/);
   });
 });
 

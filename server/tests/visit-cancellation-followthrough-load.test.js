@@ -61,11 +61,10 @@ jest.mock('../services/invoice', () => {
     CANCELLED_SERVICE_RESOLVED_STATUSES: RESOLVED,
     voidOpenInvoicesForCancelledService: jest.fn(async () => {}),
     // The shared post-void scope (direct or service-record link).
-    unresolvedInvoicesForCancelledService: jest.fn((_conn, id, { serviceRecordLinks = false } = {}) => ({
+    unresolvedInvoicesForCancelledService: jest.fn((_conn, id) => ({
       first: jest.fn(async () => {
         if (mockInvoiceReadFails) throw new Error('invoice lookup unavailable');
-        return mockInvoices.find((row) => (row.scheduled_service_id === id
-          || (serviceRecordLinks && row.service_record_scheduled_service_id === id))
+        return mockInvoices.find((row) => (row.scheduled_service_id === id || row.service_record_scheduled_service_id === id)
           && !RESOLVED.includes(row.status));
       }),
     })),
@@ -297,7 +296,7 @@ describe('pinned effects (a card-confirmed cancel)', () => {
     expect(mockApptCancel).not.toHaveBeenCalled();
   });
 
-  it('a service-record-linked invoice still holding money blocks a PINNED fee step; unpinned callers keep the direct-link gate', async () => {
+  it('a service-record-linked invoice still holding money blocks the fee step for pinned AND unpinned cancels', async () => {
     mockInvoices = [{ id: 'inv-sr', service_record_scheduled_service_id: 'svc-1', status: 'paid' }];
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], pinnedEffects: { 'svc-1': { invoices: [], fee: NO_RAIL } } });
@@ -306,8 +305,8 @@ describe('pinned effects (a card-confirmed cancel)', () => {
     jest.clearAllMocks();
     mockHoldCancel.mockResolvedValue({ charged: true });
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
-    expect(mockHoldCancel).toHaveBeenCalled();
-    expect(require('../services/invoice').unresolvedInvoicesForCancelledService).toHaveBeenCalledWith(expect.anything(), 'svc-1', { serviceRecordLinks: false });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
   });
 
   it('an unpinned target is unchanged: unrestricted void, no rail re-check, rails run', async () => {
