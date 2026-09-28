@@ -211,6 +211,32 @@ now have regression tests in `plant-engine-v2.test.js`. Codex round 1 on
 #5186 (9 P1, 5 P2) is covered by the sections above; its regression tests
 are grouped under "Codex #5186 round 1 regressions" in the same file.
 
+## Round 2 hardening (Codex #5186 r2)
+
+- **Identify mode escalates on an empty read**: a schema-valid Call A that
+  says the photos show a plant but raises no candidate in any lane the mode
+  can answer from fires `no_identity_candidate`, so the second opinion runs
+  before the customer gets an unknown.
+- **Lane choice ranks eligibility first**: when both lawn lanes are
+  populated, the lane whose top could actually be named wins
+  (`laneEligibilityRank`: checked + approved + a clean visible cue > checked
+  + approved > unchecked/uncovered/unapproved catalog > off-catalog), then
+  confidence, turf on a tie — a verified turf at 0.85 beats an off-catalog
+  weed guess at 0.95.
+- **A workup stands on Call C alone**: identity legs and the escalation can
+  all miss and the conditions leg's symptom/possibility workup is still
+  returned (`subject.plant` null); identify mode, which has no Call C, still
+  needs an identity or escalation envelope before it can answer.
+- **Named plants carry their safety line and flags** (`entry.safety_line`,
+  `entry.safety`, `entry.risk`, on identity entries and on workup weeds), so
+  the card renders sago palm's, oleander's or spotted spurge's warning.
+- **Pest possibilities carry a real `outcome`**: `regulated` when the pest's
+  `safety.regulated` is true (it then joins the outcome-class naming guard
+  and routes to the FDACS referral template), else `treatable`.
+- **Identity results carry `catalog_version`**; **leg diagnostics record the
+  answering model**; **a schema-invalid answer flips its ledger row**
+  (`rejectCall`, reason `schema_invalid:<call>`).
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

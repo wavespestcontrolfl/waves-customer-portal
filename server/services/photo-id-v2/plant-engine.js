@@ -31,7 +31,7 @@
 const MODELS = require('../../config/models');
 const catalog = require('../species-catalog');
 const { isApproved } = require('../species-catalog-approval');
-const { dispatch } = require('../llm/call');
+const { dispatch, rejectCall } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const Ajv = require('ajv');
 const {
@@ -135,7 +135,15 @@ function isHardCapped(entry, sig) {
 // confirmable_by 'photo', since a pest is a photo-identifiable organism)
 // and its `look_alikes` (as `differentials`). It is ALWAYS hard-capped at
 // `likely` (see `isHardCapped`), matching the contract's explicit "pest
-// possibilities... read at most likely" rule.
+// possibilities... read at most likely" rule. Its `outcome` comes from the
+// pest's own regulated/referral metadata (Codex #5186 r2 P1): a regulated
+// pest reads `regulated`, so it joins the outcome-class naming guard and
+// `nextStepHintFor`'s referral branch (an FDACS report, never the generic
+// unclear step); everything else reads `treatable`.
+function pestOutcomeFor(entry) {
+  return entry.safety?.regulated === true ? 'regulated' : 'treatable';
+}
+
 function signatureFor(entry) {
   if (entry.condition) {
     const c = entry.condition;
@@ -167,7 +175,7 @@ function signatureFor(entry) {
     fieldTests: [],
     siteFactors: [],
     hosts: [],
-    outcome: null,
+    outcome: pestOutcomeFor(entry),
     recoveryNote: null,
     isPestPossibility: true,
   };
@@ -588,6 +596,17 @@ function observedFor(possibilities) {
 
 // ── subject/weeds identity block (Layer A, §6.1) ──────────────────────────
 
+/** The catalog's own safety warning for a named plant (Codex #5186 r2 P1):
+ * `safety_line` plus the flags, so the card renders sago palm's, oleander's
+ * or spotted spurge's pet / sap / spine line wherever the name appears. */
+function plantSafetyFields(entry) {
+  return {
+    safety_line: entry.safety_line || null,
+    safety: entry.safety ? { ...entry.safety } : null,
+    risk: entry.risk || null,
+  };
+}
+
 function weedWordingLine(entry, wording) {
   return {
     slug: entry.slug,
@@ -595,6 +614,7 @@ function weedWordingLine(entry, wording) {
     scientific_name: entry.scientific_name || null,
     wording,
     verdict: entry.verdict,
+    ...plantSafetyFields(entry),
     what_it_means: entry.copy?.what_it_means || null,
     fact: entry.copy?.fact || null,
   };
@@ -784,6 +804,7 @@ function namedIdentityAnswer(named) {
       scientific_name: named.entry.scientific_name || null,
       kind: named.entry.kind,
       verdict: named.entry.verdict,
+      ...plantSafetyFields(named.entry),
       what_it_means: named.entry.copy?.what_it_means || null,
       fact: named.entry.copy?.fact || null,
     },
@@ -962,10 +983,16 @@ const VALIDATE = {
 };
 /** The leg's JSON when it validates against its schema, else null — an
  * `ok:true` response with a shape the schema rejects is treated exactly
- * like a failed/unavailable leg (never consumed as-is). */
+ * like a failed/unavailable leg (never consumed as-is), and the dispatcher's
+ * ledger row for it flips to a rejection (`rejectCall`, Codex #5186 r2 P2)
+ * so provider-quality metrics do not count a schema-invalid answer as a
+ * success. */
+const SCHEMA_INVALID_REASON = 'schema_invalid';
 function validJson(result, kind) {
   if (!result?.ok || !result.json) return null;
-  return VALIDATE[kind](result.json) ? result.json : null;
+  if (VALIDATE[kind](result.json)) return result.json;
+  rejectCall(result, `${SCHEMA_INVALID_REASON}:${kind}`);
+  return null;
 }
 
 async function callWithProvider(route, payload) {
@@ -1311,18 +1338,31 @@ async function runConditionLadder(run, identity) {
   };
 }
 
-const REASON_ORDER = ['gemini_missed', 'low_confidence', 'self_contradiction', 'different_outcome_classes'];
+const REASON_ORDER = ['gemini_missed', 'no_identity_candidate', 'low_confidence', 'self_contradiction', 'different_outcome_classes'];
 function reasonsFrom(pairs) {
   return pairs.filter(([applies]) => applies).map(([, reason]) => reason);
 }
 
+/** The identity slots identify mode draws its one lane from (§6.1): turf
+ * or weeds for a lawn, host otherwise. */
+function identifyLaneSlotsFor(subject) {
+  return subject === 'lawn' ? ['turf', 'weeds'] : ['host'];
+}
+
 /** `low_confidence` is checked per populated slot, off-catalog tops
  * included (Codex pre-push audit on #5186 r1): a confident weed must not
- * suppress the second read an uncertain turf answer needs. */
-function identityTriggerReasons(identity) {
+ * suppress the second read an uncertain turf answer needs. In identify
+ * mode a schema-valid Call A that says the photos show a plant but raises
+ * NO candidate in any lane the mode can answer from is a miss of its own
+ * (`no_identity_candidate`, Codex #5186 r2 P1) — one inconclusive read must
+ * not skip the second opinion and hand the customer an unknown. */
+function identityTriggerReasons(identity, run) {
   const lowSlot = IDENTITY_SLOTS.some((slot) => identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow());
+  const noLaneCandidate = run.mode === 'identify' && !!identity.candidatesJson
+    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].length === 0);
   return reasonsFrom([
     [!identity.candidatesJson || identity.verifyMissed, 'gemini_missed'],
+    [noLaneCandidate, 'no_identity_candidate'],
     [lowSlot, 'low_confidence'],
     [identity.selfContradiction, 'self_contradiction'],
   ]);
@@ -1400,7 +1440,7 @@ async function reconcileCorrectedHost(run, conditions, hostCombined, escalationJ
  * condition combine. OpenAI unavailable (or Ajv-invalid) entirely: Gemini
  * stands, but nothing escalated may read `pretty_sure`. */
 async function runEscalation(run, identity, conditions) {
-  const reasons = { identity: identityTriggerReasons(identity), conditions: conditionTriggerReasons(conditions) };
+  const reasons = { identity: identityTriggerReasons(identity, run), conditions: conditionTriggerReasons(conditions) };
   const base = {
     reasons,
     all: REASON_ORDER.filter((r) => reasons.identity.includes(r) || reasons.conditions.includes(r)),
@@ -1432,15 +1472,32 @@ async function runEscalation(run, identity, conditions) {
   };
 }
 
+/** How far a lane's top could actually be NAMED (Codex #5186 r2 P2) —
+ * answer eligibility outranks a raw number when identify mode picks a lawn
+ * lane: 3 = a checked, approved catalog candidate with a clean visible cue
+ * (can read pretty_sure); 2 = a checked, approved catalog candidate (can
+ * read likely); 1 = a catalog candidate that is unchecked, uncovered or
+ * unapproved; 0 = off-catalog or nothing. */
+function laneEligibilityRank(top) {
+  if (!top?.entry) return 0;
+  if (top.uncovered || !top.checked || !isApproved(top.entry)) return 1;
+  return top.verified ? 3 : 2;
+}
+
 /** Identify mode's one identity lane (Codex #5186 r1 P1): the host for
- * tree_shrub/palm; for a lawn, whichever of turf/weeds is populated, and
- * the higher verified top confidence when both are (turf on a tie). */
+ * tree_shrub/palm; for a lawn, whichever of turf/weeds is populated; when
+ * both are, the lane whose top is more eligible to be named
+ * (`laneEligibilityRank`) — a verified turf at 0.85 beats an off-catalog
+ * weed guess at 0.95 (Codex #5186 r2 P2) — then the higher confidence,
+ * turf on a tie. */
 function identifyLaneFor(subject, slots) {
   if (subject !== 'lawn') return 'host';
   const [turfTop] = slots.turf;
   const [weedTop] = slots.weeds;
   if (!weedTop) return 'turf';
   if (!turfTop) return 'weeds';
+  const rankGap = laneEligibilityRank(weedTop) - laneEligibilityRank(turfTop);
+  if (rankGap !== 0) return rankGap > 0 ? 'weeds' : 'turf';
   return weedTop.confidence > turfTop.confidence ? 'weeds' : 'turf';
 }
 
@@ -1451,6 +1508,7 @@ function assembleIdentity(run, escalation, quality, lane) {
   return {
     version: 2,
     kind: 'identity',
+    catalog_version: catalog.CATALOG_VERSION,
     subject_type: run.subject,
     tier: built.tier,
     answer: built.answer,
@@ -1480,10 +1538,16 @@ function assembleWorkup(run, escalation, quality) {
   });
 }
 
-function legFailureReason(identity, conditions, escalation) {
+/** Whether enough vision evidence came back to build anything. A workup
+ * stands on a valid Call C alone — identity legs can miss while the
+ * conditions leg answered, and that symptom/possibility workup must not
+ * become a 503 (Codex #5186 r2 P1); identify mode has no Call C, so it
+ * still needs an identity or escalation envelope. */
+function legFailureReason(run, identity, conditions, escalation) {
   const attempted = [identity.candidatesResult, identity.verifyResult, conditions.result, escalation.result, escalation.rerun?.result].filter(Boolean);
   if (attempted.length && attempted.every((r) => r.reason === 'no_route')) return 'no_route';
-  if (!identity.candidatesJson && !escalation.json) return 'vision_unavailable';
+  const conditionsAnswered = run.mode !== 'identify' && !!conditions.json;
+  if (!identity.candidatesJson && !escalation.json && !conditionsAnswered) return 'vision_unavailable';
   return null;
 }
 
@@ -1494,9 +1558,15 @@ function photoReadFor(identity, conditions, escalation) {
   );
 }
 
+/** One leg's admin diagnostics — provider AND the answering model (Codex
+ * #5186 r2 P2: with env overrides or registry swaps, the provider alone
+ * cannot attribute a disagreement or regression; the pest engine records
+ * both). */
 function legInfo(result) {
   if (!result) return null;
-  return { ok: !!result.ok, provider: result.provider || null, reason: result.ok ? null : (result.reason || null) };
+  return {
+    ok: !!result.ok, provider: result.provider || null, model: result.model || null, reason: result.ok ? null : (result.reason || null),
+  };
 }
 
 /** Admin-only diagnostics (never merged into `v2`). `disagreed` /
@@ -1555,7 +1625,7 @@ async function identifyPlantV2({
   const identity = await runIdentityLadder(run);
   const conditions = await runConditionLadder(run, identity);
   const escalation = await runEscalation(run, identity, conditions);
-  const failure = legFailureReason(identity, conditions, escalation);
+  const failure = legFailureReason(run, identity, conditions, escalation);
   if (failure) return { ok: false, reason: failure };
 
   const quality = photoReadFor(identity, conditions, escalation);
@@ -1621,7 +1691,13 @@ module.exports = {
     combineQuality,
     combineShows,
     identifyLaneFor,
+    laneEligibilityRank,
+    identityTriggerReasons,
+    legFailureReason,
+    legInfo,
+    pestOutcomeFor,
     verifyCoversAll,
     validJson,
+    SCHEMA_INVALID_REASON,
   },
 };

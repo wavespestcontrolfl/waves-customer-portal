@@ -1107,6 +1107,160 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
     });
   });
 
+  describe('Codex #5186 round 2 regressions', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const MISS = { ok: false, reason: 'provider_error' };
+    const idItem = (slug, confidence) => ({
+      slug, off_catalog_name: '', group_id: null, confidence,
+    });
+    const condItem = ([slug, confidence, elementsVisible = [1]]) => ({
+      slug, confidence, elements_visible: elementsVisible, signs_visible: [], symptoms_visible: [],
+    });
+    const candidatesLeg = ({
+      shows = 'plant', quality = OK_QUALITY, turf = [], weeds = [], host = [],
+    } = {}) => ({ ok: true, json: { quality, shows, turf, weeds, host } });
+    const conditionsLeg = (items, { observed = ['browning'], quality = OK_QUALITY } = {}) => ({
+      ok: true, json: { quality, observed_terms: observed, candidates: items.map(condItem) },
+    });
+    const queue = (...legs) => legs.forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+    const cand = (slug, confidence, extra = {}) => {
+      const entry = catalog.getEntry(slug);
+      return {
+        slug, entry, confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: entry.group, ...extra,
+      };
+    };
+    const offCatalog = (name, confidence) => ({
+      slug: null, entry: null, confidence, verified: false, checked: false, uncovered: false, cuesVisible: [], cuesNotVisible: [], offCatalogName: name, groupId: null,
+    });
+
+    test('finding 1: identify mode with a valid Call A that raises no candidate in any answerable lane escalates (no_identity_candidate) instead of settling for one inconclusive read', async () => {
+      queue(candidatesLeg({ shows: 'plant' }), MISS);
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(result.internal.escalation_triggered).toBe(true);
+      expect(result.internal.escalation_reasons).toContain('no_identity_candidate');
+      expect(dispatch).toHaveBeenCalledTimes(2); // candidates, then the escalation leg — no verify (nothing to verify)
+      expect(result.v2.answer.level).toBe('unknown');
+      expect(result.v2.tier).toBe('needs_more_evidence');
+    });
+
+    test('finding 1 (workup mode is unaffected): an empty identity read never triggers no_identity_candidate on its own', async () => {
+      queue(candidatesLeg({ shows: 'damage' }), conditionsLeg([['fixture-large-patch', 0.9]]));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(result.internal.escalation_reasons).not.toContain('no_identity_candidate');
+    });
+
+    test('finding 2: lane choice ranks answer eligibility before confidence — a verified turf at 0.85 beats an off-catalog weed guess at 0.95', () => {
+      const { identifyLaneFor, laneEligibilityRank } = engine._test;
+      const turf = cand('fixture-st-augustine', 0.85);
+      expect(laneEligibilityRank(turf)).toBe(3);
+      expect(laneEligibilityRank(offCatalog('some weed', 0.95))).toBe(0);
+      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.95, { uncovered: true }))).toBe(1);
+      expect(laneEligibilityRank(cand('fixture-zoysia-draft', 0.95))).toBe(1); // unapproved
+      expect(identifyLaneFor('lawn', { turf: [turf], weeds: [offCatalog('some weed', 0.95)], host: [] })).toBe('turf');
+      expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.95, { uncovered: true })], host: [] })).toBe('turf');
+      // Equal eligibility: the higher confidence wins, turf on a tie.
+      expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.95)], host: [] })).toBe('weeds');
+      expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.85)], host: [] })).toBe('turf');
+      expect(identifyLaneFor('lawn', { turf: [], weeds: [offCatalog('some weed', 0.4)], host: [] })).toBe('weeds');
+    });
+
+    test('finding 3: identity results carry catalog_version like the workup and the pest payload', async () => {
+      queue(candidatesLeg({ host: [idItem('fixture-queen-palm', 0.9)] }), { ok: true, json: { candidates: [{ slug: 'fixture-queen-palm', confidence: 0.9, cues_visible: [1], cues_not_visible: [] }] } });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'palm', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(result.v2.kind).toBe('identity');
+      expect(result.v2.catalog_version).toBe(catalog.CATALOG_VERSION);
+    });
+
+    test('finding 4: a workup stands on a valid conditions leg when every identity leg and the escalation miss — never a 503', async () => {
+      queue(MISS, conditionsLeg([['fixture-large-patch', 0.7]]), MISS);
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(result.v2.kind).toBe('workup');
+      expect(result.v2.possibilities.map((p) => p.slug)).toContain('fixture-large-patch');
+      expect(result.v2.subject.plant).toBeNull();
+      expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    });
+
+    test('finding 4 (identify mode still needs an identity envelope): identity legs and escalation missing -> vision_unavailable', async () => {
+      queue(MISS, MISS);
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'palm', mode: 'identify' });
+      expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+    });
+
+    test('finding 5: a named identity entry carries the catalog safety line and flags (sago palm shows its pet warning)', () => {
+      const built = engine.buildIdentityResult([cand('fixture-sago-palm', 0.9)], { subject: 'tree_shrub', currentMonth: 1 });
+      expect(built.answer.level).toBe('entry');
+      expect(built.entry.safety_line).toBe('Toxic to pets.');
+      expect(built.entry.safety).toEqual(catalog.getEntry('fixture-sago-palm').safety);
+      expect(built.entry.risk).toBe(catalog.getEntry('fixture-sago-palm').risk);
+      // Weeds named on a workup carry the same fields.
+      const weed = engine.weedWordingLine(catalog.getEntry('fixture-nutsedge'), 'likely');
+      expect(weed).toHaveProperty('safety_line');
+      expect(weed).toHaveProperty('safety');
+    });
+
+    test('finding 6: a regulated pest possibility reads outcome "regulated", routes to the FDACS referral template and joins the outcome-class guard', () => {
+      const regulated = engine.resolveConditionCandidate({ slug: 'fixture-regulated-pest', confidence: 0.9, elements_visible: [1, 2] }, pestEntries());
+      expect(engine._test.pestOutcomeFor(catalog.getEntry('fixture-regulated-pest'))).toBe('regulated');
+      expect(engine.signatureFor(catalog.getEntry('fixture-chinch-bug')).outcome).toBe('treatable');
+      expect(regulated.sig.outcome).toBe('regulated');
+      const { hint, referral } = engine.nextStepHintFor([regulated]);
+      expect(hint.kind).toBe('specialist');
+      expect(referral).toEqual({ kind: 'report_fdacs', text: engine.REFERRAL_TEMPLATES.report_fdacs });
+      // A manageable palm disorder next to a regulated pest at >=0.20 is not named.
+      const potassium = engine.resolveConditionCandidate({ slug: 'fixture-potassium-deficiency-palm', confidence: 0.9, elements_visible: [1, 2] }, conditionEntries());
+      const weevil = engine.resolveConditionCandidate({ slug: 'fixture-regulated-pest', confidence: 0.25, elements_visible: [] }, pestEntries());
+      expect(engine.namedAnswerFor([potassium, weevil], potassium)).toBeNull();
+      expect(engine.namedAnswerFor([potassium], potassium)).not.toBeNull();
+    });
+
+    test('finding 8: leg diagnostics record the answering model alongside the provider', async () => {
+      queue(candidatesLeg({ shows: 'damage' }), conditionsLeg([['fixture-large-patch', 0.9]]));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.internal.models.candidates).toEqual({ ok: true, provider: 'gemini', model: 'gemini-3.8-flash-test', reason: null });
+      expect(engine._test.legInfo({ ok: false, reason: 'provider_error', provider: 'openai', model: 'gpt-6-astra-test' })).toEqual({
+        ok: false, provider: 'openai', model: 'gpt-6-astra-test', reason: 'provider_error',
+      });
+    });
+  });
+});
+
+describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {
+  let engine; let rejectCall;
+
+  beforeAll(() => {
+    jest.resetModules();
+    jest.doMock('../services/species-catalog', () => require('./helpers/plant-engine-fixtures').FIXTURE);
+    jest.doMock('../services/llm/call', () => ({
+      ...jest.requireActual('../services/llm/call'),
+      dispatch: jest.fn(),
+      rejectCall: jest.fn(),
+    }));
+    ({ rejectCall } = require('../services/llm/call'));
+    engine = require('../services/photo-id-v2/plant-engine');
+  });
+  afterAll(() => {
+    jest.dontMock('../services/species-catalog');
+    jest.dontMock('../services/llm/call');
+    jest.resetModules();
+  });
+
+  test('an ok result whose JSON fails the schema is rejected in the ledger with a schema_invalid reason, and a valid one is not', () => {
+    const invalid = { ok: true, json: { turf: 'not-an-array' }, provider: 'gemini', model: 'gemini-3.8-flash-test' };
+    expect(engine._test.validJson(invalid, 'candidatesA')).toBeNull();
+    expect(rejectCall).toHaveBeenCalledTimes(1);
+    expect(rejectCall).toHaveBeenCalledWith(invalid, `${engine._test.SCHEMA_INVALID_REASON}:candidatesA`);
+    const valid = { ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'plant', turf: [], weeds: [], host: [] } };
+    expect(engine._test.validJson(valid, 'candidatesA')).toBe(valid.json);
+    expect(rejectCall).toHaveBeenCalledTimes(1);
+    // A failed leg (ok:false) is already a failure in the ledger — never re-rejected.
+    expect(engine._test.validJson({ ok: false, reason: 'provider_error' }, 'candidatesA')).toBeNull();
+    expect(rejectCall).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('plant-engine — real catalog', () => {

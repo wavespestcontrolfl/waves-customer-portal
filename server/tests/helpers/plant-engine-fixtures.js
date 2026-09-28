@@ -457,6 +457,16 @@ const FIXTURE = buildFixtureCatalog({
       look_alikes: [], copy: { what_it_means: 'Fixture chinch bug means.', fact: 'Fixture chinch fact.' }, links: {},
       service: { line: 'lawn', key: 'lawnPestControl', label: 'Lawn Pest Control', inspection_first: false, referral: null }, urgency: 'high',
     }),
+    // A regulated tree/shrub pest with an FDACS report referral (Codex #5186
+    // r2 P1): its synthesized signature must carry outcome `regulated`.
+    ownerApproved({
+      slug: 'fixture-regulated-pest', common_name: 'Fixture Regulated Weevil', scientific_name: 'Rhynchophorus fixturicus', kind: 'organism',
+      group: 'true-bugs', subgroup: null, verdict: 'call', role: 'plant_pest', risk: 'low', action: 'report',
+      safety_line: 'A regulated pest; a technician can help you report it.', safety: { ...COMMON_SAFETY, regulated: true }, range: 'rare', active_months: ALL_MONTHS, peak_months: [],
+      traits: ['Large dark weevil with a curved snout', 'Fronds collapsing from the crown'],
+      look_alikes: [], copy: { what_it_means: 'Fixture regulated pest means.', fact: 'Fixture regulated fact.' }, links: {},
+      service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_first: true, referral: 'report_fdacs' }, urgency: 'high',
+    }),
   ],
   legacySlugMap: {
     fixture_st_augustine: { node: 'fixture-st-augustine', note: 'Lawn scorer grass_type value.' },
