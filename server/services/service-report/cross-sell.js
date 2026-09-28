@@ -536,11 +536,13 @@ async function cacheOnlyPropertyLookup(address) {
 const ROACH_TERM = "(?:roach(?:es)?|cockroach(?:es)?)";
 const RODENT_TERM = '(?:rodents?|rats?|mouse|mice)';
 const TERMITE_TERM = "(?:termites?|swarmers?|swarming|mud\\s*tubes?|wood\\s*damage)";
-const MOSQUITO_TERM = 'mosquito(?:e?s)?';
 const V2_ROACH_RE = new RegExp(`\\b${ROACH_TERM}\\b`, 'i');
 const V2_RODENT_RE = new RegExp(`\\b${RODENT_TERM}\\b`, 'i');
 const V2_TERMITE_RE = new RegExp(`\\b${TERMITE_TERM}\\b`, 'i');
-const V2_MOSQUITO_RE = new RegExp(`\\b${MOSQUITO_TERM}\\b`, 'gi');
+// Mosquito has NO findings-based signal (removed 2026-09-28, third round of
+// the same "inferred from free text" finding — a mention count could never
+// be tied reliably to genuine severity from short structured text). Mosquito
+// is offered only by SEASON (May-Oct, below) or the unchanged ladder.
 
 // A finding only asserts what it POSITIVELY reports, never what a negation
 // or an explicit absence value rules out — "no roaches observed", "no
@@ -612,25 +614,6 @@ function parseJsonColumnLocal(value) {
   }
 }
 
-// Words that positively PLACE a finding indoors — the reason copy may only
-// claim "inside" when one of these appears; otherwise the signal proves
-// roach activity but not WHERE, and the copy must not invent a location
-// (P1 finding 2026-09-28: "We noted roach activity inside today" said more
-// than the evidence supported).
-const INDOOR_LOCATION_RE = /\b(?:kitchen|bathroom|cabinet(?:s)?|closet|pantry|bedroom|garage|attic|interior|inside|indoor(?:s)?)\b/i;
-
-// Flattens a typed snapshot's `values` object (string fields and string
-// array entries only) into one text blob — the same best-effort, structured-
-// data-only posture as the service_findings text above, extended to the
-// typed location fields a companion/primary snapshot may carry.
-function flattenTypedValuesText(values) {
-  if (!values || typeof values !== 'object') return '';
-  return Object.values(values)
-    .flatMap((v) => (Array.isArray(v) ? v : [v]))
-    .filter((v) => typeof v === 'string')
-    .join(' ');
-}
-
 async function detectReportFindingsSignal(service, database) {
   const serviceData = parseJsonColumnLocal(service.service_data);
   const primaryType = serviceData.typedReportSnapshot && typeof serviceData.typedReportSnapshot === 'object'
@@ -661,27 +644,11 @@ async function detectReportFindingsSignal(service, database) {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-  // Negated mosquito mentions never count toward "heavy" — two "no
-  // mosquitoes seen" findings must not out-count a single genuine one.
-  const mosquitoMentions = (stripNegatedMentions(text, MOSQUITO_TERM).match(V2_MOSQUITO_RE) || []).length;
-  // Indoor evidence for the roach reason's "inside" claim: the same
-  // service_findings text, PLUS the typed snapshot's own location-bearing
-  // values (the primary if it's the roach evidence, else the companion
-  // that carries it) — never technician_notes, same posture as every
-  // other signal here.
-  const typedValuesText = [
-    roachCompanionTyped
-      ? serviceData.companionReportSnapshots.find((snap) => snap?.type === 'cockroach')?.values
-      : (primaryType === 'cockroach' ? serviceData.typedReportSnapshot?.values : null),
-  ].map(flattenTypedValuesText).join(' ').toLowerCase();
-  const roachIndoorEvidence = INDOOR_LOCATION_RE.test(text) || INDOOR_LOCATION_RE.test(typedValuesText);
 
   return {
     roachesIndoors: roachCompanionTyped || hasAffirmativeMention(text, ROACH_TERM, V2_ROACH_RE),
-    roachIndoorEvidence,
     rodentEvidence: hasAffirmativeMention(text, RODENT_TERM, V2_RODENT_RE),
     termiteActivity: hasAffirmativeMention(text, TERMITE_TERM, V2_TERMITE_RE),
-    heavyMosquito: mosquitoMentions >= 2,
   };
 }
 
@@ -693,7 +660,7 @@ async function detectReportFindingsSignal(service, database) {
 // public-services-menu.js and call-booking-catalog.js gate on) and that the
 // customer does not already have one on the books before returning the
 // unpriced quote_cta card.
-async function buildCockroachFindingsOffer(service, database, { indoorEvidence = false } = {}) {
+async function buildCockroachFindingsOffer(service, database) {
   try {
     const catalogRow = await database('services')
       .where({ service_key: COCKROACH_SERVICE_KEY })
@@ -725,12 +692,10 @@ async function buildCockroachFindingsOffer(service, database, { indoorEvidence =
       mode: 'quote_cta',
       relationship: 'start',
       option: null,
-      // "inside" is a location claim — only made when the evidence
-      // positively places it there (P1 finding 2026-09-28); otherwise the
-      // reason states only what the signal actually proves.
-      reason: indoorEvidence
-        ? 'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.'
-        : 'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+      // No location claim (removed 2026-09-28): a location word anywhere in
+      // the findings text does not prove the SAME roach mention was indoors
+      // — the affirmative roach signal alone is what this reason states.
+      reason: 'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
     };
     return { fullPayload: { ...payload, fingerprint: offerFingerprint(payload) } };
   } catch (err) {
@@ -762,9 +727,7 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
   const signal = await detectReportFindingsSignal(service, database).catch(() => null);
   if (signal) {
     if (signal.roachesIndoors) {
-      const cockroachOffer = await buildCockroachFindingsOffer(service, database, {
-        indoorEvidence: signal.roachIndoorEvidence,
-      });
+      const cockroachOffer = await buildCockroachFindingsOffer(service, database);
       if (cockroachOffer) return cockroachOffer;
       // Catalog unavailable, or already mid-program: fall through to the
       // next priority rather than dropping the card entirely.
@@ -781,12 +744,9 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
         reason: 'We noted possible termite activity today — a termite inspection can confirm what’s there and get monitoring in place.',
       };
     }
-    if (signal.heavyMosquito && notOwned('mosquito')) {
-      return {
-        targetKey: 'mosquito',
-        reason: 'We noted heavy mosquito activity today — our mosquito program treats the yard through peak season.',
-      };
-    }
+    // No findings-based mosquito branch (removed 2026-09-28): a mention
+    // count in short structured findings text can't be tied reliably to
+    // genuine severity. Mosquito is offered by SEASON only, below.
   }
 
   // Season (America/New_York calendar month) — owner matrix 2026-09-27:
@@ -1280,9 +1240,9 @@ async function buildReportCrossSell(service, database, {
         confidence: option.confidence || null,
       } : null,
       // GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-      // a findings/season-picked target ("We noted roach activity inside
-      // today..."). Absent for the unchanged ladder pick — the card renders
-      // exactly as it does today.
+      // a findings/season-picked target ("We noted roach activity today...").
+      // Absent for the unchanged ladder pick — the card renders exactly as
+      // it does today.
       ...(reportOfferReason ? { reason: reportOfferReason } : {}),
     };
     // Server-issued fingerprint over EVERY customer-visible field (pre-push

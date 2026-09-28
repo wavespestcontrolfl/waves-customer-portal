@@ -505,40 +505,52 @@ compared to the report's property, so a multi-property account's report can
 never list another property's visits. Gate off (default): the field is
 absent and the payload is byte-identical to today.
 
-Findings- and season-aware cross-sell priority (owner-approved 2026-09-27):
-`GATE_REPORT_CROSS_SELL_V2` (dark, off unless exactly `true`, read at call
-time; inert unless `GATE_REPORT_CROSS_SELL` is also on — there is no card
-to prioritize without it) layers a priority on top of the existing
-`crossSell` offer ladder (`services/service-report/cross-sell.js`'s
-`buildReportCrossSell`). On, the payload's existing `crossSell` object may
-additionally carry `reason` — one short, honest, reason-tied sentence
-rendered above the CTA button (e.g. "We noted roach activity inside today
-— our cockroach control program is a focused two-treatment cleanout.",
-or, when the evidence proves roach activity but not a location, "We
-noted roach activity today — …": the "inside" claim is made only when
-the finding text or the typed snapshot's own location values positively
-place it indoors — kitchen, bathroom, cabinet, interior, garage, etc. —
-never inferred from the mere presence of a roach signal) — and
-`serviceKey` may resolve to two targets the ladder itself never picks:
-`rodent_bait` and `mosquito`, priced through the SAME
-`buildCustomerPricingResponse` estimator path and per-application-only
-serialization rule as the existing ladder targets. Their prompts/labels
-live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
-deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
-vocabulary the portal offer card and the photo-triage lane
-(`buildPortalOffer`, `buildOfferForFamily`) also read by
-`requestedTargetKey` — those two surfaces are unaffected by this gate and
-still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
-may also resolve to `cockroach_control` — the one target priced OUTSIDE
-the estimator (a fixed one-time catalog price; `mode` is always
-`quote_cta`, `option` is always `null`) — gated on the live `services`
-catalog row (`is_active`, `!is_archived`, `customer_visible`,
+Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
+narrowed 2026-09-28 after three rounds of "claim inferred from free text"
+findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark, off unless
+exactly `true`, read at call time; inert unless `GATE_REPORT_CROSS_SELL`
+is also on — there is no card to prioritize without it) layers a priority
+on top of the existing `crossSell` offer ladder
+(`services/service-report/cross-sell.js`'s `buildReportCrossSell`). On,
+the payload's existing `crossSell` object may additionally carry `reason`
+— one short, honest, reason-tied sentence rendered above the CTA button,
+tied ONLY to the fact a matching affirmative finding exists, never to a
+location or a severity the finding doesn't itself state (roach: "We noted
+roach activity today — our cockroach control program is a focused
+two-treatment cleanout."; rodent: "We noted signs of rodent activity
+today — …"; termite: "We noted possible termite activity today — …";
+season-mosquito: "Mosquito season is here in SW Florida — …"; season-
+termite: "It's termite swarm season in SW Florida — …") — and `serviceKey`
+may resolve to two targets the ladder itself never picks: `rodent_bait`
+and `mosquito`, priced through the SAME `buildCustomerPricingResponse`
+estimator path and per-application-only serialization rule as the
+existing ladder targets. Their prompts/labels live in cross-sell.js's own
+`V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps, deliberately NOT added to the
+shared `OFFER_PROMPTS`/`OFFER_LABELS` vocabulary the portal offer card and
+the photo-triage lane (`buildPortalOffer`, `buildOfferForFamily`) also
+read by `requestedTargetKey` — those two surfaces are unaffected by this
+gate and still refuse `rodent_bait`/`mosquito` as an unknown family.
+`serviceKey` may also resolve to `cockroach_control` — the one target
+priced OUTSIDE the estimator (a fixed one-time catalog price; `mode` is
+always `quote_cta`, `option` is always `null`) — gated on the live
+`services` catalog row (`is_active`, `!is_archived`, `customer_visible`,
 `booking_enabled`) and on the customer having no already-open
-(pending/confirmed/en_route/on_site) visit linked to it. Priority reads
-ONLY the visit's own `service_findings` rows (title/detail/category/
+(pending/confirmed/en_route/on_site) visit linked to it. Findings priority
+reads ONLY the visit's own `service_findings` rows (title/detail/category/
 severity/recommendation — the same structured rows the report's Findings
 section renders) plus its typed companion-report identity, NEVER
-`technician_notes` (raw notes must never egress on a customer surface).
+`technician_notes` (raw notes must never egress on a customer surface),
+and only an AFFIRMATIVE mention counts — a negation or an explicit
+absence value ("no roaches observed", "no signs of rodents", "termite:
+none") never asserts the finding it names. Mosquito has NO findings-based
+branch (removed 2026-09-28: a mention count in short structured text
+could not be tied reliably to genuine severity) — it is offered ONLY by
+season (America/New_York May–Oct) or the unchanged ladder. Roach findings
+likewise carry NO location claim (removed 2026-09-28: a location word
+anywhere in the findings text did not prove the roach mention itself was
+indoors) — the reason states only that activity was found. Season
+(May–Oct mosquito, Feb–May termite swarm season) runs only when no
+findings branch fired; May favors mosquito when neither is already owned.
 Never offers a family the customer already owns — reuses the ladder's own
 property-scoped ownership + plan-rate evidence, including the
 `termite_bait` → `termite` ownership mapping. Gate off (default):

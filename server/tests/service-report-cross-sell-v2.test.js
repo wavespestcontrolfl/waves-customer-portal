@@ -1,11 +1,18 @@
-// GATE_REPORT_CROSS_SELL_V2 (owner-approved 2026-09-27): findings- and
-// season-aware priority layered on top of the report's cross-sell ladder
-// (service-report-cross-sell.test.js covers the unchanged ladder itself).
-// Covers: each priority branch (roach → cockroach_control, rodent →
-// rodent_bait, termite activity → termite, heavy mosquito → mosquito),
-// owned-service exclusion, the inactive/non-public catalog skip for
-// cockroach_control, season boundaries by ET month, and gate off →
-// identical to today's ladder output.
+// GATE_REPORT_CROSS_SELL_V2 (owner-approved 2026-09-27, narrowed 2026-09-28
+// after three rounds of "claim inferred from free text" findings): findings-
+// and season-aware priority layered on top of the report's cross-sell
+// ladder (service-report-cross-sell.test.js covers the unchanged ladder
+// itself). Covers: each surviving priority branch (roach → cockroach_control,
+// rodent → rodent_bait, termite activity → termite), owned-service
+// exclusion, the inactive/non-public catalog skip for cockroach_control,
+// season boundaries by ET month (mosquito is season-only — no findings
+// branch), the negation/absence guard, and gate off → identical to today's
+// ladder output.
+//
+// Deliberately NOT covered (removed 2026-09-28, not refined): a roach
+// "inside" location claim, and a mosquito mention-count "heavy" claim.
+// Both inferred more from short structured findings text than the text
+// could support — removed structurally rather than tuned further.
 
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   hasVerifiedOverrides: jest.fn(async () => false),
@@ -51,25 +58,7 @@ describe('detectReportFindingsSignal', () => {
     const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', category: 'observation', title: 'Active German roach activity in kitchen cabinets' }] });
     const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
     expect(signal.roachesIndoors).toBe(true);
-    // "kitchen cabinets" positively places it indoors — roachIndoorEvidence follows.
-    expect(signal.roachIndoorEvidence).toBe(true);
   });
-
-  test('roach signal without any location wording does NOT claim indoor evidence', async () => {
-    const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'German roach activity found' }] });
-    const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
-    expect(signal.roachesIndoors).toBe(true);
-    expect(signal.roachIndoorEvidence).toBe(false);
-  });
-
-  test.each(['bathroom', 'garage', 'interior', 'closet', 'pantry'])(
-    'roachIndoorEvidence also fires on "%s"',
-    async (word) => {
-      const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: `Roach activity noted in the ${word}` }] });
-      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
-      expect(signal.roachIndoorEvidence).toBe(true);
-    },
-  );
 
   test('roach companion-typed signal fires when a companion snapshot (not the primary) is cockroach', async () => {
     const db = fakeDb({ service_findings: [] });
@@ -82,19 +71,6 @@ describe('detectReportFindingsSignal', () => {
     };
     const signal = await detectReportFindingsSignal(service, db);
     expect(signal.roachesIndoors).toBe(true);
-  });
-
-  test('a companion snapshot\'s own typed location value ("Garage") also proves indoor evidence, with no text mention at all', async () => {
-    const db = fakeDb({ service_findings: [] });
-    const service = {
-      id: 'sr-1',
-      service_data: JSON.stringify({
-        typedReportSnapshot: { type: 'pest' },
-        companionReportSnapshots: [{ type: 'cockroach', values: { areas_treated: 'Garage, exterior perimeter' } }],
-      }),
-    };
-    const signal = await detectReportFindingsSignal(service, db);
-    expect(signal.roachIndoorEvidence).toBe(true);
   });
 
   test('a cockroach-PRIMARY report (already mid-program today) is NOT itself the roach signal without a text mention', async () => {
@@ -114,19 +90,6 @@ describe('detectReportFindingsSignal', () => {
     const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', category: 'observation', title: 'Mud tubes observed on the exterior foundation' }] });
     const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
     expect(signal.termiteActivity).toBe(true);
-  });
-
-  test('heavy mosquito needs at least two mentions — one mention is not "heavy"', async () => {
-    const one = await detectReportFindingsSignal(
-      { id: 'sr-1', service_data: '{}' },
-      fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'Customer mentioned mosquitoes in the backyard' }] }),
-    );
-    expect(one.heavyMosquito).toBe(false);
-    const two = await detectReportFindingsSignal(
-      { id: 'sr-1', service_data: '{}' },
-      fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'Heavy mosquito activity', detail: 'Standing water breeding mosquitoes near the shed' }] }),
-    );
-    expect(two.heavyMosquito).toBe(true);
   });
 
   test('never reads technician_notes — a raw-note-only mention is not a signal (AGENTS.md raw-note rule)', async () => {
@@ -159,14 +122,6 @@ describe('detectReportFindingsSignal', () => {
       expect(signal[key]).toBe(false);
     });
 
-    test('negated mosquito mentions never count toward "heavy" — two negations do not out-count zero genuine ones', async () => {
-      const db = fakeDb({
-        service_findings: [{ service_record_id: 'sr-1', title: 'No mosquitoes seen. No mosquito activity noted.' }],
-      });
-      const signal = await detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' }, db);
-      expect(signal.heavyMosquito).toBe(false);
-    });
-
     test('the adversative exception still holds under the guard: "no ants but roaches everywhere" keeps the affirmative mention', async () => {
       const db = fakeDb({
         service_findings: [{ service_record_id: 'sr-1', title: 'No ants but roaches are everywhere' }],
@@ -196,13 +151,15 @@ describe('detectReportFindingsSignal', () => {
 const ACTIVE_COCKROACH_ROW = { id: 'svc-cockroach', service_key: 'cockroach_control', is_active: true, is_archived: false, customer_visible: true, booking_enabled: true };
 
 describe('buildCockroachFindingsOffer', () => {
-  test('returns a fingerprinted quote_cta payload when the catalog row is active/customer-offerable and nothing is already scheduled', async () => {
+  test('returns a fingerprinted quote_cta payload when the catalog row is active/customer-offerable and nothing is already scheduled, with a fixed reason that names no location', async () => {
     const db = fakeDb({ services: [ACTIVE_COCKROACH_ROW], scheduled_services: [] });
     const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
     expect(offer.fullPayload.serviceKey).toBe('cockroach_control');
     expect(offer.fullPayload.mode).toBe('quote_cta');
     expect(offer.fullPayload.option).toBeNull();
-    expect(offer.fullPayload.reason).toMatch(/roach/i);
+    expect(offer.fullPayload.reason).toBe(
+      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+    );
     expect(typeof offer.fullPayload.fingerprint).toBe('string');
   });
 
@@ -240,32 +197,12 @@ describe('buildCockroachFindingsOffer', () => {
     const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
     expect(offer).not.toBeNull();
   });
-
-  // P1 fix (2026-09-28): "inside" is a location claim and may only be made
-  // when the evidence positively places the activity indoors.
-  describe('the "inside" claim is opt-in on positive indoor evidence (P1 2026-09-28)', () => {
-    test('indoorEvidence: true says "inside"', async () => {
-      const db = fakeDb({ services: [ACTIVE_COCKROACH_ROW], scheduled_services: [] });
-      const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db, { indoorEvidence: true });
-      expect(offer.fullPayload.reason).toBe(
-        'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
-      );
-    });
-
-    test('indoorEvidence: false (or omitted) drops the location claim entirely', async () => {
-      const db = fakeDb({ services: [ACTIVE_COCKROACH_ROW], scheduled_services: [] });
-      const offer = await buildCockroachFindingsOffer({ id: 'sr-1', customer_id: 'cust-1' }, db);
-      expect(offer.fullPayload.reason).toBe(
-        'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
-      );
-      expect(offer.fullPayload.reason).not.toMatch(/inside/i);
-    });
-  });
 });
 
 // ============================================================
 // Unit level: resolveReportCrossSellV2 — priority order + owned-family
-// exclusion + season boundaries.
+// exclusion + season boundaries. Mosquito has NO findings branch (removed
+// 2026-09-28) — it is reachable only through the season check below.
 // ============================================================
 describe('resolveReportCrossSellV2 priority order', () => {
   const NO_SIGNAL_DB = fakeDb({ service_findings: [] });
@@ -334,8 +271,8 @@ describe('resolveReportCrossSellV2 priority order', () => {
     expect(result).toBeNull();
   });
 
-  test('heavy mosquito mention wins when not already owned', async () => {
-    etDateString.mockReturnValue('2026-11-01');
+  test('a mosquito mention in the findings is NOT a signal at all (removed 2026-09-28) — falls straight through to season/ladder', async () => {
+    etDateString.mockReturnValue('2026-11-01'); // outside the mosquito season window too
     const db = fakeDb({ service_findings: [{ service_record_id: 'sr-1', title: 'Heavy mosquito pressure reported, mosquitoes everywhere in the yard' }] });
     const result = await resolveReportCrossSellV2({
       service: { id: 'sr-1', customer_id: 'cust-1', service_data: '{}' },
@@ -343,7 +280,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
       ladderEvidence: [],
       planRateFamilies: [],
     });
-    expect(result).toEqual({ targetKey: 'mosquito', reason: expect.stringMatching(/mosquito/i) });
+    expect(result).toBeNull();
   });
 
   test('no findings signal, no season match, nothing owned to exclude → null (caller keeps the ladder pick)', async () => {
@@ -357,7 +294,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
     expect(result).toBeNull();
   });
 
-  describe('season boundaries (America/New_York calendar month)', () => {
+  describe('season boundaries (America/New_York calendar month) — mosquito\'s ONLY offer path', () => {
     test.each([
       ['2026-05-01', 'mosquito', 'May 1 → mosquito (checked first)'],
       ['2026-06-15', 'mosquito', 'June → mosquito'],
@@ -523,7 +460,7 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     expect(withGateOff.reason).toBeUndefined();
   });
 
-  test('gate on: a roach finding on a pest-only customer picks cockroach_control, carrying the reason, instead of the ladder\'s lawn pick', async () => {
+  test('gate on: a roach finding on a pest-only customer picks cockroach_control, carrying the fixed reason, instead of the ladder\'s lawn pick', async () => {
     process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
     const result = await buildReportCrossSell(
       SERVICE(),
@@ -537,30 +474,26 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     );
     expect(result.serviceKey).toBe('cockroach_control');
     expect(result.mode).toBe('quote_cta');
-    // "in the kitchen" is positive indoor evidence — the reason says "inside".
     expect(result.reason).toBe(
-      'We noted roach activity inside today — our cockroach control program is a focused two-treatment cleanout.',
+      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
     );
     expect(typeof result.fingerprint).toBe('string');
   });
 
-  test('gate on: a roach finding with NO location wording picks cockroach_control WITHOUT claiming "inside" (P1 2026-09-28)', async () => {
+  test('gate on: a mosquito mention in the findings does NOT pick mosquito (no findings branch) — falls through to the ladder', async () => {
     process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-11-01'); // outside mosquito season too
     const result = await buildReportCrossSell(
       SERVICE(),
       dbFor({
         serviceTypes: ['Pest Control'],
         turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
-        serviceFindings: [{ title: 'German roach activity found' }],
-        catalogServices: [ACTIVE_COCKROACH_ROW],
+        serviceFindings: [{ title: 'Heavy mosquito pressure reported, mosquitoes everywhere in the yard' }],
       }),
       { propertyLookup: missLookup },
     );
-    expect(result.serviceKey).toBe('cockroach_control');
-    expect(result.reason).toBe(
-      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
-    );
-    expect(result.reason).not.toMatch(/inside/i);
+    expect(result.serviceKey).toBe('lawn_care'); // unchanged ladder pick
+    expect(result.reason).toBeUndefined();
   });
 
   test('gate on, no findings/season signal: falls straight through to the unchanged ladder pick', async () => {
