@@ -1342,15 +1342,22 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.v2_extraction_status).toBeNull();
   });
 
-  // codex #5018 P2: twilio.js's accepted-send sms_log recovery insert
-  // (services/twilio.js, the "Authority guard failed after provider
-  // acceptance" branch) now serializes its own check-then-insert with a
-  // transaction-scoped advisory lock keyed on the twilio_sid, because
-  // twilio_sid carries no UNIQUE constraint. This pair proves the SQL
-  // primitive itself — hand-replicated here exactly as twilio.js derives
-  // it (never re-exported for tests) — the same mechanism/fix methodology
-  // this file's own lock-ordering tests above already use, since a mocked
-  // knex cannot prove a real Postgres lock is genuinely held.
+  // codex #5018 P2, closed further by its own r15/r16 follow-up: twilio.js's
+  // accepted-send sms_log recovery insert (services/twilio.js, the
+  // "Authority guard failed after provider acceptance" branch) serializes
+  // its own check-then-insert with a transaction-scoped advisory lock keyed
+  // on the twilio_sid, because twilio_sid carries no UNIQUE constraint. The
+  // "fix" test's tx1 below is no longer a hypothetical stand-in — the
+  // ORIGINAL in-handoff insert (dispatch()'s own `if (options.logInHandoff)`
+  // block, on its own held trx) now takes this SAME lock for real, right
+  // before it inserts, so this test genuinely proves both sides of the
+  // real mechanism: a recovery attempt racing a still-open original
+  // transaction blocks on this exact key until that original commits or
+  // rolls back, and only then re-checks — hand-replicated here exactly as
+  // twilio.js derives it (never re-exported for tests), the same
+  // mechanism/fix methodology this file's own lock-ordering tests above
+  // already use, since a mocked knex cannot prove a real Postgres lock is
+  // genuinely held.
   describe('twilio.js sms_log recovery: an advisory lock serializes concurrent check-then-insert for the SAME twilio_sid (codex #5018 P2)', () => {
     async function acquireRecoveryLock(trx, sid) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${sid}`]);

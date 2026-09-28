@@ -1369,6 +1369,25 @@ const TwilioService = {
         // byte-identical to origin/main's behavior.
         if (options.logInHandoff) {
           try {
+            // codex #5018 r15/r16 P1 follow-up: take the SAME advisory key
+            // the recovery insert below already does
+            // (hashtextextended('sms_log_sid:'||sid, 0)) — transaction-
+            // scoped on THIS held trx, so it releases only at trx's own
+            // COMMIT/ROLLBACK, never earlier. Only when a real trx is held:
+            // an xact-scoped lock taken on a bare `db` call (no transaction)
+            // would release the instant that single query finished,
+            // guarding nothing — the ORIGINAL window this closes only
+            // exists for the opt-in, transaction-scoped path this whole
+            // block already requires. See the recovery lock's own comment,
+            // below, for what taking it HERE too actually closes: if the
+            // COMMIT here succeeded but its acknowledgement was lost,
+            // recovery's own lock acquisition now genuinely blocks until
+            // this transaction ends, then its SELECT sees the committed
+            // row and skips inserting; if this transaction instead rolled
+            // back, recovery finds nothing and inserts once, itself.
+            if (trx) {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
+            }
             await (trx || db)("sms_log").insert(buildSmsLogRow());
           } catch (logErr) {
             logger.error(`SMS log failed: ${logErr.message}`);
@@ -1469,18 +1488,30 @@ const TwilioService = {
                 // never collide with that lock or with lockSmsPhone's
                 // separate two-key family.
                 //
-                // What this does NOT close: the ORIGINAL commit itself
-                // becoming visible to a reader on a different connection
-                // AFTER this lock releases. This lock only serializes
-                // recovery attempts against EACH OTHER — if the caller's
-                // own transaction actually committed (the "lost ack" case
-                // this recovery exists for) but that commit's row is not
-                // yet visible to a read here (a snapshot taken before the
-                // commit finished landing), the SELECT below can still see
-                // nothing and this insert can still land as a genuine
-                // duplicate. Stated plainly: nothing short of a real
-                // UNIQUE constraint on twilio_sid closes that specific
-                // window, and this lock does not claim to.
+                // codex #5018 r15/r16 P1 follow-up: the ORIGINAL in-handoff
+                // insert above now takes this SAME key, transaction-scoped
+                // on its own held trx, right before it inserts — closing
+                // the window this comment used to say nothing but a real
+                // UNIQUE constraint could close. Before that follow-up, this
+                // lock only serialized recovery attempts against EACH
+                // OTHER: the original transaction held no lock of its own,
+                // so a recovery attempt could run its check-then-insert
+                // WHILE the original was still open (its insert made but
+                // not yet committed, invisible to this SELECT under READ
+                // COMMITTED) and land a genuine duplicate the instant the
+                // original then committed. Now, a recovery attempt racing
+                // a still-open original genuinely blocks on THIS
+                // pg_advisory_xact_lock call until that original's
+                // transaction ends: if it committed, the lock's release IS
+                // the commit becoming visible, and the SELECT below finds
+                // the row and skips; if it rolled back, the SELECT finds
+                // nothing and this inserts once, itself. The one case that
+                // was never in scope for either lock, before or after this
+                // follow-up, is a completely UNRELATED failure this whole
+                // `if (options.logInHandoff)` catch is for — the original's
+                // commit genuinely lost in flight (a real network partition
+                // mid-COMMIT) rather than merely un-acknowledged; ordinary
+                // Postgres commit visibility has no such gap on one primary.
                 await db.transaction(async (trx) => {
                   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
                   const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');
