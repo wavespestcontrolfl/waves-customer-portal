@@ -196,6 +196,21 @@ function mapSharedResultToVerdict(shared) {
     if (shared.truncated) {
       return { verdict: 'fetch_blocked', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'response_truncated' } };
     }
+    // The shared classifier's redirect path (classifyRedirectLiveStatus)
+    // deliberately does NOT reclassify on a canonical mismatch — that is
+    // registry-specific behavior a content-registry row test pins (a
+    // redirect landing on a page with an unrelated canonical stays
+    // 'redirected' for the registry). This module's own bar is stricter: an
+    // owned page an answer engine is actively citing that redirects clean
+    // but then self-declares a DIFFERENT canonical is not a confirmed-good
+    // landing — checked here, not in the shared classifier.
+    if (shared.canonical_target_url) {
+      const normalizedCanonical = normalizeOwnedUrl(shared.canonical_target_url);
+      const normalizedFinal = normalizeOwnedUrl(shared.final_url);
+      if (normalizedCanonical && normalizedFinal && normalizedCanonical !== normalizedFinal) {
+        return { verdict: 'canonical_elsewhere', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, canonicalUrl: shared.canonical_target_url } };
+      }
+    }
     const visibleChars = shared.visible_text_length;
     const landedStatus = Number(shared.final_http_status || shared.http_status);
     if (landedStatus === 204 || (visibleChars != null && visibleChars < MIN_VISIBLE_TEXT_CHARS)) {

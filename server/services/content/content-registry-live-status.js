@@ -116,6 +116,14 @@ function isNoindex(html) {
   return /\bnoindex\b/i.test(extractRobots(html));
 }
 
+// A response can noindex via the X-Robots-Tag header instead of (or as well
+// as) a meta tag — the documented health contract covers both. `headers`
+// is the fetch-Response-shaped object fetchText hands back (`.get(name)`).
+function isNoindexHeader(headers) {
+  if (!headers || typeof headers.get !== 'function') return false;
+  return /\bnoindex\b/i.test(String(headers.get('x-robots-tag') || ''));
+}
+
 // Body-aware signals a bare HTTP status can never see: a page that renders
 // the site's OWN "Page Not Found" template, or a bot-challenge interstitial,
 // under a 2xx status. Shared by the registry sweep and the owned cited-URL
@@ -316,7 +324,7 @@ async function checkUrlLiveStatus(requestedUrl, {
     const status = String(first.res.status);
     const redirectTargetUrl = absoluteFromLocation(first.res.headers.get('location'), requestedUrl);
     let canonicalTargetUrl = extractCanonical(first.text, requestedUrl);
-    let noindex = isNoindex(first.text);
+    let noindex = isNoindex(first.text) || isNoindexHeader(first.res.headers);
     let finalStatus = null;
     let followError = null;
     let finalUrl = requestedUrl;
@@ -328,7 +336,7 @@ async function checkUrlLiveStatus(requestedUrl, {
         const follow = await fetchText(fetchImpl, redirectTargetUrl, { redirect: 'follow', timeoutMs });
         finalStatus = String(follow.res.status);
         canonicalTargetUrl = extractCanonical(follow.text, follow.finalUrl || redirectTargetUrl) || canonicalTargetUrl;
-        noindex = noindex || isNoindex(follow.text);
+        noindex = noindex || isNoindex(follow.text) || isNoindexHeader(follow.res.headers);
         finalUrl = follow.finalUrl || redirectTargetUrl;
         finalBody = follow.text;
         finalTruncated = Boolean(follow.res.truncated);
@@ -669,6 +677,7 @@ module.exports = {
   extractCanonical,
   extractRobots,
   isNoindex,
+  isNoindexHeader,
   extractTitle,
   visibleText,
   isChallengePage,

@@ -173,6 +173,28 @@ describe('mapSharedResultToVerdict', () => {
     expect(result.verdict).toBe('ok');
   });
 
+  // codex pre-push audit finding: the shared redirect classifier does not
+  // itself reclassify on a canonical mismatch (registry rows keep that as
+  // 'redirected' — a content-registry test pins it), so this module must
+  // check canonical_target_url itself before calling a redirect healthy.
+  test('a redirect landing clean but self-declaring a DIFFERENT canonical classifies as canonical_elsewhere, not redirect_ok', () => {
+    const result = mapSharedResultToVerdict(shared({
+      live_status: 'redirected', http_status: '301', final_http_status: '200',
+      redirect_target_url: 'https://wavespestcontrol.com/new/', final_url: 'https://wavespestcontrol.com/new/',
+      canonical_target_url: 'https://wavespestcontrol.com/other-page/',
+    }));
+    expect(result).toMatchObject({ verdict: 'canonical_elsewhere', detail: { canonicalUrl: 'https://wavespestcontrol.com/other-page/' } });
+  });
+
+  test('a redirect landing clean with a canonical matching the landed URL is still redirect_ok', () => {
+    const result = mapSharedResultToVerdict(shared({
+      live_status: 'redirected', http_status: '301', final_http_status: '200',
+      redirect_target_url: 'https://wavespestcontrol.com/new/', final_url: 'https://wavespestcontrol.com/new/',
+      canonical_target_url: 'https://wavespestcontrol.com/new/',
+    }));
+    expect(result.verdict).toBe('redirect_ok');
+  });
+
   test('a clean, directly-served 2xx page classifies as ok', () => {
     expect(mapSharedResultToVerdict(shared()).verdict).toBe('ok');
   });
@@ -222,6 +244,20 @@ describe('checkOwnedUrlHealth (shared checker, injected fetchImpl)', () => {
     }));
     const result = await checkOwnedUrlHealth('https://bradentonflpestcontrol.com/pest-control-costs/', { fetchImpl });
     expect(result.verdict).toBe('soft_404');
+  });
+
+  test('a redirect landing clean but self-declaring a different canonical is flagged end to end', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://wavespestcontrol.com/old/': response(301, '', { location: 'https://wavespestcontrol.com/new/' }),
+      'https://wavespestcontrol.com/new/': response(
+        200,
+        '<html><head><title>Pest control costs</title><link rel="canonical" href="https://wavespestcontrol.com/other-page/"></head><body>Real content here, plenty of it, well past the minimum visible length this module enforces.</body></html>',
+        {},
+        'https://wavespestcontrol.com/new/',
+      ),
+    }));
+    const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/old/', { fetchImpl });
+    expect(result.verdict).toBe('canonical_elsewhere');
   });
 
   test('a network-level failure surfaces as fetch_blocked', async () => {

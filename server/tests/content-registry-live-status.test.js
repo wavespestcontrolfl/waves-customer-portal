@@ -212,6 +212,41 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  // codex pre-push audit finding: the documented health contract covers
+  // meta robots OR the X-Robots-Tag header — a header-only noindex (no meta
+  // tag at all) must not be reported as healthy, on a direct response or on
+  // a redirect's landed page.
+  test('an X-Robots-Tag header noindex is detected even with no meta tag at all', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-header-noindex', canonical_url_normalized: '/header-hidden/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/header-hidden/': response(200, '<html></html>', { 'x-robots-tag': 'noindex' }),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '200',
+      live_status: 'noindex',
+      noindex_detected: true,
+    }));
+  });
+
+  test('an X-Robots-Tag header noindex on a redirect\'s landed page is detected too', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-redirect-header-noindex', canonical_url_normalized: '/legacy-header-hidden/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-header-hidden/': response(301, '', { location: '/header-hidden/' }),
+          'https://www.wavespestcontrol.com/header-hidden/': response(200, '<html></html>', { 'x-robots-tag': 'noindex' }, 'https://www.wavespestcontrol.com/header-hidden/'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({
+      http_status: '301',
+      live_status: 'noindex',
+      noindex_detected: true,
+    }));
+  });
+
   test('a 5xx classifies as server_error, distinct from a generic checker error', async () => {
     await expect(liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-5xx', canonical_url_normalized: '/down/' },
