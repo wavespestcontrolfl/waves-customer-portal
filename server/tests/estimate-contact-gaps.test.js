@@ -183,3 +183,14 @@ describe('computeContactGaps — multi-word given name with no surname', () => {
     expect(gaps.lastName).toBe(false);
   });
 });
+
+describe('computeContactGaps — every placeholder-only name shape', () => {
+  test.each(['Customer', 'Unknown', 'Unknown Customer', 'unknown caller', 'New Customer'])('%p asks for a first name too', (name) => {
+    const gaps = computeContactGaps({ estimate: { customer_name: name, customer_email: 'x@example.com' } });
+    expect(gaps.firstName).toBe(true);
+    expect(gaps.lastName).toBe(true);
+  });
+  test('a real name that merely contains a placeholder word is kept', () => {
+    expect(computeContactGaps({ estimate: { customer_name: 'Unknown Sample', customer_email: 'x@example.com' } }).firstName).toBe(false);
+  });
+});
