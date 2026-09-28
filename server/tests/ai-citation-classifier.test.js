@@ -228,6 +228,20 @@ describe('classifyUrl', () => {
       expect(isProviderIntentQuestion(null)).toBe(false);
     });
 
+    // Codex P2 2026-09-28 (round 10): admin-added managed queries carry no
+    // benchmark intent, so plural and equivalent provider wording counts.
+    test('isProviderIntentQuestion: plural and equivalent provider wording in a managed query', () => {
+      for (const query of [
+        'What pest control companies serve Port Charlotte?',
+        'Which exterminators work in Venice FL?',
+        'Recommended lawn care providers in Bradenton',
+        'Pest control near me in Sarasota',
+      ]) {
+        expect(isProviderIntentQuestion({ id: null, query, intent: null })).toBe(true);
+      }
+      expect(isProviderIntentQuestion({ id: null, query: 'How do I get rid of ghost ants?', intent: null })).toBe(false);
+    });
+
     // Codex P2 2026-09-28 (round 9): an entity-cohort question asks ABOUT
     // Waves ("Who owns …?") — its bare "who" is never provider intent.
     test('isProviderIntentQuestion: entity-cohort questions are never provider intent, despite who/company words', () => {

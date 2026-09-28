@@ -223,10 +223,13 @@ function hasBestToken(urlString) {
 }
 // A benchmark question's own `intent: 'provider'` (aeo-benchmark-v1.json),
 // or — for a managed/legacy query the benchmark doesn't cover — the raw
-// query text asking who/best/top/company. `question` is the same
+// query text asking for a provider: who/best/top, a company or companies,
+// an exterminator, a provider, a recommendation, whom to hire, or "near me"
+// (Codex P2 2026-09-28, round 10: an admin-added "What pest control companies
+// serve Port Charlotte?" carries no benchmark intent). `question` is the same
 // { id, query, city, service, intent } shape link-registry-ai-citation-
 // ingest.js's aggregateCitations already builds per row.
-const PROVIDER_INTENT_WORDS_RE = /\b(who|best|top|company)\b/i;
+const PROVIDER_INTENT_WORDS_RE = /\b(who|best|top|compan(?:y|ies)|exterminators?|providers?|recommend(?:ed|ations?)?|hire|near me)\b/i;
 function isProviderIntentQuestion(question) {
   if (!question) return false;
   // Entity-cohort questions (aeo-entity-cohort-v1.json — "Who owns Waves Pest
