@@ -34,6 +34,20 @@ describe('extractCompanyNames', () => {
     }
   });
 
+  test('both metadata shapes are sent when top-level and frontmatter values differ (pre-push r7)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
+    await extractCompanyNames({
+      ...DRAFT,
+      title: 'Comparing Termite Plans',
+      meta_description: 'Generic meta.',
+      frontmatter: { ...DRAFT.frontmatter, title: 'Bug Out vs. Local Providers', meta_description: 'Bug Out plans compared.' },
+    });
+    const { text } = dispatchWithFallback.mock.calls[0][1];
+    for (const part of ['Comparing Termite Plans', 'Bug Out vs. Local Providers', 'Generic meta.', 'Bug Out plans compared.']) {
+      expect(text).toContain(part);
+    }
+  });
+
   test('an empty list is a clean result', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
     expect(await extractCompanyNames(DRAFT)).toMatchObject({ ok: true, companies: [] });

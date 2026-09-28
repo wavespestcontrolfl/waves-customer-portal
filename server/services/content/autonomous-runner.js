@@ -134,8 +134,10 @@ function gbpLocationIdForCity(city) {
   return CITY_TO_LOCATION[key] || null;
 }
 
-// Company-name extraction outage → retry the draft after this long.
+// Company-name extraction outage → retry the draft after this long, at
+// most this many times per opportunity.
 const COMPANY_CHECK_RETRY_MS = 60 * 60 * 1000;
+const COMPANY_CHECK_MAX_RETRIES = 3;
 const TRUST_BUILD_THRESHOLD = parseInt(process.env.TRUST_BUILD_THRESHOLD || THRESHOLDS.autoPublishAfterApprovedRuns, 10);
 // completed_pending_review kinds that approve-and-publish (see
 // approveAndPublishNamedCompetitor). Mirrored by approve-autonomous-run.js.
@@ -942,9 +944,11 @@ class AutonomousRunner {
       // company the whole draft names, links or references
       // (business-name-confirmer.js); stored on the verdict so the merge-
       // time recheck reuses it. The owner-list decision below reads it.
-      // A provider outage or bad output DEFERS the draft an hour (the
-      // attempt budget still bounds it) rather than dropping it; an
-      // unextractable draft (over the input bound) is skipped.
+      // A provider outage or bad output DEFERS the draft an hour rather
+      // than dropping it, at most COMPANY_CHECK_MAX_RETRIES times (counted
+      // on the opportunity — queue.defer refunds the claim attempt, so the
+      // lifetime attempt budget alone would never stop it); then, or for an
+      // unextractable draft (over the input bound), it is skipped.
       if (run.action_type === 'new_supporting_blog') {
         const extractor = getBusinessNameConfirmer();
         const extraction = extractor
@@ -954,17 +958,21 @@ class AutonomousRunner {
         run.comparison_table_result = comparisonResult;
         if (extraction.ok !== true) {
           const notes = `Company-name check unavailable (${extraction.reason || 'unknown'}) — the owner competitor list could not be applied.`;
-          if (extraction.retryable === true) {
+          const retriesSoFar = Number(opp.signal_metadata?.company_check_retries) || 0;
+          if (extraction.retryable === true && retriesSoFar < COMPANY_CHECK_MAX_RETRIES
+            && await this._recordCompanyCheckRetry(opp, retriesSoFar + 1, claimToken).catch(() => false)) {
             const finalized = await finalize(run, t0, {
               outcome: 'deferred_company_check',
               skip_reason: 'named_competitor_unverified_names',
-              reviewer_notes: `${notes} Deferred one hour for a retry.`,
+              reviewer_notes: `${notes} Deferred one hour for retry ${retriesSoFar + 1} of ${COMPANY_CHECK_MAX_RETRIES}.`,
             });
             await this._deferClaimOrThrow(queue, opp.id, new Date(Date.now() + COMPANY_CHECK_RETRY_MS), { claimToken });
             return finalized;
           }
           const finalized = await finalize(run, t0, {
-            outcome: 'skipped', skip_reason: 'named_competitor_unverified_names', reviewer_notes: notes,
+            outcome: 'skipped',
+            skip_reason: 'named_competitor_unverified_names',
+            reviewer_notes: extraction.retryable === true ? `${notes} Retries exhausted (${retriesSoFar}).` : notes,
           });
           await this._skipClaimOrThrow(queue, opp.id, 'named_competitor_unverified_names', { claimToken });
           return finalized;
@@ -2016,6 +2024,18 @@ class AutonomousRunner {
    * was actually written. Guarded to the active claim so a stale worker
    * can't stamp feedback over another attempt.
    */
+  // Company-check retry counter on the opportunity (same claim-guarded
+  // signal_metadata write as _recordGateRetry). True only when written.
+  async _recordCompanyCheckRetry(opp, count, claimToken) {
+    const meta = { ...(opp.signal_metadata || {}), company_check_retries: count };
+    const updated = await db('opportunity_queue')
+      .where('id', opp.id)
+      .where('status', 'claimed')
+      .where('claimed_at', claimToken)
+      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
+    return updated > 0;
+  }
+
   async _recordGateRetry(opp, skipReason, blocking, claimToken) {
     const findings = (blocking || []).map((f) => ({
       severity: f.severity,

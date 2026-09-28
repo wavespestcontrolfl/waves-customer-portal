@@ -3149,7 +3149,7 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, businessNameConfirmer = undefined, slug = SLUG }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, businessNameConfirmer = undefined, slug = SLUG, signalMetadata = undefined }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3157,6 +3157,7 @@ describe('named-competitor autopublish gate', () => {
         action_type: 'new_supporting_blog',
         bucket: 'operator_intercept',
         claimed_at: claimedAt,
+        ...(signalMetadata ? { signal_metadata: signalMetadata } : {}),
       }),
       complete: jest.fn().mockResolvedValue(true),
       pendingReview: jest.fn().mockResolvedValue(true),
@@ -3361,15 +3362,17 @@ describe('named-competitor autopublish gate', () => {
       expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
     });
 
-    test('an extraction outage defers the draft an hour instead of dropping it; an over-long draft is skipped', async () => {
+    test('an extraction outage defers the draft an hour instead of dropping it — at most 3 times — and an over-long draft is skipped', async () => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = prPublisher(917);
-      const businessNameConfirmer = { extractCompanyNames: jest.fn().mockResolvedValue({ ok: false, key: 'k', reason: 'no_key', retryable: true }) };
-      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, businessNameConfirmer });
+      const outage = () => ({ extractCompanyNames: jest.fn().mockResolvedValue({ ok: false, key: 'k', reason: 'no_key', retryable: true }) });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, businessNameConfirmer: outage() });
+      const recordRetry = jest.spyOn(runner, '_recordCompanyCheckRetry').mockResolvedValue(true);
       const before = Date.now();
 
       const result = await runner.runNext();
 
+      expect(recordRetry).toHaveBeenCalledWith(expect.objectContaining({ id: 'opp_named_1' }), 1, claimedAt);
       expect(result).toMatchObject({ outcome: 'deferred_company_check', skip_reason: 'named_competitor_unverified_names' });
       expect(result.reviewer_notes).toMatch(/no_key/);
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
@@ -3377,6 +3380,16 @@ describe('named-competitor autopublish gate', () => {
       const [id, availableAt, payload] = queue.defer.mock.calls[0];
       expect([id, payload]).toEqual(['opp_named_1', { claimToken: claimedAt }]);
       expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(59 * 60 * 1000);
+
+      // queue.defer refunds the claim attempt, so the retry count on the
+      // opportunity is what bounds an outage (pre-push r7).
+      const exhausted = namedCompetitorScenario({
+        publisher: prPublisher(919), comparisonGate: realGate, businessNameConfirmer: outage(),
+        signalMetadata: { company_check_retries: 3 },
+      });
+      expect(await exhausted.runner.runNext()).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(exhausted.queue.defer).not.toHaveBeenCalled();
+      expect(exhausted.queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: exhausted.claimedAt });
 
       const tooLong = { extractCompanyNames: jest.fn().mockResolvedValue({ ok: false, key: null, reason: 'draft_too_long_for_extraction', retryable: false }) };
       const second = namedCompetitorScenario({ publisher: prPublisher(918), comparisonGate: realGate, businessNameConfirmer: tooLong });

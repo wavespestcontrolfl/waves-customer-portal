@@ -62,10 +62,13 @@ function extractionInput(draft) {
   const fm = draft?.frontmatter || {};
   const body = String(draft?.body || draft?.content || '');
   const links = [...new Set(body.match(LINK_RE) || [])];
+  // BOTH metadata shapes (top-level and frontmatter) — producers disagree on
+  // which one the publisher reads, so every distinct value is checked.
+  const all = (...vals) => [...new Set(vals.filter(Boolean).map(String))].join(' | ');
   const text = [
-    `TITLE: ${draft?.title || fm.title || ''}`,
-    `SLUG / URL: ${[fm.slug, draft?.slug, draft?.url].filter(Boolean).join(' ')}`,
-    `META DESCRIPTION: ${draft?.meta_description || fm.meta_description || ''}`,
+    `TITLE: ${all(draft?.title, fm.title, draft?.metaTitle, fm.metaTitle, fm.meta_title)}`,
+    `SLUG / URL: ${all(fm.slug, draft?.slug, draft?.url, fm.canonical)}`,
+    `META DESCRIPTION: ${all(draft?.meta_description, fm.meta_description, draft?.metaDescription, fm.metaDescription)}`,
     `LINK DESTINATIONS:\n${links.join('\n')}`,
     `BODY:\n${body}`,
   ].join('\n\n');
