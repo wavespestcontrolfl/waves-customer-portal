@@ -122,7 +122,7 @@ async function getReviewItem(opportunityId) {
  * path (which updates the opportunity), so the run reselect that follows
  * sees the true current run.
  */
-async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
+async function lockCurrentRun(trx, opportunityId, run, expectedRunId, decision = null) {
   const lockedOpp = await trx('opportunity_queue').where({ id: opportunityId }).forUpdate().first();
   if (!lockedOpp || lockedOpp.status !== 'pending_review') {
     const err = new Error('Opportunity review state changed; refresh before applying a decision');
@@ -130,7 +130,7 @@ async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
     err.isOperational = true;
     throw err;
   }
-  assertPageEditNotSuperseded(lockedOpp);
+  assertPageEditNotSuperseded(lockedOpp, decision);
   const current = await trx('autonomous_runs')
     .where('opportunity_id', opportunityId)
     .orderBy('claimed_at', 'desc')
@@ -161,7 +161,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     err.isOperational = true;
     throw err;
   }
-  assertPageEditNotSuperseded(opportunity);
+  assertPageEditNotSuperseded(opportunity, normalizedDecision);
 
   const run = await db('autonomous_runs')
     .where('opportunity_id', opportunityId)
@@ -286,7 +286,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       // Reselect + lock the current run — a dismiss must act on the run
       // the reviewer saw, not silently skip a replacement that parked
       // after the pre-transaction read (Codex r19).
-      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId, normalizedDecision);
       if (currentRun) {
         if (currentRun.outcome !== 'completed_pending_review' || currentRun.skip_reason === 'astro_pr_pending_merge') {
           const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
@@ -449,10 +449,11 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 
 function reviewActions({ opportunity, run }) {
   const superseded = pageEditSuperseded(opportunity);
-  const pendingReview = !superseded && opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
+  const inReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
+  const pendingReview = !superseded && inReview;
   return {
     can_requeue: pendingReview,
-    can_dismiss: pendingReview,
+    can_dismiss: pendingReview || (inReview && supersededReconciliationHold(opportunity)),
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
@@ -463,8 +464,17 @@ function pageEditSuperseded(opportunity) {
   return require('./opportunity-queue')._internals.pageEditSuperseded(opportunity);
 }
 
-function assertPageEditNotSuperseded(opportunity) {
+// A superseded reconciliation hold may record an external write nobody could
+// confirm. Dismiss (terminal, never revives the row) stays available so a
+// person who has checked GitHub can retire it; every other decision is off.
+function supersededReconciliationHold(opportunity) {
+  const { RECONCILIATION_HOLD_REASONS } = require('./opportunity-queue')._internals;
+  return pageEditSuperseded(opportunity) && RECONCILIATION_HOLD_REASONS.includes(opportunity?.skip_reason);
+}
+
+function assertPageEditNotSuperseded(opportunity, decision = null) {
   if (!pageEditSuperseded(opportunity)) return;
+  if (decision === 'dismiss' && supersededReconciliationHold(opportunity)) return;
   const err = new Error('This citability backfill was superseded by an ordinary page edit; review decisions are disabled while its PR is retired');
   err.statusCode = 409;
   err.isOperational = true;

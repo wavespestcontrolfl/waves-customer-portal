@@ -509,6 +509,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       { id: 'review-retiring', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#retiring', signal_metadata: { evidence: 'retired-pr-pending-bookkeeping' } },
       { id: 'review-historical', bucket: 'citability_backfill', status: 'pending_review', claim_id: 'claim-new', page_url: 'https://wavespestcontrol.com/blog/termite-guide#historical', signal_metadata: { evidence: 'old-claim-pr' } },
       { id: 'spoke', bucket: 'citability_backfill', status: 'pending', page_url: 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', signal_metadata: {} },
+      // An audit insert failed after a PR may have opened: no PR evidence on
+      // record, but the hold must survive for a person to reconcile.
+      { id: 'review-hold', bucket: 'citability_backfill', status: 'pending_review', skip_reason: 'astro_pr_audit_failed', page_url: 'https://wavespestcontrol.com/blog/termite-guide#hold', signal_metadata: { evidence: 'unconfirmed-write' } },
     ];
     const trx = jest.fn((table) => {
       let id = null;
@@ -546,7 +549,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       now: new Date('2026-09-26T16:00:00Z'),
     });
 
-    expect(count).toBe(6);
+    expect(count).toBe(7);
+    expect(rows.find((row) => row.id === 'review-hold')).toMatchObject({ status: 'pending_review', skip_reason: 'astro_pr_audit_failed' });
+    expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'review-hold'))).toBe(true);
     expect(rows.find((row) => row.id === 'pending')).toMatchObject({
       status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
     });

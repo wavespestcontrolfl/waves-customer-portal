@@ -26,6 +26,14 @@ const effectiveActionSql = require('./opportunity-action-sql');
 
 const PAGE_EDIT_SUPERSEDED_KEY = 'page_edit_superseded';
 const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
+// pending_review parks that stand for a POSSIBLE external write whose PR or
+// live URL could not be recorded. Supersession marks them but never
+// terminalizes them: only a person who has checked GitHub may retire one.
+const RECONCILIATION_HOLD_REASONS = [
+  'astro_pr_audit_failed', 'published_audit_failed',
+  'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
+  'named_competitor_publish_interrupted',
+];
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
 // A failed status write may leave a published run's row pending. Fence every
@@ -183,7 +191,7 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       ELSE regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '') END = ?`, [host])
     .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(split_part(page_url, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
     .forUpdate()
-    .select('id', 'page_url', 'status', 'claim_id', 'claimed_at', 'signal_metadata');
+    .select('id', 'page_url', 'status', 'skip_reason', 'claim_id', 'claimed_at', 'signal_metadata');
   const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);
   for (const row of matched) {
     let metadata = row.signal_metadata;
@@ -208,7 +216,9 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
         : parkedRun.where('queue_claim_id', row.claim_id);
       hasParkedPr = Boolean(await parkedRun.first('id'));
     }
-    const terminal = row.status === 'pending' || (row.status === 'pending_review' && !hasParkedPr);
+    const reconciliationHold = row.status === 'pending_review' && RECONCILIATION_HOLD_REASONS.includes(row.skip_reason);
+    const terminal = row.status === 'pending'
+      || (row.status === 'pending_review' && !hasParkedPr && !reconciliationHold);
     await trx('opportunity_queue').where('id', row.id).update({
       signal_metadata: JSON.stringify({
         ...metadata,
@@ -733,4 +743,5 @@ module.exports._internals = {
   supersedeCitabilityBackfillsForPage,
   PAGE_EDIT_SUPERSEDED_KEY,
   PAGE_EDIT_SUPERSEDED_REASON,
+  RECONCILIATION_HOLD_REASONS,
 };
