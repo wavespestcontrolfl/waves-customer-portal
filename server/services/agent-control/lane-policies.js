@@ -345,6 +345,8 @@ const LANE_RUNTIME = {
   // ── Customer portal ──
   // M3 (Codex r17): processIntakeMessage returns the reply to the public intake route and records it sent_to_customer with its session audit.
   ask_waves: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M3' },
+  // #4899: a yes swaps the Ask Waves reply for the emergency script, so the verdict is customer-visible.
+  ask_waves_emergency_check: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification', maturity: 'M3' },
   // offline + M3: single Anthropic client, canned error copy; tools run without approval and every call is persisted to agent_messages (Codex r12).
   // direct_sdk: that client is the raw SDK — agent_messages is an audit trail, not the adapter call ledger (Codex r14).
   portal_assistant: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
