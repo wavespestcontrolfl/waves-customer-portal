@@ -1335,7 +1335,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
       const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      const { arrivalWindowRange, formatSmsTimeRange, spokenArrivalWindow } = require('../utils/sms-time-format');
       // Customer-facing time is ALWAYS the 2-hour arrival window from the
       // start — never the exact start or the duration-driven window_end
       // (owner directive; see utils/sms-time-format).
@@ -1355,6 +1355,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           day: formatETDay(apptTime),
           date: formatETDate(apptTime),
           time: timeText,
+          // "between 9:00 AM and 11:00 AM" — the phrase every reminder uses.
+          window: spokenArrivalWindow(start),
         }, {
           workflow: 'schedule_update_reschedule',
           entity_type: 'scheduled_service',
