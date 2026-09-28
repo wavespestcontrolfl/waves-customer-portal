@@ -3321,6 +3321,54 @@ describe('runNext post-publish bookkeeping', () => {
     }
   });
 
+  test('still parks an unreconciled refresh write when its audit record cannot be written', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+    try {
+      const claimedAt = new Date('2026-09-28T19:30:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_unreconciled_2', action_type: 'new_supporting_blog', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_unreconciled_2', action_type: 'new_supporting_blog', page_type: 'blog', human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/blog/y/', title: 'Y' } }),
+      };
+      const qualityGate = {
+        evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }),
+      };
+      const err = new Error('refresh write to content/refresh-y-def timed out and the branch could not be deleted (500)');
+      err.code = 'REFRESH_PUBLISH_UNRECONCILED';
+      const publisher = { publishOrUpdatePage: jest.fn().mockRejectedValue(err) };
+      const auditRejected = new Error('audit insert rejected');
+      const dbQuery = () => {
+        const returning = jest.fn().mockRejectedValue(auditRejected);
+        return { insert: jest.fn(() => ({ returning, onConflict: () => ({ ignore: () => ({ returning }) }) })) };
+      };
+      const runner = loadRunnerWith({
+        queue, briefBuilder, dispatcher, qualityGate, publisher, indexNow: { submit: jest.fn() }, linkPlanner: {}, dbQuery,
+      });
+
+      await expect(runner.runNext()).rejects.toBe(auditRejected);
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_unreconciled_2', 'refresh_publish_unreconciled', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.skip).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
   test('parks deterministic publish validation failures instead of retrying the same opportunity', async () => {
     const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;

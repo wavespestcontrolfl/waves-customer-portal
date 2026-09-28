@@ -1433,12 +1433,20 @@ class AutonomousRunner {
       if (err.code === 'REFRESH_PUBLISH_UNRECONCILED') {
         // A timed-out GitHub write may have landed and could not be ruled out.
         // Never retry into a duplicate PR: park it for a person to check.
-        const finalized = await finalize(run, t0, {
-          outcome: 'completed_pending_review',
-          skip_reason: 'refresh_publish_unreconciled',
-          failure_message: err.message,
-          reviewer_notes: `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`,
-        });
+        // The park must happen even when the audit write fails: a claimed row
+        // would be re-pended by stale-claim recovery into a duplicate PR.
+        let finalized;
+        try {
+          finalized = await finalize(run, t0, {
+            outcome: 'completed_pending_review',
+            skip_reason: 'refresh_publish_unreconciled',
+            failure_message: err.message,
+            reviewer_notes: `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`,
+          });
+        } catch (auditErr) {
+          await this._parkPublishedClaimForReconciliation(queue, opp.id, 'refresh_publish_unreconciled', { claimToken }, err);
+          throw auditErr;
+        }
         await this._parkPublishedClaimForReconciliation(queue, opp.id, 'refresh_publish_unreconciled', { claimToken }, err);
         return finalized;
       }
