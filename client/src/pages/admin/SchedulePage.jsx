@@ -13030,16 +13030,6 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
-  // Basic (non-typed) flow only (pre-push P2, Codex #5145 r2): the tech
-  // reviews the photo summary and explicitly opts in via the "add to notes"
-  // button before it may ground the writer — captions are already
-  // tech-reviewed and need no separate opt-in. Stores the EXACT
-  // (trimmed/capped) summary text that was opted into, the same
-  // "does the CURRENT value still match what was trusted" pattern
-  // generatedReportTextRef uses: a later summary edit (or re-analysis)
-  // no longer matches, so the stale opt-in silently stops applying instead
-  // of grounding text the tech never actually reviewed-and-accepted.
-  const optedInPhotoSummaryRef = useRef(null);
   // Whether the CURRENTLY INSTALLED draft was actually generated with photo
   // grounding — the server's own photoGroundingUsed flag on its response
   // (pre-push P2, Codex #5145 r3), never guessed client-side. With the gate
@@ -15931,6 +15921,31 @@ export function CompletionPanel({
   function recommendationFreeText() {
     return uniqueLines([...freeTextLines(recommendationsText), ...freeTextLines(parkedNext), ...taggedNoteLines("next")]);
   }
+  // The tech-reviewed photo captions/summary the writer may actually see
+  // (owner spec 2026-09-27, GATE_REPORT_PHOTO_CONTENT) — the SINGLE source
+  // both buildAiReportPayload (what gets sent) and
+  // buildGenerationInputsSnapshot (what invalidates a draft) read, so they
+  // cannot drift (pre-push P2, Codex #5145 r4). Captions read straight off
+  // the CURRENT servicePhotos array, so a photo the tech deleted before
+  // Generate never contributes one; capped defensively (first 5, 200 chars
+  // each — the server re-caps from scratch and never trusts this client
+  // cap, but the snapshot must track the SAME capped list, not the raw
+  // one, or an edit past the cap would falsely (or falsely NOT) invalidate).
+  // The summary is basic-flow's own separate story: it is NEVER submitted
+  // in the generate payload for a non-typed visit — the existing "Add to
+  // technician notes" button already carries the reviewed text into
+  // notes/serviceNotes, reaching the writer that one way, so there is no
+  // second provenance to track or approve. The typed flow still sends it
+  // directly (it "appears on the customer report", no opt-in step exists).
+  function reportPhotoInputs() {
+    const captions = (Array.isArray(servicePhotos) ? servicePhotos : [])
+      .map((p) => String(p?.caption || "").trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((c) => c.slice(0, 200));
+    const summary = isTypedFindings ? String(typedPhotoSummary || "").trim().slice(0, 600) : "";
+    return { captions, summary };
+  }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
   // server can't drift. The payload classifies inputs by provenance so the
@@ -15942,23 +15957,13 @@ export function CompletionPanel({
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
     // Tech-reviewed photo captions/summary for the AI writer (owner spec
-    // 2026-09-27, GATE_REPORT_PHOTO_CONTENT). Captions read straight off the
-    // CURRENT servicePhotos array, so a photo the tech deleted before
-    // Generate never contributes a caption here.
-    const reportPhotoCaptions = (Array.isArray(servicePhotos) ? servicePhotos : [])
-      .map((p) => String(p?.caption || "").trim())
-      .filter(Boolean)
-      .slice(0, 5)
-      .map((c) => c.slice(0, 200));
-    const reportPhotoSummary = String(typedPhotoSummary || "").trim().slice(0, 600);
-    // Basic flow only: the summary must be sent only after the tech's
-    // explicit "add to notes" opt-in for THIS exact text (see
-    // optedInPhotoSummaryRef above) — reviewing it in the textarea is not
-    // itself consent to ground the writer. The typed flow has no opt-in
-    // step (the summary "appears on the customer report" directly), so it
-    // always sends.
-    const reportPhotoSummaryOptedIn = isTypedFindings
-      || (optedInPhotoSummaryRef.current !== null && optedInPhotoSummaryRef.current === reportPhotoSummary);
+    // 2026-09-27, GATE_REPORT_PHOTO_CONTENT) — the EXACT values the request
+    // actually submits. Shared with buildGenerationInputsSnapshot
+    // (reportPhotoInputs, defined below) so the two can never drift on what
+    // "the photo inputs actually submitted" means (pre-push P2, Codex #5145
+    // r4: an edit to a 6th caption, or beyond the 200-char cap, must not
+    // invalidate the draft — it was never part of the submitted set).
+    const { captions: reportPhotoCaptions, summary: reportPhotoSummary } = reportPhotoInputs();
     const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
     // Free text is the input surface now; restored older drafts can still
     // carry chip-label selections, so both merge into the same arrays.
@@ -16173,7 +16178,13 @@ export function CompletionPanel({
       // its caption is never sent. Capped defensively; the server re-caps
       // from scratch and never trusts this client-side cap.
       ...(reportPhotoCaptions.length ? { photoCaptions: reportPhotoCaptions } : {}),
-      ...(reportPhotoSummary && reportPhotoSummaryOptedIn ? { photoSummary: reportPhotoSummary } : {}),
+      // Basic (non-typed) flow never sends a photoSummary at all (pre-push
+      // P2, Codex #5145 r4) — reportPhotoInputs() returns "" for it there,
+      // since the existing "Add to technician notes" button already puts
+      // the reviewed summary text into notes/serviceNotes, reaching the
+      // writer that one way. The typed flow keeps sending it (it "appears
+      // on the customer report" directly, with no separate opt-in step).
+      ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
       ...typedFindingsPayload,
     };
@@ -18206,19 +18217,24 @@ export function CompletionPanel({
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
-      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1, r3): reviewed
-      // captions and the photo summary are generation inputs too (see
-      // buildAiReportPayload's photoCaptions/photoSummary) — the set's SIZE
-      // above doesn't catch an edited caption on an unchanged photo count,
-      // and typedPhotoSummary wasn't tracked at all, so the AI copy could
-      // stay installed beside captions/a summary the report was never
-      // actually generated from. BUT only when the INSTALLED draft was
-      // actually generated WITH grounding (installedPhotoGroundingUsedRef,
-      // set from the server's photoGroundingUsed response flag) — with the
-      // gate off (the default) neither value ever reached the model, so
-      // editing them must not clear an otherwise-untouched draft (r3).
+      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1, r3, r4):
+      // reviewed captions (and, typed flow only, the summary) are
+      // generation inputs too — the set's SIZE above doesn't catch an
+      // edited caption on an unchanged photo count. reportPhotoInputs()
+      // (defined above buildAiReportPayload) is the SAME capped
+      // captions/summary buildAiReportPayload actually sends — an edit to
+      // a 6th caption, or past the 200-char cap, is outside what was
+      // submitted and must NOT invalidate; an edit WITHIN the submitted
+      // set must. Tracked only when the INSTALLED draft was actually
+      // generated WITH grounding (installedPhotoGroundingUsedRef, set from
+      // the server's photoGroundingUsed response flag) — with the gate off
+      // (the default) neither value ever reached the model, so editing
+      // them must not clear an otherwise-untouched draft (r3).
       ...(installedPhotoGroundingUsedRef.current
-        ? [servicePhotos.map((p) => String(p?.caption || "").trim()), typedPhotoSummary]
+        ? (() => {
+          const { captions, summary } = reportPhotoInputs();
+          return [captions, summary];
+        })()
         : []),
       // a retaken/reconfirmed lawn assessment changes what completion and
       // the final report describe — the draft must invalidate with it
@@ -19810,13 +19826,6 @@ export function CompletionPanel({
                             onClick={() => {
                               const summary = typedPhotoSummary.trim();
                               if (!summary) return;
-                              // The explicit opt-in (pre-push P2, Codex
-                              // #5145 r2) — buildAiReportPayload only sends
-                              // photoSummary once this exact text has been
-                              // accepted this way. Capped the same way
-                              // reportPhotoSummary is, so a restored
-                              // over-length draft still matches.
-                              optedInPhotoSummaryRef.current = summary.slice(0, 600);
                               setNotes((prev) =>
                                 prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
                               );
@@ -22223,13 +22232,6 @@ export function CompletionPanel({
                           onClick={() => {
                             const summary = typedPhotoSummary.trim();
                             if (!summary) return;
-                            // The explicit opt-in (pre-push P2, Codex #5145
-                            // r2) — buildAiReportPayload only sends
-                            // photoSummary once this exact text has been
-                            // accepted this way. Capped the same way
-                            // reportPhotoSummary is, so a restored
-                            // over-length draft still matches.
-                            optedInPhotoSummaryRef.current = summary.slice(0, 600);
                             setNotes((prev) =>
                               prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
                             );

@@ -59,6 +59,14 @@ const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-id
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+// The plan's callbacks, as a customer knows them ("re-service"). Not
+// re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
+// rodent_trapping_followup, an included trapping-program visit that no
+// customer would call a re-service.
+const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+const { isActivePlanCustomer } = require('../waveguard-existing-services');
+const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
 
 let PhotoService = null;
 try {
@@ -1869,6 +1877,7 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.nextAppointment;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
+  delete data.planSummary;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4190,11 +4199,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
-      // never reach the customer's permanent report token. Shared with the
-      // cache-signature side (photo-set-signature.js) through
-      // resolveLawnReportPhotos — see report-photo-set.js — so the two never
-      // drift on which rows a report can show (pre-push P1, third round).
-      const turfPhotos = await require('./report-photo-set').resolveLawnReportPhotos(linkedAssessment.id, knex);
+      // never reach the customer's permanent report token.
+      const turfPhotos = await knex('lawn_assessment_photos')
+        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
+        .orderBy('photo_order', 'asc')
+        .orderBy('taken_at', 'asc')
+        .catch(() => []);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
         // Dropped-but-expected turf photo — same silent-omission class.
@@ -4779,6 +4789,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachUpcomingRoachVisits;
   let cockroachProgramPosition;
   let cockroachRenderedSignature;
+  // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
+  // this year's performed-visit + re-service COUNTS — never a price, owner
+  // rule that prices live on estimate pages only. It lists no upcoming
+  // visits. Live-view only (stripLiveOnlyScheduleFields), like
+  // nextAppointment.
+  let planSummary = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4976,6 +4992,88 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // The signature of the program state THIS payload carries — the PDF
       // store key reads it from the render, never from a second lookup.
       cockroachRenderedSignature = cockroachProgramSignature(program);
+    }
+
+    // Placed last in this try so a failure here can never disturb the
+    // next-appointment picks already resolved above — this whole block is
+    // best-effort under the shared outer catch.
+    // OPT-IN, live builds only: the /data render path is the one caller that
+    // shows the card (opts.planSummary, set by reports-public.js). The Q&A
+    // endpoint's live build and the PDF, email, recap and map builders would
+    // never read the field, so they skip these reads entirely.
+    if (opts.mode === 'live' && opts.planSummary === true
+      && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+      const yearEt = Number(reportTodayIso.slice(0, 4));
+      // Active plan members only, by the canonical membership read, which
+      // fails closed to non-member: "Your plan" describes a plan a one-time
+      // customer does not have. The plan is account-level (the customers
+      // row), so the counts cover the account's visits, not one property's.
+      // Counts only, never "at no charge": a member's callback can still be
+      // billed, and that money claim needs per-visit proof (reservice-report.js).
+      const member = await isActivePlanCustomer(knex, service.customer_id);
+      // A visit counts only when it was PERFORMED — the same rule Pest
+      // Pressure uses for prior visits (pest-pressure/first-visit.js): a
+      // completed, customer-visible service record whose outcome is not
+      // inspection-only, customer-declined or incomplete. The schedule row's
+      // status alone is not proof: an incomplete or declined closeout still
+      // leaves it 'completed'. The booking joins in only for its visit_id
+      // (grouped stops); it never decides "re-service" — an admin can repoint
+      // or rename it after closeout.
+      const recordRows = member
+        ? await knex('service_records')
+          .leftJoin('scheduled_services', 'scheduled_services.id', 'service_records.scheduled_service_id')
+          .where('service_records.customer_id', service.customer_id)
+          .where('service_records.status', 'completed')
+          .andWhere('service_records.service_date', '>=', `${yearEt}-01-01`)
+          .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
+          .select(
+            'service_records.id',
+            'service_records.scheduled_service_id',
+            'service_records.service_line',
+            'service_records.service_type',
+            'service_records.structured_notes',
+            'service_records.service_data',
+            { record_is_callback: 'service_records.is_callback' },
+            'scheduled_services.visit_id',
+          )
+          .catch(() => null)
+        : null;
+      const performedRows = Array.isArray(recordRows)
+        ? recordRows.filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
+          && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
+        : [];
+      if (performedRows.length) {
+        // One physical stop is one visit: grouped services completed at one
+        // stop share the booking's visit_id (the service_visits parent), and
+        // one booking can own several completion records (the detailed form,
+        // the pest-recap rail, a project close — completion-record-invariants
+        // documents the sibling model), so the booking id comes next. Only a
+        // legacy record with no booking link is its own visit.
+        const visitIdentity = (row) => {
+          if (row.visit_id) return `visit:${row.visit_id}`;
+          if (row.scheduled_service_id) return `booking:${row.scheduled_service_id}`;
+          return `record:${row.id}`;
+        };
+        const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
+        const reservicesThisYear = new Set(performedRows
+          // Decided by the record's FROZEN completion-time evidence only, the
+          // rule reservice-report.js and 20260830000051_repair_recap_callback_
+          // flags.js set: its is_callback, or its service_data.
+          // completedServiceKey of pest_re_service / lawn_re_service. Never
+          // the booking row (repointable after closeout) or a "Re-Service"
+          // display name (a name can belong to a non-callback). A rodent-
+          // program visit (the included trapping follow-up, a trap check) is
+          // a program step, never a re-service, whatever its flags say. A
+          // stop counts once however many of its services were re-services.
+          .filter((row) => {
+            const frozenKey = parseJsonObject(row.service_data).completedServiceKey || null;
+            if (frozenKey === 'rodent_trapping_followup'
+              || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
+            return row.record_is_callback === true || PLAN_CALLBACK_RESERVICE_KEYS.has(frozenKey);
+          })
+          .map(visitIdentity)).size;
+        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
+      }
     }
   } catch { /* best-effort */ }
 
@@ -5596,6 +5694,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
+    // the gate is off, there's no customer, or there's nothing to show —
+    // stripLiveOnlyScheduleFields deletes it for every non-live render, same
+    // staleness rule as nextAppointment.
+    ...(planSummary ? { planSummary } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static

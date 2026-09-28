@@ -2,8 +2,6 @@
 
 const crypto = require('crypto');
 const { hasPendingPhotoSummary } = require('./photo-summary-recovery');
-const { detectServiceLine } = require('./service-line-configs');
-const { resolveLawnReportPhotos } = require('./report-photo-set');
 
 /**
  * Report-photo-set key component for cached service-report PDFs.
@@ -34,22 +32,6 @@ const { resolveLawnReportPhotos } = require('./report-photo-set');
  * keys are untouched; a failed lookup returns a unique token so uncertainty
  * re-renders (and trips the fence) instead of serving or storing a possibly
  * stale document.
- *
- * Lawn turf photos (pre-push P1, third round, 2026-09-28): a lawn visit's
- * report/preview can show a customer-visible lawn_assessment_photos row
- * (report-data.js appends these to the gallery for serviceLine === 'lawn')
- * even with ZERO service_photos rows — so hashing service_photos alone left
- * this signature unmoved ('-pgon' bare) while a turf photo was added,
- * removed, hidden, or the linked assessment changed. This resolves the
- * SAME rows the renderer draws from, through resolveLawnReportPhotos
- * (report-photo-set.js) — the one function both sides consume, so the
- * signature is by construction over exactly the photos the renderer can
- * show. No pin is threaded through here: every existing caller of this
- * function already treats a lawn-assessment identity CHANGE as a separate,
- * pin-aware signature term of its own (lawnAssessmentPdfSignature) — this
- * only needs to detect the turf-photo SET changing under whichever
- * assessment is CURRENTLY linked, which is what every caller compares
- * before/after across a render.
  */
 /**
  * `options.serviceData` — the service_data of the snapshot a render path
@@ -69,62 +51,21 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options 
       .orderBy('id', 'asc')
       .select('id');
     let serviceData;
-    let lawnFields;
     if (Object.hasOwn(options || {}, 'serviceData')) {
       serviceData = options.serviceData;
-      lawnFields = await knex('service_records')
-        .where({ id: serviceRecordId })
-        .first('customer_id', 'service_line', 'service_type', 'scheduled_service_id', 'service_id');
     } else {
       const record = await knex('service_records')
         .where({ id: serviceRecordId })
-        .first('service_data', 'customer_id', 'service_line', 'service_type', 'scheduled_service_id', 'service_id');
+        .first('service_data');
       serviceData = record ? record.service_data : null;
-      lawnFields = record;
     }
     if (typeof serviceData === 'string') {
       try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
     }
     const parked = hasPendingPhotoSummary(serviceData) ? '-ps' : '';
-
-    // Lawn turf photos join the identity too — see the module doc above.
-    // loadLinkedLawnAssessment is lazily required (report-data.js is a large
-    // sibling module with no reason to load eagerly on every signature call,
-    // and this file has no top-level dependency on it otherwise).
-    //
-    // Both lookups below run failClosed (pre-push P1, follow-up): a genuine
-    // "no assessment linked" / "no customer-visible photos" resolves normally
-    // (null / []) and simply contributes no lawn part — that is NOT an
-    // error. Only a real QUERY FAILURE throws here, and neither call is
-    // caught locally, so it propagates to this function's own outer
-    // try/catch below and comes back as the unique '-phu' failure token —
-    // never a valid empty-set signature an unreadable lawn photo set could
-    // otherwise be mistaken for (see report-photo-set.js's failClosed doc).
-    let lawnPart = '';
-    const serviceLine = lawnFields?.service_line || detectServiceLine(lawnFields?.service_type);
-    if (serviceLine === 'lawn' && lawnFields?.customer_id) {
-      const assessment = await require('./report-data')
-        .loadLinkedLawnAssessment({
-          id: serviceRecordId,
-          customer_id: lawnFields.customer_id,
-          scheduled_service_id: lawnFields.scheduled_service_id,
-          service_id: lawnFields.service_id,
-        }, knex, { failClosed: true });
-      if (assessment?.id) {
-        const turfPhotos = await resolveLawnReportPhotos(assessment.id, knex, { failClosed: true });
-        if (turfPhotos.length) {
-          const turfDigest = crypto.createHash('sha1')
-            .update(turfPhotos.map((p) => `${p.id}:${p.updated_at ? new Date(p.updated_at).toISOString() : ''}`).join(','))
-            .digest('hex')
-            .slice(0, 8);
-          lawnPart = `-lp${turfPhotos.length}-${turfDigest}`;
-        }
-      }
-    }
-
-    if (!rows.length && !lawnPart) return parked;
+    if (!rows.length) return parked;
     const digest = crypto.createHash('sha1').update(rows.map((row) => String(row.id)).join(',')).digest('hex').slice(0, 8);
-    return `-ph${rows.length}-${digest}${lawnPart}${parked}`;
+    return `-ph${rows.length}-${digest}${parked}`;
   } catch {
     return `-phu-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   }
