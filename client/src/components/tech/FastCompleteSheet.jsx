@@ -218,11 +218,13 @@ function rowRate(row, sprayMethod) {
 }
 
 // Every requirement the application record needs, in screen order.
-function missingRequirement(form, rows, ratingAllowed) {
+function missingRequirement(form, rows, ratingAllowed, dictationPending) {
   const active = rows.filter((row) => row.active);
   const missingAmount = active.find((row) => !hasAmount(row));
   const needsLinearFt = active.some((row) => rowMethod(row, form.method) === 'perimeter_spray');
   return [
+    // A recorded clip still being taken or transcribed would miss the save.
+    [dictationPending, 'Finish dictating before you complete.'],
     [!active.length, 'Select at least one product.'],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [!form.pests.size, 'Select at least one pest.'],
@@ -501,6 +503,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
   const tipsAvailable = !!ctx.tips;
+  const [dictationPending, setDictationPending] = useState(false);
 
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
@@ -511,7 +514,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
     setRows((prev) => prev.map((row) => (SPRAY_METHODS.has(row.catalogMethod) ? { ...row, rateInput: null } : row)));
   }, [setField]);
 
-  const missingReason = missingRequirement(form, rows, ctx.rating.allowed);
+  const missingReason = missingRequirement(form, rows, ctx.rating.allowed, dictationPending);
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
@@ -525,7 +528,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, onFullFor
     <>
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} serviceId={service?.id} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={setDictationPending} serviceId={service?.id} locked={locked} />
           <PhotosSection serviceId={service?.id} customerName={ctx.visit?.customerName || service?.customerName} request={request} locked={locked} />
           <ProductsSection
             rows={rows}
@@ -658,7 +661,7 @@ function MethodSection({ form, rows, setField, chooseMethod, locked }) {
 // The visit note leads the sheet. The mic appends what the tech says; on a
 // phone without speech recognition it records a clip for server transcription
 // (DictationButton's upload fallback), and renders nothing where neither works.
-function VisitNote({ note, onChange, onDictated, serviceId, locked }) {
+function VisitNote({ note, onChange, onDictated, onDictationPending, serviceId, locked }) {
   const noteId = useId();
   return (
     <section className="tech-visit-choice-section">
@@ -666,7 +669,7 @@ function VisitNote({ note, onChange, onDictated, serviceId, locked }) {
         <h3 className="tech-visit-section-title"><label htmlFor={noteId}>Tell me about the visit</label></h3>
       </div>
       <div className="tech-visit-note-row">
-        <DictationButton onAppend={onDictated} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
+        <DictationButton onAppend={onDictated} onPendingChange={onDictationPending} palette={MIC_PALETTE} size={48} title="Talk about the visit" disabled={locked} uploadServiceId={serviceId} />
         <Textarea
           id={noteId}
           className="tech-visit-control"

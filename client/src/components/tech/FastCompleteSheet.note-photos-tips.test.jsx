@@ -7,12 +7,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 // The mic: a supported browser whose transcript the test delivers by hand.
-const dictation = vi.hoisted(() => ({ onTranscript: null, options: null }));
+const dictation = vi.hoisted(() => ({ onTranscript: null, options: null, state: { listening: false, mode: 'speech', uploading: false } }));
 vi.mock('../../hooks/useSpeechDictation', () => ({
   default: (onTranscript, options) => {
     dictation.onTranscript = onTranscript;
     dictation.options = options;
-    return { listening: false, supported: true, toggle: () => {}, cancel: () => {}, mode: 'speech', uploading: false };
+    return { supported: true, toggle: () => {}, cancel: () => {}, ...dictation.state };
   },
 }));
 vi.mock('./TechServicePhotosModal', () => ({
@@ -26,7 +26,10 @@ vi.mock('./TechServicePhotosModal', () => ({
 
 import FastCompleteSheet from './FastCompleteSheet';
 
-beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
+beforeEach(() => {
+  vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  dictation.state = { listening: false, mode: 'speech', uploading: false };
+});
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const CATALOG = [
@@ -100,6 +103,35 @@ describe('FastCompleteSheet visit note', () => {
 
     const body = await completeAndReadBody(request);
     expect(body.technicianNotes).toBe('Sprayed the garage threshold. Ghost ants at the kitchen window.');
+  });
+});
+
+describe('FastCompleteSheet recorded dictation', () => {
+  async function fillRequired(request) {
+    await openSheet(request);
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    return screen.getByRole('button', { name: 'Complete re-service' });
+  }
+
+  test('a clip still recording holds the completion until it is stopped', async () => {
+    dictation.state = { listening: true, mode: 'upload', uploading: false };
+    const submit = await fillRequired(makeRequest());
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByText('Finish dictating before you complete.')).toBeTruthy();
+  });
+
+  test('a clip being transcribed holds the completion and the mic', async () => {
+    dictation.state = { listening: false, mode: 'upload', uploading: true };
+    const submit = await fillRequired(makeRequest());
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Transcribing' }).disabled).toBe(true);
+  });
+
+  test('live speech recognition never holds the completion', async () => {
+    dictation.state = { listening: true, mode: 'speech', uploading: false };
+    const submit = await fillRequired(makeRequest());
+    expect(submit.disabled).toBe(false);
   });
 });
 

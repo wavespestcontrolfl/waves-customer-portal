@@ -19,7 +19,40 @@ import useSpeechDictation from "../../hooks/useSpeechDictation";
  *   uploadServiceId optional — the visit's id; where SpeechRecognition is
  *                   missing, the hook records a clip and sends it for server
  *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
+ *   onPendingChange optional — told true while a recorded clip is being
+ *                   taken or transcribed (the upload path only), so the
+ *                   caller can hold a save until the words arrive
  */
+function micLabel({ uploading, listening, title }) {
+  if (uploading) return "Transcribing";
+  return listening ? "Stop dictation" : title;
+}
+
+function legacyMicStyle({ size, listening, palette }) {
+  const {
+    accent = "#0ea5e9",
+    muted = "#94a3b8",
+    red = "#ef4444",
+    card = "#ffffff",
+  } = palette || {};
+  return {
+    width: size,
+    height: size,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "50%",
+    border: `1px solid ${listening ? red : muted}`,
+    background: listening ? red : card,
+    color: listening ? "#fff" : accent,
+    cursor: "pointer",
+    padding: 0,
+    boxShadow: listening ? `0 0 0 4px ${red}33` : "none",
+    transition: "background 0.15s, box-shadow 0.15s",
+    flex: "0 0 auto",
+  };
+}
+
 export default function DictationButton({
   onAppend,
   palette,
@@ -28,10 +61,19 @@ export default function DictationButton({
   presentation = "legacy",
   disabled = false,
   uploadServiceId,
+  onPendingChange,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel } = useSpeechDictation(onAppend, { uploadServiceId });
+  const { listening, supported, toggle, cancel, mode, uploading } = useSpeechDictation(onAppend, { uploadServiceId });
+
+  // A recorded clip has no transcript until it is stopped and transcribed;
+  // a save in that window would go out without it. (Live speech recognition
+  // stops itself when another button is pressed, so it never holds a save.)
+  const pending = mode === "upload" && (listening || uploading);
+  useEffect(() => {
+    onPendingChange?.(pending);
+  }, [pending, onPendingChange]);
 
   // A consumer disables the mic while it is busy (e.g. an AI rewrite of the
   // same field). Dictation keeps listening through pauses, and a disabled
@@ -43,43 +85,20 @@ export default function DictationButton({
 
   if (!supported) return null;
 
-  const {
-    accent = "#0ea5e9",
-    muted = "#94a3b8",
-    red = "#ef4444",
-    card = "#ffffff",
-  } = palette || {};
+  const label = micLabel({ uploading, listening, title });
 
   return (
     <Control
       type="button"
       onClick={toggle}
-      disabled={disabled}
-      title={listening ? "Stop dictation" : title}
-      aria-label={listening ? "Stop dictation" : title}
+      disabled={disabled || uploading}
+      aria-busy={uploading || undefined}
+      title={label}
+      aria-label={label}
       aria-pressed={listening}
       variant={migrated ? (listening ? "danger" : "secondary") : undefined}
       className={migrated ? "min-w-11 !p-0" : undefined}
-      style={
-        migrated
-          ? undefined
-          : {
-              width: size,
-              height: size,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "50%",
-              border: `1px solid ${listening ? red : muted}`,
-              background: listening ? red : card,
-              color: listening ? "#fff" : accent,
-              cursor: "pointer",
-              padding: 0,
-              boxShadow: listening ? `0 0 0 4px ${red}33` : "none",
-              transition: "background 0.15s, box-shadow 0.15s",
-              flex: "0 0 auto",
-            }
-      }
+      style={migrated ? undefined : legacyMicStyle({ size, listening, palette })}
     >
       <svg
         width={Math.round(size * 0.52)}
