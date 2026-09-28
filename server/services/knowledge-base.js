@@ -193,9 +193,10 @@ function cogsUnitCost(p) {
   if (!one.warning && Number.isFinite(one.cost)) return one.cost;
   const price = parseFloat(p.best_price);
   if (!Number.isFinite(price) || price < 0) return null;
-  if (CONTAINER_USAGE_UNITS.has(String(p.usage_unit || '').trim().toLowerCase())) return price;
   const count = packCountForUsage(p.container_size, p.usage_unit);
-  return count ? price / count : null;
+  if (count) return price / count;
+  if (CONTAINER_USAGE_UNITS.has(String(p.usage_unit || '').trim().toLowerCase())) return price;
+  return null;
 }
 
 function cogsLineForUsage(p) {

@@ -74,6 +74,11 @@ describe('KB COGS sync lines', () => {
     expect(packets.term).toBeNull();
   });
 
+  test('a generic counted pack resolves before the whole-package fallback', () => {
+    const each = cogsLineForUsage(row({ best_price: '100', container_size: '20 count', unit_size_oz: null, usage_unit: 'each' }));
+    expect(each.term.fixed).toBe(5);
+  });
+
   test('totals', () => {
     expect(cogsTotalLine([{ fixed: 174.72, per1000: 0 }])).toBe('Total COGS per application: $174.72');
     expect(cogsTotalLine([{ fixed: 0, per1000: 179.96 }])).toBe('Total COGS per application: $179.96 per 1,000 sq ft');
