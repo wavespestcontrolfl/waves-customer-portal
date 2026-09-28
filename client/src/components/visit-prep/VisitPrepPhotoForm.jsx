@@ -266,9 +266,12 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         else rejectedForTypeOrSize = true;
       }
 
-      setError(overflowCount > 0
-        ? `You can add up to ${maxPickable} photos.`
-        : rejectedForTypeOrSize ? REJECTED_MESSAGE : null);
+      // Both reasons can apply to one pick; name each so no dropped file
+      // goes unexplained.
+      const messages = [];
+      if (rejectedForTypeOrSize) messages.push(REJECTED_MESSAGE);
+      if (overflowCount > 0) messages.push(`You can add up to ${maxPickable} ${photoWord(maxPickable)}.`);
+      setError(messages.length ? messages.join(' ') : null);
       if (accepted.length) setPhotos((prev) => [...prev, ...accepted].slice(0, maxPickable));
     } finally {
       setPickingPhotos(false);

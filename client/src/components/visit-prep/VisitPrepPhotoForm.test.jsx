@@ -269,6 +269,25 @@ describe('VisitPrepPhotoForm', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
   });
 
+  it('a pick that is both over the room and has an unsupported file names BOTH reasons', async () => {
+    render(<VisitPrepPhotoForm photosRemaining={2} onSubmit={vi.fn()} />);
+    const pdf = new File(['%PDF-1.4'], 'invoice.pdf', { type: 'application/pdf' });
+
+    fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), pdf, photoFile('c.jpg')] } });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Photos must be JPEG, PNG, WebP, or HEIC, 5 MB or smaller.');
+    expect(alert).toHaveTextContent('You can add up to 2 photos.');
+  });
+
+  it('the count line uses the singular for a one-photo limit', async () => {
+    render(<VisitPrepPhotoForm photosRemaining={1} onSubmit={vi.fn()} />);
+
+    fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('You can add up to 1 photo.');
+  });
+
   it('the sent count is the server\'s photosAdded for THIS request, not the files attached or a stop-wide difference', async () => {
     // Two files attached; the server stored ONE new photo (the other was
     // already on the visit), while another holder's upload landed at the
