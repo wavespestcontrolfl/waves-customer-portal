@@ -2849,12 +2849,18 @@ describe('owner competitor list', () => {
     const uncurated = gate.evaluate({ body: 'Orkin and Acme Pest Solutions offer recurring residential plans.', title: 'x' }, OPTS);
     expect(uncurated.namedCompetitors).toEqual(['Acme Pest Solutions', 'Orkin']);
     expect(gate.namedCompetitorListVerdict(uncurated)).toMatchObject({ ok: false, offList: ['Acme Pest Solutions'] });
+    // …and on its own it still routes as named-competitor content, so the
+    // runner, poller and remediation all apply the owner list (pre-push r3).
+    const uncuratedOnly = gate.evaluate({ body: 'Acme Pest Solutions offers recurring residential plans.', title: 'x' }, OPTS);
+    expect(uncuratedOnly).toMatchObject({ pass: true, requiresHumanReview: true, namedCompetitors: ['Acme Pest Solutions'] });
     const regulator = gate.evaluate({ body: 'Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control enforces it. See our Sarasota Pest Control Guide.', title: 'x' }, OPTS);
     expect(regulator.namedCompetitors).toEqual(['Orkin']);
     // Title-Case topic phrases are not businesses unless the sentence uses
     // them as one (Codex r1 P2 on #5146).
     const topics = gate.evaluate({ body: 'Read our Home Pest Control Guide before you call Orkin. Yard Mosquito Control: what Orkin sprays. IFAS Termite Prevention tips.', title: 'x' }, OPTS);
     expect(topics.namedCompetitors).toEqual(['Orkin']);
+    const plainTopics = gate.evaluate({ body: 'Read our Home Pest Control Guide. Yard Mosquito Control basics.', title: 'x' }, {});
+    expect(plainTopics).toMatchObject({ pass: true, requiresHumanReview: false, namedCompetitors: [] });
     const versus = gate.evaluate({ body: 'Orkin vs. Bug Busters Pest Control: plans compared.', title: 'x' }, OPTS);
     expect(versus.namedCompetitors).toEqual(['Bug Busters Pest Control', 'Orkin']);
 

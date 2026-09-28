@@ -1609,10 +1609,17 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
       `Names competitor "${nm}" in prose/title/meta with no comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside a <ComparisonTable> (every cell is checked).`));
   }
 
+  // A business the curated detector does not know, used as a business in
+  // the prose, is named-competitor content too: it routes exactly like a
+  // curated name (review on the approvable lanes; the owner-list verdict on
+  // the unattended blog lane, where it is off-list by construction).
+  const uncurated = uncuratedBusinessNames(nameScanText);
+  if (uncurated.size) requiresHumanReview = true;
+
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   return {
     pass, findings, requiresHumanReview,
-    namedCompetitors: sortedNames(known, unknown, linkedNames, uncuratedBusinessNames(nameScanText)),
+    namedCompetitors: sortedNames(known, unknown, linkedNames, uncurated),
   };
 }
 

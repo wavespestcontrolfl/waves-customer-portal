@@ -3307,6 +3307,23 @@ describe('named-competitor autopublish gate', () => {
       expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
     });
 
+    test('a draft naming only an uncurated business is off-list too (pre-push r3)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(915);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('local providers'),
+        body: 'Acme Pest Solutions offers recurring residential plans in Sarasota.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
+      expect(result.reviewer_notes).toMatch(/Acme Pest Solutions/);
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
     test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
       const publisher = prPublisher(914);
