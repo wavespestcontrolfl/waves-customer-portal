@@ -53,6 +53,9 @@ function titleCaseServiceType(value) {
   return raw.split('_').filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 }
 
+// Knex error messages embed the SQL with its bound values — the token — so
+// failures here log only the error code, never err.message.
+
 // Redacts a long token-shaped path segment before it reaches a log line —
 // same intent as report-page-metadata's redactReportPath, generalized to
 // every kind here (tokens are bearer secrets).
@@ -129,7 +132,7 @@ async function resolveReportProject(token) {
       project = rows.length === 1 ? rows[0] : null;
     }
   } catch (err) {
-    logger.warn(`[link-preview] report-project lookup failed: ${err.message}`);
+    logger.warn(`[link-preview] report-project lookup failed: ${err.code || err.name}`);
     return null;
   }
   if (!project) return null;
@@ -158,7 +161,7 @@ async function resolveAppointment(token) {
         'c.deleted_at as customer_deleted_at',
       );
   } catch (err) {
-    logger.warn(`[link-preview] appointment lookup failed: ${err.message}`);
+    logger.warn(`[link-preview] appointment lookup failed: ${err.code || err.name}`);
     return null;
   }
   if (!svc || svc.customer_deleted_at) return null;
@@ -171,7 +174,7 @@ async function resolveAppointment(token) {
     const { previewForVisit } = require('../routes/appointment-public');
     preview = await previewForVisit(svc);
   } catch (err) {
-    logger.warn(`[link-preview] appointment state check failed: ${err.message}`);
+    logger.warn(`[link-preview] appointment state check failed: ${err.code || err.name}`);
   }
   const headline = titleCaseServiceType(svc.service_type);
   if (!preview || preview.state !== 'upcoming') {
@@ -191,7 +194,7 @@ async function resolveReschedule(token) {
       .leftJoin('customers as c', 's.customer_id', 'c.id')
       .first('s.id', 's.service_type', 'c.deleted_at as customer_deleted_at');
   } catch (err) {
-    logger.warn(`[link-preview] reschedule lookup failed: ${err.message}`);
+    logger.warn(`[link-preview] reschedule lookup failed: ${err.code || err.name}`);
     return null;
   }
   if (!svc || svc.customer_deleted_at) return null;
@@ -231,7 +234,7 @@ async function resolvePrep(token) {
       subline: 'How to get ready for your visit',
     };
   } catch (err) {
-    logger.warn(`[link-preview] prep lookup failed: ${err.message}`);
+    logger.warn(`[link-preview] prep lookup failed: ${err.code || err.name}`);
     return null;
   }
 }
@@ -281,7 +284,7 @@ async function resolveCardContent(kind, token) {
   try {
     return await resolver(String(token));
   } catch (err) {
-    logger.warn(`[link-preview] resolver for kind=${kind} failed: ${err.message}`);
+    logger.warn(`[link-preview] resolver for kind=${kind} failed: ${err.code || err.name}`);
     return null;
   }
 }
@@ -317,7 +320,7 @@ async function loadLinkPreviewMetadata(reqPath, knex = db) {
     const reportMetadata = await loadServiceReportPageMetadata(reqPath, knex);
     if (reportMetadata) return reportMetadata;
   } catch (err) {
-    logger.warn(`[link-preview] report metadata failed for ${redactLinkPreviewPath(reqPath)}: ${err.message}`);
+    logger.warn(`[link-preview] report metadata failed for ${redactLinkPreviewPath(reqPath)}: ${err.code || err.name}`);
   }
 
   const match = matchLinkPreviewRoute(reqPath);

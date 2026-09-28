@@ -92,6 +92,18 @@ function isAppointmentPath(reqPath = '') {
   return /^\/appointment\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Reschedule (/reschedule/<64-hex>, scheduled_services.reschedule_token) and
+// prep guide (/prep/<32-hex>) shells. Their <head> now carries the visit's
+// service and date for the link preview (link-preview-metadata.js), so the
+// document gets the same contract as the appointment shell.
+function isReschedulePath(reqPath = '') {
+  return /^\/reschedule\/[a-f0-9]{64}\/?$/i.test(String(reqPath || ''));
+}
+
+function isPrepPath(reqPath = '') {
+  return /^\/prep\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
+}
+
 // Public self-serve re-service scheduler (/reservice/<64-hex>) — the token
 // is customers.reservice_token, a STANDING bearer credential for the life of
 // the customer (like the /card token), and the page renders the customer's
@@ -130,7 +142,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReschedulePath(reqPath) || isPrepPath(reqPath) || isReservicePath(reqPath) || isInspectionPath(reqPath) || isCareersInterviewPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -150,6 +162,8 @@ module.exports = {
   isPriceChangeNoticePath,
   isContractPath,
   isAppointmentPath,
+  isReschedulePath,
+  isPrepPath,
   isReservicePath,
   isInspectionPath,
 };

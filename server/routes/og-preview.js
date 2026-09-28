@@ -139,7 +139,7 @@ router.get('/:kind/:tokenFile', async (req, res) => {
     const buffer = await renderCached(content);
     return sendJpeg(res, buffer);
   } catch (err) {
-    logger.error(`[og-preview] card render failed for kind=${kind}: ${err.message}`);
+    logger.error(`[og-preview] card render failed for kind=${kind}: ${err.code || err.name}`);
     return sendDefault(res);
   }
 });

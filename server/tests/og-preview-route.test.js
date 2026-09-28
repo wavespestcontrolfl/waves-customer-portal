@@ -85,11 +85,12 @@ test('token-free cards are public and cacheable; an unknown name gets the defaul
   expect(renderLinkPreviewJpeg).toHaveBeenCalled();
 }));
 
-test('every HTML page whose <head> looks a token up is mounted behind a limiter', () => {
+test('every HTML page whose <head> looks a token up gets privacy headers, then a limiter', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-  const mount = /app\.get\(\s*(\/\^[^\n]*\/i),\s*ogPreviewRoutes\.linkPreviewLimiter,\s*sendSpaHtml/.exec(src);
+  // privacy headers, THEN the limiter (so a 429 carries them), then the page
+  const mount = /app\.get\(\s*(\/\^[^\n]*\/i),\s*\(req, res, next\) => \{ applySensitiveSpaHeaders\(req\.path, res\); next\(\); \},\s*ogPreviewRoutes\.linkPreviewLimiter,\s*sendSpaHtml/.exec(src);
   expect(mount).not.toBeNull();
    
   const re = new Function(`return ${mount[1]};`)();

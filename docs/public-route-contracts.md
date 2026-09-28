@@ -1634,9 +1634,12 @@ name, address, phone, email, tech name or note, and estimates stay generic
 is keyed by card content, never by token. The customer HTML pages whose
 `<head>` looks a token up for these tags — `/report/project/:token`,
 `/appointment/:token`, `/reschedule/:token`, `/prep/:token` — are mounted
-in front of the SPA fallback behind the same limiter (`/report/:token` and
-`/recap/:token` keep the report limiter); the lookup never changes the
-page's status or body beyond its meta tags.
+in front of the SPA fallback behind the same limiter, with the
+`sensitive-spa-headers.js` privacy set applied before it (so a 429 carries
+it; `/reschedule` and `/prep` joined that set here). `/report/:token` and
+`/recap/:token` keep the report limiter. The lookup never changes the
+page's status or body beyond its meta tags, and a failed lookup logs only
+the error code (knex messages embed the token).
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the

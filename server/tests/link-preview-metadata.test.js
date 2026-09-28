@@ -208,6 +208,18 @@ describe('unknown/invalid token -> null for every kind (caller falls back to the
     expect(content).toBeNull();
   });
 
+  test('a failed lookup logs the error code, never the knex message that embeds the token', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const tok = 'b'.repeat(64);
+    const err = Object.assign(new Error(`select * from "scheduled_services" where "reschedule_token" = '${tok}'`), { code: 'ECONNRESET' });
+    mockTables({ 'scheduled_services as s': chainable({ first: () => { throw err; } }) });
+    expect(await resolveCardContent('reschedule', tok)).toBeNull();
+    const logged = logger.warn.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('ECONNRESET');
+    expect(logged).not.toContain(tok);
+  });
+
   test('a malformed token never reaches the database at all', async () => {
     db.mockImplementation(() => { throw new Error('must not query the DB for a malformed token'); });
     expect(await resolveCardContent('appointment', 'not-a-hex-token')).toBeNull();

@@ -1059,7 +1059,7 @@ if (config.nodeEnv === 'production') {
       const linkPreviewMetadata = await loadLinkPreviewMetadata(reqPath);
       if (linkPreviewMetadata) html = applyHtmlMetadata(html, linkPreviewMetadata);
     } catch (err) {
-      logger.warn(`[link-preview] Failed to render link-preview metadata for ${redactLinkPreviewPath(reqPath)}: ${err.message}`);
+      logger.warn(`[link-preview] Failed to render link-preview metadata for ${redactLinkPreviewPath(reqPath)}: ${err.code || err.name}`);
     }
     return html;
   }
@@ -1098,8 +1098,10 @@ if (config.nodeEnv === 'production') {
   // These pages' <head> looks the token up for its link-preview tags
   // (services/link-preview-metadata.js RESOLVERS) — rate-limited like /og.
   // /report and /recap are covered by the report limiter above.
+  // Privacy headers first, so a 429 carries them too.
   app.get(
     /^\/(?:report\/project|appointment|reschedule|prep)\/[^/]+\/?$/i,
+    (req, res, next) => { applySensitiveSpaHeaders(req.path, res); next(); },
     ogPreviewRoutes.linkPreviewLimiter,
     sendSpaHtml,
   );
