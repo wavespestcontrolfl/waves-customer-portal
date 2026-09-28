@@ -2558,6 +2558,17 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(wrongHostAbsolute.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
+  test('a legacy brief exposes its related paths for the publish-time recheck, bound to the current publish hosts', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const legacy = deriveSyncGuardrailOptions({}, {
+      action_type: 'new_supporting_blog',
+      voice_constraints: { related_posts: [{ path: '/termite/old-pick/' }] },
+    });
+    expect(legacy.relatedPostLinks).toEqual([]);
+    expect(legacy.legacyRelatedPostLinks).toEqual(['/termite/old-pick/']);
+    expect(legacy.legacyRelatedPostHosts.length).toBeGreaterThan(0);
+  });
+
   test('a related path that failed the publish-time liveness recheck is denied, even via the generic allowlist', () => {
     const options = {
       relatedPostLinks: ['/termite/swarmers/', '/termite/live-post/'],
@@ -6035,5 +6046,18 @@ describe('reentrySafetyClaimFinding — shared claim corpus', () => {
   const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
   test.each(FLAGGED_CLAIMS)('%s', (text) => {
     expect(reentrySafetyClaimFinding(text)).toBeTruthy();
+  });
+});
+
+describe('INVISIBLE_NAMED_ENTITY_TEXT', () => {
+  test('covers exactly the 33 HTML5 named references that decode to whitespace or format controls', () => {
+    const { INVISIBLE_NAMED_ENTITY_TEXT } = require('../services/content/content-guardrails');
+    expect(Object.keys(INVISIBLE_NAMED_ENTITY_TEXT).sort()).toEqual([
+      'af', 'applyfunction', 'emsp', 'emsp13', 'emsp14', 'ensp', 'hairsp', 'ic', 'invisiblecomma',
+      'invisibletimes', 'it', 'lrm', 'mediumspace', 'nbsp', 'negativemediumspace', 'negativethickspace',
+      'negativethinspace', 'negativeverythinspace', 'newline', 'nobreak', 'nonbreakingspace', 'numsp',
+      'puncsp', 'rlm', 'shy', 'tab', 'thickspace', 'thinsp', 'thinspace', 'verythinspace',
+      'zerowidthspace', 'zwj', 'zwnj',
+    ]);
   });
 });

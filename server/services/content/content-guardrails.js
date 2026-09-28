@@ -1950,10 +1950,14 @@ function isExactTagAt(text, start, name) {
 // {true}; Codex #3646 r36).
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
+// The COMPLETE set of HTML5 named character references that decode to only
+// whitespace or format-control characters (33 names, derived from the WHATWG
+// entity table; pinned by a test so it can't drift piecemeal again).
 const INVISIBLE_NAMED_ENTITY_TEXT = Object.freeze({
   tab: '\t',
   newline: '\n',
   nbsp: '\u00a0',
+  nonbreakingspace: '\u00a0',
   ensp: '\u2002',
   emsp: '\u2003',
   emsp13: '\u2004',
@@ -1961,6 +1965,7 @@ const INVISIBLE_NAMED_ENTITY_TEXT = Object.freeze({
   numsp: '\u2007',
   puncsp: '\u2008',
   thinsp: '\u2009',
+  thinspace: '\u2009',
   hairsp: '\u200a',
   verythinspace: '\u200a',
   mediumspace: '\u205f',
@@ -6781,6 +6786,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 }
 
 module.exports = {
+  INVISIBLE_NAMED_ENTITY_TEXT,
   evaluate,
   // affiliate-material detector for reuse channels (newsletter validator,
   // social share lanes) — affiliate links are web-only; runs regardless of

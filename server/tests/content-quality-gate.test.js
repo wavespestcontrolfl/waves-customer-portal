@@ -708,6 +708,30 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       ).ok).toBe(true);
     });
 
+    test('static string and number label expressions render text and count as links', () => {
+      const literal = "See [{'Termite guide'}](/termite/a/), [{\"B guide\"}](/termite/b/), and [{1}](/termite/c/).";
+      expect(checkRelatedPostsLinked(
+        { body: literal },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+      const empty = "See [{''}](/termite/a/), [{' '}](/termite/b/), and [{null}](/termite/c/).";
+      const result = checkRelatedPostsLinked(
+        { body: empty },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+    });
+
+    test('every HTML5 invisible named reference (e.g. &NonBreakingSpace;, &ThinSpace;) leaves a label invisible', () => {
+      const invisible = 'See [&NonBreakingSpace;](/termite/a/), [&ThinSpace;](/termite/b/), and [&ZeroWidthSpace;](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
     test('numeric references for combining and variation marks do not create visible labels', () => {
       const invisible = 'See [&#xFE0F;](/termite/a/), [&#x301;](/termite/b/), and [&#65039;](/termite/c/).';
       const result = checkRelatedPostsLinked(

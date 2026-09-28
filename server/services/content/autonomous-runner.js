@@ -35,6 +35,20 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+
+// A shallow brief copy whose related_posts omits paths that failed the
+// publish-time liveness recheck (the stored brief is never modified).
+function withoutStaleRelatedPosts(brief, stalePaths) {
+  const { _internals } = require('./related-posts');
+  const stale = new Set(stalePaths.map((p) => _internals.normalizePathForCompare(p)));
+  const vc = brief?.voice_constraints;
+  if (!vc || !Array.isArray(vc.related_posts)) return brief;
+  const related_posts = vc.related_posts.filter((post) => {
+    const path = typeof post === 'string' ? post : post?.path;
+    return !stale.has(_internals.normalizePathForCompare(path));
+  });
+  return { ...brief, voice_constraints: { ...vc, related_posts } };
+}
 const { etDateString, parseETDateTime, etWeekStart, addETDays } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS, CITY_TO_LOCATION } = require('../../config/locations');
 const { THRESHOLDS } = require('./scoring-config');
@@ -806,6 +820,10 @@ class AutonomousRunner {
       ? topicFraming.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
       : [];
 
+    // Related posts that failed the publish-time liveness recheck: denied by
+    // the guardrails AND dropped from the quality gate's link requirement,
+    // so the two gates never require and deny the same link.
+    let staleRelatedPaths = [];
     if (contentGuardrails && draft) {
       // Option derivation is shared with the named-competitor approval
       // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
@@ -824,6 +842,7 @@ class AutonomousRunner {
         await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken }, run.action_type);
         return finalized;
       }
+      staleRelatedPaths = Array.isArray(guardOptions.staleRelatedPostLinks) ? guardOptions.staleRelatedPostLinks : [];
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
       if (!guardResult.pass) {
         // Publish-time footprint refinement (footprint-claim-classifier): an
@@ -1017,6 +1036,7 @@ class AutonomousRunner {
         } catch (_) { /* keep the stricter blog contract */ }
         gateBrief = { ...brief, target_page_type: targetPageType };
       }
+      if (staleRelatedPaths.length) gateBrief = withoutStaleRelatedPosts(gateBrief, staleRelatedPaths);
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
       } catch (err) {
@@ -3417,15 +3437,24 @@ class AutonomousRunner {
     // a linked post can be unpublished, noindexed or moved while the draft
     // waits. Recheck now and deny any path that is no longer live. If the
     // recheck itself fails, quarantine every related path (fail closed).
-    if (Array.isArray(options.relatedPostLinks) && options.relatedPostLinks.length) {
+    const frozenRelated = Array.isArray(options.relatedPostLinks) ? options.relatedPostLinks : [];
+    const legacyRelated = Array.isArray(options.legacyRelatedPostLinks) ? options.legacyRelatedPostLinks : [];
+    if (frozenRelated.length || legacyRelated.length) {
       try {
         const { getLiveRelatedPaths, _internals } = require('./related-posts');
-        const live = await getLiveRelatedPaths(options.relatedPostLinks, { hosts: options.relatedPostHosts });
-        options.staleRelatedPostLinks = options.relatedPostLinks
-          .filter((p) => !live.has(_internals.normalizePathForCompare(p)));
+        const staleOf = async (paths, hosts) => {
+          if (!paths.length) return [];
+          const live = await getLiveRelatedPaths(paths, { hosts });
+          return paths.filter((p) => !live.has(_internals.normalizePathForCompare(p)));
+        };
+        options.staleRelatedPostLinks = [
+          ...(await staleOf(frozenRelated, options.relatedPostHosts)),
+          ...(await staleOf(legacyRelated, options.legacyRelatedPostHosts)),
+        ];
       } catch (err) {
         logger.warn?.(`[autonomous-runner] related-post liveness recheck failed: ${err.message}`);
         options.relatedPostLinksLive = false;
+        options.staleRelatedPostLinks = [...legacyRelated];
       }
     }
     if (brief.action_type !== 'refresh_existing_page') return options;
@@ -4491,4 +4520,5 @@ module.exports._internals = {
   operatorBriefTextForComparisonGate,
   aggregateGateFindings,
   relatedPostsNotLinkedFinding,
+  withoutStaleRelatedPosts,
 };

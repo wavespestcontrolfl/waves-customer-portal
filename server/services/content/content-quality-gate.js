@@ -1074,6 +1074,26 @@ function visibleInlineLinkLabel(label) {
   return visibleRenderedInlineText(label);
 }
 
+// A label expression that is a plain string or number literal renders its
+// value ([{'Termite guide'}](/a/), [{1}](/a/)). The scanned label has string
+// contents blanked (length-preserving), so restore such literals from the
+// raw label at the same offsets. Only spans whose braces survived every
+// masking pass count, so hidden component children stay hidden.
+const STATIC_LABEL_LITERAL_RE = /\{\s*(?:'([^'\\\n]*)'|"([^"\\\n]*)"|(-?\d+(?:\.\d+)?))\s*\}/g;
+function withStaticLabelLiterals(scannedLabel, rawLabel) {
+  if (scannedLabel.length !== rawLabel.length) return scannedLabel;
+  let out = '';
+  let last = 0;
+  for (const m of rawLabel.matchAll(STATIC_LABEL_LITERAL_RE)) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (scannedLabel[start] !== '{' || scannedLabel[end - 1] !== '}') continue;
+    out += scannedLabel.slice(last, start) + (m[1] ?? m[2] ?? m[3]);
+    last = end;
+  }
+  return out + scannedLabel.slice(last);
+}
+
 function realMarkdownLinkPaths(body, allowedHosts) {
   const { text: rendered } = blankNonRenderedMarkdownWithDepths(body);
   const scanned = blankSlotlessComponentChildren(blankExpressionStringLiterals(rendered));
@@ -1088,7 +1108,8 @@ function realMarkdownLinkPaths(body, allowedHosts) {
     // Nested image/reference syntax belongs to the unsupported body grammar;
     // do not partially interpret it here as visible anchor prose.
     if (label.includes('[') || label.includes(']')) continue;
-    if (!visibleInlineLinkLabel(label)) continue;
+    const rawLabel = rendered.slice(span.labelStart + 1, span.labelEnd);
+    if (!visibleInlineLinkLabel(withStaticLabelLiterals(label, rawLabel))) continue;
     const rawDest = parseLinkDestination(scanned.slice(span.destStart, span.destEnd + 1));
     if (!rawDest) continue;
     const norm = normalizeInternalPath(firstPartyPathname(rawDest, allowedHosts));

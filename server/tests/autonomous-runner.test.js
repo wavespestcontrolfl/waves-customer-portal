@@ -3716,3 +3716,27 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     }
   });
 });
+
+describe('withoutStaleRelatedPosts', () => {
+  const { withoutStaleRelatedPosts } = _internals;
+  test('drops stale related paths from a brief copy and leaves the stored brief untouched', () => {
+    const brief = {
+      id: 'b1',
+      voice_constraints: {
+        related_posts: [
+          { path: '/termite/swarmers/', title: 'Swarmers' },
+          { path: '/termite/live-post/', title: 'Live' },
+          '/termite/string-form/',
+        ],
+      },
+    };
+    const out = withoutStaleRelatedPosts(brief, ['/termite/swarmers', '/termite/string-form/']);
+    expect(out.voice_constraints.related_posts).toEqual([{ path: '/termite/live-post/', title: 'Live' }]);
+    expect(brief.voice_constraints.related_posts).toHaveLength(3);
+  });
+
+  test('returns the brief unchanged when it has no related posts', () => {
+    const brief = { id: 'b2', voice_constraints: {} };
+    expect(withoutStaleRelatedPosts(brief, ['/a/'])).toBe(brief);
+  });
+});

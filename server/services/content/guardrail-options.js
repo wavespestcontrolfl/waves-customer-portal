@@ -161,6 +161,11 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     // separately re-admitted the same path into the generic allowlist
     // (Codex #4984 r6+ P1).
     relatedPostLinks: legacyUnmarkedRelated ? [] : relatedPostPaths,
+    // A legacy brief's related paths still get the publish-time liveness
+    // recheck (autonomous-runner._deriveGuardrailOptions), against the
+    // brief's CURRENT publish hosts since it never froze any.
+    legacyRelatedPostLinks: legacyUnmarkedRelated ? relatedPostPaths : [],
+    legacyRelatedPostHosts: legacyUnmarkedRelated ? effectiveRelatedHosts : [],
     relatedPostHosts: frozenRelatedHosts,
     relatedPostLinksLive: relatedTargetMatches,
     isRefresh,
