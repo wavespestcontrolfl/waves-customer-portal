@@ -4041,4 +4041,8 @@ async function resolveActiveTechnicianById(id) {
 
 module.exports = {
   TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
+  // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
+  // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
+  // non-simple visit reuses this exact wording rather than a second copy.
+  CARD_CANCEL_REFUSED_MESSAGE,
 };

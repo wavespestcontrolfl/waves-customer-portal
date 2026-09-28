@@ -3260,6 +3260,15 @@ const gates = {
   // services/previsit-balance-reminder.js's leadDays() reads
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
+
+  // Intelligence Bar cancel_appointment card-confirm (PR B of the
+  // ib-cancel-pinned-effects lane, owner ruling 2026-09-28: the bar cancels
+  // SIMPLE visits only — see card_cancel_refusals in
+  // services/appointment-cancel-impact.js). Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only — the canonical CALL-TIME
+  // reader is ibCancelAppointmentLive() below, same discountStackingLive()
+  // convention, so a flip needs no redeploy.
+  ibCancelAppointment: process.env.GATE_IB_CANCEL_APPOINTMENT === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -3480,6 +3489,18 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
+// GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
+// convention as discountStackingLive(). The one canonical reader for both
+// entry points that need to know whether the Intelligence Bar may
+// card-confirm a visit cancellation: proposePendingWrite (proposal site) and
+// /confirm-action (confirm site) in routes/admin-intelligence-bar.js. Off =
+// byte-identical to before this lane — cancel_appointment always refuses to
+// the Dispatch screen (CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE). The
+// `ibCancelAppointment` gates-map entry above is for logGateStatus only.
+function ibCancelAppointmentLive() {
+  return process.env.GATE_IB_CANCEL_APPOINTMENT === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -3496,5 +3517,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, ibCancelAppointmentLive };
 // gates 1775330914
