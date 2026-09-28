@@ -61,6 +61,13 @@ describe('hard checks: schema/canonical/indexable', () => {
   test('schema_valid fails without schema', () => {
     expect(checkSchemaValid({}).ok).toBe(false);
   });
+  test('schema_valid passes a refresh: its schema is frozen to the live page, the draft\'s never publishes', () => {
+    // prod run b48a687d: a refresh hard-failed no_schema_block over a field
+    // publishRefresh never reads.
+    expect(checkSchemaValid({ frontmatter: { schema_types: ['Article'] } }, { action_type: 'refresh_existing_page' }))
+      .toEqual({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(checkSchemaValid({}, { action_type: 'new_supporting_blog' }).ok).toBe(false);
+  });
   test('title_meta_spam_free hard-fails stuffed title patterns', () => {
     const result = checkTitleMetaSpamFree({
       title: 'Pest Control Near Me in Anna Maria, FL | THE BEST Pest Control Anna Maria, FL | Top-Rated Exterminator Near Me',
