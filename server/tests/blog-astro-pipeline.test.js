@@ -571,6 +571,30 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  test('publishOrUpdatePage commits competitor links as plain text and lists them in the PR body (owner ruling 2026-09-28)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 124, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/124' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage(
+      {
+        type: 'draft',
+        frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
+        body: 'Waves Pest Control guidance. [Turner](https://www.turnerpest.com/ants) lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+      },
+      { action_type: 'new_supporting_blog' }
+    );
+    const written = gh.putFile.mock.calls[0][0].content;
+    expect(written).toContain('Turner lists ant tips');
+    expect(written).not.toMatch(/turnerpest\.com/);
+    expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*turnerpest\.com\/ants/);
+  });
+
   test('a spoke-routed draft with an OFF-SITE emitted canonical parks — spoke routing must not erase the canonical before the guard (Codex r5)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -1183,6 +1207,57 @@ describe('Astro publisher autonomous draft adapter', () => {
   });
 });
 
+describe('every blog commit serializes through the competitor unlink (owner ruling 2026-09-28)', () => {
+  test('fm.stringify appears only inside competitorFreeMarkdown; all four lanes call it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content-astro/astro-publisher'), 'utf8');
+    expect((src.match(/fm\.stringify\(/g) || []).length).toBe(1);
+    expect(src).toMatch(/function competitorFreeMarkdown\([^)]*\) \{[\s\S]{0,400}?fm\.stringify\(/);
+    for (const fn of ['publishAstro', 'publishOrUpdatePage', 'publishMetadataRewrite', 'publishRefresh']) {
+      const start = src.indexOf(`async function ${fn}(`);
+      const next = src.indexOf('\nasync function ', start + 10);
+      expect(src.slice(start, next === -1 ? undefined : next)).toMatch(/competitorFreeMarkdown\(/);
+    }
+  });
+});
+
+describe('publishMetadataRewrite unlinks competitor links already on the page (owner ruling 2026-09-28)', () => {
+  test('the commit carries the new meta and the body with competitor links as plain text', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({
+      sha: 'existing-sha',
+      content: [
+        '---',
+        'title: Old Lakewood Ranch Title',
+        'slug: /pest-control-lakewood-ranch-fl/',
+        'meta_description: Old meta description.',
+        'canonical: https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+        '---',
+        'Compare [Orkin](https://www.orkin.com/) before you sign.',
+      ].join('\n'),
+    });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'metadata-sha' } });
+    gh.createPr.mockResolvedValue({ number: 56, html_url: 'https://github.com/x/y/pull/56', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+
+    await AstroPublisher.publishMetadataRewrite({
+      type: 'metadata',
+      title: 'Pest Control in Lakewood Ranch, FL | Waves',
+      meta_description: 'Need pest control in Lakewood Ranch? Waves helps identify, treat, and prevent common Southwest Florida pest problems.',
+    }, {
+      action_type: 'rewrite_title_meta',
+      target_url: 'https://www.wavespestcontrol.com/pest-control-lakewood-ranch-fl/',
+      target_keyword: 'pest control lakewood ranch fl',
+      city: 'Lakewood Ranch',
+      service: 'pest',
+    });
+    const written = gh.putFile.mock.calls[0][0].content;
+    expect(written).toContain('Compare Orkin before you sign.');
+    expect(written).not.toMatch(/orkin\.com/);
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
+  });
+});
+
 describe('publishOrUpdatePage autonomous hero pipeline', () => {
   const fmModule = require('../services/content-astro/frontmatter');
 
@@ -1619,6 +1694,41 @@ describe('Astro publisher hero image republish', () => {
       astro_status: 'pr_open',
       astro_pr_number: 123,
     }));
+  });
+
+  test('publishAstro (admin / calendar lane) unlinks competitor links before its guardrails and commits plain text', async () => {
+    const post = {
+      id: 'post-1',
+      title: 'Ant Trails in Bradenton',
+      slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: '/images/blog/ant-trails-bradenton/hero.webp',
+      hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails start with moisture. [One national guide](https://www.terminix.com/ants/) says the same; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+    const commit = gh.commitFiles.mock.calls.at(-1)?.[0];
+    const written = commit ? commit.files.find((f) => /\.mdx?$/.test(f.path)).content : gh.putFile.mock.calls.at(-1)[0].content;
+    expect(written).toContain('One national guide says the same');
+    expect(written).not.toMatch(/terminix\.com/);
+    expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
+    expect(gh.createPr.mock.calls.at(-1)[0].body).toMatch(/Competitor links removed[\s\S]*terminix\.com\/ants/);
   });
 
   test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {

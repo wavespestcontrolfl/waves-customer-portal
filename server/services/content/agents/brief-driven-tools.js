@@ -49,6 +49,7 @@ const getSerpProfiler = lazy('serp-profiler', '../../seo/serp-profiler');
 const getGithubClient = lazy('github-client', '../../content-astro/github-client');
 const getFrontmatter = lazy('frontmatter', '../../content-astro/frontmatter');
 const getContentGuardrails = lazy('content-guardrails', '../content-guardrails');
+const getCompetitorLinks = lazy('competitor-links', '../competitor-links');
 const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-directives');
 
 // ── tool executor ────────────────────────────────────────────────────
@@ -528,6 +529,23 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): stripped citation residue from the draft — the writer model is still emitting citation markup despite the prompt ban`);
         }
       }
+      // Owner ruling 2026-09-28: never link a competitor's own site. Links
+      // to a competitor host become their anchor text at capture, so every
+      // gate (and the in-loop self-lint) judges the body that will publish;
+      // the publisher repeats the same pass at commit for every lane.
+      const competitorLinksUnlinked = [];
+      const competitorLinks = getCompetitorLinks();
+      if (competitorLinks) {
+        const hosts = competitorLinks.competitorHosts();
+        const b = competitorLinks.unlinkCompetitorLinks(cleanBody, hosts);
+        const f = competitorLinks.unlinkCompetitorLinksDeep(cleanFrontmatter, hosts);
+        cleanBody = b.text;
+        cleanFrontmatter = f.value;
+        competitorLinksUnlinked.push(...b.unlinked, ...f.unlinked);
+        if (competitorLinksUnlinked.length) {
+          logger.info(`[brief-driven-tools] emit_draft(${sessionId}): unlinked ${competitorLinksUnlinked.length} competitor link(s) (owner ruling: no links to competitor sites)`);
+        }
+      }
       // Bind the approved plan to what's actually being emitted: the plan
       // passed validate_answer_plan, but nothing upstream stops the draft's
       // real sections from diverging from it. requiresExistingTitle marks a
@@ -628,6 +646,7 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         claims_ledger: Array.isArray(claims_ledger) ? claims_ledger : [],
         notes_for_reviewer: notes_for_reviewer || null,
         citation_residue_stripped: residueStripped,
+        competitor_links_unlinked: competitorLinksUnlinked,
         // Audit trail: how many in-loop redrafts this draft took (null when
         // the lint wasn't armed for the session). Rides the persisted
         // draft_payload like citation_residue_stripped above.

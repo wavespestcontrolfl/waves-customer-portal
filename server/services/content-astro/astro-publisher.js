@@ -41,8 +41,38 @@ const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 const { resolveSpokeTarget, blogOriginForSpoke: sharedBlogOriginForSpoke } = require('./spoke-routing');
 const { etDateString } = require('../../utils/datetime-et');
+const competitorLinks = require('../content/competitor-links');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
+
+// Owner ruling 2026-09-28: "I do not want to link to a competitor's website,
+// whatsoever." The last step before EVERY blog commit (publishAstro,
+// publishOrUpdatePage, publishRefresh, publishMetadataRewrite): each link to
+// a competitor host becomes its anchor text, in body and frontmatter —
+// deterministic, no LLM. A competitor URL that somehow survives refuses the
+// publish.
+function competitorFreeMarkdown(frontmatter, body) {
+  const hosts = competitorLinks.competitorHosts();
+  const b = competitorLinks.unlinkCompetitorLinks(body, hosts);
+  const f = competitorLinks.unlinkCompetitorLinksDeep(frontmatter, hosts);
+  const markdown = fm.stringify(f.value, b.text);
+  const left = competitorLinks.competitorLinkUrls(markdown, hosts);
+  if (left.length) {
+    const err = new Error(`competitor link "${left[0]}" survived unlinking — publish refused (owner ruling: no links to competitor sites)`);
+    err.code = 'COMPETITOR_LINK';
+    throw err;
+  }
+  const unlinked = [...b.unlinked, ...f.unlinked];
+  if (unlinked.length) logger.info(`[astro-publisher] unlinked ${unlinked.length} competitor link(s) before commit`);
+  return { markdown, unlinked };
+}
+
+// The generated PR's own description lists what was unlinked.
+function withCompetitorUnlinkNote(prBody, unlinked = []) {
+  if (!unlinked.length) return prBody;
+  const lines = unlinked.map((u) => `- \`${String(u.url).replace(/`/g, '')}\` → "${String(u.text).replace(/\s+/g, ' ').slice(0, 80)}"`);
+  return `${prBody}\n\n### Competitor links removed\n\nOwner ruling 2026-09-28: no links to competitor sites. The wording stays; these links became plain text:\n\n${lines.join('\n')}\n`;
+}
 const ASTRO_HERO_DIR = 'public/images/blog';
 
 // Only blog posts are governed by the blog frontmatter schema. Service/location
@@ -1374,7 +1404,14 @@ async function publishAstro(postId) {
     });
     assertValidBlogFrontmatter(data);
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
-    const body = String(prepared.body || '').trim();
+    // Unlink competitor links BEFORE this lane's guardrail pass below (the
+    // commit-time pass in competitorFreeMarkdown then finds nothing left),
+    // so an admin/calendar post is unlinked and published, not blocked.
+    const earlyUnlink = competitorLinks.unlinkCompetitorLinks(String(prepared.body || '').trim());
+    const earlyMetaUnlink = competitorLinks.unlinkCompetitorLinksDeep(data);
+    Object.assign(data, earlyMetaUnlink.value);
+    const earlyUnlinked = [...earlyUnlink.unlinked, ...earlyMetaUnlink.unlinked];
+    const body = earlyUnlink.text;
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
     // A repair can add or remove the body's visible FAQ section — recompute
     // schema_types against the REPAIRED body so FAQPage tracks what actually
@@ -1520,7 +1557,7 @@ async function publishAstro(postId) {
       await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
     }
     const finalBody = bodyImages.body;
-    const markdown = fm.stringify(data, finalBody + '\n');
+    const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n');
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
@@ -1563,7 +1600,7 @@ async function publishAstro(postId) {
     });
 
     // 4. PR
-    const prBody = buildPrBody({ post, slug, branch, content: finalBody, images: { hero: heroImage, body: bodyImages.images } });
+    const prBody = withCompetitorUnlinkNote(buildPrBody({ post, slug, branch, content: finalBody, images: { hero: heroImage, body: bodyImages.images } }), [...earlyUnlinked, ...competitorUnlinked]);
     prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
@@ -3369,7 +3406,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`);
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
@@ -3417,7 +3454,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }),
+    body: withCompetitorUnlinkNote(buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }), competitorUnlinked),
   });
   await requestCodexReview({
     pr,
@@ -3547,7 +3584,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const markdown = fm.stringify(nextFrontmatter, parsed.content || '');
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3602,7 +3639,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `SEO metadata: ${nextFrontmatter[titleField]}`.slice(0, 72),
-    body: buildMetadataPrBody({
+    body: withCompetitorUnlinkNote(buildMetadataPrBody({
       filePath,
       targetUrl,
       branch,
@@ -3612,7 +3649,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
       metaField,
       brief,
       backfilledFields,
-    }),
+    }), competitorUnlinked),
   });
   await requestCodexReview({
     pr,
@@ -3843,7 +3880,7 @@ async function publishRefresh(draft, brief = {}) {
     }
   }
   const finalBody = refreshImages.body;
-  const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
@@ -3892,7 +3929,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }),
+    body: withCompetitorUnlinkNote(buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }), competitorUnlinked),
   });
   await requestCodexReview({
     pr,

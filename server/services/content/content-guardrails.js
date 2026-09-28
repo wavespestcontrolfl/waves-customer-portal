@@ -3394,6 +3394,17 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   return null;
 }
 
+function competitorLinkFinding(text) {
+  let urls = [];
+  try {
+    urls = require('./competitor-links').competitorLinkUrls(text);
+  } catch (err) {
+    return finding('P1', 'COMPETITOR_LINK', `Competitor-link check unavailable (${err.message}) — held for review rather than risk publishing a link to a competitor's site.`);
+  }
+  if (!urls.length) return null;
+  return finding('P1', 'COMPETITOR_LINK', `Draft links to a competitor's site ("${urls[0].slice(0, 80)}"${urls.length > 1 ? ` and ${urls.length - 1} more` : ''}) — owner ruling: never link a competitor's website. Keep the wording, drop the link.`);
+}
+
 // ── MDX component gate ──────────────────────────────────────────────
 // SAFE_MDX_COMPONENTS mirrors the RECONCILED Astro component contract
 // (wavespestcontrol-astro PR #342): the set where
@@ -6554,6 +6565,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    // Owner ruling 2026-09-28: never a link to a competitor's own site. Draft
+    // capture and the publisher unlink them (competitor-links.js); one that
+    // somehow remains blocks here.
+    competitorLinkFinding(publishableText),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,
@@ -6733,7 +6748,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
+  _internals: { competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

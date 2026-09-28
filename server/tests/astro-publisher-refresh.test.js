@@ -130,6 +130,18 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
   });
 
+  test('competitor links in the refreshed body are committed as plain text (owner ruling 2026-09-28)', async () => {
+    const res = await pub.publishRefresh(refreshDraft({
+      body: 'Fresh Sarasota guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BRIEF);
+    expect(res.status).toBe('pr_open');
+    const written = gh.putFile.mock.calls[0][0].content;
+    expect(written).toContain("Per Orkin's terms plans renew yearly");
+    expect(written).not.toMatch(/orkin\.com/);
+    expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
+  });
+
   test('no_changes when body and meta are identical to live', async () => {
     const draft = {
       type: 'draft',

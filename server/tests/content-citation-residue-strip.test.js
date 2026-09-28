@@ -120,6 +120,18 @@ describe('emit_draft strips at capture', () => {
     expect(res.body_chars).toBe(draft.body.length);
   });
 
+  it('unlinks competitor links at capture — body and frontmatter — and records them (owner ruling 2026-09-28)', async () => {
+    const res = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'Orkin vs Waves', meta_description: 'See https://www.orkin.com for their plans.' },
+      body: 'Per [Orkin\'s terms](https://www.orkin.com/terms), plans renew. See [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }, { sessionId: SESSION });
+    expect(res.ok).toBe(true);
+    const draft = getDraft(SESSION);
+    expect(draft.body).toBe("Per Orkin's terms, plans renew. See [UF/IFAS](https://edis.ifas.ufl.edu/x).");
+    expect(draft.frontmatter.meta_description).toBe('See orkin.com for their plans.');
+    expect(draft.competitor_links_unlinked.map((u) => u.url)).toEqual(['https://www.orkin.com/terms', 'https://www.orkin.com']);
+  });
+
   it('records citation_residue_stripped=false on a clean draft', async () => {
     const res = await executeBriefTool('emit_draft', {
       frontmatter: { title: 'Clean title' },
