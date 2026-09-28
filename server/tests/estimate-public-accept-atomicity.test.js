@@ -2087,6 +2087,40 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.last_name).toBe('Sample');
   });
 
+  test('the explicitly linked profile with a placeholder first name takes the collected first name and surname', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-25',
+      token: 'tok-contact-25-x0123456789',
+      customer_id: 'cust-unknown',
+      customer_phone: null,
+      customer_name: 'Unknown caller',
+      customer_email: 'testy@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-unknown', first_name: 'Unknown', last_name: 'caller', email: 'testy@example.com', phone: null }];
+    conversionOk('cust-unknown');
+
+    const res = await putAccept('tok-contact-25-x0123456789', { contactFirstName: 'testy', contactLastName: 'sample' });
+    expect(res.status).toBe(200);
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-unknown');
+    expect(cust.first_name).toBe('Testy');
+    expect(cust.last_name).toBe('Sample');
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+    expect(nameFanoutSpy).toHaveBeenCalled();
+  });
+
+  test('a placeholder typed into the surname field is rejected before any mutation', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-26',
+      token: 'tok-contact-26-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+    }));
+    const res = await putAccept('tok-contact-26-x0123456789', { contactLastName: 'Customer' });
+    expect(res.status).toBe(400);
+    expect(res.data.code).toBe('CONTACT_LAST_NAME_INVALID');
+    expect(storedEstimate().status).toBe('sent');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

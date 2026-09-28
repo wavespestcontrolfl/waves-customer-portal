@@ -194,3 +194,15 @@ describe('computeContactGaps — every placeholder-only name shape', () => {
     expect(computeContactGaps({ estimate: { customer_name: 'Unknown Sample', customer_email: 'x@example.com' } }).firstName).toBe(false);
   });
 });
+
+describe('one placeholder rule everywhere', () => {
+  test.each(['Customer', 'undefined', 'NULL', 'Unknown', 'unknown caller'])('typed %p is rejected as a name', (v) => {
+    expect(sanitizeContactLastName(v).error.code).toBe('CONTACT_LAST_NAME_INVALID');
+    expect(sanitizeContactFirstName(v).error.code).toBe('CONTACT_FIRST_NAME_INVALID');
+  });
+  test('a linked profile split as Unknown + caller is missing both names', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Unknown caller', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Unknown', last_name: 'caller', email: 'x@example.com' } });
+    expect(gaps.firstName).toBe(true);
+    expect(gaps.lastName).toBe(true);
+  });
+});

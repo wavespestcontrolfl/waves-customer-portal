@@ -27,7 +27,16 @@ const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 // booking pre-drafts 'Customer', legacy profiles 'Unknown Customer'. A name
 // made ONLY of these words carries no real name and reads as missing
 // (codex #5102 r2, r9).
-const PLACEHOLDER_NAME_WORDS = new Set(['unknown', 'customer', 'new', 'caller']);
+// 'undefined' / 'null' are the legacy concatenation artifacts. ONE
+// predicate (isPlaceholderName) is the verdict everywhere: the gap check,
+// both name columns of a linked profile, and the accept-card input itself
+// (codex #5102 r10).
+const PLACEHOLDER_NAME_WORDS = new Set(['unknown', 'customer', 'new', 'caller', 'undefined', 'null']);
+
+function isPlaceholderName(value) {
+  const words = String(value == null ? '' : value).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return !words.length || words.every((w) => PLACEHOLDER_NAME_WORDS.has(w));
+}
 
 function cleanedNameTokens(value) {
   const rawWords = String(value == null ? '' : value).trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -48,18 +57,12 @@ function cleanedNameTokens(value) {
 // the estimate carried only one name token — never a real surname, so it
 // must count as a gap, not a filled field.
 function hasRealLastName(value) {
-  const cleaned = collapseWhitespace(value || '') || '';
-  // 'undefined' / 'null' are the legacy concatenation artifacts
-  // cleanedNameTokens strips from the estimate name — same verdict here.
-  return !!cleaned && !['customer', 'undefined', 'null'].includes(cleaned.toLowerCase());
+  return !isPlaceholderName(value);
 }
 
-// A usable first name on the linked profile: present and not one of the
-// system placeholders the accept/intake paths mint ('New', 'Unknown',
-// 'Customer').
+// A usable first name on a linked profile — any non-placeholder value.
 function hasRealFirstName(value) {
-  const cleaned = collapseWhitespace(value || '') || '';
-  return !!cleaned && !['new', 'unknown', 'customer'].includes(cleaned.toLowerCase());
+  return !isPlaceholderName(value);
 }
 
 function hasEmail(value) {
@@ -83,8 +86,12 @@ function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
   const nameIsLinkedFirstName = tokens.length > 1
     && hasRealFirstName(linkedCustomer?.first_name)
     && tokens.join(' ').toLowerCase() === String(linkedCustomer.first_name).trim().replace(/\s+/g, ' ').toLowerCase();
+  // A linked profile whose two columns together are only placeholders
+  // ('Unknown' + 'caller') has no real surname either.
+  const linkedPairIsPlaceholder = !!linkedCustomer
+    && isPlaceholderName(`${linkedCustomer.first_name ?? ''} ${linkedCustomer.last_name ?? ''}`);
   const lastName = (tokens.length < 2 || nameIsLinkedFirstName)
-    && !hasRealLastName(linkedCustomer?.last_name);
+    && (!hasRealLastName(linkedCustomer?.last_name) || linkedPairIsPlaceholder);
   const firstName = tokens.length === 0 && !hasRealFirstName(linkedCustomer?.first_name);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
   return { firstName, lastName, email };
@@ -106,6 +113,11 @@ function sanitizeContactNamePart(raw, code, label) {
     return { value: null, error: { code, message: `Please enter a valid ${label}.` } };
   }
   const normalized = String(normalizeContactName(collapsed) || collapsed);
+  // A placeholder typed back in ('Customer', 'Unknown', 'undefined') would
+  // re-create the exact gap this card exists to close.
+  if (isPlaceholderName(normalized)) {
+    return { value: null, error: { code, message: `Please enter your real ${label}.` } };
+  }
   return { value: normalized.slice(0, CONTACT_LAST_NAME_MAX), error: null };
 }
 
@@ -174,6 +186,28 @@ async function fillExistingCustomerLastName(trx, customerId, lastName, { expecte
   return { applied: true, reason: null };
 }
 
+// The LINKED profile (estimate.customer_id — the office tied this estimate
+// to it) with a placeholder first name ('New', 'Unknown') takes the first
+// name the page collected, through the same name fan-out an operator edit
+// runs, so onboarding and later sends stop greeting "Hi New". There is no
+// real first name to prove identity against, so this is never applied to a
+// phone-matched or sibling profile — only the explicit link (codex #5102 r10).
+async function fillLinkedCustomerFirstName(trx, customerId, firstName) {
+  if (!customerId || !firstName) return { applied: false, reason: null };
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'first_name', 'last_name');
+  if (!row || hasRealFirstName(row.first_name)) return { applied: false, reason: 'first name already on file' };
+  // A placeholder surname stored beside it ('Unknown' + 'caller') is part of
+  // the same fallback — cleared so the surname fill below can land.
+  const clearPlaceholderLast = isPlaceholderName(`${row.first_name ?? ''} ${row.last_name ?? ''}`) && !!row.last_name;
+  const next = { first_name: firstName, ...(clearPlaceholderLast ? { last_name: null } : {}) };
+  await trx('customers').where({ id: customerId }).update({ ...next, updated_at: new Date() });
+  await require('./customer-contact-fanout').propagateCustomerNameChange({
+    before: row,
+    after: { ...row, ...next },
+  }, trx);
+  return { applied: true, reason: null };
+}
+
 // Email goes through the shared email-claim guard (customer row lock, then
 // the 'customer-email:' advisory lock, then the undone-merge holder
 // recheck) in a savepoint — the same serialization every other automated
@@ -190,6 +224,9 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
 
 module.exports = {
   IDENTITY_MISMATCH,
+  isPlaceholderName,
+  hasRealLastName,
+  fillLinkedCustomerFirstName,
   hasRealFirstName,
   sanitizeContactFirstName,
   hasEmail,

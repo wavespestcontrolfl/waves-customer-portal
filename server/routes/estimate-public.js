@@ -33,6 +33,8 @@ const {
   cleanedNameTokens: contactGapNameTokens,
   IDENTITY_MISMATCH: CONTACT_IDENTITY_MISMATCH,
   hasRealFirstName: contactGapHasRealFirstName,
+  hasRealLastName: contactGapHasRealLastName,
+  fillLinkedCustomerFirstName,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -9116,6 +9118,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // The estimate's own first name (pre-fill) — the identity an existing
     // profile must match before the accept card may fill it.
     let acceptContactIdentityName = null;
+    let acceptContactLinkedId = null;
     // Set when an existing profile's blank email was filled — the open
     // customer_email_missing review cards resolve after commit.
     let acceptContactEmailBackfill = null;
@@ -10832,6 +10835,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             : null;
           const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
           acceptContactIdentityName = contactGapNameTokens(lockedContact.customer_name).join(' ') || null;
+          acceptContactLinkedId = lockedContact.customer_id || null;
           if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
           // The first name the patched estimate name starts with: the one
           // the page asked for when there was none (gaps.firstName), else the
@@ -10863,7 +10867,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // real one. varchar(100) column.
             const linkedLast = String(linkedCustomerForGaps?.last_name ?? '').trim();
             const patchLastName = contactFillLastName
-              || (linkedLast && !['customer', 'undefined', 'null'].includes(linkedLast.toLowerCase()) ? linkedLast : '');
+              || (contactGapHasRealLastName(linkedLast) ? linkedLast : '');
             contactWrite.customer_name = `${patchFirstName} ${patchLastName}`.trim().slice(0, 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
@@ -10910,9 +10914,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // estimates.customer_email when the customer has none (codex #5102
       // r2 P1). "Already on file" / "filled concurrently" leave the
       // customer's own standing value, so the estimate copy is harmless.
-      const applyAcceptContactEmailFill = async (targetCustomerId) => {
+      const applyAcceptContactEmailFill = async (targetCustomerId, identityName = acceptContactIdentityName) => {
         if (!contactFillEmail) return;
-        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedName: acceptContactIdentityName });
+        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedName: identityName });
         if (claim?.emailApplied) acceptContactEmailBackfill = { customerId: targetCustomerId, email: contactFillEmail };
         const reason = claim?.emailDroppedReason || '';
         // An identity mismatch keeps the value on the estimate: it belongs
@@ -10931,8 +10935,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // already fenced this row since acceptPreLockedCommsId === customerId
       // here). Never overwrites a real value already on file.
       if (customerId) {
-        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
-        await applyAcceptContactEmailFill(customerId);
+        // The explicitly linked profile with a placeholder first name takes
+        // the collected one first; that name is then the identity the
+        // surname / email fills check against.
+        let linkedIdentityName = acceptContactIdentityName;
+        if (contactFillFirstName && customerId === acceptContactLinkedId) {
+          const firstFill = await fillLinkedCustomerFirstName(trx, customerId, contactFillFirstName);
+          if (firstFill.applied) linkedIdentityName = contactFillFirstName;
+        }
+        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: linkedIdentityName });
+        await applyAcceptContactEmailFill(customerId, linkedIdentityName);
       }
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this
