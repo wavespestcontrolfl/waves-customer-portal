@@ -2867,7 +2867,7 @@ describe('owner competitor list', () => {
 
   // Uncurated business names: high-recall candidates here, semantic
   // confirmation in business-name-confirmer.js (Codex r2 on #5146).
-  test('business-name candidates are broad; only regulators, institutions, headings-as-headings and own/.gov/.edu links are dropped', () => {
+  test('business-name candidates are broad; only regulators, institutions and own/.gov/.edu links are dropped', () => {
     const cands = (body, title = 'x') => gate.evaluate({ body, title }, OPTS).businessNameCandidates.map((c) => c.name);
     expect(cands('Acme Pest Solutions competes with Orkin in Sarasota.')).toEqual(['Acme Pest Solutions']);
     expect(cands('Acme Pest Solutions is based in Sarasota alongside Orkin.')).toEqual(['Acme Pest Solutions']);
@@ -2875,9 +2875,14 @@ describe('owner competitor list', () => {
     expect(cands('Orkin and Bob Smith Lawn Care LLC both mow.')).toEqual(['Bob Smith Lawn Care LLC']);
     expect(cands('Compare [their plans](https://acme-pest-solutions.com/plans) with Orkin.')).toEqual(['acme pest solutions']);
     expect(cands('Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control and the Florida Department of Agriculture enforce it.')).toEqual([]);
-    expect(cands('## Home Pest Control Guide\n\nOrkin offers plans. See [FDACS](https://www.fdacs.gov/pest-control-licensing) and [our page](https://www.wavespestcontrol.com/pest-control/).')).toEqual([]);
-    // A heading that compares keeps its candidate.
-    expect(cands('## Orkin vs. Bug Busters Pest Control\n\nPlans compared.')).toEqual(['Bug Busters Pest Control']);
+    expect(cands('Orkin offers plans. See [FDACS](https://www.fdacs.gov/pest-control-licensing) and [our page](https://www.wavespestcontrol.com/pest-control/).')).toEqual([]);
+    // Titles and headings go to the confirmer too (pre-push r5).
+    expect(cands('Plans for local homes.', 'Acme Pest Solutions in Sarasota')).toEqual(['Acme Pest Solutions']);
+    expect(cands('## Acme Pest Solutions\n\nThis company offers recurring residential plans.')).toEqual(['Acme Pest Solutions']);
+    // A link to an uncurated business on a TABLE draft is still a candidate.
+    const T = '<ComparisonTable columns={["What to weigh","National chain","Local SWFL company"]} rows={[{ label: "Plans", values: ["Yes","Yes"] }]} caption="Trade-offs." />';
+    const tabled = gate.evaluate({ body: `See [their plans](https://acme-pest-solutions.com/plans).\n\n${T}`, title: 'x' }, OPTS);
+    expect(tabled.businessNameCandidates.map((c) => c.name)).toEqual(['acme pest solutions']);
     const first = gate.evaluate({ body: 'Acme Pest Solutions competes with Orkin in Sarasota.', title: 'x' }, OPTS).businessNameCandidates;
     expect(first).toEqual([{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions competes with Orkin in Sarasota.' }]);
   });
