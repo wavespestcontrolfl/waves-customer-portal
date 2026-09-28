@@ -643,6 +643,20 @@ const gates = {
   // allowlist, the eval harness, the benchmark runner) must use that.
   voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
 
+  // Voice relay (Sandy) production INBOUND on an OpenAI model (owner
+  // ruling 2026-09-28: GPT-6 Luna after the benchmark). Ships DARK — off
+  // unless exactly 'true'. This is deliberately a SEPARATE gate from
+  // GATE_VOICE_RELAY_OPENAI above, which is already live in prod for the
+  // sandbox/eval lane alone: that gate must never be what opens production
+  // inbound to an OpenAI model. This map entry is for logGateStatus only;
+  // the canonical CALL-TIME reader is voiceRelayOpenaiInboundLive() below
+  // (strict 'true') — relay-conversation.js's resolveSessionModel reads it,
+  // at session construction, to decide whether a PRODUCTION inbound session
+  // may resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id. The
+  // shared VOICE_RELAY_MODEL / MODEL_VOICE chain stays Anthropic-only either
+  // way (collections-conversation.js shares it).
+  voiceRelayOpenaiInbound: process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -819,6 +833,15 @@ const gates = {
   // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
   // itself stays live either way (old links, fallback for unknown locations).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
+
+  // Day-0 review-ask contextual topic (recurring customers only): stores a
+  // grounded service topic (review-ask-topic.js) on review_sequences.ask_context
+  // for a later PR's wording to read. This PR only WRITES the
+  // topic — nothing customer-facing reads it yet. Customer-facing generated
+  // text still needs its own opt-in when that lane ships; this gate exists
+  // so the storage half ships dark first. Off = enrollPostService makes no
+  // extra DB read and no model call.
+  reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
 
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
@@ -1920,6 +1943,9 @@ const gates = {
 
   // Owner-authorized unattended blog publishing. Explicit false disables
   // competitor autopublishing; comparison/content checks remain mandatory.
+  // On, a blog still publishes only when every named competitor is on the
+  // owner list (competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS, rulings
+  // 2026-09-27 D2 + 2026-09-28).
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
@@ -3309,6 +3335,23 @@ function voiceRelayOpenaiLive() {
   return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
+// GATE_VOICE_RELAY_OPENAI_INBOUND read at CALL time — ships DARK, off unless
+// exactly 'true' (owner ruling 2026-09-28: GPT-6 Luna for Sandy's inbound
+// phone agent after the benchmark). The ONE reader relay-conversation.js's
+// resolveSessionModel uses, at session construction, to decide whether a
+// PRODUCTION inbound session (sandbox === false, evalHarness === false) may
+// resolve VOICE_RELAY_INBOUND_MODEL to a voice-eligible OpenAI id — a
+// DELIBERATELY SEPARATE gate from voiceRelayOpenaiLive() above, which is
+// already live in prod for the sandbox/eval lane and must never be read as
+// authorizing production inbound. Off: production inbound rejects any
+// OpenAI override exactly as before this gate existed — byte-identical. On:
+// the model-switchboard's voice_relay row (inboundOverrideParse /
+// inboundOverrideAllowed) reads this same function so the Models tab shows
+// what production inbound actually resolves.
+function voiceRelayOpenaiInboundLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI_INBOUND === 'true';
+}
+
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
 // point into the customer-intelligence AI legs (nightly sentiment mining in
 // signal-detector, retention drafting in retention-engine, and the admin
@@ -3496,5 +3539,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
 // gates 1775330914

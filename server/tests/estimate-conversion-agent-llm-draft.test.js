@@ -23,6 +23,7 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // authorized figures. Kept intentionally simple — the drafter's own unit
   // tests cover the full extraction/authorization grammar; this test file
   // only needs grounded-vs-ungrounded discrimination.
+  requestedServiceType: jest.fn(async () => null),
   replyQuotesUngroundedAmount: jest.fn((reply, context) => {
     const amounts = (String(reply || '').match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
       .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
@@ -556,4 +557,53 @@ describe('processInboundSms — intended actions persist on the estimate-review 
     const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
     expect(snapshot).not.toHaveProperty('intended_actions');
   });
+});
+
+
+// #5194 r2: the resolved estimate reaches the drafter only when the message
+// is LINKED to it (its short code, or estimate wording) — never merely
+// because the customer has one open.
+describe('processInboundSms — estimate forwarded only when the message is linked to it', () => {
+  test('a generic request with an open estimate on file forwards estimateId null; explicit estimate wording forwards it', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Can you add lawn service Tuesday?', smsLogId: 'sms-link-1' });
+    const calls = generateGroundedDraft.mock.calls;
+    expect(calls[calls.length - 1][0]).toMatchObject({ estimateId: null });
+  });
+});
+
+
+// #5194 r3: a conversational reply to an estimate ("Sounds good, can we do
+// Tuesday?") carries no keyword, but when the customer has no upcoming visit
+// the estimate is the only service context — it still prices availability.
+describe('generateLlmReviewDraft — estimate linkage from the conversation', () => {
+  const draft = () => ({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+  test('not explicitly linked + no upcoming visit → the estimate is forwarded; not linked + an upcoming visit → null; explicitly linked → forwarded regardless', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [] });
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Sounds good, can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] });
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Sounds good, can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: null }));
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'About my estimate — can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: true });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
+  });
+});
+
+
+// #5194 r4: an explicit service request is about THAT service, never an
+// unlinked open estimate — even for a customer with no upcoming visit.
+test('an unlinked estimate + no upcoming visit + an explicit service request → estimateId null', async () => {
+  process.env.GATE_SMS_REAL_ANSWERS = 'true';
+  const drafter = require('../services/sms-shadow-drafter');
+  drafter.requestedServiceType.mockResolvedValueOnce('Lawn Care');
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [] });
+  generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+  await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Can you add lawn service Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+  expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: null }));
 });

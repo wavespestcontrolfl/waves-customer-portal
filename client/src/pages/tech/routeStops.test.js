@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts } from './routeStops';
+import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos } from './routeStops';
 
 const visit = { id: 'v1', serviceCount: 2 };
 
@@ -56,5 +56,36 @@ describe('stopWindow / stopPropertyAlerts (codex #3603 r1)', () => {
       { id: 'c', status: 'pending', visit, propertyAlerts: ['Gate 1234', { type: 'chemical', text: 'Exterior only' }] },
     ]);
     expect(stopPropertyAlerts(grouped)).toEqual([{ type: 'gate', text: 'Gate 1234' }, 'Dog in yard', { type: 'chemical', text: 'Exterior only' }]);
+  });
+});
+
+// Customer-visit-photos scope doc §5.4 item 2 (PR 3b) — the stop chip.
+describe('stopHasCustomerSentPhotos (PR 3b)', () => {
+  it('false for a single row with no flag', () => {
+    const [stop] = groupServicesIntoStops([{ id: 'a', status: 'pending' }]);
+    expect(stopHasCustomerSentPhotos(stop)).toBe(false);
+  });
+  it('true for a single row the server flagged', () => {
+    const [stop] = groupServicesIntoStops([{ id: 'a', status: 'pending', customerSentPhotos: true }]);
+    expect(stopHasCustomerSentPhotos(stop)).toBe(true);
+  });
+  it('a grouped stop reads true when ANY member carries the flag — shown once for the whole stop', () => {
+    const [stop] = groupServicesIntoStops([
+      { id: 'a', status: 'pending', visit, customerSentPhotos: false },
+      { id: 'c', status: 'pending', visit, customerSentPhotos: true },
+    ]);
+    expect(stop.isVisit).toBe(true);
+    expect(stopHasCustomerSentPhotos(stop)).toBe(true);
+  });
+  it('false when gate-off omitted the field entirely on every member (undefined, not false)', () => {
+    const [stop] = groupServicesIntoStops([
+      { id: 'a', status: 'pending', visit },
+      { id: 'c', status: 'pending', visit },
+    ]);
+    expect(stopHasCustomerSentPhotos(stop)).toBe(false);
+  });
+  it('null/undefined stop is false, never a throw', () => {
+    expect(stopHasCustomerSentPhotos(null)).toBe(false);
+    expect(stopHasCustomerSentPhotos(undefined)).toBe(false);
   });
 });

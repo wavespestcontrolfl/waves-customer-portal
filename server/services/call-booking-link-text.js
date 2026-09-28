@@ -1674,6 +1674,11 @@ async function dispatchClaimedCall(conn, call, now) {
       await mtrx(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
       await mtrx(CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: call.id }).del();
     }),
+    // codex #5196 r4 P2: a definitive Twilio rejection inside
+    // messages.create() fires this INSTEAD of onDispatchAbort, still
+    // inside the handoff — lockSmsPhone is held. Same clearDispatchMarkers
+    // the post-return path already uses as a backstop.
+    onDispatchRejected: () => clearDispatchMarkers(call),
     // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
     // transaction sms_log insert. This lane's own withSmsHandoff below
     // already takes lockCustomerComms for every candidate customer id
