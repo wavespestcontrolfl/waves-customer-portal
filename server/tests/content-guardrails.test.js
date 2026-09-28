@@ -1545,6 +1545,9 @@ describe('outbound-link gate: encoded mailto separators, IP/localhost hosts, sem
       'Load //192.168.1.1/x today.',
       '<a href="//localhost/x">x</a>',
       'Try [x](//[::1]/admin) now.',
+      // Userinfo before the host: the browser still goes to the host (Codex r7 on #5191).
+      'See [x](//user@spam-example.com/x) now.',
+      '<a href="//a@b@spam-example.com">x</a>',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);

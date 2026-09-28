@@ -109,6 +109,18 @@ describe('competitorLinkUrls: every form a browser follows', () => {
     expect(found('See https:orkin.com/x now')).toBe(true);
   });
 
+  test('userinfo before the host does not hide it: the browser goes to the host (Codex r7 on #5191)', () => {
+    for (const t of [
+      '[source](//user@orkin.com/path)',
+      'https:user@orkin.com/x',
+      '<a href="//a@b@orkin.com">x</a>',
+      '[x](<//us(er@orkin.com>)',
+      '<a href="https://waves.com@orkin.com/">x</a>',
+    ]) expect([t, found(t)]).toEqual([t, true]);
+    // The reverse goes to waves.com, not the competitor.
+    expect(found('<a href="https://orkin.com@wavespestcontrol.com/">x</a>')).toBe(false);
+  });
+
   test('a tab or newline inside a URL does not hide it: browsers remove them (Codex r6 on #5191)', () => {
     expect(competitorLinkUrls('[plans](https://or\tkin.com/plans)')).toEqual(['https://orkin.com/plans']);
     expect(competitorLinkUrls('<a href="https://www.ork\nin.com/x">Orkin</a>')).toEqual(['https://www.orkin.com/x']);

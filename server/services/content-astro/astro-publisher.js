@@ -1399,6 +1399,12 @@ async function publishAstro(postId, { humanApproved = false } = {}) {
       hero_image_alt: vetGeneratedAlt(heroImage?.alt, post.hero_image_alt),
     });
     assertValidBlogFrontmatter(data);
+    // No competitor-evidence channel on this lane: a blog_posts row has no
+    // reviewer notes (the autonomous lanes' notes_for_reviewer), and a post
+    // may not link a competitor's page. So under GATE_EDITORIAL_EVIDENCE a
+    // claim sourced only from a competitor's own site is not evidenced here,
+    // and the review repairs or refuses it (Codex r7 on #5191; a notes field
+    // for admin posts is an owner decision).
     const prepared = await editorialEvidence.prepareDraft({ frontmatter: data, body: post.content || '' }, { page_type: 'supporting-blog' });
     const body = String(prepared.body || '').trim();
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);

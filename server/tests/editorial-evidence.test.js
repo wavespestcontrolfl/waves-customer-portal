@@ -434,6 +434,9 @@ test('evidenceUrlsFor: only competitor pages come from the notes — every other
     '- https://www.orkin.com/terms again, and //terminix.com/fees',
     '- https://example.org/blog-post (not a competitor: cite it in the body instead)',
   ].join('\n') })).toEqual(['https://www.orkin.com/terms', 'https://terminix.com/fees']);
+  // Read whole: a balanced "(2026)" stays, wrapping punctuation goes (Codex r7 on #5191).
+  expect(evidence.evidenceUrlsFor({ notes_for_reviewer: 'Sources: https://www.orkin.com/report_(2026) and [terms](https://www.terminix.com/terms).' }))
+    .toEqual(['https://www.orkin.com/report_(2026)', 'https://www.terminix.com/terms']);
   expect(evidence.evidenceUrlsFor({ notes_for_reviewer: null })).toEqual([]);
   expect(evidence.evidenceUrlsFor(null)).toEqual([]);
 });

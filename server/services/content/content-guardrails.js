@@ -2884,8 +2884,9 @@ const ALLOWED_DEST_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 // left `//127.0.0.1/x` and `//localhost/x` clean. The dotted-TLD arm keeps
 // prose slashes ("and//or", path fragments) from tripping; `<` in the
 // prefix class covers Markdown's angle-bracketed destination form and `>`
-// in the terminator lookahead closes it.
-const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
+// in the terminator lookahead closes it. Optional userinfo before the host:
+// a browser sends "//user@host/x" to host (Codex r7 on #5191).
+const PROTOCOL_RELATIVE_RE = /(?:^|[\s("'[=<])\/\/(?:[^\s/?#\\"'<>]*@)?(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|localhost\b|[a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?=[/:\s"')\]>]|$)/i;
 const MAILTO_RE = /\bmailto:([^\s"'<>)\]]+)/gi;
 // tel: destinations — validated against the Waves phone allowlist, exactly
 // like mailto recipients are validated against the business domain. The

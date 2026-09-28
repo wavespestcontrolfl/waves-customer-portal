@@ -181,15 +181,18 @@ async function refreshReviewFrontmatter(draft, brief) {
 // linked (owner ruling 2026-09-28), so its URL goes in notes_for_reviewer,
 // which never publishes. Only competitor-host URLs are taken from the notes:
 // every other source is linked in the body, where the link allowlist
-// applies. Read token by token (never joined across lines, unlike the
-// publish-time detector) and normalized to the https URL a browser requests
+// applies. Each URL is read whole from one of the detector's URL starts to
+// the next space (never joined across lines), a balanced "(2026)" kept and
+// only unmatched wrapping punctuation trimmed, as sourceUrls does (Codex r7
+// on #5191), then normalized to the https URL a browser requests
 // (evidenceUrl), so every consumer (the review, the publish-day snapshots)
 // gets the same clean list.
 function evidenceUrlsFor(draft) {
   const notes = typeof draft?.notes_for_reviewer === 'string' ? draft.notes_for_reviewer : '';
-  const { isCompetitorHost } = require('./competitor-links');
-  const urls = notes.split(/[\s<>()[\]"'`]+/)
-    .map((token) => evidenceUrl(token.replace(/[.,;:!?]+$/, '')))
+  const { URL_START_RE, isCompetitorHost } = require('./competitor-links');
+  const urlRe = new RegExp(`(?:${URL_START_RE.source})[^\\s<>"'\`\\]}]+`, 'gi');
+  const urls = (notes.match(urlRe) || [])
+    .map((raw) => evidenceUrl(trimTrailingUrlNoise(raw)))
     .filter((url) => url && isCompetitorHost(new URL(url).hostname));
   return [...new Set(urls)];
 }
