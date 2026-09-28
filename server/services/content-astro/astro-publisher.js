@@ -3807,10 +3807,12 @@ function assertRefreshLaneEnabled(brief) {
 }
 
 // A refresh write that hit the caller's GitHub request deadline may still
-// have landed. Resolve it outside that deadline: a PR GitHub opened is this
-// attempt's PR; with no PR, a provably-deleted branch leaves nothing behind
-// and the ordinary retry is safe. Anything unproven is REFRESH_PUBLISH_UNRECONCILED
-// so the caller parks it for a person instead of retrying into a duplicate.
+// complete on GitHub's side: aborting the request does not cancel it. Resolve
+// it outside that deadline. A PR GitHub has open on this attempt's branch is
+// this attempt's PR. Otherwise the outcome is not established (a missing ref
+// can still appear, a PR create can still land), so the branch is removed as
+// best-effort cleanup and REFRESH_PUBLISH_UNRECONCILED tells the caller to
+// park the row for a person instead of retrying into a duplicate.
 async function reconcileTimedOutRefreshWrite(branch, { prCreateAttempted }, cause) {
   const unreconciled = (why) => {
     const err = new Error(`refresh write to ${branch} timed out and ${why}; check GitHub for this branch and any PR before retrying (${cause.message})`);
@@ -3830,12 +3832,10 @@ async function reconcileTimedOutRefreshWrite(branch, { prCreateAttempted }, caus
       return { pr, fileCommit: pr.head?.sha ? { commit: { sha: pr.head.sha } } : null };
     }
   }
-  let gone = false;
-  try { gone = await gh.retireBranch(branch); } catch (cleanupErr) {
-    throw unreconciled(`the branch could not be deleted (${cleanupErr.message})`);
+  try { await gh.retireBranch(branch); } catch (cleanupErr) {
+    logger.warn(`[astro-publisher] cleanup of timed-out refresh branch ${branch} failed: ${cleanupErr.message}`);
   }
-  if (!gone) throw unreconciled('the branch still exists after deletion');
-  throw cause;
+  throw unreconciled(prCreateAttempted ? 'no PR was found yet' : 'the write may still complete');
 }
 
 async function publishRefresh(draft, brief = {}, { humanApproved = false, commitGuard = null } = {}) {

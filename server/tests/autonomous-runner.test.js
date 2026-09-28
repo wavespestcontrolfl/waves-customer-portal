@@ -4325,6 +4325,38 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
     expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
   });
 
+  test('an unreconciled timed-out write parks both approval records on a reason no approval accepts', async () => {
+    jest.resetModules();
+    const updates = [];
+    const wheres = [];
+    const dbMock = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { wheres.push({ table, args }); return q; }),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const approvalClaimedAt = new Date('2026-09-28T20:00:00Z');
+    const err = Object.assign(new Error('refresh write to content/refresh-z timed out and no PR was found yet'), { code: 'REFRESH_PUBLISH_UNRECONCILED' });
+
+    await new AutonomousRunner()._parkUnreconciledApproval('opp-z', { id: 'run-z' }, approvalClaimedAt, err);
+
+    const runPatch = updates.find((u) => u.table === 'autonomous_runs').patch;
+    const oppPatch = updates.find((u) => u.table === 'opportunity_queue').patch;
+    expect(runPatch).toMatchObject({ outcome: 'completed_pending_review', skip_reason: 'refresh_publish_unreconciled' });
+    expect(runPatch.reviewer_notes).toMatch(/content\/refresh-z/);
+    expect(oppPatch).toMatchObject({ status: 'pending_review', skip_reason: 'refresh_publish_unreconciled' });
+    // Only the in-flight approval claim is parked.
+    expect(wheres).toContainEqual({ table: 'autonomous_runs', args: [{ id: 'run-z', outcome: 'publishing_named_competitor' }] });
+    expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
+    // No approval path claims this reason, and a superseded row stays for a person.
+    const { RECONCILIATION_HOLD_REASONS } = jest.requireActual('../services/content/opportunity-queue')._internals;
+    expect(RECONCILIATION_HOLD_REASONS).toContain('refresh_publish_unreconciled');
+  });
+
   test('crash recovery preserves an uncertain superseded publication for interrupted-publish reconciliation', async () => {
     jest.resetModules();
     const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');

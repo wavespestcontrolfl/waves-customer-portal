@@ -1698,6 +1698,19 @@ class AutonomousRunner {
     }
   }
 
+  async _parkUnreconciledApproval(opportunityId, run, approvalClaimedAt, err) {
+    const reason = 'refresh_publish_unreconciled';
+    const notes = `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`.slice(0, 4000);
+    const now = new Date();
+    await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
+      .update({ outcome: 'completed_pending_review', skip_reason: reason, failure_message: String(err.message).slice(0, 4000), reviewer_notes: notes, updated_at: now })
+      .catch((e) => logger.error(`[autonomous-runner] unreconciled approval run park failed (run ${run.id}); manual reconcile needed: ${e.message}`));
+    await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+      .where('claimed_at', approvalClaimedAt)
+      .update({ status: 'pending_review', skip_reason: reason, updated_at: now })
+      .catch((e) => logger.error(`[autonomous-runner] unreconciled approval queue park failed (opp ${opportunityId}); manual reconcile needed: ${e.message}`));
+  }
+
   // Under the page-edit lock: the backfill must still hold its queue claim
   // and must not have been superseded by an ordinary page edit.
   async _assertBackfillPageOwnership(lockConn, run) {
@@ -3777,6 +3790,11 @@ class AutonomousRunner {
     } catch (err) {
       if (err.code === 'PAGE_EDIT_SUPERSEDED') {
         await this._retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, err.message);
+      } else if (err.code === 'REFRESH_PUBLISH_UNRECONCILED') {
+        // A timed-out GitHub write may have landed. Reverting would make the
+        // draft approvable again and open a second PR; park both records on a
+        // reason no approval path accepts.
+        await this._parkUnreconciledApproval(opportunityId, run, approvalClaimedAt, err);
       } else {
         await revertClaims(); // let the operator retry
       }

@@ -186,28 +186,28 @@ describe('publishRefresh frontmatter freeze', () => {
       expect(gh.retireBranch).not.toHaveBeenCalled();
     });
 
-    test('with no PR and the branch provably gone, the deadline error surfaces for an ordinary retry', async () => {
+    test('with no PR found, the branch is cleaned up but the row is still parked: the write may still land', async () => {
       gh.createPr.mockRejectedValueOnce(deadline());
       gh.findOpenPrByHead.mockResolvedValueOnce(null);
       gh.retireBranch.mockResolvedValueOnce(true);
 
-      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
       expect(gh.retireBranch).toHaveBeenCalledTimes(1);
     });
 
-    test('a timed-out commit skips the PR lookup and retires the branch', async () => {
+    test('a timed-out commit skips the PR lookup, cleans up, and parks', async () => {
       gh.putFile.mockRejectedValueOnce(deadline());
       gh.retireBranch.mockResolvedValueOnce(true);
 
-      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
       expect(gh.findOpenPrByHead).not.toHaveBeenCalled();
       expect(gh.createPr).not.toHaveBeenCalled();
+      expect(gh.retireBranch).toHaveBeenCalledTimes(1);
     });
 
     test.each([
       ['the PR lookup fails', () => gh.findOpenPrByHead.mockRejectedValueOnce(new Error('503'))],
-      ['the branch cannot be deleted', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockRejectedValueOnce(new Error('500')); }],
-      ['the branch survives deletion', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockResolvedValueOnce(false); }],
+      ['the branch cleanup fails', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockRejectedValueOnce(new Error('500')); }],
     ])('an unproven outcome is REFRESH_PUBLISH_UNRECONCILED when %s', async (_label, arrange) => {
       gh.createPr.mockRejectedValueOnce(deadline());
       arrange();
