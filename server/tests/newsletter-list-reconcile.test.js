@@ -210,3 +210,22 @@ test.each([
   expect(result.orphanLinks).toBe(expected ? 1 : 0);
   expect(state.subscribers[0].customer_id).toBe(expected);
 });
+
+test('orphan link re-derives the match fresh: a second live customer sharing the email appearing mid-batch drops the link', async () => {
+  const state = { customers: [cust({ id: 'c1', email: 'orphan@e.com' })], subscribers: [{ id: 's1', customer_id: null, email: 'orphan@e.com', status: 'active' }], prefs: [] };
+  const conn = makeConn(state);
+  let firstRead = true;
+  const rawImpl = conn.raw.getMockImplementation();
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Call 1 = the read-phase count (sees exactly one match); call 2 = the
+    // write-phase re-derivation — add a second live customer before it reads.
+    if (sql.includes('SELECT id FROM customers')) {
+      if (!firstRead) state.customers.push(cust({ id: 'c2', email: 'orphan@e.com' }));
+      firstRead = false;
+    }
+    return rawImpl(sql, bindings);
+  });
+  const result = await reconcileCustomers({ dryRun: false, conn });
+  expect(result.orphanLinks).toBe(1); // the read-phase snapshot still counted it
+  expect(state.subscribers[0].customer_id).toBeNull(); // the write-phase recheck found it now ambiguous
+});

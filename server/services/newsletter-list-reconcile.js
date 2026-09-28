@@ -202,7 +202,7 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const orphanLinks = [];
   for (const orphan of orphanCandidateRows) {
     const matches = await findLiveCustomersForEmail(conn, orphan.email);
-    if (matches.length === 1) orphanLinks.push({ subscriberId: orphan.id, customerId: matches[0].id });
+    if (matches.length === 1) orphanLinks.push({ subscriberId: orphan.id, email: orphan.email, customerId: matches[0].id });
   }
 
   // Runs `action` per item, catching so one failure never aborts the batch.
@@ -254,10 +254,17 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       .where((qb) => qb.whereNull('region_zone').orWhereRaw("TRIM(region_zone) = ''"))
       .update({ region_zone: fill.zone }));
 
-    await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), (link) => conn('newsletter_subscribers')
-      .where({ id: link.subscriberId })
-      .whereNull('customer_id')
-      .update({ customer_id: link.customerId }));
+    await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), async (link) => {
+      // Re-derive the match fresh immediately before writing — an email
+      // change on either side, or a second live customer now sharing the
+      // address, must drop the link rather than trust the earlier read.
+      const fresh = await findLiveCustomersForEmail(conn, link.email);
+      if (fresh.length !== 1) return;
+      await conn('newsletter_subscribers')
+        .where({ id: link.subscriberId, email: link.email })
+        .whereNull('customer_id')
+        .update({ customer_id: fresh[0].id });
+    });
   }
 
   return {
