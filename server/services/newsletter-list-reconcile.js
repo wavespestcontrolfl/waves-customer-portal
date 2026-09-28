@@ -159,7 +159,7 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
     try {
       reason = await classifyCustomer(conn, row);
     } catch (e) {
-      errors.push({ customerId: row.customer_id, email: row.email, error: e.message });
+      errors.push({ customerId: row.customer_id, error: e.message });
       logger.error(`[newsletter-list-reconcile] classify customer id=${row.customer_id} failed: ${e.message}`);
       continue;
     }
@@ -186,18 +186,21 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   }
 
   // Runs `action` per item, catching so one failure never aborts the batch.
-  async function guardedEach(items, action) {
+  // `idFor` returns an id-only descriptor for the error/log — never the
+  // full row (an importable row carries email/first_name/last_name).
+  async function guardedEach(items, idFor, action) {
     for (const item of items) {
       try { await action(item); } catch (e) {
-        errors.push({ ...item, error: e.message });
-        logger.error(`[newsletter-list-reconcile] write failed for ${JSON.stringify(item)}: ${e.message}`);
+        const id = idFor(item);
+        errors.push({ ...id, error: e.message });
+        logger.error(`[newsletter-list-reconcile] write failed for ${JSON.stringify(id)}: ${e.message}`);
       }
     }
   }
 
   let imported = 0;
   if (write) {
-    await guardedEach(importableRows, async (row) => {
+    await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
       // Re-check immediately before writing: a customer who unsubscribes,
       // gets suppressed, or flips marketing_offers off between the read
       // and this write must be skipped, never imported.
@@ -223,12 +226,12 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       }
     });
 
-    await guardedEach(zoneFillCandidates, (fill) => conn('newsletter_subscribers')
+    await guardedEach(zoneFillCandidates, (fill) => ({ subscriberId: fill.subscriberId }), (fill) => conn('newsletter_subscribers')
       .where({ id: fill.subscriberId })
       .where((qb) => qb.whereNull('region_zone').orWhereRaw("TRIM(region_zone) = ''"))
       .update({ region_zone: fill.zone }));
 
-    await guardedEach(orphanLinks, (link) => conn('newsletter_subscribers')
+    await guardedEach(orphanLinks, (link) => ({ subscriberId: link.subscriberId }), (link) => conn('newsletter_subscribers')
       .where({ id: link.subscriberId })
       .whereNull('customer_id')
       .update({ customer_id: link.customerId }));
