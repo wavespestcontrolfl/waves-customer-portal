@@ -2844,34 +2844,56 @@ describe('owner competitor list', () => {
     const offList = gate.evaluate({ body: 'Orkin and Truly Nolen both offer recurring residential plans.', title: 'x' }, OPTS);
     expect(gate.namedCompetitorListVerdict(offList)).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
 
-    // An uncurated business the curated detector does not know still counts
-    // (pre-push audit P1) — but a statute or regulator is not a business.
-    const uncurated = gate.evaluate({ body: 'Orkin and Acme Pest Solutions offer recurring residential plans.', title: 'x' }, OPTS);
-    expect(uncurated.namedCompetitors).toEqual(['Acme Pest Solutions', 'Orkin']);
-    expect(gate.namedCompetitorListVerdict(uncurated)).toMatchObject({ ok: false, offList: ['Acme Pest Solutions'] });
-    // …and on its own it still routes as named-competitor content, so the
-    // runner, poller and remediation all apply the owner list (pre-push r3).
-    const uncuratedOnly = gate.evaluate({ body: 'Acme Pest Solutions offers recurring residential plans.', title: 'x' }, OPTS);
-    expect(uncuratedOnly).toMatchObject({ pass: true, requiresHumanReview: true, namedCompetitors: ['Acme Pest Solutions'] });
-    const regulator = gate.evaluate({ body: 'Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control enforces it. See our Sarasota Pest Control Guide.', title: 'x' }, OPTS);
-    expect(regulator.namedCompetitors).toEqual(['Orkin']);
-    // Title-Case topic phrases are not businesses unless the sentence uses
-    // them as one (Codex r1 P2 on #5146).
-    const topics = gate.evaluate({ body: 'Read our Home Pest Control Guide before you call Orkin. Yard Mosquito Control: what Orkin sprays. IFAS Termite Prevention tips.', title: 'x' }, OPTS);
-    expect(topics.namedCompetitors).toEqual(['Orkin']);
-    const plainTopics = gate.evaluate({ body: 'Read our Home Pest Control Guide. Yard Mosquito Control basics.', title: 'x' }, {});
-    expect(plainTopics).toMatchObject({ pass: true, requiresHumanReview: false, namedCompetitors: [] });
-    const versus = gate.evaluate({ body: 'Orkin vs. Bug Busters Pest Control: plans compared.', title: 'x' }, OPTS);
-    expect(versus.namedCompetitors).toEqual(['Bug Busters Pest Control', 'Orkin']);
+    // A name only a link destination carries still counts, and the bare
+    // HomeTeam / Turner aliases match lowercase URL slugs (Codex r2 P1) —
+    // while prose casing stays case-sensitive.
+    for (const [body, name] of [
+      ['See [the published terms](https://example.com/providers/hometeam).', 'HomeTeam Pest Defense'],
+      ['See [their terms](https://example.com/pest/turner-plan-terms).', 'Turner Pest Control'],
+    ]) {
+      const r = gate.evaluate({ body, title: 'x' }, { namedCompetitorEnabled: true });
+      expect(r).toMatchObject({ pass: true, requiresHumanReview: true, namedCompetitors: [name] });
+    }
+    expect(gate.evaluate({ body: 'Cheer the home team; hometeam spirit; a pancake turner.', title: 'x' }, {}).namedCompetitors).toEqual([]);
 
     // The owner's short "Turner" is recognized (Codex r1 P1 on #5146).
     const turner = gate.evaluate({ body: 'Turner does not offer a termite bond in every county.', title: 'x' }, OPTS);
     expect(turner.namedCompetitors).toEqual(['Turner Pest Control']);
     expect(gate.namedCompetitorListVerdict(turner)).toEqual({ ok: true, approved: ['Turner Pest Control'] });
 
-    // A name only a link destination carries still counts.
     const linked = gate.evaluate({ body: 'Compare plans on [their site](https://www.trulynolen.com/plans).', title: 'x' }, OPTS);
     expect(linked.namedCompetitors).toContain('Truly Nolen');
+  });
+
+  // Uncurated business names: high-recall candidates here, semantic
+  // confirmation in business-name-confirmer.js (Codex r2 on #5146).
+  test('business-name candidates are broad; only regulators, institutions, headings-as-headings and own/.gov/.edu links are dropped', () => {
+    const cands = (body, title = 'x') => gate.evaluate({ body, title }, OPTS).businessNameCandidates.map((c) => c.name);
+    expect(cands('Acme Pest Solutions competes with Orkin in Sarasota.')).toEqual(['Acme Pest Solutions']);
+    expect(cands('Acme Pest Solutions is based in Sarasota alongside Orkin.')).toEqual(['Acme Pest Solutions']);
+    expect(cands('Biological Pest Control offers a way to reduce chemical use.')).toEqual(['Biological Pest Control']);
+    expect(cands('Orkin and Bob Smith Lawn Care LLC both mow.')).toEqual(['Bob Smith Lawn Care LLC']);
+    expect(cands('Compare [their plans](https://acme-pest-solutions.com/plans) with Orkin.')).toEqual(['acme pest solutions']);
+    expect(cands('Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control and the Florida Department of Agriculture enforce it.')).toEqual([]);
+    expect(cands('## Home Pest Control Guide\n\nOrkin offers plans. See [FDACS](https://www.fdacs.gov/pest-control-licensing) and [our page](https://www.wavespestcontrol.com/pest-control/).')).toEqual([]);
+    // A heading that compares keeps its candidate.
+    expect(cands('## Orkin vs. Bug Busters Pest Control\n\nPlans compared.')).toEqual(['Bug Busters Pest Control']);
+    const first = gate.evaluate({ body: 'Acme Pest Solutions competes with Orkin in Sarasota.', title: 'x' }, OPTS).businessNameCandidates;
+    expect(first).toEqual([{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions competes with Orkin in Sarasota.' }]);
+  });
+
+  test('candidates count only through a confirmation that covers exactly them', () => {
+    const r = gate.evaluate({ body: 'Acme Pest Solutions competes with Orkin in Sarasota.', title: 'x' }, OPTS);
+    const key = gate.businessNameCandidatesKey(r.businessNameCandidates);
+    expect(gate.namedCompetitorListVerdict(r)).toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: false, key, reason: 'timeout' } }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key: 'stale', companies: [] } }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_unverified_names' });
+    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key, companies: ['Acme Pest Solutions'] } }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Acme Pest Solutions'] });
+    expect(gate.namedCompetitorListVerdict({ ...r, businessNameConfirmation: { ok: true, key, companies: [] } }))
+      .toEqual({ ok: true, approved: ['Orkin'] });
   });
 
   test('a verdict without recorded names fails closed', () => {

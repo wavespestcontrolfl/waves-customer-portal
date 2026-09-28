@@ -1446,7 +1446,15 @@ async function maybeAutoMerge(run, pr) {
         if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
         // A stored NULL verdict is a valid competitor-free read; missing
         // row/unparseable stays flagged (fail closed).
-        const flagged = ctr === undefined ? true : Boolean(ctr && ctr.requiresHumanReview === true);
+        // Uncurated business-name candidates whose STORED confirmation does
+        // not clear them (unconfirmed, failed, stale, or a confirmed company)
+        // govern the run too. The merge gate never re-calls the confirmer:
+        // it judges the confirmation the runner / remediation persisted
+        // with this exact verdict (pinned head = the text it judged).
+        const unclearedCandidates = Boolean(ctr && Array.isArray(ctr.businessNameCandidates)
+          && ctr.businessNameCandidates.length > 0
+          && require('./comparison-table-gate').namedCompetitorListVerdict(ctr).ok !== true);
+        const flagged = ctr === undefined ? true : Boolean(ctr && (ctr.requiresHumanReview === true || unclearedCandidates));
         let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
         const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();

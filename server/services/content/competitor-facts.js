@@ -146,6 +146,7 @@ const COMPETITORS = [
     // "Turner", and intercept copy uses the short form): "Turner" /
     // "TURNER" only — never a lowercase word.
     aliasesCS: ['Turner'],
+    urlAliases: ['turner'],
     attributes: {
       reach: { value: 'Florida (statewide)', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://www.turnerpest.com', asOf: '2026-06-22' },
@@ -169,6 +170,9 @@ const COMPETITORS = [
     // Case-sensitive bare brand: "HomeTeam" / "HOMETEAM" name the company;
     // lowercase "hometeam" / "home team" stay ordinary prose.
     aliasesCS: ['HomeTeam'],
+    // Link destinations lowercase their slugs ("/providers/hometeam"): the
+    // bare brand matches case-insensitively in URL tokens ONLY.
+    urlAliases: ['hometeam'],
     attributes: {
       reach: { value: 'Multi-state (US, incl. Florida)', source: 'https://pestdefense.com', asOf: '2026-06-22' },
       residential_recurring: { value: 'Yes — recurring residential plans', source: 'https://pestdefense.com', asOf: '2026-06-22' },
@@ -289,6 +293,7 @@ for (const c of COMPETITORS) {
   ALLOWLIST_INDEX.set(normalize(c.name), c);
   for (const a of c.aliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
   for (const a of c.aliasesCS || []) ALLOWLIST_INDEX.set(normalize(a), c);
+  for (const a of c.urlAliases || []) ALLOWLIST_INDEX.set(normalize(a), c);
 }
 
 // Case-INSENSITIVE detectable tokens: allowlist names/aliases + detection-only
@@ -309,6 +314,13 @@ const DETECTABLE_NAMES = (() => {
 const DETECTABLE_NAMES_CS = (() => {
   const set = new Set();
   for (const c of COMPETITORS) for (const a of c.aliasesCS || []) set.add(a);
+  return [...set].sort((a, b) => b.length - a.length);
+})();
+
+// Case-INSENSITIVE aliases honored in link-destination tokens only.
+const URL_ALIAS_NAMES = (() => {
+  const set = new Set();
+  for (const c of COMPETITORS) for (const a of c.urlAliases || []) set.add(a);
   return [...set].sort((a, b) => b.length - a.length);
 })();
 
@@ -349,7 +361,7 @@ function attributeValues(name) {
  * sourced facts and may therefore be named. A longer name shadows the shorter
  * names it contains (so "Massey Services" does not also report bare "Massey").
  */
-function findBusinessMentions(text) {
+function findBusinessMentions(text, { url = false } = {}) {
   // Normalize curly quotes/apostrophes → straight so a stylized spelling like
   // All "U" Need or Keller's still matches the straight-quote aliases.
   const haystack = String(text || '')
@@ -360,9 +372,13 @@ function findBusinessMentions(text) {
   const claimedRanges = []; // [start,end) already attributed to a longer name
   // Case-insensitive tokens + case-sensitive ones (generic-word brands), merged
   // longest-first so the longest match wins regardless of which list it came from.
+  // `url: true` — the text is link-destination tokens: bare brand aliases
+  // that are case-sensitive in prose (HomeTeam, Turner) also match their
+  // lowercase slug form there (urlAliases).
   const candidates = [
     ...DETECTABLE_NAMES.map((display) => ({ display, ci: true })),
     ...DETECTABLE_NAMES_CS.map((display) => ({ display, ci: false })),
+    ...(url ? URL_ALIAS_NAMES.map((display) => ({ display, ci: true })) : []),
   ].sort((a, b) => b.display.length - a.display.length);
   for (const { display, ci } of candidates) {
     // Escape regex metachars, then let any whitespace match between words so

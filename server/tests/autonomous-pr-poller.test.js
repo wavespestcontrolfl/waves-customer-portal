@@ -1716,6 +1716,13 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   test.each([
     ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Truly Nolen'] }],
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
+    ['has business-name candidates with no stored confirmation', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'], businessNameCandidates: [{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions competes with Orkin.' }] }],
+    ['has an unflagged verdict whose stored confirmation found a company', (() => {
+      const businessNameCandidates = [{ name: 'Acme Pest Solutions', sentence: 'Acme Pest Solutions is based in Sarasota.' }];
+      const key = require('../services/content/comparison-table-gate').businessNameCandidatesKey(businessNameCandidates);
+      return { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], businessNameCandidates,
+        businessNameConfirmation: { ok: true, key, companies: ['Acme Pest Solutions'] } };
+    })()],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     await withGatesOn(async () => {

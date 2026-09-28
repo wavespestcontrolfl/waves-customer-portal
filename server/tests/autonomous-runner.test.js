@@ -1759,6 +1759,7 @@ function loadRunnerWith({
   contentGuardrails = undefined,
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
+  businessNameConfirmer = undefined,
 }) {
   queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
@@ -1815,6 +1816,7 @@ function loadRunnerWith({
   mockOrLoadFail('../services/content/content-guardrails', contentGuardrails);
   mockOrLoadFail('../services/content/comparison-table-gate', comparisonTableGate);
   mockOrLoadFail('../services/content/claims-ledger-validator', claimsLedgerValidator);
+  mockOrLoadFail('../services/content/business-name-confirmer', businessNameConfirmer);
   return require('../services/content/autonomous-runner');
 }
 
@@ -3145,7 +3147,7 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, businessNameConfirmer = undefined }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3209,6 +3211,7 @@ describe('named-competitor autopublish gate', () => {
       indexNow: { submit: jest.fn() },
       linkPlanner: {},
       contentGuardrails: contentGuardrails || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      businessNameConfirmer,
       // Default: the gate PASSES but flags the named-competitor human-review
       // signal — the exact shape a validated curated-competitor table
       // produces. Tests may override with a failing gate. The REAL shared
@@ -3274,8 +3277,9 @@ describe('named-competitor autopublish gate', () => {
     test('approved names only (incl. the TAEXX and bare HomeTeam spellings) publish and record the names the list cleared', async () => {
       delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
       const publisher = prPublisher(911);
+      const businessNameConfirmer = { confirmBusinessNames: jest.fn() };
       const { runner, queue } = namedCompetitorScenario({
-        publisher, comparisonGate: realGate,
+        publisher, comparisonGate: realGate, businessNameConfirmer,
         operatorBrief: brief('Orkin and HomeTeam'),
         body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans.',
       });
@@ -3286,6 +3290,8 @@ describe('named-competitor autopublish gate', () => {
       expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
       expect(result.comparison_table_result.competitors_approved_by_list).toEqual(['HomeTeam Pest Defense', 'Orkin']);
       expect(queue.skip).not.toHaveBeenCalled();
+      // No uncurated candidates → no confirmation call.
+      expect(businessNameConfirmer.confirmBusinessNames).not.toHaveBeenCalled();
     });
 
     test('one name off the owner list skips as named_competitor_off_list — never published, never queued for approval', async () => {
@@ -3307,21 +3313,62 @@ describe('named-competitor autopublish gate', () => {
       expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
     });
 
-    test('a draft naming only an uncurated business is off-list too (pre-push r3)', async () => {
+    // Uncurated business names: the gate's high-recall candidates go to ONE
+    // structured confirmation call (mocked here); Codex r2 on #5146.
+    const confirmer = (companiesFor) => ({ confirmBusinessNames: jest.fn(async (cands) => ({
+      ok: true, key: realGate.businessNameCandidatesKey(cands), companies: cands.map((c) => c.name).filter(companiesFor),
+    })) });
+
+    test('a confirmed uncurated company beside an approved one skips as off-list', async () => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = prPublisher(915);
+      const businessNameConfirmer = confirmer((n) => n === 'Acme Pest Solutions');
       const { runner, queue, claimedAt } = namedCompetitorScenario({
-        publisher, comparisonGate: realGate,
-        operatorBrief: brief('local providers'),
-        body: 'Acme Pest Solutions offers recurring residential plans in Sarasota.',
+        publisher, comparisonGate: realGate, businessNameConfirmer,
+        operatorBrief: brief('Orkin'),
+        body: 'Acme Pest Solutions competes with Orkin in Sarasota.',
       });
 
       const result = await runner.runNext();
 
+      expect(businessNameConfirmer.confirmBusinessNames).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
       expect(result.reviewer_notes).toMatch(/Acme Pest Solutions/);
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
       expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
+    test('an unconfirmed candidate (a concept, not a company) publishes as an ordinary post', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = prPublisher(916);
+      const businessNameConfirmer = confirmer(() => false);
+      const { runner } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate, businessNameConfirmer, intercept: false,
+        body: 'Biological Pest Control offers a way to reduce chemical use around Sarasota homes.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(businessNameConfirmer.confirmBusinessNames).toHaveBeenCalledTimes(1);
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed confirmation fails closed for that draft only (named_competitor_unverified_names)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(917);
+      const businessNameConfirmer = { confirmBusinessNames: jest.fn().mockResolvedValue({ ok: false, key: 'k', reason: 'no_key' }) };
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate, businessNameConfirmer,
+        body: 'Biological Pest Control offers a way to reduce chemical use.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(result.reviewer_notes).toMatch(/no_key/);
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: claimedAt });
     });
 
     test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {

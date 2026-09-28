@@ -79,6 +79,7 @@ const getProtectedPages = lazy('protected-pages', './protected-pages');
 const getContentGuardrails = lazy('content-guardrails', './content-guardrails');
 const getFootprintClassifier = lazy('footprint-claim-classifier', './footprint-claim-classifier');
 const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table-gate');
+const getBusinessNameConfirmer = lazy('business-name-confirmer', './business-name-confirmer');
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
@@ -904,6 +905,17 @@ class AutonomousRunner {
         logger.warn(`[autonomous-runner] comparison-table gate threw: ${err.message}`);
         comparisonResult = { pass: false, findings: [{ severity: 'P1', code: 'COMPARISON_TABLE_GATE_ERROR', message: err.message }] };
       }
+      // Unattended blogs only: uncurated business-name candidates get one
+      // structured confirmation call (business-name-confirmer.js), stored
+      // on the verdict so the merge-time recheck reuses it. Unavailable
+      // module → { ok: false } → the draft fails closed at the verdict.
+      const businessCandidates = Array.isArray(comparisonResult?.businessNameCandidates) ? comparisonResult.businessNameCandidates : [];
+      if (comparisonResult?.pass === true && run.action_type === 'new_supporting_blog' && businessCandidates.length) {
+        const confirmer = getBusinessNameConfirmer();
+        comparisonResult.businessNameConfirmation = confirmer
+          ? await confirmer.confirmBusinessNames(businessCandidates)
+          : { ok: false, reason: 'business_name_confirmer_unavailable' };
+      }
       run.comparison_table_result = comparisonResult;
       // A clean draft that NAMES a competitor must still never auto-publish — it
       // routes to the (approvable) human-review queue at the trust-build step.
@@ -1146,19 +1158,24 @@ class AutonomousRunner {
     // gate) AND the owner list (every name approved — owner rulings
     // 2026-09-27 D2 + 2026-09-28). Comparison, sourcing, and
     // merge-time head checks remain mandatory.
+    // Uncurated business-name candidates count as competitor content unless
+    // their confirmation cleared them all (then the post is ordinary).
     let namedCompetitorLaneOpen = false;
     let namedCompetitorList = null;
+    const businessCandidatesPresent = unattendedBlog
+      && (run.comparison_table_result?.businessNameCandidates?.length || 0) > 0;
     try {
       const comparisonTableGate = require('./comparison-table-gate');
       namedCompetitorLaneOpen = comparisonTableGate.namedCompetitorAutopublishEligible(brief) === true;
-      if (run.comparison_requires_review === true) {
+      if (run.comparison_requires_review === true || businessCandidatesPresent) {
         namedCompetitorList = comparisonTableGate.namedCompetitorListVerdict(run.comparison_table_result);
       }
     } catch (_) { namedCompetitorLaneOpen = false; namedCompetitorList = null; }
+    const competitorContent = run.comparison_requires_review === true
+      || (businessCandidatesPresent && namedCompetitorList?.ok !== true);
     const namedCompetitorAutopublish = namedCompetitorLaneOpen && namedCompetitorList?.ok === true;
-    const forceNamedCompetitorReview = run.comparison_requires_review === true
-      && !namedCompetitorAutopublish;
-    if (namedCompetitorAutopublish) {
+    const forceNamedCompetitorReview = competitorContent && !namedCompetitorAutopublish;
+    if (namedCompetitorAutopublish && competitorContent) {
       // Audit trail: which names the owner list cleared on this run, kept
       // on the persisted comparison verdict.
       run.comparison_table_result = {
@@ -1191,11 +1208,14 @@ class AutonomousRunner {
     if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
       const reason = !autoPublish ? 'auto_publish_disabled'
         : forceNamedCompetitorReview
-          ? ((namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
+          ? ((namedCompetitorList?.reason === 'named_competitor_unverified_names' && namedCompetitorList.reason)
+            || (namedCompetitorLaneOpen && namedCompetitorList?.reason) || 'named_competitor_disabled')
           : 'brief_risk_blocked';
-      const listNote = namedCompetitorLaneOpen && reason === 'named_competitor_off_list'
+      const listNote = reason === 'named_competitor_off_list'
         ? `Names competitor(s) outside the owner-approved list: ${namedCompetitorList.offList.join(', ')} (a new owner ruling is needed to name them).`
-        : null;
+        : reason === 'named_competitor_unverified_names'
+          ? `Could not confirm whether these are companies (${run.comparison_table_result?.businessNameConfirmation?.reason || 'no confirmation'}): ${(run.comparison_table_result?.businessNameCandidates || []).map((c) => c.name).join(', ')}.`
+          : null;
       const finalized = await finalize(run, t0, {
         outcome: 'skipped', skip_reason: reason,
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), listNote].filter(Boolean).join(' | '),
