@@ -764,6 +764,25 @@ describe('weeklyRefreshIfDue', () => {
     expect(errorLog).toBeTruthy();
   });
 
+  test('a stale track page refreshes with the grass_track id from its title, not the slug', async () => {
+    useDb({
+      knowledge_entries: [{
+        id: 'ke-t', slug: 'track/st-augustine', category: 'track',
+        title: 'Track st_augustine Performance', stale_flag: true,
+      }],
+      knowledge_update_log: [],
+      treatment_outcomes: [],
+    });
+    const trackSpy = jest.spyOn(wiki, 'updateTrackPage').mockResolvedValue({ writeState: 'skipped' });
+    const seasonalSpy = jest.spyOn(wiki, 'updateSeasonalPage').mockResolvedValue({ writeState: 'skipped' });
+
+    await wiki.weeklyRefresh();
+
+    expect(trackSpy).toHaveBeenCalledWith('st_augustine', expect.anything());
+    trackSpy.mockRestore();
+    seasonalSpy.mockRestore();
+  });
+
   test('vision-score reconcile keyset-paginates the whole window instead of a blind cap', async () => {
     const t0 = 1755000000000;
     const fullPage = Array.from({ length: 100 }, (_, i) => ({

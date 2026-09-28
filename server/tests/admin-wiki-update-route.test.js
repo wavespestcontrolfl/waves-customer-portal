@@ -13,6 +13,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/agronomic-wiki', () => ({
   getPage: jest.fn(),
   updateTrackPage: jest.fn(),
+  trackIdFromPage: jest.requireActual('../services/agronomic-wiki').trackIdFromPage,
 }));
 
 const express = require('express');
