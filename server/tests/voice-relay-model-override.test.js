@@ -270,12 +270,12 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
     return q;
   }
 
-  function setDb() {
+  function setDb(target = db) {
     const queues = {
       call_log: [chain({ first: CALL_ROW }), chain(), chain(), chain()],
       collection_cases: [chain({ first: CASE_ROW })],
     };
-    db.mockImplementation((table) => {
+    target.mockImplementation((table) => {
       if (table === 'customers') return chain({ first: CUSTOMER });
       if (table === 'customer_dunning_sequences') return chain({ first: undefined });
       const queue = queues[table];
@@ -343,6 +343,9 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
       // `logger` this file requires at top — captured here so the assertion
       // below checks the instance collections-conversation.js actually used.
       isolatedLogger = require('../services/logger');
+      // Same for ../models/db: configure the instance the fresh module
+      // actually requires, not the outer one beforeEach set up.
+      setDb(require('../models/db'));
       FreshCollectionsConversation = require('../services/collections/outbound-voice/collections-conversation').CollectionsConversation;
     });
     delete process.env.VOICE_RELAY_MODEL;
