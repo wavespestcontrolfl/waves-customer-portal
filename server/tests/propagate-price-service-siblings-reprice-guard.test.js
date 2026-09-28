@@ -5,11 +5,18 @@
  *     so a sibling sitting on an unpaid draft/sent invoice refuses the
  *     'following' propagation, not just one already holding taken money.
  *   - C: a sibling whose price this loop is about to rewrite takes that
- *     sibling's invoice-mint lock BEFORE the targetQuery's own row lock
- *     (`.forUpdate()`), in a stable (sorted) id order.
+ *     sibling's invoice-mint lock — NON-BLOCKING (pre-push audit P1: the
+ *     edited visit's own mint lock is already held when this runs, so a
+ *     blocking wait here risks a real ABBA deadlock against a second
+ *     overlapping 'following' save) — BEFORE the targetQuery's own row lock
+ *     (`.forUpdate()`), in a stable (sorted) id order; any sibling whose
+ *     try-lock fails refuses the whole save (409 VISIT_BUSY_RETRY).
  *
  * Direct unit tests against the exported function with a minimal fake
- * knex-shaped `conn` — no HTTP route, no transaction.
+ * knex-shaped `conn` — no HTTP route, no transaction. `tryAcquireScheduledInvoiceMintLock`
+ * runs for REAL (through `conn.raw`, faked below to answer like Postgres'
+ * `pg_try_advisory_xact_lock`) rather than being replaced by a mock, so
+ * these tests also exercise its actual boolean-parsing contract.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -23,14 +30,14 @@ jest.mock('../services/scheduled-invoice-mint', () => {
   const actual = jest.requireActual('../services/scheduled-invoice-mint');
   return {
     ...actual,
-    acquireScheduledInvoiceMintLock: jest.fn((...a) => actual.acquireScheduledInvoiceMintLock(...a)),
+    tryAcquireScheduledInvoiceMintLock: jest.fn((...a) => actual.tryAcquireScheduledInvoiceMintLock(...a)),
   };
 });
 
 // Only reachable via router._test — this helper has no top-level
 // module.exports.<name> line of its own (unlike findBillingCoveredVisits).
 const { propagatePriceServiceToFollowingSiblings } = require('../routes/admin-schedule')._test;
-const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
 
 // The single `scheduled_services` `.forUpdate()` spy — shared across every
 // chain the fake `conn` hands out for that table, so its invocationCallOrder
@@ -44,8 +51,12 @@ const rowForUpdateSpy = jest.fn();
 // different call sites in the SAME function (an unlocked `.pluck('id')`
 // candidate read, then the locked `.forUpdate()` targets read) — both ride
 // the one `candidateIds`/`targets` pair below since every real call in this
-// function targets the same sibling population.
-function makeConn({ candidateIds = [], targets = [], hasTables = {}, byTable = {} } = {}) {
+// function targets the same sibling population. `denyTryLockFor` names ids
+// whose `conn.raw` try-lock answers `acquired: false` (Postgres semantics:
+// the lock is already held by another session/transaction).
+function makeConn({
+  candidateIds = [], targets = [], hasTables = {}, byTable = {}, denyTryLockFor = new Set(),
+} = {}) {
   const conn = (table) => {
     if (table === 'scheduled_services') {
       const c = {};
@@ -76,7 +87,13 @@ function makeConn({ candidateIds = [], targets = [], hasTables = {}, byTable = {
     hasTable: jest.fn(async (name) => hasTables[name] !== false),
     hasColumn: jest.fn(async () => true),
   };
-  conn.raw = jest.fn(async () => {});
+  // Mirrors `pg_try_advisory_xact_lock(...) AS acquired` — the bound id is
+  // the second parameter (tryAcquireScheduledInvoiceMintLock's own call
+  // shape: [namespace, String(scheduledServiceId)]).
+  conn.raw = jest.fn(async (_sql, params) => {
+    const id = params?.[1];
+    return { rows: [{ acquired: !denyTryLockFor.has(id) }] };
+  });
   return conn;
 }
 
@@ -87,7 +104,7 @@ const ALL_TABLES = {
 
 beforeEach(() => {
   rowForUpdateSpy.mockClear();
-  acquireScheduledInvoiceMintLock.mockClear();
+  tryAcquireScheduledInvoiceMintLock.mockClear();
 });
 
 test('a sibling with an OPEN (draft) invoice linked only via its service record refuses the propagation (B.3 — openBalance)', async () => {
@@ -126,12 +143,12 @@ test('sibling mint locks are acquired BEFORE the targetQuery row lock, sorted by
     fields: { estimated_price: 200 }, serviceChanged: false, priceChanged: true, cols: { estimated_price: {} },
   });
   expect(ids.sort()).toEqual(['sib-a', 'sib-b']);
-  expect(acquireScheduledInvoiceMintLock).toHaveBeenCalledTimes(2);
+  expect(tryAcquireScheduledInvoiceMintLock).toHaveBeenCalledTimes(2);
   // Sorted order: sib-a before sib-b.
-  expect(acquireScheduledInvoiceMintLock.mock.calls[0][1]).toBe('sib-a');
-  expect(acquireScheduledInvoiceMintLock.mock.calls[1][1]).toBe('sib-b');
+  expect(tryAcquireScheduledInvoiceMintLock.mock.calls[0][1]).toBe('sib-a');
+  expect(tryAcquireScheduledInvoiceMintLock.mock.calls[1][1]).toBe('sib-b');
   // Every mint-lock call precedes the (single, shared) row-lock spy's call.
-  const lastMintOrder = acquireScheduledInvoiceMintLock.mock.invocationCallOrder[1];
+  const lastMintOrder = tryAcquireScheduledInvoiceMintLock.mock.invocationCallOrder[1];
   const rowLockOrder = rowForUpdateSpy.mock.invocationCallOrder[0];
   expect(lastMintOrder).toBeLessThan(rowLockOrder);
 });
@@ -147,5 +164,31 @@ test('a schedule-only propagation (no price/service change) never touches the mi
     editedId: 'edited-1', editedRow: null, parentId: 'parent-1', fromDateStr: null,
     fields: { technician_id: 'tech-2' }, serviceChanged: false, priceChanged: false, cols: { technician_id: {} },
   });
-  expect(acquireScheduledInvoiceMintLock).not.toHaveBeenCalled();
+  expect(tryAcquireScheduledInvoiceMintLock).not.toHaveBeenCalled();
+});
+
+test('ABBA-safe refusal (pre-push audit P1): a sibling whose mint lock is already held elsewhere refuses the whole save, no sibling write', async () => {
+  const conn = makeConn({
+    candidateIds: ['sib-a', 'sib-b'],
+    targets: [
+      { id: 'sib-a', scheduled_date: '2099-02-01', pre_service_brief_type: null },
+      { id: 'sib-b', scheduled_date: '2099-03-01', pre_service_brief_type: null },
+    ],
+    hasTables: ALL_TABLES,
+    byTable: {
+      invoices: [], 'invoices as inv': [], 'visit_completion_packet_items as p': [],
+      estimate_card_holds: [], appointment_card_requests: [], scheduled_service_addons: [],
+    },
+    // sib-b's lock is already held by a concurrent transaction (e.g. a
+    // second overlapping 'following' save, or a live invoice mint).
+    denyTryLockFor: new Set(['sib-b']),
+  });
+  await expect(propagatePriceServiceToFollowingSiblings(conn, {
+    editedId: 'edited-1', editedRow: { id: 'edited-1' }, parentId: 'parent-1', fromDateStr: null,
+    fields: { estimated_price: 200 }, serviceChanged: false, priceChanged: true, cols: { estimated_price: {} },
+  })).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+  // The try-lock never blocks — sib-a (tried first, sorted) succeeded, but
+  // the row-locking targetQuery (and so every sibling UPDATE) never ran.
+  expect(tryAcquireScheduledInvoiceMintLock).toHaveBeenCalledTimes(2);
+  expect(rowForUpdateSpy).not.toHaveBeenCalled();
 });

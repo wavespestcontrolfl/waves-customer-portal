@@ -106,6 +106,15 @@ let invoiceFixture = [];
 // single counter shared across every mock function in the environment, so
 // comparing across distinct jest.fn instances is meaningful).
 const forUpdateSpy = jest.fn();
+// TOCTOU regression coverage (pre-push audit P1): true only while the
+// route's own db.transaction callback is running. A test can set
+// `concurrentEstimatedPrice` to make a `scheduled_services` read made
+// INSIDE the transaction answer a DIFFERENT stored price than one made
+// before it — simulating a concurrent save that already committed a price
+// change between whatever the operator's screen last showed and this
+// transaction's own mint-lock-held read.
+let insideTxn = false;
+let concurrentEstimatedPrice = null;
 
 function chain(table) {
   const c = {};
@@ -116,7 +125,13 @@ function chain(table) {
     if (table === 'scheduled_services') forUpdateSpy(...args);
     return c;
   });
-  c.first = jest.fn(async () => (table === 'scheduled_services' ? { ...STORED } : null));
+  c.first = jest.fn(async () => {
+    if (table !== 'scheduled_services') return null;
+    if (insideTxn && concurrentEstimatedPrice != null) {
+      return { ...STORED, estimated_price: concurrentEstimatedPrice };
+    }
+    return { ...STORED };
+  });
   c.columnInfo = jest.fn(async () => (table === 'scheduled_services' ? COLS : {}));
   c.pluck = jest.fn(async () => []);
   c.count = jest.fn(async () => [{ count: '0' }]);
@@ -153,6 +168,8 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   captured.length = 0;
   invoiceFixture = [];
+  insideTxn = false;
+  concurrentEstimatedPrice = null;
   forUpdateSpy.mockClear();
   acquireScheduledInvoiceMintLock.mockClear();
   mockReleaseCombined.mockClear();
@@ -167,7 +184,12 @@ beforeEach(() => {
     trx.schema = db.schema;
     trx.commit = jest.fn();
     trx.rollback = jest.fn();
-    return fn(trx);
+    insideTxn = true;
+    try {
+      return await fn(trx);
+    } finally {
+      insideTxn = false;
+    }
   });
 });
 
@@ -182,10 +204,33 @@ test('unchanged price passes even with an open invoice on the visit', async () =
   invoiceFixture = [{ scheduled_service_id: 'svc-1', status: 'sent', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 100 }];
   const { status, body } = await put({ estimatedPrice: 100, notes: 'no price change' });
   console.log('unchanged price:', status, JSON.stringify(body));
-  // Same price -> no guard, no mint lock, save proceeds to the write.
-  expect(acquireScheduledInvoiceMintLock).not.toHaveBeenCalled();
+  // A price field WAS posted, so the mint lock is still taken (it's gated on
+  // the request shape, not a pre-transaction DB comparison — see
+  // priceEditPosted's own comment: that comparison can only be trusted
+  // in-transaction, under the lock). But the in-transaction comparison
+  // finds no actual change, so the coverage check never runs and the save
+  // proceeds to the write.
+  expect(acquireScheduledInvoiceMintLock).toHaveBeenCalledWith(expect.anything(), 'svc-1');
   const write = captured.find((c) => c.table === 'scheduled_services');
   expect(write).toBeDefined();
+});
+
+test('TOCTOU regression: a save that LOOKS unchanged still refuses when the in-transaction row already differs (a concurrent save landed first)', async () => {
+  // The operator's screen (and any pre-transaction read) shows the OLD
+  // stored price (100) and posts it back unchanged. But by the time this
+  // save reaches its mint-lock-held read INSIDE the transaction, a
+  // concurrent save has already moved the row to 250 — so this save's
+  // posted 100 is actually a real (and, given the open invoice below,
+  // blocked) price change relative to the row's CURRENT state. The guard
+  // must decide from the in-transaction read, never a value that could have
+  // gone stale before the transaction opened.
+  concurrentEstimatedPrice = 250;
+  invoiceFixture = [{ scheduled_service_id: 'svc-1', status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 250 }];
+  const { status, body } = await put({ estimatedPrice: 100, notes: 'looks unchanged from a stale read' });
+  console.log('toctou-blocked:', status, JSON.stringify(body));
+  expect(status).toBe(409);
+  expect(body.code).toBe('REPRICE_BLOCKED_COMMITTED_MONEY');
+  expect(captured.find((c) => c.table === 'scheduled_services')).toBeUndefined();
 });
 
 test('changed price is refused (409) with a DRAFT invoice that still has a balance', async () => {
@@ -240,10 +285,10 @@ test('the free re-service conversion is exempt from the repricing guard by const
   // an equally deep conditional.
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
-  expect(src).toMatch(/if \(!reServiceConversionZeroPrice && updates\.estimated_price !== undefined\) \{/);
+  expect(src).toMatch(/const priceEditPosted = !reServiceConversionZeroPrice && updates\.estimated_price !== undefined;/);
   // The conversion still takes the mint lock (it voids invoices under it),
   // it just never runs the coverage refusal.
-  expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceChangeNeedsGuard\) \{/);
+  expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted\) \{/);
 });
 
 test('the refusal happens BEFORE the Bill-To session release (the first Stripe cancel this route can reach)', async () => {
