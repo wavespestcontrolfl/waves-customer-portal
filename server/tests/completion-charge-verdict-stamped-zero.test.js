@@ -42,7 +42,7 @@ describe('resolveCompletionChargeCap — per-application stamped $0 anchor', () 
     });
   });
 
-  test('on: a bare stamped 0 anchors at nothing — a $40 extra is now over cap, routed to review', async () => {
+  test('on: a bare stamped 0 anchors at a ZERO base — a $40 extra is over cap, never the fee', async () => {
     process.env.GATE_STAMPED_ZERO_FREE = 'true';
     const { resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
     const cap = await resolveCompletionChargeCap({
@@ -55,8 +55,37 @@ describe('resolveCompletionChargeCap — per-application stamped $0 anchor', () 
       secureSetupFee: null,
       conn: makeConn(),
     });
-    expect(cap.acceptedPerVisit).toBeNull();
-    expect(cap.verdict).toBe('no_accepted_amount');
+    expect(cap.acceptedPerVisit).toBe(0);
+    expect(cap.capCeiling).toBe(0);
+    expect(cap.verdict).toBe('above_cap');
+  });
+
+  // Codex r3 P1 on #5256: a null base sent an AUTHORIZED setup-only invoice
+  // to office review while attachedInvoiceAutoChargeLikely promised the
+  // charge. The zero base lets the independent allowance form the cap.
+  test('on: a stamped 0 with an authorized setup fee caps at exactly that fee', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    const { resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
+    const setupLine = { description: 'One-time setup fee', amount: 99, quantity: 1, unit_price: 99 };
+    const args = {
+      svc: { estimated_price: 0, primary_line_price: null, cust_per_application_fee: 97.2 },
+      perApplicationBilling: true,
+      apptCardOneTimeCharge: false,
+      apptCardAcceptedAmount: null,
+      extendedLaneAnchor: null,
+      secureSetupFee: { amount: 99 },
+      conn: makeConn(),
+    };
+    const ok = await resolveCompletionChargeCap({
+      ...args, invoice: { id: 'inv-1', subtotal: 99, total: 99, discount_amount: 0, notes: '', line_items: [setupLine] },
+    });
+    expect(ok.acceptedPerVisit).toBe(0);
+    expect(ok.setupFeeAllowance).toBe(99);
+    expect(ok.verdict).toBe('ok');
+    const over = await resolveCompletionChargeCap({
+      ...args, invoice: { id: 'inv-1', subtotal: 139, total: 139, discount_amount: 0, notes: '', line_items: [setupLine, { description: 'Extra', amount: 40 }] },
+    });
+    expect(over.verdict).toBe('above_cap');
   });
 
   test('on: a genuinely NULL (never-priced) row is unaffected — still anchors at the fee', async () => {

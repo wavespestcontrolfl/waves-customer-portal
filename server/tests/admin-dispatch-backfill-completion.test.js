@@ -2386,8 +2386,8 @@ describe('completion route wiring (source contracts)', () => {
     // The per-application acceptance-fee fallback and the setup-fee
     // allowances never widen this lane's cap. GATE_STAMPED_ZERO_FREE
     // (owner ruling 2026-09-28) adds a guard ahead of the fee fallback: a
-    // stamped $0 visit never anchors at the acceptance fee.
-    expect(verdictSource).toMatch(/: \(!perVisitStampedZero && perApplicationBilling\s*\n\s*&& svc\.cust_per_application_fee != null/);
+    // stamped $0 visit anchors at a zero base, never the acceptance fee.
+    expect(verdictSource).toMatch(/: \(perVisitStampedZero \? 0\s*\n\s*: \(perApplicationBilling\s*\n\s*&& svc\.cust_per_application_fee != null/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
     expect(verdictSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
     // Autopay-ledger entries name the actual lane (three-way since the
