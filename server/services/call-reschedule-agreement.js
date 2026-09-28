@@ -404,14 +404,12 @@ function namesAnyDay(quote) {
 // The halves of the day this quote's am/pm and part-of-day words state
 // ("at two AM" -> am), so a commitment in the other half never counts.
 const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
-// A part of the day right before one of these describes that thing, not a
-// time ("your morning appointment", "the afternoon slot").
-const DESCRIBED_THINGS = new Set(['appointment', 'appointments', 'visit', 'visits', 'slot', 'slots', 'time', 'service', 'treatment']);
+// Every half of the day said, whatever it describes: "your morning
+// appointment" may be the old visit or the new one, and the words cannot
+// tell which, so an unstated hour beside it fails closed (Codex #5163 r1).
 function halvesSaid(quote) {
   const toks = normalize(quote).split(' ');
-  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t)
-    && (t === 'am' || t === 'pm' || !DESCRIBED_THINGS.has(toks[i + 1])) // "2 PM appointment" keeps its PM
-    && (t !== 'am' || amIsMeridiem(toks[i - 1], toks[i - 2])))
+  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && (t !== 'am' || amIsMeridiem(toks[i - 1], toks[i - 2])))
     .map((t) => HALF_WORDS[t]);
 }
 
