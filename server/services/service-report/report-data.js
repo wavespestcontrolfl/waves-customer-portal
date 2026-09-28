@@ -4998,9 +4998,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // Placed last in this try so a failure here can never disturb the
     // next-appointment picks already resolved above — this whole block is
     // best-effort under the shared outer catch.
-    // Live builds only: the PDF, email, recap and map builders would delete
-    // the field unread, so they skip these reads entirely.
-    if (opts.mode === 'live' && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+    // OPT-IN, live builds only: the /data render path is the one caller that
+    // shows the card (opts.planSummary, set by reports-public.js). The Q&A
+    // endpoint's live build and the PDF, email, recap and map builders would
+    // never read the field, so they skip these reads entirely.
+    if (opts.mode === 'live' && opts.planSummary === true
+      && featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
       const yearEt = Number(reportTodayIso.slice(0, 4));
       // Active plan members only, by the canonical membership read, which
       // fails closed to non-member: "Your plan" describes a plan a one-time
@@ -5024,11 +5027,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           .andWhere('service_records.service_date', '>=', `${yearEt}-01-01`)
           .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
           .select(
+            'service_records.id',
             'service_records.service_line',
             'service_records.service_type',
             'service_records.structured_notes',
             { record_is_callback: 'service_records.is_callback' },
             'scheduled_services.service_key_snapshot',
+            'scheduled_services.visit_id',
             { scheduled_is_callback: 'scheduled_services.is_callback' },
           )
           .catch(() => null)
@@ -5038,23 +5043,29 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
         : [];
       if (performedRows.length) {
-        const visitsThisYear = performedRows.length;
-        const reservicesThisYear = performedRows
+        // One physical stop is one visit: grouped services completed at one
+        // stop each get a service record, but share the booking's visit_id
+        // (the service_visits parent). An ungrouped record is its own visit.
+        const visitIdentity = (row) => (row.visit_id ? `visit:${row.visit_id}` : `record:${row.id}`);
+        const visitsThisYear = new Set(performedRows.map(visitIdentity)).size;
+        const reservicesThisYear = new Set(performedRows
           // A rodent-program visit (the included trapping follow-up, a trap
           // check) is a program step, never a re-service, whatever its flags
           // say: excluded by its key or by its rodent line, keyed or not.
-          // Then the booking's persisted is_callback flag is the canonical
-          // callback fact (the record's copy stands in when no booking is
-          // linked), then a stamped callback key, then, for a free-text
-          // booking with neither, the canonical "Re-Service" match.
+          // Then the record's is_callback — the completion-time snapshot
+          // reservice-report.js treats as authoritative — with the mutable
+          // booking flag only when the record has no value, then a stamped
+          // callback key, then, for a free-text booking with neither, the
+          // canonical "Re-Service" match. A stop counts once however many of
+          // its services were re-services.
           .filter((row) => {
             const key = row.service_key_snapshot || null;
             if (key === 'rodent_trapping_followup'
               || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
-            if ((row.scheduled_is_callback ?? row.record_is_callback) === true) return true;
+            if ((row.record_is_callback ?? row.scheduled_is_callback) === true) return true;
             return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row.service_type });
           })
-          .length;
+          .map(visitIdentity)).size;
         planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
       }
     }

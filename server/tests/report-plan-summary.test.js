@@ -124,6 +124,10 @@ const BASE_SERVICE = {
   pressure_index: 0,
 };
 
+// What the /data render path passes (reports-public.js): live mode plus the
+// explicit plan-summary opt-in.
+const LIVE_PAGE = { mode: 'live', planSummary: true };
+
 afterEach(() => {
   delete process.env.GATE_REPORT_PLAN_SUMMARY;
   jest.resetModules();
@@ -137,7 +141,7 @@ test('gate off: payload carries no planSummary key at all', async () => {
       { id: 'scheduled-next', customer_id: 'customer-plan', scheduled_date: `${YEAR}-06-01`, status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00' },
     ],
   });
-  const data = await buildReportV1Data(BASE_SERVICE, 'token-plan-off', knex, { mode: 'live' });
+  const data = await buildReportV1Data(BASE_SERVICE, 'token-plan-off', knex, LIVE_PAGE);
   expect(data).not.toHaveProperty('planSummary');
 });
 
@@ -153,6 +157,7 @@ const record = (id, overrides = {}) => ({
   structured_notes: '{}',
   record_is_callback: false,
   service_key_snapshot: null,
+  visit_id: null,
   scheduled_is_callback: null,
   ...overrides,
 });
@@ -173,20 +178,28 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
       // an unkeyed trapping follow-up with no stamped line — still not a
       // re-service, by its rodent-line name
       record('record-freetext-trap', { service_date: `${YEAR}-03-22`, service_line: null, service_type: 'Rodent Trapping Follow-Up', scheduled_is_callback: false }),
-      // a callback flagged on its booking whose key and name no longer say
-      // re-service — the flag counts it
-      record('record-flagged-callback', { service_date: `${YEAR}-04-05`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', scheduled_is_callback: true }),
+      // a callback flagged on its record (the completion-time snapshot) whose
+      // key and name don't say re-service, and whose booking was reclassified
+      // since — the frozen record flag counts it
+      record('record-flagged-callback', { service_date: `${YEAR}-04-05`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: true, scheduled_is_callback: false }),
+      // the reverse: booking flagged after closeout, record frozen false —
+      // the record wins, so a visit but not a re-service
+      record('record-reclassified-booking', { service_date: `${YEAR}-04-06`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: false, scheduled_is_callback: true }),
       // a flagged trapping follow-up, keyed — never a re-service
-      record('record-flagged-trap', { service_date: `${YEAR}-04-12`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', scheduled_is_callback: true }),
+      record('record-flagged-trap', { service_date: `${YEAR}-04-12`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', record_is_callback: true }),
       // a flagged trapping follow-up with NO key and no stamped line — the
       // rodent-line name excludes it before the callback flag is read
-      record('record-flagged-unkeyed-trap', { service_date: `${YEAR}-04-19`, service_line: null, service_type: 'Rodent Trapping Follow-Up', scheduled_is_callback: true }),
-      // no linked booking: the record's own callback copy stands in
-      record('record-unlinked-callback', { service_date: `${YEAR}-04-26`, service_type: 'Pest Control Service', record_is_callback: true }),
+      record('record-flagged-unkeyed-trap', { service_date: `${YEAR}-04-19`, service_line: null, service_type: 'Rodent Trapping Follow-Up', record_is_callback: true }),
+      // a record with no callback value (legacy): the booking flag stands in
+      record('record-legacy-null-flag', { service_date: `${YEAR}-04-26`, service_type: 'Pest Control Service', record_is_callback: null, scheduled_is_callback: true }),
+      // ONE physical stop, two services (grouped under one visit_id), one of
+      // them a re-service: one visit, one re-service
+      record('record-stop-pest', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_type: 'Pest Re-Service', service_key_snapshot: 'pest_re_service' }),
+      record('record-stop-lawn', { service_date: `${YEAR}-04-28`, visit_id: 'visit-stop-1', service_line: 'lawn', service_type: 'Lawn Re-Service', service_key_snapshot: 'lawn_re_service' }),
       // NOT performed — each excluded from both totals, even when flagged
       record('record-incomplete-status', { service_date: `${YEAR}-05-01`, status: 'incomplete' }),
       record('record-outcome-incomplete', { service_date: `${YEAR}-05-02`, structured_notes: JSON.stringify({ visitOutcome: 'incomplete' }) }),
-      record('record-declined-callback', { service_date: `${YEAR}-05-03`, structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), scheduled_is_callback: true }),
+      record('record-declined-callback', { service_date: `${YEAR}-05-03`, structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), record_is_callback: true }),
       record('record-inspection-only', { service_date: `${YEAR}-05-04`, structured_notes: JSON.stringify({ visitOutcome: 'inspection_only' }) }),
       // an internal-only record the customer never sees — excluded
       record('record-internal', { service_date: `${YEAR}-05-05`, structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }) }),
@@ -197,8 +210,22 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
       record('record-next-year', { service_date: `${YEAR + 1}-01-01` }),
     ],
   });
-  const data = await build(BASE_SERVICE, 'token-plan-counts', knex, { mode: 'live' });
-  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 9, reservicesThisYear: 4 });
+  const data = await build(BASE_SERVICE, 'token-plan-counts', knex, LIVE_PAGE);
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 11, reservicesThisYear: 5 });
+});
+
+test('the frozen record callback flag wins over a booking reclassified after closeout, in both directions', async () => {
+  const build = requireWithGateOn();
+  const countFor = async (row) => {
+    const data = await build(BASE_SERVICE, `token-plan-${row.id}`, makeKnex({ ...BASE_FIXTURES, service_records: [row] }), LIVE_PAGE);
+    return data.planSummary;
+  };
+  // Frozen true, booking since flipped false: still a re-service.
+  expect(await countFor(record('record-frozen-true', { service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: true, scheduled_is_callback: false })))
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1 });
+  // Frozen false, booking since flipped true: not a re-service.
+  expect(await countFor(record('record-frozen-false', { service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', record_is_callback: false, scheduled_is_callback: true })))
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 0 });
 });
 
 test('a non-member gets no planSummary, even with completed visits and visits coming up', async () => {
@@ -213,7 +240,7 @@ test('a non-member gets no planSummary, even with completed visits and visits co
       { id: 'scheduled-next', customer_id: 'customer-plan', scheduled_date: addDays(10), status: 'confirmed', service_type: 'Mosquito Event Spray' },
     ],
   });
-  const data = await build(BASE_SERVICE, 'token-plan-nonmember', knex, { mode: 'live' });
+  const data = await build(BASE_SERVICE, 'token-plan-nonmember', knex, LIVE_PAGE);
   expect(data).not.toHaveProperty('planSummary');
 });
 
@@ -224,7 +251,8 @@ test.each(['pdf', 'static', undefined])('a non-live build (mode %s) skips the co
     ...BASE_FIXTURES,
     service_records: [record('record-current')],
   }, reads);
-  const data = await build(BASE_SERVICE, `token-plan-${mode || 'default'}`, knex, mode ? { mode } : {});
+  // Opted in, so this proves the live-mode check on its own.
+  const data = await build(BASE_SERVICE, `token-plan-${mode || 'default'}`, knex, { ...(mode ? { mode } : {}), planSummary: true });
   expect(data).not.toHaveProperty('planSummary');
   // The plan-summary history read is the only select carrying these aliases.
   const planHistoryRead = ([table, kind, args]) => table === 'service_records' && kind === 'select'
@@ -232,19 +260,29 @@ test.each(['pdf', 'static', undefined])('a non-live build (mode %s) skips the co
   expect(reads.some(planHistoryRead)).toBe(false);
 });
 
+test('a live build WITHOUT the plan-summary opt-in (the Q&A endpoint) skips the reads and carries no planSummary', async () => {
+  const build = requireWithGateOn();
+  const reads = [];
+  const knex = makeKnex({ ...BASE_FIXTURES, service_records: [record('record-current')] }, reads);
+  const data = await build(BASE_SERVICE, 'token-plan-qa', knex, { mode: 'live' });
+  expect(data).not.toHaveProperty('planSummary');
+  expect(reads.some(([table, kind, args]) => table === 'service_records' && kind === 'select'
+    && JSON.stringify(args).includes('record_is_callback'))).toBe(false);
+});
+
 test('omitted when there is no customer, or when the member has no performed visit this year', async () => {
   const build = requireWithGateOn();
-  const noCustomer = await build({ ...BASE_SERVICE, customer_id: null }, 'token-plan-no-customer', makeKnex({ ...BASE_FIXTURES, scheduled_services: [] }), { mode: 'live' });
+  const noCustomer = await build({ ...BASE_SERVICE, customer_id: null }, 'token-plan-no-customer', makeKnex({ ...BASE_FIXTURES, scheduled_services: [] }), LIVE_PAGE);
   expect(noCustomer).not.toHaveProperty('planSummary');
 
-  const nothingToShow = await build(BASE_SERVICE, 'token-plan-empty', makeKnex({ ...BASE_FIXTURES, service_records: [] }), { mode: 'live' });
+  const nothingToShow = await build(BASE_SERVICE, 'token-plan-empty', makeKnex({ ...BASE_FIXTURES, service_records: [] }), LIVE_PAGE);
   expect(nothingToShow).not.toHaveProperty('planSummary');
 
   // Completed on the schedule but declined at the door: not a performed visit.
   const onlyDeclined = await build(BASE_SERVICE, 'token-plan-declined', makeKnex({
     ...BASE_FIXTURES,
     service_records: [record('record-declined', { structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }) })],
-  }), { mode: 'live' });
+  }), LIVE_PAGE);
   expect(onlyDeclined).not.toHaveProperty('planSummary');
 });
 

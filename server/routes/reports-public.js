@@ -373,6 +373,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // under the general report limiter, repeatedly. Defaulting to off means a
   // future caller cannot inherit that cost by accident either.
   composeOffers = false,
+  // OPT-IN on the same terms: only the /data render shows the "Your plan"
+  // card, so only it pays for the membership + year-history reads
+  // (GATE_REPORT_PLAN_SUMMARY). The Q&A endpoint never reads the field.
+  planSummary = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -384,7 +388,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -2330,7 +2334,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

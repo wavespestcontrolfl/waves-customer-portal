@@ -71,8 +71,9 @@ unchanged.
 
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
-(`/api/reports/:token/data`, built with `mode: 'live'`; no other build reads
-or carries it) may carry `planSummary: { year, visitsThisYear,
+(`/api/reports/:token/data`, the only caller that opts in with
+`planSummary: true`, built with `mode: 'live'`; the `/ask` Q&A build and every
+other build neither read nor carry it) may carry `planSummary: { year, visitsThisYear,
 reservicesThisYear }` for the token's own customer, only when that customer
 is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
 with at least one performed visit this year; anyone else gets no field and no
@@ -81,8 +82,10 @@ account's visits, not only this property's. `visitsThisYear` counts PERFORMED
 visits in the current ET calendar year: completed, customer-visible service
 records whose outcome is not inspection-only, customer-declined or incomplete
 (the Pest Pressure prior-visit rule, `pest-pressure/first-visit.js`), never a
-schedule row's status alone. `reservicesThisYear` counts how many of those
-were callbacks (the booking's persisted `is_callback` flag, a
+schedule row's status alone, and one physical stop counts once (grouped
+services share the booking's `visit_id`). `reservicesThisYear` counts how many
+of those stops were callbacks (the record's completion-time `is_callback`
+snapshot, the booking's flag only when the record has none, a
 `pest_re_service` / `lawn_re_service` key, or a "Re-Service" service name when
 neither is stamped; a rodent-program visit, such as the included trapping
 follow-up, never counts, by its key or its rodent line). Counts only: no
