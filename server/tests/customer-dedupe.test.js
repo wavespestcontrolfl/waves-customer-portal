@@ -3293,6 +3293,18 @@ describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared wi
     });
   }
 
+  it('a legacy payment_receipt=false no longer blocks a merge in the shared preflight', async () => {
+    installDb((table, q) => {
+      if (table === 'notification_prefs') {
+        return q.args('where')[0].customer_id === 'W'
+          ? { customer_id: 'W', payment_receipt: false, payment_receipt_channels: ['email'] }
+          : { customer_id: 'L', payment_receipt_channels: ['email'] };
+      }
+      return null;
+    });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, { ...loser, billing_mode: null })).toBeNull();
+  });
+
   it('refuses an incompatible addressed winner whose only primary property is inactive', async () => {
     const addressedWinner = { ...winner, address_line1: '100 Main St' };
     const otherPremise = { ...loser, billing_mode: null, address_line1: '200 Oak Ave' };

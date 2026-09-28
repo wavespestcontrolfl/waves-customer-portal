@@ -680,12 +680,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   // which jsonb rejects. Dates and other typed objects pass through.
   const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
     ? JSON.stringify(v) : v;
+  const updates = table === 'notification_prefs' ? mergedBillingChannelUpdates(winnerRow, loserRow) : {};
   // Customers cannot turn payment receipts off (owner ruling 2026-09-26): a
-  // legacy payment_receipt=false on either row neither narrows the merged
-  // receipt channels nor survives on the kept row.
-  const receiptsOn = (row) => (row.payment_receipt === false ? { ...row, payment_receipt: true } : row);
-  const updates = table === 'notification_prefs'
-    ? mergedBillingChannelUpdates(receiptsOn(winnerRow), receiptsOn(loserRow)) : {};
+  // legacy payment_receipt=false never survives on the kept row.
   if (table === 'notification_prefs' && winnerRow.payment_receipt === false) updates.payment_receipt = true;
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
