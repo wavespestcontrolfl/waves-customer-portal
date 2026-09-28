@@ -595,20 +595,39 @@ are both live (`bookInsertionOffersLive()`, routes/booking.js) — the same
 condition the estimate routes' own insertion already required (owner
 2026-09-28). That commit (`createSelfBooking`) re-verifies with live traffic
 and saves the certified route order, so an inserted offer it confirms is
-exactly what gets persisted. Public reschedule and the voice agent keep
-append-only offers because their own commits do not save a route order:
-public reschedule (`SmartRebooker.reschedule`/`rescheduleSeries`) clears
-`route_order` on any day or technician move, and the voice agent inserts the
-new row with no `route_order` at all — either way an inserted offer would
-commit as an unnumbered stop sorted after the route, not at the position it
-was offered at. `/book` offers minted with mid-route insertion carry a
-signed policy tag (`BOOK_INSERTION_OFFER_POLICY`, `utils/slot-offer-token.js`)
-inside their `slot_sig`, so an offer can't be confirmed under a different
-`GATE_BOOK_CAPACITY_COMMIT`/`GATE_SCHEDULING_CAPACITY` state than the one it
-was minted under (a rollback or a mixed rolling deploy inside the 45-minute
-offer window) — the customer gets the standard "pick your time again" 409
-instead of a silently mis-ordered commit. The staff save probe
-(`checkArrivalPlacement`) stays append-only too. Detour
+exactly what gets persisted. Public reschedule keeps append-only offers
+because its own commit does not save a route order: `SmartRebooker.reschedule`/
+`rescheduleSeries` clears `route_order` on any day or technician move, so an
+inserted offer there would commit as an unnumbered stop sorted after the
+route, not at the position it was offered at. `/book` offers minted with
+mid-route insertion carry a signed policy tag (`BOOK_INSERTION_OFFER_POLICY`,
+`utils/slot-offer-token.js`) inside their `slot_sig`, so an offer can't be
+confirmed under a different `GATE_BOOK_CAPACITY_COMMIT`/`GATE_SCHEDULING_CAPACITY`
+state than the one it was minted under (a rollback or a mixed rolling deploy
+inside the 45-minute offer window) — the customer gets the standard "pick
+your time again" 409 instead of a silently mis-ordered commit. The staff
+save probe (`checkArrivalPlacement`) stays append-only too.
+
+The voice agent (owner 2026-09-28) is no longer append-only either, following
+the same shape: `relay-tools.js`'s `get_availability`/`find_slots` offers and
+`relay-booking.js`'s `revalidateSlot` recheck both pass
+`capacityPlacement: bookInsertionOffersLive()` into `buildBookingAvailability`,
+so a mid-route slot can be offered and re-confirmed. The commit
+(`commitVoiceBooking`) earns the insertion the same way `createSelfBooking`
+does — `prepareArrivalCapacity` before the transaction, `lockTechDays` in
+place of the plain technician advisory lock, `verifyArrivalCapacity` under
+that lock right before the insert, `persistArrivalOrder` right after it —
+only when the offer carries a technician, a resolved pin, and
+`bookInsertionOffersLive()` reads live at commit time. Unlike `/book`, the
+voice agent's offer is never handed back across a separate request (the
+whole call turn is synchronous), so there is no signed policy tag to carry:
+`bookInsertionOffersLive()` is simply read fresh at each of the three points
+(offer, recheck, commit), and the commit's own prepare/verify is what
+decides whether the insertion is safe — a gate flip mid-call can only refuse
+a stale insertion (the same "that time is no longer available" outcome every
+other stale offer gets), never persist one unverified. No technician, no
+resolved pin, or the gate reading off at commit time leaves the row exactly
+as before — appended, no `route_order`. Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds

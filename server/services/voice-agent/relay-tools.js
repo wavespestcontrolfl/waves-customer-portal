@@ -501,6 +501,16 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
       lat: coords.lat, lng: coords.lng, duration,
       rangeFrom: w.dateFrom, rangeTo: w.dateTo, config, today,
       timeOfDay: w.timeOfDay, expandOpenDays: true,
+      // This surface's own commit is relay-booking.js's commitVoiceBooking,
+      // which (while bookInsertionOffersLive() is live) prepares/locks/
+      // verifies with traffic and persists the certified route order for a
+      // mid-route insertion — see the capacityPlacement comment inside
+      // buildBookingAvailability (booking.js) and commitVoiceBooking's own
+      // header. revalidateSlot below reads the same live value at recheck
+      // time; the commit's own prepare/verify is what actually decides
+      // whether the insertion is safe, so an offer/recheck/commit gate flip
+      // mid-call never persists an unverified route position.
+      capacityPlacement: booking.bookInsertionOffersLive(),
     });
     const count = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
     return {
@@ -523,6 +533,8 @@ async function resolveAvailability({ address_line1, city, zip, when }) {
   const rangeTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
   const availability = await booking.buildBookingAvailability({
     lat: coords.lat, lng: coords.lng, duration, rangeFrom, rangeTo, config, today,
+    // See the comment on the `when` branch above.
+    capacityPlacement: booking.bookInsertionOffersLive(),
   });
   return {
     status: 'ok',

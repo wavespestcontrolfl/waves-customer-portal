@@ -4,11 +4,16 @@
  * createSelfBooking does that, and only while GATE_BOOK_CAPACITY_COMMIT is
  * live — so exactly the callers below pass `capacityPlacement:
  * bookInsertionOffersLive()` into buildBookingAvailability (booking.js), and
- * exactly the callers whose own commit does NOT persist a route order
- * (public reschedule — SmartRebooker clears route_order on a move; the
- * voice agent — relay-booking.js/relay-tools.js insert with no route_order)
- * omit it and stay append-only.
+ * the caller whose own commit does NOT persist a route order (public
+ * reschedule — SmartRebooker clears route_order on a move) omits it and
+ * stays append-only.
  *
+ * The voice agent (owner 2026-09-28, same day) earns the wiring too, once
+ * its OWN commit (relay-booking.js's commitVoiceBooking) also
+ * prepares/locks/verifies/persists the certified route order — see
+ * voice-relay-booking-insertion.test.js for that commit-side behavior.
+ *
+
  * Round 2 (Codex P1, same PR): bookCapacityCommitLive() alone wasn't the
  * right condition either — it doesn't also require GATE_SCHEDULING_CAPACITY,
  * the gate that actually turns on whole-route insertion in the first place.
@@ -115,25 +120,26 @@ describe('reschedule-public.js — commits through SmartRebooker, which clears r
   });
 });
 
-describe('voice agent — commits by inserting the row with no route_order', () => {
-  test('relay-booking.js never passes capacityPlacement — stays append-only', () => {
+describe('voice agent — commitVoiceBooking now persists a certified route order too (owner 2026-09-28)', () => {
+  test('relay-booking.js revalidateSlot passes capacityPlacement: bookInsertionOffersLive()', () => {
     const src = read('../services/voice-agent/relay-booking.js');
     const call = callAfter(src, 'booking.buildBookingAvailability({');
-    expect(call).not.toContain('capacityPlacement');
+    expect(call).toContain('capacityPlacement: booking.bookInsertionOffersLive()');
   });
 
-  test('relay-tools.js never passes capacityPlacement at either call site — stays append-only', () => {
+  test('relay-tools.js passes capacityPlacement: bookInsertionOffersLive() at both call sites', () => {
     const src = read('../services/voice-agent/relay-tools.js');
-    // Two call sites (lines ~500, ~524) — check both independently rather
-    // than a whole-file scan, so a future unrelated addition elsewhere in
-    // this large file can't hide a wrongly-wired third call.
+    // Two call sites (the `when` NL-window build and the soonest-windows
+    // build) — check both independently rather than a whole-file scan, so a
+    // future unrelated addition elsewhere in this large file can't hide a
+    // wrongly-wired third call.
     const firstStart = src.indexOf('booking.buildBookingAvailability({');
     expect(firstStart).toBeGreaterThan(-1);
     const firstEnd = src.indexOf('});', firstStart);
     const secondStart = src.indexOf('booking.buildBookingAvailability({', firstEnd);
     expect(secondStart).toBeGreaterThan(firstEnd);
     const secondEnd = src.indexOf('});', secondStart);
-    expect(src.slice(firstStart, firstEnd)).not.toContain('capacityPlacement');
-    expect(src.slice(secondStart, secondEnd)).not.toContain('capacityPlacement');
+    expect(src.slice(firstStart, firstEnd)).toContain('capacityPlacement: booking.bookInsertionOffersLive()');
+    expect(src.slice(secondStart, secondEnd)).toContain('capacityPlacement: booking.bookInsertionOffersLive()');
   });
 });

@@ -13,6 +13,9 @@ jest.mock('../routes/booking', () => ({
     loadBookingConfig: jest.fn(),
     resolveBookingCoords: jest.fn(),
     buildBookingAvailability: jest.fn(),
+    // Mid-route insertion policy reader (owner 2026-09-28) — defaults to
+    // off, matching every pre-existing test's byte-identical expectations.
+    bookInsertionOffersLive: jest.fn(() => false),
     MAX_BOOKING_HORIZON_DAYS: 90,
   },
 }));

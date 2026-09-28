@@ -63,6 +63,10 @@ jest.mock('../routes/booking', () => ({
     // Commit-time gates the web path enforces and the voice path did not.
     validateBookingSlotDate: jest.fn(() => null),
     bookingSlotWindow: jest.fn(() => ({ maxPerDay: 3 })),
+    // Mid-route insertion policy reader (owner 2026-09-28) — defaults to
+    // off, matching every pre-existing test's byte-identical, append-only
+    // expectations. The insertion-specific describe block below overrides it.
+    bookInsertionOffersLive: jest.fn(() => false),
     MAX_BOOKING_HORIZON_DAYS: 90,
   },
 }));
@@ -100,6 +104,16 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(), sendCustomerMessage
 jest.mock('../services/email', () => ({ sendEmail: jest.fn() }));
 jest.mock('../services/appointment-reminders', () => ({ registerAppointment: jest.fn(), handleReschedule: jest.fn() }));
 jest.mock('../services/outbound-review-confirm', () => ({ runOutboundReviewConfirmHook: jest.fn() }));
+// Mid-route insertion (owner 2026-09-28) — createSelfBooking's own
+// prepare/verify/persist trio, reused rather than re-implemented; mocked
+// here so the insertion-specific describe block below can assert exactly
+// how and when commitVoiceBooking calls them.
+jest.mock('../services/scheduling/arrival-route', () => ({
+  prepareArrivalCapacity: jest.fn(),
+  verifyArrivalCapacity: jest.fn(),
+  persistArrivalOrder: jest.fn(),
+}));
+jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -112,6 +126,8 @@ const TwilioService = require('../services/twilio');
 const EmailService = require('../services/email');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+const arrivalRoute = require('../services/scheduling/arrival-route');
+const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 
 const { resolveCallBookingPropertyLinkage } = require('../services/call-recording-processor');
 
@@ -1198,5 +1214,132 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     delete process.env.GATE_VOICE_AI_BOOKING;
     const contextOnly = buildBasePrompt(true);
     expect(contextOnly).not.toContain('BOOKING REQUESTS');
+  });
+
+  // MID-ROUTE INSERTION (owner 2026-09-28) — commitVoiceBooking earns the
+  // same insertion createSelfBooking (routes/booking.js) supports: prepare
+  // before the transaction, lockTechDays instead of the bare advisory lock,
+  // verify under that lock right before the insert, persist the certified
+  // order right after it. Gate off (every OTHER test in this file, and the
+  // default `bookInsertionOffersLive: jest.fn(() => false)` mock) is
+  // byte-identical to before — asserted explicitly below too.
+  describe('MID-ROUTE INSERTION — commitVoiceBooking (owner 2026-09-28)', () => {
+    const preparedSentinel = { options: { date: BOOK_DATE }, fingerprint: 'fp-1', travel: null };
+    const fitSentinel = { routeOrder: ['svc-existing', '__candidate__'], target: { scheduled_date: BOOK_DATE, technician_id: 't-1' } };
+
+    beforeEach(() => {
+      booking.bookInsertionOffersLive.mockReturnValue(true);
+      arrivalRoute.prepareArrivalCapacity.mockResolvedValue(preparedSentinel);
+      arrivalRoute.verifyArrivalCapacity.mockResolvedValue(fitSentinel);
+      arrivalRoute.persistArrivalOrder.mockResolvedValue(undefined);
+      lockTechDays.mockResolvedValue([`t-1:${BOOK_DATE}`, `unassigned:${BOOK_DATE}`]);
+    });
+
+    test('technician + resolved pin, gate live → prepares, locks both tech-days, verifies, persists the certified order', async () => {
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+
+      // Prepared BEFORE the transaction, from the SAME inputs the commit
+      // writes: the re-validated engine slot's technician, the property
+      // pin the row will carry, and the catalog service's own duration.
+      expect(arrivalRoute.prepareArrivalCapacity).toHaveBeenCalledWith({
+        date: BOOK_DATE,
+        technicianId: 't-1',
+        prospective: {
+          lat: 27.55, lng: -82.55,
+          estimated_duration_minutes: 45,
+          service_type: 'General Pest Control',
+        },
+        windowStart: '09:00',
+        windowEnd: '10:00',
+        durationMinutes: 45,
+      });
+
+      // Rung 3 took lockTechDays (both the tech's day AND the unassigned
+      // day) INSTEAD OF the bare advisory lock — never both.
+      expect(lockTechDays).toHaveBeenCalledWith(trx, [
+        { techId: 't-1', date: BOOK_DATE },
+        { techId: null, date: BOOK_DATE },
+      ]);
+      const rawCalls = trx.raw.mock.calls.map((c) => c[1]);
+      expect(rawCalls).not.toContainEqual(['slot-reserve', `t-1:${BOOK_DATE}`]);
+
+      // Verified UNDER that lock, right before the insert, with the same
+      // window/duration/service the row will carry.
+      expect(arrivalRoute.verifyArrivalCapacity).toHaveBeenCalledWith(preparedSentinel, {
+        conn: trx,
+        windowStart: '09:00',
+        windowEnd: '10:00',
+        durationMinutes: 45,
+        serviceTypes: ['General Pest Control'],
+      });
+      const verifyOrder = arrivalRoute.verifyArrivalCapacity.mock.invocationCallOrder[0];
+      const insertOrder = trxBuilders.scheduled_services.insert.mock.invocationCallOrder[0];
+      expect(verifyOrder).toBeLessThan(insertOrder);
+
+      // Persisted AFTER the row has a stored id — the certified fit, keyed
+      // to the actual inserted row.
+      expect(arrivalRoute.persistArrivalOrder).toHaveBeenCalledWith(trx, fitSentinel, 'ss-501');
+      const persistOrder = arrivalRoute.persistArrivalOrder.mock.invocationCallOrder[0];
+      expect(persistOrder).toBeGreaterThan(insertOrder);
+    });
+
+    test('verify failure (changed/infeasible route) → the existing stale-offer refusal, no write', async () => {
+      arrivalRoute.verifyArrivalCapacity.mockRejectedValue(
+        Object.assign(new Error('This time is no longer available. Please choose another appointment.'),
+          { code: 'SLOT_UNAVAILABLE', reason: 'route_changed', status: 409 }),
+      );
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/just taken/i);
+      expect(out).toMatch(/NOTHING was booked/i);
+      // The refusal happens INSIDE the transaction (verify runs under the
+      // tech-day lock), so db.transaction itself IS entered — unlike the
+      // pre-transaction refusals assertNoCreateWrites checks elsewhere. No
+      // row was written either way.
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+      expect(trxBuilders.triage_items.insert).not.toHaveBeenCalled();
+      expect(arrivalRoute.persistArrivalOrder).not.toHaveBeenCalled();
+    });
+
+    test('gate reads off at commit time (flipped after the offer) → refuses to insert unverified, same as a stale offer', async () => {
+      // The offer and recheck read a LIVE gate too, but a test can still
+      // simulate the flip landing exactly at commit: prepareArrivalCapacity
+      // itself reads capacityEnabled() again and returns null when the
+      // gate is no longer live — the real function's own behavior, mocked
+      // here to prove commitVoiceBooking treats that null exactly like "no
+      // insertion was ever prepared" rather than crashing on it.
+      arrivalRoute.prepareArrivalCapacity.mockResolvedValue(null);
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(arrivalRoute.verifyArrivalCapacity).not.toHaveBeenCalled();
+      expect(arrivalRoute.persistArrivalOrder).not.toHaveBeenCalled();
+      expect(lockTechDays).not.toHaveBeenCalled();
+      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
+    });
+
+    test('no technician on the re-validated slot → insertion skipped even with the gate live', async () => {
+      const unassignedSlot = { ...SLOT, technician_id: null };
+      booking.buildBookingAvailability.mockResolvedValue({
+        slots: [unassignedSlot], days: [{ date: BOOK_DATE, slots: [unassignedSlot] }],
+      });
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(arrivalRoute.prepareArrivalCapacity).not.toHaveBeenCalled();
+      expect(lockTechDays).not.toHaveBeenCalled();
+      const insert = trxBuilders.scheduled_services.insert;
+      expect(insert.mock.calls[0][0].technician_id).toBeNull();
+    });
+
+    test('gate OFF → byte-identical to before: no prepare, no lock swap, no verify, no persist', async () => {
+      booking.bookInsertionOffersLive.mockReturnValue(false);
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(arrivalRoute.prepareArrivalCapacity).not.toHaveBeenCalled();
+      expect(arrivalRoute.verifyArrivalCapacity).not.toHaveBeenCalled();
+      expect(arrivalRoute.persistArrivalOrder).not.toHaveBeenCalled();
+      expect(lockTechDays).not.toHaveBeenCalled();
+      const rawCalls = trx.raw.mock.calls.map((c) => c[1]);
+      expect(rawCalls).toContainEqual(['slot-reserve', `t-1:${BOOK_DATE}`]);
+    });
   });
 });

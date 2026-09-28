@@ -194,6 +194,14 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     expandOpenDays: offer.expandOpenDays === true,
     // No serviceIdentity — see this function's doc comment (Codex r6 P2):
     // the offer never had one, so the recheck must not manufacture one.
+    // capacityPlacement reads the SAME live gate the offer step
+    // (relay-tools.resolveAvailability) reads, so the slot this recheck
+    // returns reflects the current insertion policy. commitVoiceBooking
+    // reads the live gate again at its own prepare/verify — that is what
+    // actually decides whether an inserted slot is safe to persist, so a
+    // gate flip between here and the commit cannot itself corrupt the
+    // route (owner 2026-09-28).
+    capacityPlacement: booking.bookInsertionOffersLive(),
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
@@ -261,7 +269,10 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-ac
  * coarsest first, skipping only the rungs this writer does not need:
  *   1. date-occupancy   acquireOccupancyLock(trx, date)              [required]
  *   2. self-booking     'self-booking-confirm' / `<customerId>:<date>`
- *   3. technician       'slot-reserve' / `<techId>:<date>`  (when assigned)
+ *   3. technician       'slot-reserve' / `<techId>:<date>`  (when assigned) —
+ *      or, while a mid-route insertion is being prepared (below), the SAME
+ *      namespace/key through lockTechDays (tech-day-lock.js), which also
+ *      fences the unassigned day a stop could be pulled from.
  *   4. zone             SKIPPED — this writer resolves no zone
  *   5. global day cap   acquireSelfBookingDayCapLock(trx, date)
  *   6. customer-comms   lockCustomerComms(trx, customerId)           [required
@@ -273,6 +284,28 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-ac
  * only serializes writers; it cannot widen what a writer's own narrow check
  * sees, and this writer's dedupe is customer-scoped, so the global probe is the
  * only thing that catches a different customer's committed row in the window.
+ *
+ * MID-ROUTE INSERTION (owner 2026-09-28, following PR #5231's /book design):
+ * relay-tools.js's offer and revalidateSlot's recheck above both pass
+ * capacityPlacement: bookInsertionOffersLive() to buildBookingAvailability,
+ * so an offer here can be a genuine BETWEEN-two-stops slot, not only one
+ * appended after the route. Committing one safely needs the same proof
+ * createSelfBooking (routes/booking.js) requires: a traffic-certified
+ * placement, verified under the tech-day lock, with the certified order
+ * persisted after insert. This writer earns that the same way — when the
+ * offer carries a technician, a resolved pin, and bookInsertionOffersLive()
+ * is STILL live at commit time (read fresh here, not carried from the
+ * offer): prepareArrivalCapacity() spends the traffic budget before the
+ * transaction, lockTechDays() takes rung 3 instead of the bare advisory
+ * lock, verifyArrivalCapacity() re-certifies under that lock right before
+ * the insert, and persistArrivalOrder() writes the certified route_order
+ * right after it. No technician, no pin, or the gate reads off here ⇒ the
+ * row commits exactly as it always has — appended, no route_order. Unlike
+ * /book's signed slot_sig (this offer is never handed back across a
+ * request — the whole call turn is synchronous), there is nothing to sign:
+ * the live read at commit time is what decides, so a gate flip between the
+ * offer and this commit can only ever refuse a stale insertion, never
+ * persist one unverified.
  */
 async function commitVoiceBooking({
   db, customerId, dateStr, windowStart, windowEnd, insertData, callLogId,
@@ -301,6 +334,30 @@ async function commitVoiceBooking({
   // everyone else too. Identical to `windowEnd` whenever the two agree.
   const insertRow = { ...insertData, window_end: endTime };
 
+  // Mid-route insertion (see the header comment above): spend the traffic
+  // budget BEFORE any lock, exactly like createSelfBooking's own
+  // preparedCapacity. Only when the offer carries a technician (no
+  // technician ⇒ no route to insert into) and a resolved pin, and only
+  // while bookInsertionOffersLive() is live RIGHT NOW — read fresh, not
+  // carried from the offer or the recheck.
+  let preparedCapacity = null;
+  if (insertData.technician_id && coords && coords.lat && coords.lng && booking.bookInsertionOffersLive()) {
+    const { prepareArrivalCapacity } = require('../scheduling/arrival-route');
+    preparedCapacity = await prepareArrivalCapacity({
+      date: dateStr,
+      technicianId: insertData.technician_id,
+      prospective: {
+        lat: coords.lat,
+        lng: coords.lng,
+        estimated_duration_minutes: insertData.estimated_duration_minutes,
+        service_type: insertData.service_type,
+      },
+      windowStart,
+      windowEnd: endTime,
+      durationMinutes: insertData.estimated_duration_minutes,
+    });
+  }
+
   try {
     return await db.transaction(async (trx) => {
       // Rung 1 — FIRST statement in the transaction, before every row lock.
@@ -312,12 +369,25 @@ async function commitVoiceBooking({
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['self-booking-confirm', `${customerId}:${dateStr}`],
       );
-      // Rung 3 — only when the offer carries a technician.
+      // Rung 3 — only when the offer carries a technician. A prepared
+      // mid-route insertion takes lockTechDays instead of the bare advisory
+      // lock (same namespace/key — tech-day-lock.js's own header — so this
+      // never changes what else is fenced), because verifyArrivalCapacity
+      // below also fingerprints the unassigned day a stop could be pulled
+      // from and must hold it through the insert too.
       if (insertData.technician_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${insertData.technician_id}:${dateStr}`],
-        );
+        if (preparedCapacity) {
+          const { lockTechDays } = require('../scheduling/tech-day-lock');
+          await lockTechDays(trx, [
+            { techId: insertData.technician_id, date: dateStr },
+            { techId: null, date: dateStr },
+          ]);
+        } else {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${insertData.technician_id}:${dateStr}`],
+          );
+        }
       }
       // Rung 5 — the global self-booking day cap.
       await acquireSelfBookingDayCapLock(trx, dateStr);
@@ -405,12 +475,39 @@ async function commitVoiceBooking({
       });
       if (clash.length) return { status: 'slot_taken' };
 
+      // Mid-route insertion certification, under the tech-day lock taken at
+      // rung 3 above — verify BEFORE insert, persist the certified order
+      // AFTER (the same order createSelfBooking uses, routes/booking.js). A
+      // changed route fingerprint or an infeasible live fit is exactly the
+      // "pick another time" outcome every other stale-offer check here
+      // already returns — no row has been written yet either way.
+      let capacityCommitFit = null;
+      if (preparedCapacity) {
+        try {
+          capacityCommitFit = await require('../scheduling/arrival-route').verifyArrivalCapacity(preparedCapacity, {
+            conn: trx,
+            windowStart,
+            windowEnd: endTime,
+            durationMinutes: insertData.estimated_duration_minutes,
+            serviceTypes: [insertData.service_type],
+          });
+        } catch (verifyErr) {
+          if (verifyErr.code === 'SLOT_UNAVAILABLE') return { status: 'slot_taken' };
+          throw verifyErr;
+        }
+      }
+
       // Visit groups: deliberately NOT stamped here — this row is a
       // pending office-review booking (voice_agent source_action), which
       // maybeGroupRow refuses; its grouping moment is office confirm via
       // the transitionJobStatus pending→confirmed seam (job-status.js).
       await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx, date: dateStr });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
+      // Apply the certified order only after the candidate has a stored id
+      // (createSelfBooking, routes/booking.js, does the same).
+      if (capacityCommitFit) {
+        await require('../scheduling/arrival-route').persistArrivalOrder(trx, capacityCommitFit, created.id);
+      }
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
       // possible when the live call has a call_log row (the card FKs it).
