@@ -39,13 +39,28 @@ async function reserve({
   return { row: existing, duplicate: true };
 }
 
+// Takes the SAME per-customer advisory lock as reserveWithCap before
+// flipping to `sent` (codex pre-push r3 P1): without it, a concurrent
+// reserveWithCap for a different idempotency key could split-read around
+// this update under READ COMMITTED — its eligibility pass (reads `sent`
+// rows) running before this commits, then its outstanding-reservation
+// check (reads `reserved` rows) running after this commits and no longer
+// seeing THIS row — passing both checks despite the send this cap exists
+// to bound. Serializing the two transactions on the same lock makes that
+// split-read impossible: whichever gets the lock first runs to completion
+// before the other's checks can begin.
 async function markSent(id, { emailMessageId = null } = {}, { conn } = {}) {
-  const database = conn || db;
-  return database('marketing_email_ledger').where({ id }).update({
-    status: 'sent',
-    sent_at: database.fn.now(),
-    email_message_id: emailMessageId,
-    updated_at: database.fn.now(),
+  const runner = conn || db;
+  return runner.transaction(async (trx) => {
+    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id');
+    if (!existing) return 0;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
+    return trx('marketing_email_ledger').where({ id }).update({
+      status: 'sent',
+      sent_at: trx.fn.now(),
+      email_message_id: emailMessageId,
+      updated_at: trx.fn.now(),
+    });
   });
 }
 

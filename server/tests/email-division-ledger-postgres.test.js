@@ -105,4 +105,28 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     const rows = await db('marketing_email_ledger').where({ customer_id: customerId });
     expect(rows).toHaveLength(1); // only the winner's reservation exists
   });
+
+  test('markSent racing a distinct concurrent reservation attempt never lets both through (codex pre-push r3 P1)', async () => {
+    const first = await attempt('first-key');
+    expect(first.ok).toBe(true);
+
+    // markSent takes the SAME per-customer lock reserveWithCap does, so
+    // whichever transaction gets it first runs to completion before the
+    // other's checks can even begin — no split-read window between the
+    // eligibility (`sent` rows) and outstanding-reservation (`reserved`
+    // rows) queries. Every ordering must still deny the second attempt:
+    // either it sees the row still `reserved` (outstanding conflict) or
+    // already `sent` (weekly cap) — never neither.
+    const [, second] = await Promise.all([
+      Ledger.markSent(first.row.id, { emailMessageId: null }),
+      attempt('second-key'),
+    ]);
+    expect(second.ok).toBe(false);
+    expect(second.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
+    expect(second.row).toBeNull();
+
+    const rows = await db('marketing_email_ledger').where({ customer_id: customerId });
+    expect(rows).toHaveLength(1); // the racing attempt never inserted
+    expect(rows[0].status).toBe('sent');
+  });
 });
