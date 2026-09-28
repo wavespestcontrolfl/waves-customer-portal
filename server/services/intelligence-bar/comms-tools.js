@@ -218,7 +218,7 @@ Use for: "what happened today?", "today's comms summary", "morning inbox briefin
   },
   {
     name: 'list_queued_messages',
-    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (a text held past 8PM-8AM quiet hours, an uncertain-delivery retry, etc.). Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
+    description: `List a customer's outbound TEXTS that are still SCHEDULED — not yet sent (e.g. a text held past 8PM-8AM quiet hours). Texts a send worker already picked up, and replies tied to an Agent Review suggestion, are left out — the bar cannot cancel those. Use before cancel_queued_message to resolve the exact message_id; a cancel preview always names one message from this list. Soonest first, capped at 25 — pass next_cursor as cursor for more. SCHEDULED EMAILS DO NOT EXIST: an email is rendered and handed to the delivery provider within seconds of being queued, so by the time anyone could ask about it, it has already sent — there is nothing to list or cancel.
 Use for: "what's queued to send Henderson?", "is there a text scheduled for this customer?"`,
     input_schema: {
       type: 'object',
@@ -474,8 +474,24 @@ function smsIneligibilityReason(row) {
   // Nothing persisted distinguishes that from a definite not-sent retry, so
   // every requeued-after-attempt row is refused conservatively. (The retry
   // also moves scheduled_for, which the commit's CAS pin refuses on.)
-  if (meta.provider_retry_at) {
+  // Any prior send claim at all (Codex round 6 on #5224, P1): besides
+  // provider retries, recoverStaleScheduledSmsClaims requeues a row whose
+  // worker died mid-send (scheduled_sms_recovered_at) — possibly after
+  // Twilio accepted it. Every claim stamps scheduled_sms_claimed_at, so the
+  // bar cancels only texts NO worker has ever picked up (the simple-only
+  // chokepoint, as #5214 did for visits), rather than one marker per round.
+  if (meta.provider_retry_at || meta.scheduled_sms_recovered_at || meta.scheduled_sms_claimed_at) {
     return "This text already had a send attempt and may have reached the provider — it can't be cancelled here.";
+  }
+  // Agent Review linked (Codex round 6 on #5224, P1): cancelling a reply
+  // that carries agent_decision_id / parked_decision_ids reopens or ignores
+  // those decisions and can re-park them onto a SIBLING queued reply
+  // (scheduled-sms-cancel.js). The bar cancels only texts with none, so the
+  // card's "no other message is touched" is true; the writer re-checks this
+  // in the same statement that cancels (simpleOnly).
+  const parked = Array.isArray(meta.parked_decision_ids) ? meta.parked_decision_ids : [];
+  if (meta.agent_decision_id || parked.length) {
+    return "This text is tied to an Agent Review suggestion and can't be cancelled here.";
   }
   // Recruiting threads are answered from Recruiting only — message_type is
   // the general, always-present signal (a recruiting send may carry no
@@ -697,6 +713,7 @@ async function commitCancelSms(input, preview, technicianId) {
     expectedScheduledFor: fresh._version.scheduled_for,
     expectedToPhone: fresh._version.to_phone,
     expectedBodyDigest: fresh._version.body_digest,
+    simpleOnly: true,
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'

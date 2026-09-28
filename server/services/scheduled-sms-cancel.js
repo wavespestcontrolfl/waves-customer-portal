@@ -88,8 +88,25 @@ function pinnedBodyDigest(query, expectedBodyDigest) {
     : query.whereRaw("md5(convert_to(message_body, 'UTF8')) = ?", [expectedBodyDigest]);
 }
 
-function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest) {
-  return pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest);
+// The Intelligence Bar's simple-only rule (Codex round 6 on #5224, P1),
+// enforced in the SAME statement that cancels: never claimed by a send
+// worker and carrying no Agent Review decisions, so nothing past the row
+// itself changes. Off (the inbox route) = unchanged behavior.
+function simpleOnlyWhere(query, simpleOnly) {
+  if (!simpleOnly) return query;
+  return query
+    .whereRaw("COALESCE(metadata->>'scheduled_sms_claimed_at', '') = ''")
+    .whereRaw("COALESCE(metadata->>'scheduled_sms_recovered_at', '') = ''")
+    .whereRaw("COALESCE(metadata->>'provider_retry_at', '') = ''")
+    .whereRaw("COALESCE(metadata->>'agent_decision_id', '') = ''")
+    .whereRaw("COALESCE(metadata->'parked_decision_ids', '[]'::jsonb) IN ('[]'::jsonb, 'null'::jsonb)");
+}
+
+function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly) {
+  return simpleOnlyWhere(
+    pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest),
+    simpleOnly,
+  );
 }
 
 /**
@@ -101,7 +118,7 @@ function pinned(query, expectedScheduledFor, expectedToPhone, expectedBodyDigest
  *   only when THIS call actually neutralized the row (deleted it, or
  *   flipped it to 'canceled' in place).
  */
-async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest } = {}) {
+async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly = false } = {}) {
   const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone');
   if (!peek) return { outcome: 'not_found', cancelled: false, row: null };
   if (techRole !== 'admin') {
@@ -143,7 +160,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
     // have invalidated.
     let row = (await pinned(
       trx('sms_log').where({ id, status: 'scheduled' }),
-      expectedScheduledFor, expectedToPhone, expectedBodyDigest,
+      expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly,
     )
       .whereRaw("COALESCE(metadata->>'review_ask_reservation', '') <> 'true'")
       .del(['id', 'metadata', 'created_at']))?.[0];
@@ -158,7 +175,7 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
       // 72-hour spacing hold survives.
       row = (await pinned(
         trx('sms_log').where({ id, status: 'scheduled' }),
-        expectedScheduledFor, expectedToPhone, expectedBodyDigest,
+        expectedScheduledFor, expectedToPhone, expectedBodyDigest, simpleOnly,
       )
         .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
     }

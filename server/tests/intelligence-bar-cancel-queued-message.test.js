@@ -348,6 +348,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
     id: MESSAGE_ID, techRole: 'admin', technicianId: null,
     expectedScheduledFor: scheduledFor.toISOString(), expectedToPhone: '+19415550100',
     expectedBodyDigest: require('crypto').createHash('md5').update('Synthetic reminder body', 'utf8').digest('hex'),
+    simpleOnly: true,
   });
   expect(refused.success).not.toBe(true);
   expect(refused.preview_changed).toBe(true);
@@ -492,6 +493,30 @@ test('a provider-retry row (provider_retry_at set) is excluded from the list and
   expect(listed.messages).toEqual([]);
   const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
   expect(out.error).toMatch(/may have reached the provider/i);
+  expect(out.proposal).not.toBe(true);
+  expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
+});
+
+// Codex round 6 on #5224, P1 x2: the bar cancels only SIMPLE texts — never
+// claimed by a send worker (stale-claim recovery, provider retry, refunded
+// deferral) and not tied to Agent Review decisions (whose cancel reopens them
+// or re-parks them onto a sibling reply).
+test.each([
+  ['recovered from a stale send claim', { scheduled_sms_recovered_at: '2099-01-01T11:50:00Z', scheduled_sms_claimed_at: '2099-01-01T11:40:00Z' }, /may have reached the provider/i],
+  ['claimed once then deferred with the attempt refunded', { scheduled_sms_claimed_at: '2099-01-01T11:40:00Z', scheduled_sms_attempts: 0 }, /may have reached the provider/i],
+  ['tied to an agent decision', { agent_decision_id: 'dec-synthetic-1' }, /Agent Review/i],
+  ['carrying parked decisions', { parked_decision_ids: ['dec-synthetic-2'] }, /Agent Review/i],
+])('a row %s is excluded from the list and refused', async (_label, metadata, reason) => {
+  const row = {
+    id: MESSAGE_ID, customer_id: CUSTOMER_ID, direction: 'outbound', status: 'scheduled',
+    to_phone: '+19415550100', message_type: 'manual', message_body: 'Synthetic body',
+    scheduled_for: new Date('2099-01-01T12:00:00Z'), metadata,
+  };
+  db.mockImplementation(makeSmsDbMock([row]));
+  const listed = await executeCommsTool('list_queued_messages', { customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(listed.messages).toEqual([]);
+  const out = await executeCommsTool('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' });
+  expect(out.error).toMatch(reason);
   expect(out.proposal).not.toBe(true);
   expect(cancelScheduledSmsRow).not.toHaveBeenCalled();
 });
