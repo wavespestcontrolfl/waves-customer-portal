@@ -253,6 +253,9 @@ const SCOPE_SNAPSHOT = {
     // predicates, trip traces, redacted call quotes still keyed by call id.
     'get_growthbook_experiments', 'get_growthbook_features', 'get_managed_agent_runs', 'get_railway_logs', 'get_scheduled_job_health',
     'get_sentry_issue_detail', 'get_sentry_new_issues', 'get_sentry_top_issues', 'get_truck_trips', 'get_twilio_alerts', 'search_call_research',
+    // list_gap_reports' free-text summary/attempted fields are cleaned but not
+    // customer-proven — a gap report can still carry an operator's phrasing.
+    'list_gap_reports',
     // Operator free text passed through verbatim (a name or address can be
     // typed into any of these): technician notes and call snippets, restock
     // reasons, the pricing changelog, estimate service_interest, lost reasons.

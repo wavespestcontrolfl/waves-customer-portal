@@ -1,0 +1,111 @@
+// recordGapReport()'s upsert and list_gap_reports' grouping/ordering against
+// real PostgreSQL (server/models/migrations/20260928160000_agent_gap_reports.js
+// must be applied to DATABASE_URL first).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+postgres('agent-gap-reports against PostgreSQL', () => {
+  let db;
+  let recordGapReport;
+  let listGapReports;
+  const source = `test-source-${Date.now()}`;
+  const insertedIds = [];
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a disposable local database');
+    db = require('../models/db');
+    if (!(await db.schema.hasTable('agent_gap_reports'))) {
+      throw new Error('Apply migration 20260928160000_agent_gap_reports to this database first');
+    }
+    ({ recordGapReport } = require('../services/agent-gap-reports'));
+    // list_gap_reports is a plain function inside gap-report-tools.js's TOOLS
+    // dispatcher; exercise it through executeGapReportTool exactly as the
+    // route does.
+    const gapTools = require('../services/intelligence-bar/gap-report-tools');
+    listGapReports = (input) => gapTools.executeGapReportTool('list_gap_reports', input);
+  }, 30000);
+
+  afterEach(async () => {
+    if (insertedIds.length) {
+      await db('agent_gap_reports').whereIn('id', insertedIds).del();
+      insertedIds.length = 0;
+    }
+  });
+
+  afterAll(async () => { await db?.destroy(); });
+
+  async function record(overrides = {}) {
+    const result = await recordGapReport({ source, kind: 'missing_capability', summary: 'Synthetic gap for db test', ...overrides });
+    if (result?.id) insertedIds.push(result.id);
+    return result;
+  }
+
+  test('a recurrence of the same gap increments occurrences and bumps last_seen_at', async () => {
+    const first = await record({ summary: 'Add a second service address to a customer' });
+    expect(first.occurrences).toBe(1);
+    const before = await db('agent_gap_reports').where('id', first.id).first('last_seen_at');
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = await record({ summary: 'Add a second service address to a customer' });
+    expect(second.id).toBe(first.id);
+    expect(second.occurrences).toBe(2);
+
+    const after = await db('agent_gap_reports').where('id', first.id).first('last_seen_at');
+    expect(new Date(after.last_seen_at).getTime()).toBeGreaterThan(new Date(before.last_seen_at).getTime());
+  });
+
+  test('a recurrence on a fixed gap reopens it as new; building stays building', async () => {
+    const fixed = await record({ summary: 'A gap the owner already fixed once' });
+    await db('agent_gap_reports').where('id', fixed.id).update({ status: 'fixed' });
+    const reopened = await record({ summary: 'A gap the owner already fixed once' });
+    expect(reopened.id).toBe(fixed.id);
+    expect(reopened.status).toBe('new');
+    expect(reopened.occurrences).toBe(2);
+
+    const building = await record({ summary: 'A gap already in progress' });
+    await db('agent_gap_reports').where('id', building.id).update({ status: 'building' });
+    const recurred = await record({ summary: 'A gap already in progress' });
+    expect(recurred.status).toBe('building');
+  });
+
+  test('by_design and dismissed gaps stay in their status across a recurrence', async () => {
+    const byDesign = await record({ summary: 'A gap the owner ruled by design' });
+    await db('agent_gap_reports').where('id', byDesign.id).update({ status: 'by_design' });
+    const recurredByDesign = await record({ summary: 'A gap the owner ruled by design' });
+    expect(recurredByDesign.status).toBe('by_design');
+
+    const dismissed = await record({ summary: 'A gap the owner dismissed' });
+    await db('agent_gap_reports').where('id', dismissed.id).update({ status: 'dismissed' });
+    const recurredDismissed = await record({ summary: 'A gap the owner dismissed' });
+    expect(recurredDismissed.status).toBe('dismissed');
+  });
+
+  test('list_gap_reports groups by domain, orders by occurrence volume, and excludes closed statuses by default', async () => {
+    const heavy = await record({ summary: 'Heavy hit gap in ops domain', domain: 'ops' });
+    for (let i = 0; i < 3; i += 1) await record({ summary: 'Heavy hit gap in ops domain', domain: 'ops' });
+    const light = await record({ summary: 'Light hit gap with no domain' });
+    const closed = await record({ summary: 'A closed gap that should be excluded by default', domain: 'ops' });
+    await db('agent_gap_reports').where('id', closed.id).update({ status: 'dismissed' });
+
+    const result = await listGapReports({ days: 1 });
+    expect(result.window_days).toBe(1);
+    const opsGroup = result.groups.find((g) => g.domain === 'ops');
+    const otherGroup = result.groups.find((g) => g.domain === 'other');
+    expect(opsGroup).toBeTruthy();
+    expect(otherGroup).toBeTruthy();
+    // ops (4 occurrences on the heavy gap) outranks other (1 occurrence).
+    expect(result.groups.indexOf(opsGroup)).toBeLessThan(result.groups.indexOf(otherGroup));
+    expect(opsGroup.gaps[0].gap_id).toBe(heavy.id);
+    expect(opsGroup.gaps[0].times_seen).toBe(4);
+    expect(opsGroup.gaps.some((g) => g.gap_id === closed.id)).toBe(false);
+    expect(otherGroup.gaps.some((g) => g.gap_id === light.id)).toBe(true);
+    expect(result.note).toMatch(/gap #/);
+
+    const withClosed = await listGapReports({ days: 1, include_closed: true });
+    const opsGroupClosed = withClosed.groups.find((g) => g.domain === 'ops');
+    expect(opsGroupClosed.gaps.some((g) => g.gap_id === closed.id)).toBe(true);
+  });
+});

@@ -1596,6 +1596,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
+  // Intelligence Bar recorded a gap report (missing capability, tool failure,
+  // or blocked action) in the last 7 days; a clean week sends nothing.
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    try {
+      await runExclusive('agent-gap-digest', async () => {
+        const { runAgentGapDigest } = require('./agent-gap-digest');
+        const result = await runAgentGapDigest();
+        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
+        // A delivery-blocking skip (mailer unconfigured / non-internal
+        // recipient) or a failed send must still read as a FAILED run in
+        // job_health, mirroring the turf-variance digest block above.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Weekly agent gap digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are

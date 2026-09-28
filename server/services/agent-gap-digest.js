@@ -1,0 +1,122 @@
+'use strict';
+
+// Weekly owner reminder: gaps the Intelligence Bar recorded (report_gap +
+// the automatic per-request collector, agent-gap-reports.js) in the last 7
+// days — things it told the operator it could not do. Exception-based per
+// the hands-off rule (CLAUDE.md rule 14): a quiet week sends nothing.
+//
+// The bell body is a fixed, short instruction ("ask the bar, or say build
+// gap #N") — never the list itself, which can run long and is free text an
+// operator typed (owner ruling 2026-09-28: bell alerts stay two short
+// actionable lines). The full list goes out only in the email body, to the
+// internal ops inbox, same recipient/mailer preflight as turf-variance-digest.
+//
+// Cron: Monday 8:15am ET in scheduler.js, inside runExclusive.
+
+const sendgrid = require('./sendgrid-mail');
+const logger = require('./logger');
+const db = require('../models/db');
+const { deliverOpsDigest } = require('./ops-digest');
+const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { etWeekStart } = require('../utils/datetime-et');
+
+const digestEmail = () => process.env.AGENT_GAP_DIGEST_EMAIL || 'contact@wavespestcontrol.com';
+const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
+const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+
+const WINDOW_DAYS = 7;
+// A gap the owner has already triaged as intentional or rejected does not
+// need a recurring weekly nag; `fixed` still shows up if it recurs (the
+// recorder reopens it to `new` on that recurrence) and `building`/`new` gaps
+// are the ones worth a reminder.
+const QUIET_STATUSES = ['by_design', 'dismissed'];
+// Fixed, short instruction — never the list itself (bell-body length rule).
+const BELL_BODY = 'Ask the bar "show gap reports" for the list. Tell any session "build gap #N" to start a PR.';
+
+async function loadRecentGaps() {
+  const cutoff = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  return db('agent_gap_reports')
+    .where('last_seen_at', '>=', cutoff)
+    .whereNotIn('status', QUIET_STATUSES)
+    .orderBy('occurrences', 'desc')
+    .orderBy('last_seen_at', 'desc');
+}
+
+function gapLine(row) {
+  const tried = row.attempted ? ` — tried: ${row.attempted}` : '';
+  const tool = row.closest_tool ? ` [${row.closest_tool}]` : '';
+  return `gap #${row.id} (${row.status}, seen ${row.occurrences}x): ${row.summary}${tried}${tool}`;
+}
+
+// Pure composition: null = nothing worth an email (the common, quiet case).
+function composeAgentGapDigest(rows) {
+  if (!rows || !rows.length) return null;
+  const count = rows.length;
+  const subject = `ACT: ${count} thing${count === 1 ? '' : 's'} the bar couldn't do this week`;
+  const text = [
+    `${count} thing${count === 1 ? '' : 's'} the Intelligence Bar could not do in the last ${WINDOW_DAYS} days:`,
+    '',
+    ...rows.map(gapLine),
+    '',
+    BELL_BODY,
+  ].join('\n');
+  return { subject, text, count };
+}
+
+function dedupeKeyFor(now = new Date()) {
+  return `agent-gap-digest:${etWeekStart(now)}`;
+}
+
+async function runAgentGapDigest(opts = {}) {
+  let rows;
+  try {
+    rows = await (opts.loadRows || loadRecentGaps)();
+  } catch (err) {
+    logger.error(`[agent-gap-digest] query failed: ${err.message}`);
+    return { skipped: 'query_failed' };
+  }
+
+  const composed = composeAgentGapDigest(rows);
+  if (!composed) return { skipped: 'empty' };
+
+  const mailer = opts.sendgrid || sendgrid;
+  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+    logger.warn('[agent-gap-digest] mailer not configured — skipping send');
+    return { skipped: 'unconfigured', ...composed };
+  }
+
+  // FAIL CLOSED: owner/internal inboxes only.
+  const to = digestEmail();
+  if (!isInternalEmailRecipient(to)) {
+    logger.warn('[agent-gap-digest] recipient is not an internal address — skipping send; set a valid AGENT_GAP_DIGEST_EMAIL');
+    return { skipped: 'recipient', ...composed };
+  }
+
+  try {
+    await deliverOpsDigest({
+      key: 'agent-gap-digest',
+      subject: composed.subject,
+      text: BELL_BODY,
+      dedupeKey: dedupeKeyFor(opts.now),
+      sendEmail: () => mailer.sendOne({
+        to,
+        fromEmail: fromEmail(),
+        fromName: FROM_NAME,
+        subject: composed.subject,
+        text: composed.text,
+        categories: ['ops', 'agent-gap-digest'],
+        suppressErrorLog: true,
+      }),
+    });
+  } catch (err) {
+    logger.error(`[agent-gap-digest] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
+    return { sent: false, error: true, ...composed };
+  }
+  logger.info(`[agent-gap-digest] sent: ${composed.count} gap(s)`);
+  return { sent: true, ...composed };
+}
+
+module.exports = {
+  runAgentGapDigest,
+  _private: { composeAgentGapDigest, dedupeKeyFor, BELL_BODY },
+};
