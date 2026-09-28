@@ -580,5 +580,5 @@ module.exports = {
   planRiderDates,
   syncRiderSeries,
   syncRidersOfHost,
-  _internals: { immovableByOwnFields, buildRiderRowFromTemplate, addDaysStr },
+  _internals: { immovableByOwnFields, buildRiderRowFromTemplate, addDaysStr, tryLockSeriesMaintenance },
 };
