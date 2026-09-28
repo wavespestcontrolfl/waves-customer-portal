@@ -501,7 +501,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
                     border: `1px solid ${S.border}`,
                     background: '#FFFFFF',
                     color: S.text,
-                    fontSize: 13,
+                    fontSize: 14,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
