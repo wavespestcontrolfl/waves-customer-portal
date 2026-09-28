@@ -6,6 +6,13 @@
 // palette as CreateAppointmentModal's duplicate-series section.
 const D = { border: '#E4E4E7', text: '#18181B', white: '#fff' };
 
+// The service line the request collided with: the visit's own service, or
+// an add-on on it ("Mosquito Control (add-on to General Pest Control)").
+export function matchedLineLabel(visit) {
+  const matched = visit.matchedService || visit.serviceType;
+  return matched === visit.serviceType ? matched : `${matched} (add-on to ${visit.serviceType})`;
+}
+
 export default function CallBookingConflictNotice({ conflict, sectionRef, canSubmit, onBookAnother }) {
   if (!conflict) return null;
   return (
@@ -13,7 +20,7 @@ export default function CallBookingConflictNotice({ conflict, sectionRef, canSub
       <div style={{ fontWeight: 500 }}>The phone agent already booked this</div>
       {conflict.existingVisits?.map((visit) => (
         <div key={visit.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
-          <div>{visit.serviceType} · {visit.scheduledDate} · {visit.windowStart || 'No time set'} · {visit.status}</div>
+          <div>{matchedLineLabel(visit)} · {visit.scheduledDate} · {visit.windowStart || 'No time set'} · {visit.status}</div>
           <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(visit.scheduledDate)}&appointment=${encodeURIComponent(visit.id)}`}
             target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing visit</a>
         </div>

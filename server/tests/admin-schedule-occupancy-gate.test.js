@@ -528,6 +528,55 @@ describe('POST / — admin create', () => {
       expect(seen.where).toEqual(expect.arrayContaining([['ss.property_id', 'prop-9']]));
     });
 
+    test('the locked re-check covers every date a series books — each generated occurrence and booster, not just the anchor (codex #5183 r3 P1)', async () => {
+      const lockedDays = [];
+      trx.mockImplementation((table) => {
+        const c = chain(table === 'customers' ? { id: 'cust-1' } : (table === 'scheduled_services' ? { ...SVC } : undefined));
+        if (table === GUARD_TABLE) {
+          c.whereRaw = jest.fn((sql, bindings) => { if (String(sql).includes('unnest')) lockedDays.push(...bindings[0]); return c; });
+        }
+        return c;
+      });
+
+      await post({
+        ...createBody, isRecurring: true, recurringPattern: 'monthly', recurringCount: 3, boosterMonths: [11],
+        estimatedPrice: 89, createInvoice: true,
+      });
+
+      // Anchor, two generated monthly occurrences (moved onto working days)
+      // and the November booster: every date the series will insert.
+      expect(lockedDays[0]).toBe('2099-07-03');
+      expect(lockedDays.map((d) => d.slice(0, 7))).toEqual(['2099-07', '2099-08', '2099-09', '2099-11']);
+    });
+
+    test('the promised follow-up visit a call booked (a phone_call child) is a candidate too (codex #5183 r3 P1)', async () => {
+      const seen = { where: [], orWhereRaw: [] };
+      const orWhere = [];
+      db.mockImplementation((table) => {
+        const c = recordGuardQuery(seen)(table);
+        if (table === GUARD_TABLE) c.orWhere = jest.fn((...args) => { orWhere.push(args); return c; });
+        return c;
+      });
+
+      await post(createBody);
+
+      expect(orWhere).toEqual(expect.arrayContaining([['ss.booking_source', 'phone_call']]));
+    });
+
+    test('a visit that matched only through an add-on reports that add-on as the matched line (codex #5183 r3 P2)', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'customers') return chain(CUSTOMER_ROW);
+        if (table === GUARD_TABLE) return chain({ ...callBookedVisit, service_type: 'General Pest Control', service_id: 'svc-gpc' });
+        if (table === 'scheduled_service_addons') return chain({ scheduled_service_id: 'call-visit-1', service_id: 'svc-mosq', service_name: 'Mosquito Control' });
+        return chain(undefined);
+      });
+
+      const result = await post({ ...createBody, serviceType: 'Mosquito Control', serviceId: 'svc-mosq' });
+
+      expect(result.status).toBe(409);
+      expect(result.body.existingVisits[0]).toMatchObject({ serviceType: 'General Pest Control', matchedService: 'Mosquito Control' });
+    });
+
     test('a phone-agent booking committed after the preflight is caught by the locked re-check inside the booking transaction (codex #5183 r1 P1)', async () => {
       const insertSpy = jest.fn();
       trx.mockImplementation((table) => {

@@ -9,7 +9,7 @@ const conflict = {
   key: 'one-time',
   existingVisits: [
     { id: 'v1', serviceType: 'General Pest Control', scheduledDate: '2026-10-02', windowStart: '09:00', status: 'confirmed' },
-    { id: 'v2', serviceType: 'Mosquito Control', scheduledDate: '2026-10-03', windowStart: null, status: 'pending' },
+    { id: 'v2', serviceType: 'General Pest Control', matchedService: 'Mosquito Control', scheduledDate: '2026-10-03', windowStart: null, status: 'pending' },
   ],
 };
 
@@ -21,11 +21,12 @@ describe('CallBookingConflictNotice', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('lists each phone-agent visit with an Open link, and a missing time reads "No time set"', () => {
+  it('lists each phone-agent visit by the line that matched, with an Open link; a missing time reads "No time set"', () => {
     render(<CallBookingConflictNotice conflict={conflict} canSubmit onBookAnother={() => {}} />);
     expect(screen.getByText('The phone agent already booked this')).toBeTruthy();
     expect(screen.getByText('General Pest Control · 2026-10-02 · 09:00 · confirmed')).toBeTruthy();
-    expect(screen.getByText('Mosquito Control · 2026-10-03 · No time set · pending')).toBeTruthy();
+    // Matched through an add-on: the notice names that line (codex #5183 r3 P2).
+    expect(screen.getByText('Mosquito Control (add-on to General Pest Control) · 2026-10-03 · No time set · pending')).toBeTruthy();
     const links = screen.getAllByRole('link', { name: 'Open existing visit' });
     expect(links[0].getAttribute('href')).toBe('/admin/dispatch?tab=schedule&date=2026-10-02&appointment=v1');
   });
