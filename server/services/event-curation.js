@@ -89,16 +89,31 @@ const CLASSIFY_TIMEOUT_MS = 10 * 60 * 1000;
 const FORWARD_WINDOW_DAYS = 90;
 const NOTE_MAX = 200;
 // Whole-run budget: the 7:00 AM ET newsletter autopilot plans from whatever
-// is approved by then, and a skipped week is not retried. The 6:15 run only
-// starts a classify batch when that batch's full CLASSIFY_TIMEOUT_MS still
-// fits, so it finishes by about 6:55. Rows it doesn't reach stay unexamined
+// is approved by then, and a skipped week is not retried. The deadline is
+// anchored to the clock, not the job's start: runExclusive may hold the 6:15
+// tick for a lock slot first. A classify batch starts only when its full
+// CLASSIFY_TIMEOUT_MS still ends by CURATION_CUTOFF_ET (and within
+// CURATION_RUN_BUDGET_MS of the start); rows it doesn't reach stay unexamined
 // for tomorrow's run.
 const CURATION_RUN_BUDGET_MS = 40 * 60 * 1000;
+const CURATION_CUTOFF_ET = '06:55:00';
+const AUTOPILOT_START_ET = '07:00:00';
+
+// Absolute time after which no classify batch may still be running: the
+// earlier of start + CURATION_RUN_BUDGET_MS and, for a run that begins before
+// the 7:00 AM ET autopilot, 6:55 AM ET that day.
+function curationDeadline(startedAt = new Date()) {
+  const day = etDateString(startedAt);
+  const budgetEnd = startedAt.getTime() + CURATION_RUN_BUDGET_MS;
+  const autopilotStart = parseETDateTime(`${day}T${AUTOPILOT_START_ET}`).getTime();
+  if (startedAt.getTime() >= autopilotStart) return budgetEnd;
+  return Math.min(budgetEnd, parseETDateTime(`${day}T${CURATION_CUTOFF_ET}`).getTime());
+}
 
 // A classify batch may run for up to CLASSIFY_TIMEOUT_MS, so it only starts
-// when that whole allowance still fits inside the run budget.
-function batchFitsRunBudget(elapsedMs, runBudgetMs = CURATION_RUN_BUDGET_MS) {
-  return elapsedMs + CLASSIFY_TIMEOUT_MS <= runBudgetMs;
+// when that whole allowance still ends by the deadline.
+function batchFitsDeadline(nowMs, deadlineMs) {
+  return nowMs + CLASSIFY_TIMEOUT_MS <= deadlineMs;
 }
 
 function curationEnabled() {
@@ -497,13 +512,12 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
 /**
  * Cron entry point. Returns a summary for logging/tests.
  */
-async function runAutoCuration({ limit = CURATION_RUN_LIMIT, runBudgetMs = CURATION_RUN_BUDGET_MS } = {}) {
+async function runAutoCuration({ limit = CURATION_RUN_LIMIT, deadlineMs = curationDeadline(new Date()) } = {}) {
   if (!curationEnabled()) {
     logger.info('[event-curation] disabled via EVENT_AUTO_CURATION=false');
     return { disabled: true, examined: 0, approved: 0 };
   }
 
-  const runStartedAt = Date.now();
   const { candidates, policyDrops } = await fetchCurationCandidates(limit);
 
   // Stamp policy-dropped rows first so they leave the candidate window
@@ -539,8 +553,8 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT, runBudgetMs = CURAT
   let examined = 0;
 
   for (let i = 0; i < candidates.length; i += CLASSIFY_BATCH) {
-    if (!batchFitsRunBudget(Date.now() - runStartedAt, runBudgetMs)) {
-      logger.warn(`[event-curation] run budget reached; ${candidates.length - i} candidates left for the next run`);
+    if (!batchFitsDeadline(Date.now(), deadlineMs)) {
+      logger.warn(`[event-curation] deadline reached; ${candidates.length - i} candidates left for the next run`);
       break;
     }
     const batch = candidates.slice(i, i + CLASSIFY_BATCH);
@@ -583,5 +597,6 @@ module.exports = {
   applyDecision,
   CURATION_FRESHNESS_EXCLUSIONS,
   CURATION_RUN_BUDGET_MS,
-  batchFitsRunBudget,
+  curationDeadline,
+  batchFitsDeadline,
 };

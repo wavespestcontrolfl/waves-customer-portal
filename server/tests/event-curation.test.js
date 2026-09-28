@@ -13,7 +13,8 @@ const {
   buildCurationCandidateQuery,
   CURATION_FRESHNESS_EXCLUSIONS,
   CURATION_RUN_BUDGET_MS,
-  batchFitsRunBudget,
+  curationDeadline,
+  batchFitsDeadline,
 } = require('../services/event-curation');
 const { FACTOR_MAXES, REJECTION_CODES } = require('../services/event-scoring');
 
@@ -231,16 +232,26 @@ describe('event-curation hard freshness exclusions', () => {
   });
 });
 
-describe('event-curation run budget (finishes before the 7 AM autopilot)', () => {
-  const MIN = 60 * 1000;
-  test('the 6:15 run is budgeted to end by about 6:55', () => {
-    expect(CURATION_RUN_BUDGET_MS).toBe(40 * MIN);
+describe('event-curation deadline (finishes before the 7 AM autopilot)', () => {
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const et = (clock) => parseETDateTime(`2026-10-06T${clock}`);
+
+  test('an on-time 6:15 run is capped at 6:55 ET', () => {
+    expect(curationDeadline(et('06:15:00'))).toBe(et('06:55:00').getTime());
   });
 
-  test('a batch starts only when its full 10-minute allowance still fits', () => {
-    expect(batchFitsRunBudget(0)).toBe(true);
-    expect(batchFitsRunBudget(30 * MIN)).toBe(true);
-    expect(batchFitsRunBudget(30 * MIN + 1)).toBe(false);
-    expect(batchFitsRunBudget(0, 0)).toBe(false);
+  test('a run the cron lock delayed to 6:25 still ends by 6:55 ET, not 7:05', () => {
+    expect(curationDeadline(et('06:25:00'))).toBe(et('06:55:00').getTime());
+  });
+
+  test('a run starting after the autopilot gets the plain 40-minute budget', () => {
+    expect(curationDeadline(et('09:00:00'))).toBe(et('09:00:00').getTime() + CURATION_RUN_BUDGET_MS);
+  });
+
+  test('a batch starts only when its full 10-minute allowance ends by the deadline', () => {
+    const deadline = et('06:55:00').getTime();
+    expect(batchFitsDeadline(et('06:45:00').getTime(), deadline)).toBe(true);
+    expect(batchFitsDeadline(et('06:45:00').getTime() + 1, deadline)).toBe(false);
+    expect(batchFitsDeadline(et('06:15:00').getTime(), deadline)).toBe(true);
   });
 });
