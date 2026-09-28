@@ -552,4 +552,126 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     const alerts = await trx('recurring_plan_alerts').where({ recurring_parent_id: pestParent.id });
     expect(alerts.every((a) => !a.resolved_at)).toBe(true);
   });
+
+  test('a contended customer-comms lock skips the sync (customer_locked), non-blocking', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const before = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+
+    // NOTE: a genuinely separate session BLOCK-acquiring this same key would
+    // deadlock this test — seedChildren above already took this exact lock
+    // reentrant on `trx`'s own session (recurring-appointment-seeder.js's
+    // follow-up insert locks customer-comms for the whole rest of the
+    // transaction), so a second session's blocking pg_advisory_xact_lock on
+    // the same key would wait for `trx` to end, which never happens mid-
+    // test. tryLockCustomerComms itself is non-blocking by construction
+    // (pg_try_advisory_xact_lock, verified directly against
+    // utils/customer-comms-lock.js) — what this test proves is the code
+    // path: syncRiderSeries writes nothing and returns 'customer_locked'
+    // the moment that call reports contention, whoever's holding it.
+    const commsLock = require('../utils/customer-comms-lock');
+    const spy = jest.spyOn(commsLock, 'tryLockCustomerComms').mockResolvedValueOnce(false);
+    try {
+      const { syncRiderSeries } = require('../services/rider-series');
+      const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+      expect(result.skipped).toBe('customer_locked');
+      expect(result.move).toEqual([]);
+      expect(result.insert).toEqual([]);
+      expect(result.cancel).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const after = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+    expect(after).toEqual(before);
+  });
+
+  test('two movable rider rows sharing one planned date: exactly one is kept, the other resolves (never both orphaned); a second sync is a no-op', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+    // Isolate the diff/claim algorithm this test targets from visit-group
+    // grouping (a SEPARATE, correct immovability rule this suite covers
+    // elsewhere): both series resolve real groupable catalog rows and an
+    // auto-anchored property in this shared QA database, so a first sync
+    // would otherwise group every matched row onto its host's visit and
+    // make it immovable, leaving nothing left to duplicate against.
+    // property_id IS NULL is grouping's own hard requirement to skip
+    // (visit-groups.js groupRowOn), and TEMPLATE_COPY_FIELDS carries it
+    // forward onto every future insert/move, so clearing it once here
+    // keeps grouping off for the rest of this test.
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ property_id: null });
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false }); // aligns all 4 pest rows onto plan dates
+
+    const pestRowsAfterFirstSync = await seriesRows(pestParent.id);
+    const movableRow = pestRowsAfterFirstSync.find((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START);
+    const dupDate = movableRow.scheduled_date;
+
+    // A genuine duplicate on the SAME already-planned date.
+    const [duplicateRow] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status: 'pending',
+      scheduled_date: dupDate, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_parent_id: pestParent.id, recurring_ongoing: true, source: 'admin',
+    }).returning('*');
+
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    const pairIds = [movableRow.id, duplicateRow.id];
+    const keptFromPair = pairIds.filter((id) => result.keep.some((k) => k.id === id));
+    const resolvedFromPair = pairIds.filter((id) => (
+      result.move.some((m) => m.id === id) || result.cancel.some((c) => c.id === id)
+    ));
+    expect(keptFromPair.length).toBe(1);
+    expect(resolvedFromPair.length).toBe(1);
+
+    const rowsAfter = await trx('scheduled_services').whereIn('id', pairIds);
+    const liveDates = rowsAfter.filter((r) => r.status !== 'cancelled').map((r) => r.scheduled_date.toISOString().slice(0, 10));
+    expect(new Set(liveDates).size).toBe(liveDates.length); // never two live rows on the same date
+
+    const second = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(second.move).toEqual([]);
+    expect(second.insert).toEqual([]);
+    expect(second.cancel).toEqual([]);
+  });
+
+  test('the plan-ending alert action resolves a REAL persisted alert on a successful rider sync', async () => {
+    const adminScheduleRouter = require('../routes/admin-schedule');
+    const { runRecurringAlertAction } = adminScheduleRouter._test;
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const [alertRow] = await trx('recurring_plan_alerts').insert({
+      recurring_parent_id: pestParent.id, customer_id: customerId, alert_type: 'plan_ending',
+    }).returning('*');
+
+    const outcome = await runRecurringAlertAction(trx, {
+      idParam: String(alertRow.id), action: 'extend', count: 1, adminUserId: null,
+    });
+
+    expect(outcome.status).toBe(200);
+    expect(outcome.body.success).toBe(true);
+    const alertAfter = await trx('recurring_plan_alerts').where({ id: alertRow.id }).first();
+    expect(alertAfter.resolved_at).not.toBeNull();
+    expect(alertAfter.resolved_action).toBe('extend');
+  });
 });

@@ -2677,3 +2677,22 @@ requires before any `scheduled_services` write — it was writing ahead of
 that lock. The plan-ending alert action now refuses (409,
 `RIDER_SYNC_INCOMPLETE`) instead of reporting success when the rider sync
 itself was skipped, and never resolves the alert on that path.
+
+Review round 3 (2026-09-28, pre-push audit): the customer-comms lock now
+uses `tryLockCustomerComms` (skips with `customer_locked` on contention)
+instead of the blocking `lockCustomerComms` — the whole non-blocking
+deadlock-safety argument depended on every lock this module takes being a
+try-lock, and this one broke that. The diff now claims a movable row by id
+(at most one per planned date) instead of matching by date alone, which
+had silently orphaned a genuine duplicate — two rider rows sharing one
+scheduled_date — forever, since neither was ever recognized as unmatched.
+The plan-ending alert action's rider SUCCESS path now runs the same
+alert-resolution write the non-rider path runs (it returns before ever
+reaching that shared code), so a persisted `recurring_plan_alerts` row for
+a rider parent gets `resolved_at` instead of sitting stale. Also confirmed:
+in the shared QA database, synthetic "Lawn Care"/"Pest Control" labels
+resolve to REAL groupable catalog rows and an auto-anchored property, so a
+rider row that lands on a host date gets grouped (and, per round 2's
+visit_id rule, immovable) on the very first sync — expected, not a bug,
+but real-catalog PG tests that need a SECOND round of diffing must clear
+`property_id` first or they will find nothing left movable.

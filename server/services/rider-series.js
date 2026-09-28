@@ -138,10 +138,15 @@ async function tryLockSeriesMaintenance(trx, parentId) {
   return result.rows[0]?.locked === true;
 }
 
-async function lockCustomerCommsIfKnown(trx, customerId) {
-  if (!customerId) return;
-  const { lockCustomerComms } = require('../utils/customer-comms-lock');
-  await lockCustomerComms(trx, customerId);
+// Non-blocking, matching the module's whole deadlock-safety argument (see
+// the header): every lock this module takes is a try-lock, so the ordering
+// proof (no lock here ever WAITS) holds for this one too. A blocking
+// lockCustomerComms would be the one exception that breaks it. Returns
+// true when acquired (or no customer to fence) and false on contention.
+async function tryLockCustomerCommsIfKnown(trx, customerId) {
+  if (!customerId) return true;
+  const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
+  return tryLockCustomerComms(trx, customerId);
 }
 
 // Batched "is this rider row an immovable anchor" lookup — never move,
@@ -338,7 +343,9 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       return { ...empty(), skipped: 'cross_customer' };
     }
 
-    await lockCustomerCommsIfKnown(trx, riderParent.customer_id);
+    if (!(await tryLockCustomerCommsIfKnown(trx, riderParent.customer_id))) {
+      return { ...empty(), skipped: 'customer_locked' };
+    }
 
     const todayStr = etDateString();
 
@@ -413,22 +420,41 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       weekendShift: riderParent.weekend_shift === 'back' ? 'back' : 'forward',
     });
 
+    // Grouped by date (an array, not a single row) so a genuine duplicate —
+    // two movable rows sharing one date — is diffed correctly. Matching by
+    // "is my date in the plan" alone (the previous shape) let BOTH same-
+    // date rows pass and neither was ever claimed as the kept one or
+    // exposed as unmatched, silently orphaning the duplicate forever (a
+    // second sync would make the exact same no-decision, non-idempotently
+    // leaving a duplicate that never resolves). Claiming by row id, at
+    // most one per planned date, makes every OTHER movable row on that
+    // date (or any row a plan date never reaches) unmatched — a move or
+    // cancel candidate like any other unmatched row.
     const movableByDate = new Map();
     for (const r of movableRows) {
       const d = dateOnly(r.scheduled_date);
-      if (d) movableByDate.set(d, r);
+      if (!d) continue;
+      if (!movableByDate.has(d)) movableByDate.set(d, []);
+      movableByDate.get(d).push(r);
     }
-    const planSet = new Set(plan);
+    // Stable choice among same-date duplicates: lowest id.
+    for (const rows of movableByDate.values()) rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
 
+    const claimedIds = new Set();
     const keep = [];
     const unmatchedPlanned = [];
     for (const d of plan) {
-      const existing = movableByDate.get(d);
-      if (existing) keep.push({ id: existing.id, date: d });
-      else unmatchedPlanned.push(d);
+      const candidates = movableByDate.get(d) || [];
+      const existing = candidates.find((r) => !claimedIds.has(r.id));
+      if (existing) {
+        claimedIds.add(existing.id);
+        keep.push({ id: existing.id, date: d });
+      } else {
+        unmatchedPlanned.push(d);
+      }
     }
     const unmatchedMovable = movableRows
-      .filter((r) => !planSet.has(dateOnly(r.scheduled_date)))
+      .filter((r) => !claimedIds.has(r.id))
       .sort((a, b) => dateOnly(a.scheduled_date).localeCompare(dateOnly(b.scheduled_date)));
 
     const pairCount = Math.min(unmatchedMovable.length, unmatchedPlanned.length);

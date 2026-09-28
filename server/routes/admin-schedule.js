@@ -24704,6 +24704,34 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         };
         return;
       }
+      // Successful sync — resolve the SAME alert/derived-record the
+      // non-rider extend/convert path resolves further below. This branch
+      // RETURNS before ever reaching that shared code, so without this a
+      // persisted (non-derived) recurring_plan_alerts row for a rider
+      // parent would never get resolved_at and the office would keep
+      // seeing a stale "plan ending" alert for a series the sync engine
+      // is actually keeping topped up. Mirrors that block exactly.
+      if (alert) {
+        await trx('recurring_plan_alerts').where({ id: alert.id }).update({
+          resolved_at: trx.fn.now(),
+          resolved_action: action,
+          resolved_by: adminUserId,
+        });
+      } else {
+        // Derived — insert a resolved record for audit. Savepoint, not bare
+        // try/catch: an insert failure must not abort the locked transaction.
+        try {
+          await trx.transaction((sp) => sp('recurring_plan_alerts').insert({
+            recurring_parent_id: parentId,
+            customer_id: parent.customer_id,
+            alert_type: 'plan_ending_soon',
+            recurring_pattern: parent.recurring_pattern,
+            resolved_at: sp.fn.now(),
+            resolved_action: action,
+            resolved_by: adminUserId,
+          }));
+        } catch {}
+      }
       outcome = {
         status: 200,
         body: { success: true, action, created: (riderSync.insertedRows || []).length, riderSynced: true },

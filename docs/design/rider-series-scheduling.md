@@ -62,8 +62,11 @@ own 84-day cadence rather than lapsing.
    advisory lock (the SAME lock `acquireRecurringSeriesMaintenanceLock` in
    `routes/admin-schedule.js` uses, key derivation copied verbatim — see
    that function's own comment on why the derivation must stay
-   byte-identical), then the shared customer-comms lock. **Non-blocking**
-   on both maintenance locks — see "Locking" below.
+   byte-identical), then the shared customer-comms lock — every one of the
+   three is **non-blocking** (`pg_try_advisory_xact_lock` /
+   `tryLockCustomerComms`; a miss on any of them skips with `host_locked` /
+   `rider_locked` / `customer_locked`, writing nothing) — see "Locking"
+   below.
 3. Host dates = the host's live future rows (parent + children,
    `JOIN_INELIGIBLE_STATUSES` excluded, `>= today`).
 4. `lastRiderDate` (the anchor) = the rider's latest row that is
@@ -136,8 +139,12 @@ after the anchor.
 ## Locking
 
 The recurring-series-maintenance advisory lock is taken for BOTH the
-host's and the rider's parent id, **non-blocking** (`pg_try_advisory_xact_
-lock`). `syncRiderSeries` is reached from both directions — a rider's own
+host's and the rider's parent id, then the shared customer-comms lock —
+all three **non-blocking** (`pg_try_advisory_xact_lock` /
+`tryLockCustomerComms`, never the blocking `lockCustomerComms` — the whole
+deadlock-safety argument below depends on EVERY lock this module takes
+being a try-lock, so a blocking exception would quietly break it).
+`syncRiderSeries` is reached from both directions — a rider's own
 completion/top-up/alert hook already holds the RIDER's lock before calling
 in, and a host's seed/extend hook already holds the HOST's lock before
 calling in — so a fixed blocking order (host-then-rider, matching the
@@ -146,7 +153,8 @@ from every call site without releasing and re-acquiring a lock mid-
 transaction, which `pg_advisory_xact_lock` doesn't support. Non-blocking
 acquisition on whichever lock isn't already held makes a deadlock
 structurally impossible (a try-lock never waits): on contention, this sync
-is skipped for that pass and the nightly reconcile retries it.
+is skipped for that pass (`skipped: 'host_locked'` / `'rider_locked'` /
+`'customer_locked'`) and the nightly reconcile retries it.
 
 ## Hooked paths vs the nightly reconcile
 
