@@ -56,9 +56,18 @@ const {
 // `invoiceById` (plain `invoices` table, distinct from the `invoices as i`
 // alias below) backs isPricedCoveredMemberVisit's own anchor-identity read
 // (`.where({id}).first('scheduled_service_id')`) — the priced-covered-member
-// widening gate, never the sibling-invoice lookup itself.
+// widening gate, never the sibling-invoice lookup itself. `ownRefundRow`
+// (default none) backs pricedCoveredMemberOwnRefundHold's own
+// completionTerminalInvoiceLookup read (its ONLY `.whereIn('status', ...)`
+// call on this table — the discriminator from the anchor-identity read
+// above); `splitOffRows` (default `[]`) backs isPricedCoveredMemberVisit's
+// OWN "split off by hand" check (liveBaseApplicationInvoiceVisitIdsOn),
+// which always starts with `.whereIn` too but ends in `.select(...)`, never
+// `.first(...)` — told apart by which terminal method the real call chain
+// actually reaches.
 function fakeDbConn({
   byId = {}, members = [], invoiceRows = [], invoiceQueryCalls = null, invoiceById = {},
+  ownRefundRow = null, splitOffRows = [],
 } = {}) {
   return (table) => {
     if (table === 'scheduled_services') {
@@ -76,7 +85,26 @@ function fakeDbConn({
       };
     }
     if (table === 'invoices') {
-      return { where: (cond) => ({ first: async () => invoiceById[cond.id] || null }) };
+      const q = {};
+      let usedWhereIn = false;
+      let firstWhereCond;
+      // Three real call chains share this table: isPricedCoveredMemberVisit's
+      // plain `.where({id}).first(...)` anchor-identity read (no
+      // .whereIn); pricedCoveredMemberOwnRefundHold's
+      // `.where(fn).whereIn('status', ...)....first(...)` own-refund read;
+      // and isPricedCoveredMemberVisit's OWN split-off check
+      // (`.whereIn(...).whereNotIn(...).modify(...).select(...)`, never
+      // `.first()` at all). `.first()` tells the first two apart by
+      // whether `.whereIn` was ever called on this chain.
+      q.where = (cond) => { if (firstWhereCond === undefined) firstWhereCond = cond; return q; };
+      q.whereIn = () => { usedWhereIn = true; return q; };
+      q.whereNotIn = () => q;
+      q.whereNot = () => q;
+      q.orderBy = () => q;
+      q.modify = (fn) => { fn(q); return q; };
+      q.select = async () => splitOffRows;
+      q.first = async () => (usedWhereIn ? ownRefundRow : (invoiceById[firstWhereCond?.id] || null));
+      return q;
     }
     if (table === 'invoices as i') {
       const q = {};
@@ -574,6 +602,31 @@ describe('siblingCoverageForSchedule', () => {
     const { coverage, prediction } = await siblingCoverageForSchedule({ svc: PEST_SVC, dbConn });
     expect(coverage.state).toBe('none');
     expect(prediction).toBeNull();
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+  });
+
+  // #5237 review r2 P2: a priced covered member whose OWN base-application
+  // invoice is REFUNDED — the combined invoice is STILL LIVE, so
+  // isPricedCoveredMemberVisit's "split off by hand" check (LIVE-only)
+  // still says covered — must surface `review`, the SAME verdict
+  // completion reaches by checking this visit's own refund FIRST
+  // (completionTerminalInvoiceLookup), never `collect_on_combined_invoice`
+  // — that invoice is fine; THIS visit's own money is what's in question.
+  test('a PRICED non-anchor sibling with its OWN refunded base-application invoice (combined still live) → review, matching completion', async () => {
+    const PRICED_LAWN_SVC = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-1' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({
+      invoiceById: { 'inv-1': { scheduled_service_id: 'svc-pest' } },
+      ownRefundRow: { id: 'inv-own-refund', invoice_number: 'WPC-TEST-0077', status: 'refunded' },
+    });
+
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: PRICED_LAWN_SVC, dbConn });
+    expect(coverage.state).toBe('review');
+    expect(prediction.kind).toBe('sibling_needs_review');
+    // The own-refund short-circuit never even asks the sibling lookup.
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
 });

@@ -15954,8 +15954,16 @@ function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
     return {
       refused: true,
       reason: 'sibling_invoice_covered',
+      // #5237 review P2: the Invoices page's manual-create endpoint
+      // (admin-invoices.js POST /) only links via serviceRecordId — a
+      // pre-completion visit has none yet, so a "split it off from the
+      // Invoices page" instruction was a dead end that would just 409 on
+      // the next Charge Now. No staff-facing action un-stamps a covered
+      // member today; the honest instructions are collect on the combined
+      // invoice (completing the visit reuses it too — never a second
+      // charge) or have the office adjust the combined invoice by hand.
       message: hasOwnPrice
-        ? 'This visit is billed on the combined trip invoice — collect on that invoice. If this visit should be billed on its own, split it off by giving it its own invoice from the Invoices page.'
+        ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
         : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
     };
   }
@@ -16018,7 +16026,21 @@ async function resolveScheduledServiceCharge({
   if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
     try {
-      verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+      // Own-row refund precedence (#5237 review r2 P2): completion checks
+      // THIS VISIT's own refunded invoice BEFORE ever consulting the
+      // sibling group — a priced covered member split off by hand and
+      // refunded still carries the combined-invoice stamp, so the ordinary
+      // sibling verdict below would otherwise report 'covered' on the
+      // (still live) combined invoice while completion parks it for manual
+      // review. Scoped to the priced-covered-member widening only
+      // (isPricedCoveredMember true) — every unpriced-sibling caller is
+      // unaffected. Reuses completion's own classifier
+      // (pricedCoveredMemberOwnRefundHold → completionTerminalInvoiceLookup)
+      // so the two can never disagree.
+      const ownRefund = isPricedCoveredMember
+        ? await require('../services/estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+        : null;
+      verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
     } catch {
       verdict = { status: 'error' };
     }
@@ -16105,25 +16127,31 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
-  // Priced-covered-member widening (see resolveScheduledServiceCharge's own
-  // header just above): a priced row with NO stamp at all can never be a
-  // covered member — read straight off svc's own already-selected
-  // first_application_invoice_id column (readFirstApplicationStamp's fast
-  // path), never an extra DB call just to rule this out synchronously — so
-  // the ordinary hasOwnPrice gate below still returns null for it exactly
-  // as before. A priced row that DOES carry a stamp might be the anchor or
-  // a covered member; that can only be told apart under the lock (the
-  // invoice's own anchor id), so the closure below re-decides eligibility
-  // itself before ever running the recheck.
-  const maybePricedCoveredMember = hasOwnPrice && !!svc?.first_application_invoice_id;
+  // Shape-only eligibility, PRICE-BLIND (Codex r2 P1 on 2ac5813cf0): the
+  // route's own pre-lock read of svc can be stale by the time this mint
+  // transaction's row lock (acquireScheduledMintLockChain, ahead of this
+  // recheck) actually commits — reconcileRecentUnstampedAccepts /
+  // stampGroupRevalidated can stamp a priced sibling in exactly that
+  // window. Deciding "maybe a covered member" from svc's OWN captured
+  // first_application_invoice_id column (as this used to) missed that
+  // race outright: a not-yet-stamped snapshot returned null here and the
+  // mint proceeded with NO in-lock recheck at all. So this outer gate no
+  // longer looks at price or the stamp at all — every visit whose SHAPE
+  // (estimate-linked, not a callback, not an always-free type) could ever
+  // carry a stamp gets the closure below; the closure alone decides,
+  // re-reading the stamp FRESH under the lock every time.
   if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
-    isPricedCoveredMember: maybePricedCoveredMember,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
   return async (trx) => {
     if (hasOwnPrice) {
       const { isPricedCoveredMemberVisit } = require('../services/estimate-first-application-invoice');
-      const isPricedCoveredMember = await isPricedCoveredMemberVisit(svc, trx);
+      // A NARROW shape ({id} only — no first_application_invoice_id key)
+      // forces readFirstApplicationStamp's own by-id fallback read instead
+      // of its fast path off svc's stale pre-lock object (that fast path
+      // is exactly what let the race above through): the row this trx
+      // already holds FOR UPDATE makes this read authoritative.
+      const isPricedCoveredMember = await isPricedCoveredMemberVisit({ id: svc?.id }, trx);
       if (!isSiblingCoverageEligibleVisit({
         sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
         isPricedCoveredMember,

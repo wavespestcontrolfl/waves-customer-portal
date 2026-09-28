@@ -7,6 +7,7 @@ const {
   invoiceHasPositiveSetupFeeLine,
   classifyAcceptedEstimateInvoiceCoverage,
   isPricedCoveredMemberVisit,
+  pricedCoveredMemberOwnRefundHold,
 } = require('../services/estimate-first-application-invoice');
 
 function makeItemizeKnex(first, members) {
@@ -544,10 +545,24 @@ describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (C
 // Minimal fake conn for isPricedCoveredMemberVisit: only 'invoices' (the
 // anchor-identity read) and 'scheduled_services' (readFirstApplicationStamp's
 // narrow-select fallback) ever get touched by this predicate.
-function fakeAnchorLookupConn({ invoiceById = {}, stampRow } = {}) {
+// `splitOffRows` (default `[]`, i.e. no member has split itself off with
+// its own live base-application invoice) backs
+// isPricedCoveredMemberVisit's OWN "split off by hand" check
+// (liveBaseApplicationInvoiceVisitIdsOn): that query starts with
+// `.whereIn(...)`, never a plain `.where({id})` first, and ends in
+// `.select(...)`, never `.first(...)` — told apart from the anchor-
+// identity read below by both.
+function fakeAnchorLookupConn({ invoiceById = {}, stampRow, splitOffRows = [] } = {}) {
   return (table) => {
     if (table === 'invoices') {
-      return { where: (cond) => ({ first: async () => invoiceById[cond.id] || null }) };
+      const q = {};
+      q.where = (cond) => ({ first: async () => invoiceById[cond.id] || null });
+      q.whereIn = () => q;
+      q.whereNotIn = () => q;
+      q.whereNot = () => q;
+      q.modify = (fn) => { fn(q); return q; };
+      q.select = async () => splitOffRows;
+      return q;
     }
     if (table === 'scheduled_services') {
       return { where: () => ({ first: async () => stampRow }) };
@@ -606,5 +621,62 @@ describe('isPricedCoveredMemberVisit — priced-covered-member widening gate (Co
     const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
     const conn = () => { throw new Error('db down'); };
     await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  // Split off by hand (#5237 review P2): a member whose base application a
+  // LIVE invoice of its OWN already bills is no longer covered —
+  // liveBaseApplicationInvoiceVisitIdsOn, the same split evidence the
+  // backfill and the sweep use.
+  test('a member split off by hand — its OWN base-application invoice is LIVE — is no longer covered → false', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+      splitOffRows: [{
+        id: 'inv-split', scheduled_service_id: 'lawn-sibling',
+        line_items: JSON.stringify([{ client_id: 'scheduled_lawn-sibling_primary', description: 'Lawn Care', amount: 56.4 }]),
+      }],
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+});
+
+// pricedCoveredMemberOwnRefundHold — #5237 review r2 P2: a priced covered
+// member whose OWN base-application invoice is REFUNDED (the combined
+// invoice may still be live) reuses completion's OWN classifier
+// (completionTerminalInvoiceLookup) so Charge Now / the schedule sheet can
+// never disagree with completion for this input.
+describe('pricedCoveredMemberOwnRefundHold', () => {
+  function fakeConn({ refundedRow = null } = {}) {
+    return (table) => {
+      if (table !== 'invoices') throw new Error(`unexpected table: ${table}`);
+      const q = {};
+      q.where = () => q;
+      q.whereIn = () => q;
+      q.orderBy = () => q;
+      q.first = async () => refundedRow;
+      return q;
+    };
+  }
+
+  test('finds THIS visit\'s own refunded base-application invoice', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const refunded = { id: 'inv-own-refund', invoice_number: 'WPC-TEST-0077', status: 'refunded' };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, fakeConn({ refundedRow: refunded }))).resolves.toEqual(refunded);
+  });
+
+  test('no refunded invoice on this row → null', async () => {
+    const svc = { id: 'lawn-sibling' };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, fakeConn())).resolves.toBeNull();
+  });
+
+  test('missing svc.id or conn → null, no query attempt', async () => {
+    await expect(pricedCoveredMemberOwnRefundHold({}, fakeConn())).resolves.toBeNull();
+    await expect(pricedCoveredMemberOwnRefundHold({ id: 'lawn-sibling' }, null)).resolves.toBeNull();
+  });
+
+  test('a read failure PROPAGATES (never swallowed) — this decides a refusal, not a widening gate', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const conn = () => { throw new Error('db down'); };
+    await expect(pricedCoveredMemberOwnRefundHold(svc, conn)).rejects.toThrow('db down');
   });
 });

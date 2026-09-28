@@ -47,11 +47,12 @@ const suite = local || managed || ci ? describe : describe.skip;
 
 suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #5021 follow-up)', () => {
   let db;
-  const { resolveScheduledServiceCharge } = require('../routes/admin-schedule')._test;
-  const { perApplicationCompletionVoidHold } = require('../services/billing-lane');
+  const { resolveScheduledServiceCharge, siblingCoverageRecheckInTrx } = require('../routes/admin-schedule')._test;
+  const { perApplicationCompletionVoidHold, siblingCoverageForSchedule } = require('../services/billing-lane');
   const {
-    findFirstApplicationInvoiceForEstimateService, isPricedCoveredMemberVisit,
+    findFirstApplicationInvoiceForEstimateService, isPricedCoveredMemberVisit, pricedCoveredMemberOwnRefundHold,
   } = require('../services/estimate-first-application-invoice');
+  const { completionTerminalInvoiceLookup } = require('../services/completion-invoice-candidate');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
@@ -147,14 +148,20 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
   }));
 
   // #5237 review P2s: the priced refusal never tells staff to "set a price"
-  // (it already has one), and a stamped sibling the office split off by hand
-  // (its own live base-application invoice) is no longer a covered member.
-  test('the priced covered refusal copy never offers "set a price" as the way out', () => rollbackTest(async (trx) => {
+  // (it already has one); a stamped sibling the office split off by hand
+  // (its own live base-application invoice) is no longer a covered member;
+  // and (r2 P2) the copy never points at the Invoices page's manual-create
+  // endpoint to "split it off" — that endpoint only links via
+  // serviceRecordId, which a pre-completion visit has none of yet, so the
+  // instruction was a dead end that would just 409 on the next Charge Now.
+  test('the priced covered refusal copy never offers "set a price" or the dead-end "Invoices page" split, and stays honest', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { invoiceStatus: 'paid' });
     const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
     const result = await chargeNow(lawn, trx);
     expect(result.message).not.toMatch(/set a price/i);
-    expect(result.message).toMatch(/its own invoice/i);
+    expect(result.message).not.toMatch(/invoices page/i);
+    expect(result.message).toMatch(/combined trip invoice/i);
+    expect(result.message).toMatch(/adjust the combined invoice/i);
   }));
 
   test('a stamped priced sibling split off by hand (own live base-application invoice) is not refused and is not a covered member', () => rollbackTest(async (trx) => {
@@ -241,5 +248,74 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
     ]);
     await expect(isPricedCoveredMemberVisit(lawn, trx)).resolves.toBe(true);
     await expect(isPricedCoveredMemberVisit(pest, trx)).resolves.toBe(false);
+  }));
+
+  // #5237 review r2 P1: siblingCoverageRecheckInTrx's outer sync gate used
+  // to predict "maybe a covered member" off svc's OWN pre-lock
+  // first_application_invoice_id column — stale the moment a stamp lands
+  // between the route's read and the mint transaction's own row lock
+  // (reconcileRecentUnstampedAccepts / stampGroupRevalidated can commit
+  // right there). Proven against a REAL DB: read svc BEFORE the stamp
+  // exists, stamp it (mirroring that reconciliation write), then run the
+  // in-lock recheck against the SAME pre-lock svc snapshot.
+  test('a stamp committed AFTER svc was read is still caught by the in-lock recheck (real DB)', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    // svc as the route would have read it BEFORE the sibling was stamped —
+    // clear the stamp first, capture that pre-lock snapshot, then commit
+    // the stamp (the race window this fix closes).
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ first_application_invoice_id: null });
+    const preLockSvc = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+    expect(preLockSvc.first_application_invoice_id).toBeNull();
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ first_application_invoice_id: ids.invoiceId });
+
+    const recheckInTrx = siblingCoverageRecheckInTrx(preLockSvc);
+    expect(typeof recheckInTrx).toBe('function');
+    await expect(recheckInTrx(trx)).rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
+  }));
+
+  test('...and the ANCHOR\'s own pre-lock snapshot closure is STILL a no-op under the same real-DB lock', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent' });
+    const preLockPest = await trx('scheduled_services').where({ id: ids.pestId }).first();
+    const recheckInTrx = siblingCoverageRecheckInTrx(preLockPest);
+    await expect(recheckInTrx(trx)).resolves.toBeUndefined();
+  }));
+
+  // #5237 review r2 P2: a priced covered member whose OWN base-application
+  // invoice is REFUNDED (the combined invoice stays LIVE) must reach
+  // 'needs_review' — the SAME verdict completion's own classifier
+  // (completionTerminalInvoiceLookup) reaches by checking this visit's own
+  // refund FIRST — on all three surfaces, proven together against a real
+  // DB so they can never drift apart.
+  test('a priced covered member with its OWN refunded base-application invoice agrees across Charge Now, schedule prediction, and completion\'s own classifier', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    const ownRefundId = randomUUID();
+    await trx('invoices').insert({
+      id: ownRefundId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'refunded', title: 'Lawn Care',
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]),
+      subtotal: 65, total: 65,
+    });
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
+
+    // Completion's own classifier — the source of truth this fix mirrors.
+    const completionSeesRefund = await completionTerminalInvoiceLookup(trx, { scheduledServiceId: ids.lawnId });
+    expect(completionSeesRefund?.id).toBe(ownRefundId);
+
+    // pricedCoveredMemberOwnRefundHold reuses that SAME classifier.
+    const ownRefundHold = await pricedCoveredMemberOwnRefundHold(lawn, trx);
+    expect(ownRefundHold?.id).toBe(ownRefundId);
+
+    // Charge Now.
+    const chargeNowResult = await resolveScheduledServiceCharge({
+      estimatedPrice: lawn.estimated_price, isCallback: false, monthlyRate: null, billingMode: 'per_application',
+      serviceType: lawn.service_type, svc: lawn, dbConn: trx,
+    });
+    expect(chargeNowResult).toMatchObject({ refused: true, reason: 'sibling_invoice_needs_review' });
+
+    // Schedule prediction.
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: lawn, dbConn: trx });
+    expect(coverage.state).toBe('review');
+    expect(prediction.kind).toBe('sibling_needs_review');
   }));
 });

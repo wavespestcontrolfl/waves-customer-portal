@@ -1360,7 +1360,7 @@ async function enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn) {
 // fields this lookup itself needs in order to run at all.
 async function scheduleSiblingCoverageEligible(svc, dbConn) {
   const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
-  if (!hasBaseFields) return false;
+  if (!hasBaseFields) return { eligible: false, isPricedCoveredMember: false };
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
   // Priced-covered-member widening (see isSiblingCoverageEligibleVisit's own
@@ -1369,9 +1369,14 @@ async function scheduleSiblingCoverageEligible(svc, dbConn) {
   const isPricedCoveredMember = hasOwnPrice
     ? await require('./estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
     : false;
-  return isSiblingCoverageEligibleVisit({
+  const eligible = isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type, isPricedCoveredMember,
   });
+  // isPricedCoveredMember rides back to the caller (#5237 review r2 P2):
+  // only when it's true does the caller need to ALSO ask
+  // pricedCoveredMemberOwnRefundHold before trusting a 'covered' verdict —
+  // recomputing it there would be a second, redundant DB round trip.
+  return { eligible, isPricedCoveredMember };
 }
 
 /**
@@ -1397,12 +1402,20 @@ async function scheduleSiblingCoverageEligible(svc, dbConn) {
  * except where a caller opts in, same as monthlyDuesCollected above.
  */
 async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
-  if (!(await scheduleSiblingCoverageEligible(svc, dbConn))) {
+  const { eligible, isPricedCoveredMember } = await scheduleSiblingCoverageEligible(svc, dbConn);
+  if (!eligible) {
     return { coverage: NO_SIBLING_COVERAGE, prediction: null };
   }
   let verdict;
   try {
-    verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+    // Own-row refund precedence (#5237 review r2 P2) — see
+    // resolveScheduledServiceCharge's own header (admin-schedule.js) for
+    // why: reuses the SAME pricedCoveredMemberOwnRefundHold so the sheet
+    // can never disagree with Charge Now or completion for this input.
+    const ownRefund = isPricedCoveredMember
+      ? await require('./estimate-first-application-invoice').pricedCoveredMemberOwnRefundHold(svc, dbConn)
+      : null;
+    verdict = ownRefund ? { status: 'needs_review', invoice: ownRefund } : await siblingInvoiceCoverageVerdict(svc, dbConn);
   } catch {
     verdict = { status: 'error' };
   }
