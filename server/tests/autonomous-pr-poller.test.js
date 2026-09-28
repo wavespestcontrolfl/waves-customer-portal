@@ -89,6 +89,10 @@ function fakeTrx(locked) {
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
 const EDITORIAL_BASE_PROOF = { baseSha: 'editorial-base-sha', baseRef: 'main' };
 
+// A competitor-free blog verdict as the runner now stores it: the company
+// extraction ran and found nothing (a NULL / pre-check verdict is withheld).
+const CLEAN_BLOG_VERDICT = { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: [] } };
+
 function makeRun(overrides = {}) {
   return {
     id: 'run-1',
@@ -201,7 +205,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
             : Array.isArray(runFirst) ? runFirst[Math.min(runFirstRead++, runFirst.length - 1)]
               : runFirst;
           return Promise.resolve(runFirst !== undefined ? configured : {
-            comparison_table_result: null,
+            comparison_table_result: CLEAN_BLOG_VERDICT,
             draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }),
             trust_build_approved_at: null,
             brief_id: null,
@@ -1538,7 +1542,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const briefs = [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }];
     setupDb({
       pending: [run], briefs,
-      runFirst: governedRun({ pin: publisherPin, approvedAt: run.trust_build_approved_at, approvedSha, verdict: null, briefId: 'brief-r' }),
+      runFirst: governedRun({ pin: publisherPin, approvedAt: run.trust_build_approved_at, approvedSha, verdict: CLEAN_BLOG_VERDICT, briefId: 'brief-r' }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1718,6 +1722,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
     ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
     ['is an unflagged blog verdict recorded before the company check (no extraction)', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }],
+    ['is a stored NULL blog verdict (pre-check PR)', null],
     ['is unflagged but its stored extraction found an off-list company', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: ['Bug Out'] } }],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
@@ -1753,7 +1758,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const headSha = '2'.repeat(40);
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1808,7 +1813,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const headSha = '2'.repeat(40);
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1853,7 +1858,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test.each([
-    ['publisher pin', () => governedRun({ pin: '3'.repeat(40), verdict: null, briefId: null })],
+    ['publisher pin', () => governedRun({ pin: '3'.repeat(40), verdict: CLEAN_BLOG_VERDICT, briefId: null })],
     ['full comparison verdict', (pin) => governedRun({ pin, verdict: { pass: true, findings: [{ code: 'changed' }], requiresHumanReview: false }, briefId: null })],
   ])('an evidence proof cannot authorize the head after its persisted %s changes', async (_field, changedContext) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
@@ -1862,7 +1867,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({
       pending: [makeRun()],
       runFirst: [
-        governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+        governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
         changedContext(pinnedSha),
       ],
     });
@@ -1886,7 +1891,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const parked = { id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null };
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
       queueFirst: (read) => read === 0 ? parked : { ...parked, status: 'queued' },
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
@@ -1996,7 +2001,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({
       pending: [makeRun()],
-      runFirst: { comparison_table_result: null, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
+      runFirst: { comparison_table_result: CLEAN_BLOG_VERDICT, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
     });
     greenMergePath();
 
