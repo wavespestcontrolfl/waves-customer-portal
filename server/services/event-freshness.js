@@ -186,6 +186,10 @@ function etYearOf(value, reference = new Date()) {
   return etParts(reference).year;
 }
 
+// A weekly issue ships Tuesday 6 AM ET and lists events through the following
+// Monday night; 8 days covers that window plus a delayed send.
+const FEATURED_ISSUE_LOOKAHEAD_MS = 8 * 24 * 60 * 60 * 1000;
+
 /**
  * Hard editorial-newness gate. A one-time (non-recurring) identity may
  * appear only once, ever. A RECURRING identity (owner ruling 2026-09-27:
@@ -203,8 +207,17 @@ function isEditoriallyNewEvent(event = {}, reference = new Date(), { occurrenceC
 
   const lastFeatured = new Date(event.last_featured_at);
   if (Number.isNaN(lastFeatured.getTime())) return false;
+  // Same fallback etYearOf uses: no parseable start_at reads as `reference`.
+  const parsedStart = event.start_at ? new Date(event.start_at) : null;
+  const start = parsedStart && !Number.isNaN(parsedStart.getTime()) ? parsedStart : new Date(reference);
 
-  return etYearOf(lastFeatured, reference) < etYearOf(event.start_at, reference);
+  // last_featured_at is the SEND time, not the featured occurrence's date: an
+  // issue covers events up to FEATURED_ISSUE_LOOKAHEAD_MS after it ships. An
+  // occurrence inside that window may be the very one that shipped (a
+  // January 2 event featured December 29), so it never re-qualifies through
+  // the year refresh. Only a later occurrence in a newer ET year does.
+  if (start.getTime() <= lastFeatured.getTime() + FEATURED_ISSUE_LOOKAHEAD_MS) return false;
+  return etYearOf(lastFeatured, reference) < etYearOf(start, reference);
 }
 
 function canonicalEventUrl(value) {

@@ -22,7 +22,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { applyRescore, hasContentChangedSinceCuration, revalidateStaleRescoreCandidate } = require('../services/event-curation');
+const { applyRescore, revalidateStaleRescoreCandidate } = require('../services/event-curation');
 
 function wireDb({ approveRows = 1 } = {}) {
   const calls = [];

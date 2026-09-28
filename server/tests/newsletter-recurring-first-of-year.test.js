@@ -334,4 +334,35 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     });
     expect(rows.map((row) => row.id)).toEqual(['feed-a']);
   });
+
+  test('a January occurrence featured in a late-December issue never re-qualifies through the year refresh', () => {
+    const annual = {
+      id: 'jan-2027',
+      title: 'New Year Polar Plunge',
+      event_type: 'one_time',
+      recurrence_type: 'annual',
+      start_at: '2027-01-02T15:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-12-29T11:00:00Z',
+    };
+    expect(isEditoriallyNewEvent(annual, new Date('2026-12-30T12:00:00Z'))).toBe(false);
+    expect(isPreviouslyFeaturedIdentity(
+      { ...annual, id: 'jan-2027-other-feed', times_featured: 0, last_featured_at: null },
+      [annual],
+      new Date('2026-12-30T12:00:00Z'),
+    )).toBe(true);
+  });
+
+  test('the next year\'s occurrence of that annual event is new again', () => {
+    const nextYear = {
+      id: 'jan-2028',
+      title: 'New Year Polar Plunge',
+      event_type: 'one_time',
+      recurrence_type: 'annual',
+      start_at: '2028-01-01T15:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-12-29T11:00:00Z',
+    };
+    expect(isEditoriallyNewEvent(nextYear, new Date('2027-12-20T12:00:00Z'))).toBe(true);
+  });
 });
