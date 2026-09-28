@@ -2112,7 +2112,7 @@ const ReviewService = {
     const outreachTechFirst = firstNameFrom(request.tech_name) || null;
     const outreachVars = {
       tech: outreachTechFirst || TECH_FALLBACK_SMS,
-      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : "Waves Pest Control",
+      sender: outreachTechFirst ? `${outreachTechFirst} with Waves` : OUTREACH.SENDER_FALLBACK,
     };
 
     // Body source priority so a deferred/retried send keeps the operator's
@@ -4800,7 +4800,7 @@ const ReviewService = {
       tech: techFirst || TECH_FALLBACK_SMS,
       // {sender} (day0_ask): the technician on the record, else the company —
       // the "Your tech" SMS fallback must not become "Your tech with Waves".
-      sender: techFirst ? `${techFirst} with Waves` : "Waves Pest Control",
+      sender: techFirst ? `${techFirst} with Waves` : OUTREACH.SENDER_FALLBACK,
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };

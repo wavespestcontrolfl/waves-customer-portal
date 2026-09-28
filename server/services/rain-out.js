@@ -128,11 +128,31 @@ function customLinkClause(rescheduleUrl) {
 //     static template text can't mask the loss (codex r3 P2). The list is
 //     the SHARED map the template write validator enforces at save time
 //     (codex r8 P1) — one source, so save and render can never disagree.
+// A dispatcher often opens the Custom note with a greeting of their own
+// ("Hey Sam, the cleaner was there today…"), but the template already
+// greets the customer ("Hi {first_name} - "), so the text read "Hi Sam -
+// Hey Sam, …" (owner 2026-09-28). Drop that leading greeting: the greeting
+// word, then "there" or up to three capitalized name words, ended by a
+// comma / "!" / "." / ":" / dash — or the greeting word and the customer's
+// own first name with no punctuation ("Hey Sam the tech is out…").
+// Anything else is left exactly as typed; a note that was only a greeting
+// falls back to the default line.
+const NOTE_GREETING_WORD = '(?:[Hh]i|[Hh]ello|[Hh]ey|[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening))';
+const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+(?:there|[A-Z][A-Za-z'.-]*)){0,3}\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)`);
+function withoutLeadingGreeting(note, firstName) {
+  const text = String(note || '');
+  const stripped = text.replace(NOTE_LEADING_GREETING_RE, '');
+  if (stripped !== text || !firstName) return stripped;
+  const name = String(firstName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!name) return text;
+  return text.replace(new RegExp(`^${NOTE_GREETING_WORD}\\s+${name}\\b[\\s,!.:\u2013\u2014-]*`, 'i'), '');
+}
+
 async function renderCustomMovedBody({ firstName, serviceType, date, window, customMessage, rescheduleUrl, serviceId }) {
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   return renderSmsTemplate(CUSTOM_TEMPLATE_KEY, {
     first_name: firstName || 'there',
-    custom_message: customMessage,
+    custom_message: withoutLeadingGreeting(customMessage, firstName) || CUSTOM_DEFAULT_MESSAGE,
     service_type: (serviceType || 'service').toLowerCase(),
     new_option: customerArrivalOption(date, window),
     link_clause: customLinkClause(rescheduleUrl),

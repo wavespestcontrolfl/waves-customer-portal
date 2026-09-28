@@ -110,7 +110,7 @@ describe('review outreach templates', () => {
 
   test('{sender} is the tech on the record, else the company — never the "Your tech" fallback', () => {
     expect(renderOutreachBody('{sender}.', { tech: 'Adam' })).toBe('Adam with Waves.');
-    expect(renderOutreachBody('{sender}.', {})).toBe('Waves Pest Control.');
+    expect(renderOutreachBody('{sender}.', {})).toBe("It's Waves.");
     expect(renderOutreachBody('{sender}.', { sender: 'Sam with Waves', tech: 'Adam' })).toBe('Sam with Waves.');
   });
 

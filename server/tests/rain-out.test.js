@@ -3750,3 +3750,42 @@ describe('commit summary — visit-covered members are not separate stops (local
     expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
   });
 });
+
+describe('custom rung: the dispatcher note never re-greets the customer (owner 2026-09-28)', () => {
+  const { renderCustomMovedBody, CUSTOM_TEMPLATE_KEY } = require('../services/rain-out')._test;
+  // The template already opens "Hi {first_name} - ", so a note typed as
+  // "Hey Sam, …" read "Hi Sam - Hey Sam, …".
+  const noteAsSent = async (customMessage, firstName = 'Sam') => {
+    renderSmsTemplate.mockClear();
+    await renderCustomMovedBody({
+      firstName, serviceType: 'Pest Control', date: '2026-10-07', window: { start: '09:00', end: '11:00' },
+      customMessage, rescheduleUrl: null, serviceId: 'svc-greet',
+    });
+    const [key, vars] = renderSmsTemplate.mock.calls[0];
+    expect(key).toBe(CUSTOM_TEMPLATE_KEY);
+    return vars.custom_message;
+  };
+
+  test.each([
+    ['Hey Sam, the cleaner was there today, so we moved this appointment.', 'the cleaner was there today, so we moved this appointment.'],
+    ['Hello Sam, as requested we moved your appointment.', 'as requested we moved your appointment.'],
+    ['Hi there! Storms rolled in this afternoon.', 'Storms rolled in this afternoon.'],
+    ['Good morning Mrs. Lee - the gate was locked.', 'the gate was locked.'],
+    ['Hey Sam the tech is out sick today.', 'the tech is out sick today.'],
+  ])('drops the leading greeting: %s', async (typed, sent) => {
+    expect(await noteAsSent(typed)).toBe(sent);
+  });
+
+  test.each([
+    'quick update on your upcoming appointment.',
+    'Hey the cleaner was there today, so we moved it.',
+    'History: the gate was locked.',
+    'Hi-rise access was closed today.',
+  ])('leaves a note without a leading greeting exactly as typed: %s', async (typed) => {
+    expect(await noteAsSent(typed)).toBe(typed);
+  });
+
+  test('a note that was only a greeting falls back to the default line', async () => {
+    expect(await noteAsSent('Hi Sam!')).toBe('quick update on your upcoming appointment.');
+  });
+});

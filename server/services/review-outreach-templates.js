@@ -27,13 +27,18 @@
  * that sends.
  */
 
+// {sender} when no technician resolves: the company speaks ("Hi Sam! It's
+// Waves. If we earned it…"), never a person's name and never the full
+// "Waves Pest Control" (owner rulings 2026-09-28).
+const SENDER_FALLBACK = "It's Waves";
+
 const OUTREACH_TEMPLATES = [
   {
     // The cadence's Day-0 ask (owner decision 2026-09-07, a narrow revision of
     // the 2026-07-30 personalized-drafting spec for THIS touch only): composed
     // from verified fields — the recipient's first name, the technician on the
-    // completed service ({sender} = "<tech> with Waves", or "Waves Pest
-    // Control" when no tech resolves), the tokenized link, and the uniform
+    // completed service ({sender} = "<tech> with Waves", or SENDER_FALLBACK
+    // "It's Waves" when no tech resolves), the tokenized link, and the uniform
     // reply invite everyone gets. Day-agnostic on purpose: the smart send
     // window and quiet hours can carry the ask past midnight, and a "today"
     // written at 8 PM read wrong at 8 AM. No service label — with the reply
@@ -247,7 +252,7 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     tech: vars.tech || 'Your tech',
     // Sender identity from the record: the technician's first name when one
     // resolves, else the company — never a hardcoded person.
-    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : 'Waves Pest Control'),
+    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : SENDER_FALLBACK),
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',
@@ -285,4 +290,5 @@ module.exports = {
   isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,
+  SENDER_FALLBACK,
 };
