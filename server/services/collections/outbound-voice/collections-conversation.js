@@ -75,11 +75,17 @@ function linkAnchorOf(invoices = []) {
 // thinking-always-on ids excluded) rather than a second hand-typed list.
 // Lazy require: this file loads at server boot too, and the two modules
 // have no other reason to depend on each other.
+// Each link is validated in order (VOICE_RELAY_MODEL, then MODEL_VOICE), the
+// same walk relay-conversation.js's shared chain takes, so a rejected
+// VOICE_RELAY_MODEL still lands on a valid configured VOICE tier.
 const MODEL = (() => {
-  const raw = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
   const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../../voice-agent/relay-conversation');
-  if (ALLOWED_OVERRIDE_MODEL_IDS.has(raw)) return raw;
-  logger.warn(`[collections-voice] model ${raw} is not on the Anthropic voice allowlist — falling back to ${MODELS.DEFAULTS.VOICE}`);
+  for (const [source, value] of [['VOICE_RELAY_MODEL', process.env.VOICE_RELAY_MODEL], ['MODEL_VOICE', MODELS.VOICE]]) {
+    if (!value) continue;
+    if (ALLOWED_OVERRIDE_MODEL_IDS.has(value)) return value;
+    logger.warn(`[collections-voice] ${source}=${value} is not on the Anthropic voice allowlist — skipping it`);
+  }
+  logger.warn(`[collections-voice] no allowlisted voice model configured — using ${MODELS.DEFAULTS.VOICE}`);
   return MODELS.DEFAULTS.VOICE;
 })();
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation

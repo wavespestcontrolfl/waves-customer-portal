@@ -333,8 +333,14 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
   // MODELS.DEFAULTS.VOICE with one logged warning — the module-level MODEL
   // const is resolved once at require time, so this needs a fresh module
   // registry under the bad env.
-  test('a thinking-always-on VOICE_RELAY_MODEL is rejected — falls back to the code default with a warning', async () => {
+  // The walk validates each link in order: a rejected VOICE_RELAY_MODEL
+  // falls to a valid configured MODEL_VOICE, and only then to the code default.
+  test.each([
+    ['unset MODEL_VOICE → the code default', undefined, () => MODELS.DEFAULTS.VOICE],
+    ['a valid custom MODEL_VOICE → that tier', 'claude-opus-5', () => 'claude-opus-5'],
+  ])('a thinking-always-on VOICE_RELAY_MODEL is rejected with a warning — %s', async (_label, modelVoice, expected) => {
     process.env.VOICE_RELAY_MODEL = 'claude-opus-5-5';
+    if (modelVoice) process.env.MODEL_VOICE = modelVoice;
     let FreshCollectionsConversation;
     let isolatedLogger;
     jest.isolateModules(() => {
@@ -349,6 +355,7 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
       FreshCollectionsConversation = require('../services/collections/outbound-voice/collections-conversation').CollectionsConversation;
     });
     delete process.env.VOICE_RELAY_MODEL;
+    delete process.env.MODEL_VOICE;
 
     expect(isolatedLogger.warn).toHaveBeenCalledWith(expect.stringContaining('claude-opus-5-5'));
 
@@ -365,8 +372,7 @@ describe('collections-conversation.js resolution is unaffected by the new envs',
     await convo._chain;
 
     expect(mockStreamCalls).toHaveLength(1);
-    expect(mockStreamCalls[0].model).toBe(MODELS.DEFAULTS.VOICE);
-    expect(mockStreamCalls[0].model).not.toBe('claude-opus-5-5');
+    expect(mockStreamCalls[0].model).toBe(expected());
     expect(mockStreamCalls[0].thinking).toEqual({ type: 'disabled' }); // still sent — and now safe to send
   });
 });
@@ -469,10 +475,22 @@ describe('thinking-always-on Anthropic candidates (Opus 5.5+)', () => {
   });
 
   test('the shared VOICE_RELAY_MODEL/MODEL_VOICE chain never resolves to it either, sandbox or not', () => {
+    // SHARED_MODEL_CHAIN is captured at module load, so load a fresh
+    // instance with the env already set.
     process.env.VOICE_RELAY_MODEL = OPUS_55;
-    expect(resolveSessionModel({ sandbox: false }).model).not.toBe(OPUS_55);
-    expect(resolveSessionModel({ sandbox: true }).model).not.toBe(OPUS_55);
-    delete process.env.VOICE_RELAY_MODEL;
+    let freshResolve;
+    try {
+      jest.isolateModules(() => {
+        freshResolve = require('../services/voice-agent/relay-conversation').resolveSessionModel;
+      });
+    } finally {
+      delete process.env.VOICE_RELAY_MODEL;
+    }
+    for (const sandbox of [false, true]) {
+      const result = freshResolve({ sandbox });
+      expect(result.model).not.toBe(OPUS_55);
+      expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPUS_55}`);
+    }
   });
 
   test('a sandbox session accepts it with no gate required', () => {
