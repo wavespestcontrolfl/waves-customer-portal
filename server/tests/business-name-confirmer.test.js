@@ -85,6 +85,12 @@ describe('extractCompanyNames', () => {
       .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Making Waves Pest Control'] });
   });
 
+  test('possessive mentions resolve to the company itself; own-brand possessives are dropped (#5146 r11)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ["Orkin's", 'Aptive’s', "Lowe's", "Waves'", 'Orkin'] } });
+    const r = await extractCompanyNames(DRAFT);
+    expect(r.companies).toEqual(['Aptive Environmental', "Lowe's", 'Orkin']);
+  });
+
   test('an empty list is a clean result', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
     expect(await extractCompanyNames(DRAFT)).toMatchObject({ ok: true, companies: [] });
@@ -270,6 +276,15 @@ describe('assertOwnerListForCommit', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out', 'Orkin'] } });
     await expect(assertOwnerListForCommit({ draft: { ...bugOutOnly }, brief: BLOG_BRIEF, humanApproved: true, body: bugOutOnly.body,
       frontmatter: heroFm('An Orkin truck on a Sarasota street') })).resolves.toMatchObject({ requiresHumanMerge: false });
+  });
+
+  test('humanApproved operator lane: a curated competitor the approved draft only LINKED counts as reviewed (#5146 r11)', async () => {
+    const brief = { ...BLOG_BRIEF, voice_constraints: { operator_brief: { working_title: 'Prodigy Pest alternatives', primary_kw: 'prodigy pest alternatives' } } };
+    const approved = { frontmatter: { title: 'Pest plan terms in Sarasota', slug: '/pest-control/plan-terms/', meta_description: 'Compare plans.' },
+      body: 'Read the [published terms](https://prodigypest.com/plans) before you sign.' };
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Prodigy Pest Solutions'] } });
+    await expect(assertOwnerListForCommit({ draft: { ...approved }, brief, humanApproved: true, body: approved.body, frontmatter: approved.frontmatter }))
+      .resolves.toMatchObject({ requiresHumanMerge: false });
   });
 
   test('humanApproved operator lane: a curated name counts as reviewed under any curated spelling (#5146 r10)', async () => {

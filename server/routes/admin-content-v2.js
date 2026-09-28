@@ -977,7 +977,9 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID'
       || err.code === 'BLOG_GUARDRAILS_FAILED'
       || err.code === 'BLOG_COMPARISON_GATE_FAILED'
-      || err.code === 'BLOG_TOPIC_TARGETING_BLOCKED';
+      || err.code === 'BLOG_TOPIC_TARGETING_BLOCKED'
+      // The final-text comparison scan (hero / body-image alts included).
+      || err.code === 'BLOG_OWNER_LIST_BLOCKED';
     // An earlier topic-blocked PR still awaiting its close: try again once
     // pages-poll has retired it — 409, not a server failure.
     const status = isClientErr ? 400 : err.code === 'BLOG_PR_RETIRE_PENDING' ? 409 : 500;

@@ -154,14 +154,17 @@ function inputKey(text) {
 
 // Canonical curated name when the extraction names a curated competitor
 // (alias spellings like "Massey" → "Massey Services", legal-name variants
-// like "Orkin, LLC" → "Orkin" via findCompetitor's suffix normalization),
-// else the name as written. Own-brand mentions are dropped.
+// like "Orkin, LLC" → "Orkin" via findCompetitor's suffix normalization, and
+// possessive mentions like "Orkin's" or "Aptive’s" — Codex r11), else the
+// name as written. Own-brand mentions ("Waves", "Waves'") are dropped.
 function canonicalCompanies(names) {
   const out = new Set();
   for (const raw of names) {
     const nm = String(raw || '').trim();
-    if (!nm || ownNames().has(normalizeOwnName(nm))) continue;
-    out.add(competitorFacts.findCompetitor(nm)?.name || nm);
+    const base = nm.replace(/['’]s?$/i, '').trim();
+    if (!nm || ownNames().has(normalizeOwnName(nm)) || ownNames().has(normalizeOwnName(base))) continue;
+    const rec = competitorFacts.findCompetitor(nm) || (base && base !== nm ? competitorFacts.findCompetitor(base) : null);
+    out.add(rec?.name || nm);
   }
   return [...out].sort();
 }
@@ -210,6 +213,33 @@ async function extractCompanyNames(draft, { prior = null, brief = null, final = 
     logger.warn(`[business-name-confirmer] extraction threw (${err.message}) — draft deferred`);
     return { ok: false, key, reason: `threw:${String(err.message).slice(0, 180)}`, retryable: true };
   }
+}
+
+// The comparison gate over a draft: body + title/meta exactly as the gate
+// reads them (the runner's draft-time evaluation), then every other
+// frontmatter text field as its own document (Codex r10: joined into one
+// text, unrelated fields read as one sentence — a slug's
+// "orkin-alternatives" beside a meta description's "Worst roach problems"
+// is not disparagement). Fields come from the SAME walk the company
+// extraction uses (textFields), hero alt included (Codex r8). The byline
+// blocks are the only exclusion: they come from the curated author registry
+// (author-service), not from the writer or an image model, and a credential
+// such as "FDACS Licensed Pest Control Operator" is business-shaped by
+// construction.
+function gateByField(gate, { frontmatter = {}, body = '', title, meta_description: metaDescription }, gateOptions) {
+  const doc = {
+    frontmatter, body, title: title ?? frontmatter.title, meta_description: metaDescription ?? frontmatter.meta_description,
+  };
+  const fieldTexts = [...new Set(textFields(frontmatter, '', [])
+    .filter((line) => !/^(?:author|technically_reviewed_by)\./.test(line)
+      && !/^(?:title|meta_description|metaTitle|metaDescription): /.test(line))
+    .map((line) => line.replace(/^[^:]*: /, '')))];
+  const evaluations = [doc, ...fieldTexts.map((text) => ({ frontmatter: {}, body: text }))]
+    .map((d) => gate.evaluate(d, gateOptions));
+  return {
+    findings: evaluations.flatMap((e) => e.findings || []),
+    namedCompetitors: [...new Set(evaluations.flatMap((e) => (Array.isArray(e.namedCompetitors) ? e.namedCompetitors : [])))].sort(),
+  };
 }
 
 // Whole-word text of the draft the operator approved (every frontmatter
@@ -295,32 +325,11 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
   let namedCompetitorEnabled = false;
   try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
   const { operatorBriefTextForComparisonGate } = require('./guardrail-options');
-  // Every publisher-set text field of the final frontmatter (hero alt
-  // included — Codex r8) is scanned, derived by the SAME walk the company
-  // extraction uses (textFields). Each field is judged as its own document
-  // (Codex r10): joined into one text, unrelated fields read as one
-  // sentence (a slug's "orkin-alternatives" beside a meta description's
-  // "Worst roach problems" is not disparagement). Title and meta are left to
-  // the gate itself, which reads them exactly as the runner's draft-time
-  // gate does.
-  // The byline blocks are the only exclusion: they come from the curated
-  // author registry (author-service), not from the writer or an image
-  // model, and a credential such as "FDACS Licensed Pest Control Operator"
-  // is business-shaped by construction.
-  const fieldTexts = [...new Set(textFields(frontmatter, '', [])
-    .filter((line) => !/^(?:author|technically_reviewed_by)\./.test(line)
-      && !/^(?:title|meta_description|metaTitle|metaDescription): /.test(line))
-    .map((line) => line.replace(/^[^:]*: /, '')))];
   const gateOptions = {
     namedCompetitorEnabled,
     operatorBriefText: operatorBriefTextForComparisonGate({ bucket: brief?.gsc_signal?.bucket }, brief),
   };
-  const evaluations = [finalDraft, ...fieldTexts.map((text) => ({ frontmatter: {}, body: text }))]
-    .map((doc) => gate.evaluate(doc, gateOptions));
-  const comparison = {
-    findings: evaluations.flatMap((e) => e.findings || []),
-    namedCompetitors: [...new Set(evaluations.flatMap((e) => (Array.isArray(e.namedCompetitors) ? e.namedCompetitors : [])))].sort(),
-  };
+  const comparison = gateByField(gate, { frontmatter, body }, gateOptions);
   const blocking = (comparison.findings || []).filter((f) => (f.severity === 'P0' || f.severity === 'P1')
     && !(humanMergeFallback && f.code === 'COMPARISON_UNCLASSIFIED_OPTION'));
   if (blocking.length) {
@@ -346,9 +355,17 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
     // The operator approved every name in the stored draft; a name only
     // publisher-added text carries was never reviewed, so it must be on the
     // owner list (#5146 r10).
+    // Seen = named in the approved draft's words, or detected in it by the
+    // same gate scan (a curated competitor linked only through its site —
+    // "[published terms](https://prodigypest.com/plans)" — Codex r11).
     const reviewed = reviewedWords(draft);
+    const reviewedNames = new Set(gateByField(gate, {
+      frontmatter: draft.frontmatter || {}, body: String(draft.body || draft.content || ''),
+      title: draft.title, meta_description: draft.meta_description,
+    }, gateOptions).namedCompetitors);
     const unreviewed = [...new Set([...names, ...extraction.companies])]
-      .filter((nm) => !namedInReviewedDraft(nm, reviewed) && !competitorFacts.isOwnerApprovedForAutopublish(nm));
+      .filter((nm) => !reviewedNames.has(competitorFacts.findCompetitor(nm)?.name || nm)
+        && !namedInReviewedDraft(nm, reviewed) && !competitorFacts.isOwnerApprovedForAutopublish(nm));
     if (unreviewed.length) {
       throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
         `publisher-added text names company(ies) the operator never reviewed: ${unreviewed.join(', ')}`,
