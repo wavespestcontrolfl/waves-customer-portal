@@ -352,3 +352,17 @@ describe('a longer species name that contains the matched alias', () => {
   });
 });
 
+// Codex r7 on #5272 ("Treat broad other-organism classes as a second pest").
+describe('"other" plus a broad organism class is a second subject', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['fire ants and other insects', null],
+    ['fire ants or other pests', null],
+    ['huntsman spiders and other arachnids', null],
+    ['house geckos and other reptiles', null],
+    ['fire ant pest control in bradenton', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+

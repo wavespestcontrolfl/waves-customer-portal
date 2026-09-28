@@ -867,3 +867,15 @@ test.each([
     .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
 });
 
+// Codex r7 on #5272: full HTML decoding and JS-parsed expression props.
+test.each([
+  ['recommendation="Call&Tab;today."'],
+  ['recommendation="Call&NonBreakingSpace;today."'],
+  ['recommendation={"Call today." /* note */}'],
+  ['recommendation={"Call " + "today."}'],
+])('#5272 r7: %s is a pitch', (prop) => {
+  const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+});
+

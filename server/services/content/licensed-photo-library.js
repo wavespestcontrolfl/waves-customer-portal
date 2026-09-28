@@ -266,8 +266,11 @@ function namesAnotherPest(text, entry) {
   const covered = new Array(text.length).fill(false);
   for (const [s, e] of ownSpans) covered.fill(true, s, e);
   const rest = [...text].map((ch, i) => (covered[i] ? ' ' : ch)).join('');
-  return PEST_NOUN_RE.test(rest);
+  return PEST_NOUN_RE.test(rest) || OTHER_ORGANISM_CLASS_RE.test(rest);
 }
+// "…and other insects", "…or other stinging pests": a broad class after
+// "other"/"similar"/"related" is a second subject too (Codex r7 on #5272).
+const OTHER_ORGANISM_CLASS_RE = /\b(?:other|similar|related|different)\s+(?:[a-z-]+\s+){0,2}?(?:insects?|pests?|arachnids?|reptiles?|amphibians?|critters?|creatures?|animals?|wildlife|vermin|invertebrates?|arthropods?|mammals?|birds?|species)\b/i;
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as
 // comparison"): the `looks?\s+like` alternative above makes ordinary TERMINAL

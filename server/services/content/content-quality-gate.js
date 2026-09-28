@@ -670,38 +670,42 @@ function checkLocalBusinessServiceSchema(draft) {
 // A box prop's rendered value: a quoted attribute, or a static string
 // expression ({"…"}, {'…'}, {`…`}) that MDX renders the same (Codex r4 on
 // #5272).
-// Values are decoded to what renders (Codex r5 on #5272): character
-// references in a quoted prop ("Call&#32;today"), JavaScript escapes in a
-// static expression ({"Call\x20today"}).
+// Values are read as they RENDER (Codex r5–r7 on #5272). Props are split
+// by the guardrails' own JSX attribute walker (eachJsxAttr). A quoted
+// value is HTML-decoded in full (entities.decodeHTML: &nbsp; &Tab;
+// &#160;…). A {…} expression is parsed as JavaScript (acorn — comments,
+// escapes and string concatenation as the renderer sees them); anything but
+// a static string reads as empty. Unicode spaces collapse to a plain space.
 function boxProp(tag, name) {
-  const { decodeEntitiesForScan } = require('./content-guardrails')._internals;
-  const quoted = attrValue(tag, name);
-  if (quoted !== null && quoted !== undefined) return decodeRenderedText(decodeEntitiesForScan(String(quoted)));
-  const m = String(tag).match(new RegExp(`\\b${name}\\s*=\\s*\\{\\s*(["'\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1\\s*\\}`));
-  return m ? decodeRenderedText(decodeJsStringEscapes(m[2])) : '';
+  const { eachJsxAttr } = require('./content-guardrails')._internals;
+  const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
+  const attr = eachJsxAttr(attrs).find((a) => a.name === name);
+  if (!attr) return '';
+  let text = '';
+  if (attr.literal !== null && attr.literal !== undefined) text = require('entities').decodeHTML(String(attr.literal));
+  else if (attr.expr) text = staticExpressionString(attr.expr) ?? '';
+  return text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ');
 }
-// decodeEntitiesForScan keeps to a security subset; the box text is also
-// read as it RENDERS: remaining numeric references and the whitespace
-// named references (&nbsp; &ensp; &emsp; &thinsp;) decode, and every
-// Unicode space collapses to a plain space (Codex r6 on #5272).
-const WHITESPACE_ENTITIES = { nbsp: ' ', ensp: ' ', emsp: ' ', thinsp: ' ', numsp: ' ', puncsp: ' ', hairsp: ' ' };
-function decodeRenderedText(text) {
-  return String(text)
-    .replace(/&#x([0-9a-f]+);?/gi, (all, hex) => { const n = parseInt(hex, 16); return n <= 0x10ffff ? String.fromCodePoint(n) : all; })
-    .replace(/&#(\d+);?/g, (all, dec) => { const n = parseInt(dec, 10); return n <= 0x10ffff ? String.fromCodePoint(n) : all; })
-    .replace(/&([a-z]+);/gi, (all, name) => WHITESPACE_ENTITIES[name.toLowerCase()] ?? all)
-    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ');
-}
-const JS_SIMPLE_ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
-function decodeJsStringEscapes(raw) {
-  return String(raw).replace(/\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|([\s\S]))/g, (all, hex, codePoint, unicode, ch) => {
-    const code = hex || codePoint || unicode;
-    if (code) {
-      const n = parseInt(code, 16);
-      return n <= 0x10ffff ? String.fromCodePoint(n) : all;
+function staticExpressionString(expr) {
+  const inner = String(expr).replace(/^\{/, '').replace(/\}$/, '');
+  let node;
+  try {
+    node = require('acorn').parse(`(${inner}\n)`, { ecmaVersion: 'latest' }).body[0]?.expression;
+  } catch {
+    return null;
+  }
+  const evaluate = (n) => {
+    if (!n) return null;
+    if (n.type === 'Literal' && typeof n.value === 'string') return n.value;
+    if (n.type === 'TemplateLiteral' && n.expressions.length === 0) return n.quasis.map((q) => q.value.cooked).join('');
+    if (n.type === 'BinaryExpression' && n.operator === '+') {
+      const left = evaluate(n.left);
+      const right = evaluate(n.right);
+      return left !== null && right !== null ? left + right : null;
     }
-    return Object.prototype.hasOwnProperty.call(JS_SIMPLE_ESCAPES, ch) ? JS_SIMPLE_ESCAPES[ch] : ch;
-  });
+    return null;
+  };
+  return evaluate(node);
 }
 
 function leadingVerdictBox(body) {
