@@ -774,7 +774,7 @@ const REQUIRED_FINDINGS_FIELDS = {
 // The "Next steps" chip picker (per-type chip map, required-type set,
 // chip-to-sentence dictionary) was retired (owner ruling 2026-09-27) —
 // Recommendations is now the single tech-advice field for every typed
-// service type. See nextStepSentence() below for what replaced it.
+// service type, and a new completion carries no next-step sentence.
 
 function getActivityIndicator(projectType) {
   return ACTIVITY_INDICATORS[projectType] || null;
@@ -1520,19 +1520,6 @@ function firstSentenceFrom(value, fallback) {
   if (!text) return fallback;
   const period = text.endsWith('.') ? '' : '.';
   return `${text.charAt(0).toUpperCase()}${text.slice(1)}${period}`;
-}
-
-// The typed-completion "Next steps" chip picker was retired (owner ruling
-// 2026-09-27) — Recommendations is now the single tech-advice field, and a
-// new completion NEVER carries a next-step sentence (no "Contact us if you
-// have any questions." filler). Any chips a stale pre-deploy tab still
-// submits are accepted and ignored (see complete-scheduled-service.js /
-// companion-completions.js) rather than turned into report copy. The
-// signature keeps its `chips` parameter for the frozen-snapshot callers
-// below, but every renderer of an OLD snapshot's stored `todaysResult.nextStep`
-// string is unaffected — this function only shapes NEW completions.
-function nextStepSentence() {
-  return null;
 }
 
 function joinPhrases(parts) {
@@ -3218,7 +3205,10 @@ function buildTodaysResult({
       values.treatment_performed || values.exclusion_completed || values.areas_treated || values.traps_set,
       'We completed the scheduled service.'
     );
-  const nextStep = nextStepSentence();
+  // No chip-derived next-step sentence on a new completion (Next steps chips
+  // retired 2026-09-27; Recommendations replaces them). Frozen snapshots keep
+  // whatever todaysResult.nextStep they already stored.
+  const nextStep = null;
 
   // Bait station zero states use the owner's required scoped wording —
   // accessible-stations-only for termite, consumption+evidence for rodent —
@@ -4276,7 +4266,6 @@ module.exports = {
   customerLabelForValue,
   validateTypedFindings,
   validateActivityScoreConsistency,
-  nextStepSentence,
   trendWordForScores,
   trendDirection,
   buildTodaysResult,

@@ -6,7 +6,6 @@ const {
   findBannedCustomerCopy,
   deriveActivityScore,
   validateTypedFindings,
-  nextStepSentence,
   trendWordForScores,
   trendDirection,
   buildTypedReportSnapshot,
@@ -317,23 +316,9 @@ describe('validateTypedFindings', () => {
 });
 
 // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
-// Recommendations is the single tech-advice field for every typed service
-// type now. nextStepSentence() never composes a sentence (and never falls
-// back to "Contact us if you have any questions.") for a new completion,
-// whatever chips (if any) a stale pre-deploy tab still submits — and the
-// schema slice no longer serves nextStepChips/nextStepRequired for the
-// retired picker.
-describe('nextStepSentence (Next steps chip picker retired 2026-09-27)', () => {
-  test('always returns null — no chip-derived sentence, no "Contact us" filler', () => {
-    expect(nextStepSentence([])).toBeNull();
-    expect(nextStepSentence(null)).toBeNull();
-    expect(nextStepSentence(undefined)).toBeNull();
-    expect(nextStepSentence()).toBeNull();
-    // A stale pre-deploy tab's chips are accepted and ignored, never turned
-    // into a sentence.
-    expect(nextStepSentence(['Monitor activity', 'No action needed'])).toBeNull();
-  });
-
+// Recommendations replaces it. The schema slice no longer serves the retired
+// picker fields, and a new snapshot never composes a next-step sentence.
+describe('Next steps chip picker retired 2026-09-27', () => {
   test('the schema slice no longer serves the retired picker fields', () => {
     const schema = findingsSchemaForType('mosquito_event');
     expect(schema.nextStepChips).toBeUndefined();
