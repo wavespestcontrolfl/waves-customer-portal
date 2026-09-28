@@ -230,3 +230,37 @@ test('no invoices/holds at all: never covered', async () => {
   const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveInvoice: true });
   expect(covered.size).toBe(0);
 });
+
+// The free re-service conversion's option (Codex r2 P1 on #5253): its own
+// cleanup voids DIRECTLY linked unpaid invoices, so only those are waived.
+describe('liveIndirectInvoice (free re-service conversion)', () => {
+  const fixture = (byInvoices) => makeConn({
+    hasTables: ALL_TABLES_PRESENT,
+    byTable: {
+      estimate_card_holds: [],
+      appointment_card_requests: [],
+      invoices: [],
+      'invoices as inv': [],
+      'visit_completion_packet_items as p': [],
+      ...byInvoices,
+    },
+  });
+  const unpaid = { status: 'draft', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: null, total: 90 };
+
+  test('a directly linked unpaid invoice is waived (the conversion voids it)', async () => {
+    const conn = fixture({ invoices: [{ scheduled_service_id: 'v1', ...unpaid }] });
+    expect((await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveIndirectInvoice: true })).size).toBe(0);
+  });
+
+  test('an unpaid invoice linked only through the service record blocks (the conversion never sees it)', async () => {
+    const conn = fixture({ 'invoices as inv': [{ scheduled_service_id: 'v1', ...unpaid }] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveIndirectInvoice: true });
+    expect(covered.get('v1')).toMatch(/still open at the old price/);
+  });
+
+  test('a PAID invoice linked only through a combined packet blocks', async () => {
+    const conn = fixture({ 'visit_completion_packet_items as p': [{ scheduled_service_id: 'v1', ...unpaid, status: 'paid' }] });
+    const covered = await findBillingCoveredVisits(conn, [{ id: 'v1' }], { liveIndirectInvoice: true });
+    expect(covered.get('v1')).toMatch(/money on it/);
+  });
+});

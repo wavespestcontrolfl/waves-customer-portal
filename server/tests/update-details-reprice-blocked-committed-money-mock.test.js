@@ -282,7 +282,7 @@ test('the free re-service conversion runs the base money check (not liveInvoice)
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
   expect(src).toMatch(/const priceEditPosted = postedPriceKeys\.length > 0;/);
-  expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], \{ liveInvoice: !reServiceConversionZeroPrice \}\)/);
+  expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], reServiceConversionZeroPrice \? \{ liveIndirectInvoice: true \} : \{ liveInvoice: true \}\)/);
   expect(src).toMatch(/if \(reServiceConversionZeroPrice \|\| priceEditPosted \|\| serviceEditPosted\) \{/);
   // The check reads the row under its own FOR UPDATE, before the first
   // route-owned write (applyAppointmentAddress).

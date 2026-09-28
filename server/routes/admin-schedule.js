@@ -13441,11 +13441,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // card-fee capture all write this row (Codex r1 P1 + parallel review on
       // #5253). The row's CURRENT price is read under these locks, never
       // before the transaction.
-      // A free re-service conversion voids this visit's unpaid invoices
-      // itself, so only money it cannot undo blocks it (a paid or prepaid
-      // invoice, credit or a deposit on one, a card charge that can still
-      // settle, a prepayment, a term, a hold): the base check, without
-      // liveInvoice (Codex r1 P1).
+      // A free re-service conversion voids this visit's DIRECTLY linked
+      // unpaid invoices itself, so those alone are waived; money anywhere,
+      // and any live invoice linked through a service record or a combined
+      // packet (which that cleanup never sees), still blocks it (Codex r1 +
+      // r2 P1).
       if (priceEditPosted) {
         const priceGuardCols = await trx('scheduled_services').columnInfo();
         const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
@@ -13454,7 +13454,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
         const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
-          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: !reServiceConversionZeroPrice });
+          const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], reServiceConversionZeroPrice ? { liveIndirectInvoice: true } : { liveInvoice: true });
           if (covered.size > 0) {
             const [, reason] = [...covered.entries()][0];
             throw Object.assign(
@@ -17290,12 +17290,18 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // `liveInvoice` (repricing guard, PUT /:id/update-details): also count ANY
 // live attached invoice that hasn't taken money yet — a draft never sent, a
 // sent/viewed/overdue invoice sitting unpaid, or a $0 one — because
-// completion and Charge Now reuse it at the OLD price. None of the three
+// completion and Charge Now reuse it at the OLD price.
+// `liveIndirectInvoice` (defaults to liveInvoice) applies that same rule only
+// to invoices linked through a service record or a combined-visit packet —
+// the free re-service conversion's case: its own cleanup voids the visit's
+// DIRECTLY linked unpaid invoices but never sees the indirect ones (Codex r2
+// P1 on #5253). Either option also discovers the indirect links, so money
+// on an indirectly linked invoice always blocks. None of the three
 // existing callers (the plan trim, the series-cancel fee rails, the price/
 // service sibling propagation before this option was threaded onto it) ever
 // needed to know about an invoice nobody has paid — so this stays opt-in,
 // default false, keeping every pre-existing call byte-identical.
-async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false, liveIndirectInvoice = liveInvoice } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -17389,7 +17395,8 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', [...NO_MONEY_HELD])
       .select('scheduled_service_id', 'status', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
-    // liveInvoice also reaches an invoice this visit carries WITHOUT its own
+    // liveIndirectInvoice (on whenever liveInvoice is) reaches an invoice
+    // this visit carries WITHOUT its own
     // invoices.scheduled_service_id — the two indirect links the repricing
     // guard has to check because the direct query above misses them:
     //   • service-record-linked — most post-completion invoices carry ONLY
@@ -17404,7 +17411,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     // asked "does this visit carry an unpaid invoice at all," only "has
     // money already moved," so widening the match set here would change
     // their answer for a case they were never built to consider.
-    if (liveInvoice) {
+    if (liveIndirectInvoice) {
       if (await conn.schema.hasTable('service_records')) {
         const srLinked = await conn('invoices as inv')
           .join('service_records as sr', 'sr.id', 'inv.service_record_id')
@@ -17414,7 +17421,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
             'sr.scheduled_service_id as scheduled_service_id',
             'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
-        invoiced.push(...srLinked);
+        invoiced.push(...srLinked.map((row) => ({ ...row, viaIndirectLink: true })));
       }
       if (await conn.schema.hasTable('visit_completion_packet_items')) {
         const packetLinked = await conn('visit_completion_packet_items as p')
@@ -17425,7 +17432,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
             'p.scheduled_service_id as scheduled_service_id',
             'inv.status', 'inv.credit_applied', 'inv.line_items', 'inv.stripe_payment_intent_id', 'inv.total',
           );
-        invoiced.push(...packetLinked);
+        invoiced.push(...packetLinked.map((row) => ({ ...row, viaIndirectLink: true })));
       }
     }
     const hasDepositCreditLine = (items) => {
@@ -17451,7 +17458,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // conservative: no Stripe round-trip in a refusal path, and an
         // already-dead PI just means the operator voids the invoice first.
         mark(inv.scheduled_service_id, 'attached to an invoice with a card payment that can still settle');
-      } else if (liveInvoice) {
+      } else if (liveInvoice || (liveIndirectInvoice && inv.viaIndirectLink)) {
         // Nothing above fired, yet a live invoice is attached: a draft never
         // sent, a sent/viewed/overdue invoice sitting unpaid, or a $0 one.
         // Completion and Charge Now reuse any live attached invoice, so it
