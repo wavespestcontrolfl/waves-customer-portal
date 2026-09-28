@@ -361,6 +361,41 @@ describe('admin billing-recovery routes', () => {
     });
   });
 
+  // Owner ruling 2026-09-28: a stamped $0 is a deliberately free visit — the
+  // bill route must never invoice the per-application fee for it.
+  test('a per-application visit stamped $0 is never billed the fee', async () => {
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, estimated_price: '0.00', monthly_rate: '55.30' } });
+      if (arg === 'customers') return makeQB({ first: { billing_mode: 'per_application', per_application_fee: '55.30' } });
+      throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
+    });
+    customerOnAutopay.mockResolvedValue(true);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(res.status).toBe(422);
+      expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+    });
+  });
+
+  test('GET /leaks: a stamped $0 per-application visit is not a leak — only a NULL row price falls back to the fee', async () => {
+    const qb = makeQB({ rows: [] });
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return qb;
+      throw new Error(`unexpected table ${JSON.stringify(arg)}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/billing-recovery/leaks?days=90`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(200);
+    });
+    const priceSql = qb.whereRaw.mock.calls.map(([sql]) => String(sql)).find((sql) => sql.includes('per_application_fee'));
+    expect(priceSql).toContain('COALESCE(ss.estimated_price, CASE');
+    expect(priceSql).not.toContain('NULLIF(ss.estimated_price, 0)');
+    delete db.schema;
+  });
+
   test('GET /leaks surfaces per-application fee-only visits under needs_review with the fee as price', async () => {
     // Per-app follow-up rows seed estimated_price NULL by design — the
     // effective price is customers.per_application_fee, and per-app

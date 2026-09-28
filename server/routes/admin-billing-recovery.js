@@ -35,6 +35,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const { isStampedZeroEstimate } = require('../services/billing-lane');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -113,7 +114,9 @@ function dueDateFromVisit(v) {
 function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false } = {}) {
   const autopay = autopayActivePredicate();
   const effectivePriceSql = perAppAware
-    ? "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
+    // A stamped 0 is a deliberately free visit (owner 2026-09-28), so only a
+    // NULL row price falls back to the per-application fee.
+    ? "COALESCE(ss.estimated_price, CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
     : 'COALESCE(ss.estimated_price, 0)';
   // Effective payer mirrors resolveForInvoice: a per-job self-pay pin blocks
   // inheriting the customer default, so a pinned visit on a default-payer
@@ -222,6 +225,7 @@ router.get('/leaks', async (req, res) => {
     const effectivePrice = (r) => {
       const rowPrice = parseFloat(r.estimated_price || 0);
       if (rowPrice > 0) return rowPrice;
+      if (isStampedZeroEstimate(r.estimated_price)) return 0;
       return r.billing_mode === 'per_application' ? parseFloat(r.per_application_fee || 0) : 0;
     };
     const shape = (r) => ({
@@ -451,9 +455,10 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
     // visit whose amount lives at the customer level must be recoverable
     // here, not bounce as "no price" (Codex round-11).
     const rowPrice = parseFloat(visit.estimated_price || 0);
+    // A stamped 0 is deliberately free (owner 2026-09-28) — never the fee.
     const price = rowPrice > 0
       ? rowPrice
-      : (recoveryBillingMode === 'per_application' ? recoveryPerApplicationFee : 0);
+      : (recoveryBillingMode === 'per_application' && !isStampedZeroEstimate(visit.estimated_price) ? recoveryPerApplicationFee : 0);
     if (!(price > 0)) {
       return res.status(422).json({ error: 'Visit has no price to invoice.' });
     }
