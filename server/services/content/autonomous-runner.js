@@ -812,6 +812,10 @@ class AutonomousRunner {
       ? topicFraming.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
       : [];
 
+    // The live frontmatter gate 3c's fail-closed derivation loaded for a
+    // refresh — handed to the quality gate below so both judge the SAME
+    // snapshot (one GitHub read, no second fetch that could disagree).
+    let refreshLiveFrontmatter = null;
     if (contentGuardrails && draft) {
       // Option derivation is shared with the named-competitor approval
       // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
@@ -819,6 +823,7 @@ class AutonomousRunner {
       let guardOptions;
       try {
         guardOptions = await this._deriveGuardrailOptions(opp, brief);
+        refreshLiveFrontmatter = guardOptions?.liveFrontmatter || null;
       } catch (err) {
         if (err.code !== 'REFRESH_DOMAINS_LOAD_FAILED' && err.code !== 'REFRESH_PRIOR_BODY_LOAD_FAILED') throw err;
         const skipReason = err.code === 'REFRESH_DOMAINS_LOAD_FAILED' ? 'refresh_domains_load_failed' : 'refresh_prior_body_load_failed';
@@ -1011,19 +1016,10 @@ class AutonomousRunner {
         }
         // publishRefresh ships the LIVE frontmatter, so the gate classifies
         // the refresh (answer-first / licensed-photo checks) by the live
-        // post_type, not the draft's (Codex r2 on #5216). A failed load
-        // fails CLOSED: the gate then holds the refresh to the identification
-        // checks, so an unknown classification routes to review instead of
-        // silently skipping them.
-        const liveFm = publisher?.getLiveFrontmatter
-          ? await publisher
-            .getLiveFrontmatter(brief.target_url || brief.page_url || draft.url)
-            .catch((err) => {
-              logger.warn(`[autonomous-runner] live frontmatter load for the quality gate failed: ${err.message}`);
-              return null;
-            })
-          : null;
-        if (liveFm && typeof liveFm === 'object') ctx.liveFrontmatter = liveFm;
+        // post_type / page_type, not the draft's (Codex r2 on #5216) — the
+        // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
+        // (holds the refresh to the identification checks).
+        if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
         else ctx.liveFrontmatterUnavailable = true;
         // Same resolved-target derivation as the metadata lane: page_type
         // 'refresh' says nothing about the target, and a refresh that
@@ -3510,6 +3506,9 @@ class AutonomousRunner {
       throw e;
     }
     options.domains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+    // Not a guardrail option (evaluate ignores it): the runner hands this
+    // same snapshot to the quality gate's refresh classification.
+    options.liveFrontmatter = liveFm;
     // Owner hard rule (2026-07-16): service/location metaTitles are never
     // edited — hand the live value to the guardrails so a rewriting draft
     // parks (PROTECTED_META_TITLE_REWRITE) instead of publishing. Rides

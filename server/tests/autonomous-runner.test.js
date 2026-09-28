@@ -3845,7 +3845,7 @@ describe('refresh quality gate receives the live frontmatter', () => {
     expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
   });
 
-  test('a failed live frontmatter load for the gate is flagged so the gate fails closed', async () => {
+  test('the quality gate reuses gate 3c\'s live frontmatter snapshot (one read, no second fetch)', async () => {
     const claimedAt = new Date('2026-09-28T10:00:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({ id: 'opp_refresh_live_fail', action_type: 'refresh_existing_page', page_url: '/pest-control/fire-ant-id/', claimed_at: claimedAt }),
@@ -3855,11 +3855,7 @@ describe('refresh quality gate receives the live frontmatter', () => {
     const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/pest-control/fire-ant-id/', human_review_required: false }) };
     const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { body: 'Refreshed body.', frontmatter: {} } }) };
     const publisher = {
-      // Gate 3c's own (fail-closed) load succeeds; the quality gate's
-      // separate load then hits a transient failure.
-      getLiveFrontmatter: jest.fn()
-        .mockResolvedValueOnce({ post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [] })
-        .mockRejectedValue(new Error('github 502')),
+      getLiveFrontmatter: jest.fn().mockResolvedValue({ post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [] }),
       loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live body.' }),
       resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/pest-control/fire-ant-id.mdx' }),
       isBlogTarget: jest.fn().mockReturnValue(true),
@@ -3873,7 +3869,8 @@ describe('refresh quality gate receives the live frontmatter', () => {
     });
     await runner.runNext();
     const [, , ctx] = qualityGate.evaluate.mock.calls[0];
-    expect(ctx.liveFrontmatter).toBeUndefined();
-    expect(ctx.liveFrontmatterUnavailable).toBe(true);
+    expect(publisher.getLiveFrontmatter).toHaveBeenCalledTimes(1);
+    expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic' });
+    expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
   });
 });
