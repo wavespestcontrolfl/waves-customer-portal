@@ -65,8 +65,11 @@ function citationMatchesPage(citation, page) {
 // A "recommended" answer is the bar above a bare mention: Waves is named,
 // portrayed positively, and ranks in the top 3 brands the answer surfaces
 // (rank_position is 1-indexed order of first appearance among Waves +
-// COMPETITORS in llm-mention-prober.js's parse()). Same denominator as
-// mentioned/cited (measured answers) so the three rates stay comparable.
+// COMPETITORS in llm-mention-prober.js's parse()). Denominator: measured
+// answers, less the mentioned ones whose sentiment was never classified
+// (stored NULL — no key, provider error, off-contract reply). Those are
+// neither recommended nor not, so they are counted as `unclassified` rather
+// than read as misses (Codex r4 on #5123).
 function isRecommendedAnswer(row) {
   return row.waves_mentioned === true
     && row.sentiment === 'positive'
@@ -78,15 +81,18 @@ function summarizeObservations(rows) {
   const cited = measured.filter(row => ownedCitations(row).length > 0).length;
   const mentioned = measured.filter(row => row.waves_mentioned === true).length;
   const recommended = measured.filter(isRecommendedAnswer).length;
+  const unclassified = measured.filter(row => row.waves_mentioned === true && row.sentiment == null).length;
+  const recommendable = measured.length - unclassified;
   return {
     total: rows.length,
     measured: measured.length,
     mentioned,
     cited,
     recommended,
+    unclassified,
     mentionRate: measured.length ? Math.round(100 * mentioned / measured.length) : null,
     citationRate: measured.length ? Math.round(100 * cited / measured.length) : null,
-    recommendedRate: measured.length ? Math.round(100 * recommended / measured.length) : null,
+    recommendedRate: recommendable ? Math.round(100 * recommended / recommendable) : null,
     legacy: rows.filter(row => row.measurement_version !== MEASUREMENT_VERSION).length,
     noAnswer: rows.filter(row => row.measurement_version === MEASUREMENT_VERSION && row.answer_available === false).length,
     unresolved: rows.filter(row => row.measurement_version === MEASUREMENT_VERSION

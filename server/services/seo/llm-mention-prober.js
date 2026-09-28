@@ -57,7 +57,7 @@ const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configure
 // word is a label and no other label appears anywhere in it. A substring
 // search used to take whichever label it checked first — "not negative;
 // neutral" read as negative — and record that as a successful call
-// (Codex r13 on #4884). Anything else is null (caller: neutral + failed row).
+// (Codex r13 on #4884). Anything else is null (caller: unclassified + failed row).
 const SENTIMENT_LABELS = new Set(['positive', 'neutral', 'negative']);
 function parseSentimentLabel(text) {
   const words = String(text || '').toLowerCase().match(/[a-z]+/g) || [];
@@ -107,10 +107,12 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
     }
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
-  // "missing" (next to noAnswer): expected active-question x configured-engine
-  // pairs with NO observation of any kind in this window — measured,
-  // no-answer, legacy, unresolved and missing partition the expected pairs.
-  // The engine denominator is the CONFIGURED provider set (getDashboard
+  // Coverage: the expected active-question x configured-engine pairs, each
+  // classified by its NEWEST observation in this window (any model cohort)
+  // as measured, no answer, legacy or unresolved — or missing when it has
+  // none. These partition the expected pairs. The rates above stay per model
+  // cohort (a pair holds one row per model), so their counts are NOT a
+  // partition of the pairs (Codex r4 on #5123). The engine denominator is the CONFIGURED provider set (getDashboard
   // passes the prober's own `providers`), never the engines that happened to
   // succeed: runDaily skips null probes, so a newly enabled provider or one
   // failing for the whole window has no rows, and deriving engines from rows
@@ -130,11 +132,17 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   // cohort's gap — deactivating a question should never silently shrink
   // `missing` toward zero. Restricted to configured engines for the same
   // reason: a removed provider's old rows must not offset a live one's gap.
-  const observedFixedPairs = new Set(fixed
-    .filter(row => managed.has(row.query) && configuredSet.has(row.llm_platform))
-    .map(row => `${row.query}::${row.llm_platform}`));
+  // `fixed` keeps the input's newest-first order, so the first row seen for a
+  // pair is its newest observation across model cohorts.
+  const newestByPair = new Map();
+  for (const row of fixed) {
+    if (!managed.has(row.query) || !configuredSet.has(row.llm_platform)) continue;
+    const pair = `${row.query}::${row.llm_platform}`;
+    if (!newestByPair.has(pair)) newestByPair.set(pair, row);
+  }
   const expectedObservations = activeQuestionCount * configuredEngines.length;
-  const missing = Math.max(0, expectedObservations - observedFixedPairs.size);
+  const missing = Math.max(0, expectedObservations - newestByPair.size);
+  const pairs = summarizeObservations([...newestByPair.values()]);
   return {
     summary: {
       ...summarizeObservations(grid),
@@ -150,6 +158,14 @@ function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
       ...summarizeObservations(fixed),
       expectedObservations,
       missing,
+      coverage: {
+        expected: expectedObservations,
+        measured: pairs.measured,
+        noAnswer: pairs.noAnswer,
+        legacy: pairs.legacy,
+        unresolved: pairs.unresolved,
+        missing,
+      },
       byPlatform: observationGroups(fixed, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
       byCity: observationGroups(fixed, row => row.city),
       byIntent: observationGroups(fixed, row => row.intent),
@@ -435,9 +451,15 @@ class LLMMentionProber {
     };
   }
 
-  /** Light LLM sentiment pass, only when Waves is actually mentioned. */
+  /**
+   * Light LLM sentiment pass, only when Waves is actually mentioned. Returns
+   * null — unclassified, stored as NULL — when no label was obtained (no
+   * key/SDK, a provider error, an off-contract reply): the recommended rate
+   * reads this label, so a fallback 'neutral' would turn an outage into
+   * "not recommended" (Codex r4 on #5123).
+   */
   async classifySentiment(context) {
-    if (!context || !process.env.ANTHROPIC_API_KEY || !Anthropic) return 'neutral';
+    if (!context || !process.env.ANTHROPIC_API_KEY || !Anthropic) return null;
     try {
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const resp = await ledgerCall('anthropic', MODELS.FAST, () => client.messages.create({
@@ -453,9 +475,9 @@ class LLMMentionProber {
   // content[0] read return '' — see event-ingestion.js for the incident.
       const label = parseSentimentLabel(stripThinkingBlocks(resp).content?.[0]?.text);
       if (!label) ledgerCallRejected(resp, 'invalid_output');
-      return label || 'neutral';
+      return label;
     } catch {
-      return 'neutral';
+      return null;
     }
   }
 

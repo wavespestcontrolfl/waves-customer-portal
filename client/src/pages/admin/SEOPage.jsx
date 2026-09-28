@@ -2053,15 +2053,21 @@ function BacklinksTab() {
               </div>
               <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
                 {llmDash.benchmark.activeQuestions} questions active ·{" "}
-                {llmDash.benchmark.measured} measured answers. Recommended
-                counts a mentioned answer with positive sentiment ranked in
-                the top 3 brands. Excluded: {llmDash.benchmark.legacy} legacy,{" "}
-                {llmDash.benchmark.noAnswer} no answer,{" "}
-                {llmDash.benchmark.unresolved} unresolved,{" "}
-                {llmDash.benchmark.missing ?? 0} missing (expected
-                question×engine pairs with no observation yet, of{" "}
-                {llmDash.benchmark.expectedObservations ?? 0}). Historical
-                observations used a different citation method. Compare the same
+                {llmDash.benchmark.measured} measured answers (a model change
+                keeps its answers separate). Recommended counts a mentioned
+                answer with positive sentiment ranked in the top 3 brands
+                {llmDash.benchmark.unclassified > 0
+                  ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
+                  : ""}
+                . Coverage of the{" "}
+                {llmDash.benchmark.coverage?.expected ?? 0} expected
+                question×engine pairs, by each pair's latest answer:{" "}
+                {llmDash.benchmark.coverage?.measured ?? 0} measured,{" "}
+                {llmDash.benchmark.coverage?.noAnswer ?? 0} no answer,{" "}
+                {llmDash.benchmark.coverage?.unresolved ?? 0} unresolved,{" "}
+                {llmDash.benchmark.coverage?.legacy ?? 0} legacy,{" "}
+                {llmDash.benchmark.coverage?.missing ?? 0} not yet observed.
+                Historical observations used a different citation method. Compare the same
                 questions and model in repeat runs. This view uses the latest
                 observations within 30 days; sampling dates may differ by
                 engine.

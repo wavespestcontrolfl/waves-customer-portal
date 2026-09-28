@@ -52,7 +52,7 @@ test('rates exclude legacy, no-answer and unresolved evidence rather than record
     measured(), measured({ measurement_version: null, waves_mentioned: true, waves_cited_urls: [WAVES] }),
     measured({ answer_available: false }), measured({ citations_complete: false }),
   ]);
-  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, recommended: 0, mentionRate: 33, citationRate: 33, recommendedRate: 0, legacy: 1, noAnswer: 1, unresolved: 1 });
+  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, recommended: 0, unclassified: 1, mentionRate: 33, citationRate: 33, recommendedRate: 0, legacy: 1, noAnswer: 1, unresolved: 1 });
   expect(summarizeObservations([])).toMatchObject({ citationRate: null, mentionRate: null });
 });
 
@@ -115,6 +115,39 @@ test('recommended counts a mentioned, positively-sentimented, top-3-ranked answe
     expectedObservations: 80, missing: 77,
   });
   expect(dashboard.summary).toMatchObject({ measured: 3, recommended: 1 });
+});
+
+// Codex r4 on #5123: a mentioned answer whose sentiment was never classified
+// (NULL) is neither recommended nor a miss — it leaves the denominator.
+test('a mentioned answer with unclassified sentiment is excluded from the recommended rate and counted', () => {
+  const result = summarizeObservations([
+    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 1 }),
+    measured({ waves_mentioned: true, sentiment: null, rank_position: 1 }),
+    measured({ sentiment: 'neutral' }),
+  ]);
+  expect(result).toMatchObject({ measured: 3, mentioned: 2, recommended: 1, unclassified: 1, recommendedRate: 50, mentionRate: 67 });
+  expect(summarizeObservations([measured({ waves_mentioned: true, sentiment: null })])).toMatchObject({ unclassified: 1, recommendedRate: null });
+});
+
+// Codex r4 on #5123: a provider's model change leaves two cohort rows on one
+// question x engine pair. The rates keep the cohorts apart; coverage
+// classifies each pair once, by its newest observation, so it partitions the
+// expected pairs.
+test('coverage partitions the expected pairs by each pair\'s newest observation across model cohorts', () => {
+  const [q1, q2] = benchmark.questions.map(q => q.query);
+  const managed = [{ query: q1, active: true }, { query: q2, active: true }];
+  const rows = [ // newest first, as getDashboard orders them
+    measured({ model_version: 'new-search', check_date: '2026-08-02' }),
+    measured({ model_version: 'old-search', check_date: '2026-08-01', answer_available: false }),
+    measured({ llm_platform: 'gemini', check_date: '2026-08-01', citations_complete: false }),
+    measured({ query: q2, llm_platform: 'perplexity' }), // perplexity is not configured
+  ];
+  const dashboard = buildDashboard(rows, managed, { configuredPlatforms: ['chatgpt', 'gemini'] });
+  const { coverage } = dashboard.benchmark;
+  expect(coverage).toEqual({ expected: 4, measured: 1, noAnswer: 0, legacy: 0, unresolved: 1, missing: 2 });
+  expect(coverage.measured + coverage.noAnswer + coverage.legacy + coverage.unresolved + coverage.missing).toBe(coverage.expected);
+  // The rates still count each model cohort separately — never blended.
+  expect(dashboard.benchmark).toMatchObject({ measured: 2, noAnswer: 1, unresolved: 1 });
 });
 
 test('missing never goes negative when every expected pair is observed', () => {

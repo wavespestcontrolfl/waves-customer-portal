@@ -47,9 +47,12 @@ describe('normalizeOwnedUrl', () => {
       .toBe('https://www.bradentonflpestcontrol.com/pest-control-costs/');
   });
 
-  test('adds a consistent trailing slash to an extension-less path but not to a file path', () => {
-    expect(normalizeOwnedUrl('https://wavespestcontrol.com/pest-control-costs')).toBe('https://wavespestcontrol.com/pest-control-costs/');
-    expect(normalizeOwnedUrl('https://wavespestcontrol.com/sitemap.xml')).toBe('https://wavespestcontrol.com/sitemap.xml');
+  // Codex r4 on #5123: the identity is also what gets probed, so the cited
+  // path is never rewritten — /page and /page/ are different requests.
+  test('keeps the cited path exactly as cited — no trailing slash is added or removed', () => {
+    expect(normalizeOwnedUrl('https://wavespestcontrol.com/pest-control-costs')).toBe('https://wavespestcontrol.com/pest-control-costs');
+    expect(normalizeOwnedUrl('https://wavespestcontrol.com/pest-control-costs/')).toBe('https://wavespestcontrol.com/pest-control-costs/');
+    expect(normalizeOwnedUrl('http://wavespestcontrol.com/pest-control-costs?utm_source=chatgpt.com')).toBe('https://wavespestcontrol.com/pest-control-costs');
   });
 
   test('rejects a non-http(s) scheme and malformed input', () => {
@@ -62,7 +65,7 @@ describe('normalizeOwnedUrl', () => {
   // rejected, never rewritten to the default-port page.
   test('rejects a nonstandard port instead of rewriting it; keeps an explicit default port', () => {
     expect(normalizeOwnedUrl('https://wavespestcontrol.com:8443/page')).toBe('');
-    expect(normalizeOwnedUrl('https://wavespestcontrol.com:443/page')).toBe('https://wavespestcontrol.com/page/');
+    expect(normalizeOwnedUrl('https://wavespestcontrol.com:443/page')).toBe('https://wavespestcontrol.com/page');
   });
 });
 
@@ -302,6 +305,32 @@ describe('checkOwnedUrlHealth (shared checker, injected fetchImpl)', () => {
     expect(result.verdict).toBe('canonical_elsewhere');
   });
 
+  // Codex r4 on #5123: the cited slash-less form is what gets fetched — a
+  // healthy /page/ must not stand in for a broken cited /page.
+  test('probes the cited path as cited, not a trailing-slash rewrite of it', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://wavespestcontrol.com/pest-control-costs': response(404, 'Not found', {}, 'https://wavespestcontrol.com/pest-control-costs'),
+      'https://wavespestcontrol.com/pest-control-costs/': response(200, '<html><head><title>Pest control costs</title></head><body>Real content here, plenty of it, well past the minimum visible length this module enforces for a clean page.</body></html>'),
+    }));
+    const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/pest-control-costs?utm_source=chatgpt.com', { fetchImpl });
+    expect(result).toMatchObject({ url: 'https://wavespestcontrol.com/pest-control-costs', verdict: 'not_found' });
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://wavespestcontrol.com/pest-control-costs');
+  });
+
+  test('a redirect landing on /page with a /page/ canonical is the same page, still redirect_ok', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://wavespestcontrol.com/old/': response(301, '', { location: 'https://wavespestcontrol.com/new' }),
+      'https://wavespestcontrol.com/new': response(
+        200,
+        '<html><head><title>Pest control costs</title><link rel="canonical" href="https://wavespestcontrol.com/new/"></head><body>Real content here, plenty of it, well past the minimum visible length this module enforces.</body></html>',
+        {},
+        'https://wavespestcontrol.com/new',
+      ),
+    }));
+    const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/old/', { fetchImpl });
+    expect(result.verdict).toBe('redirect_ok');
+  });
+
   test('a network-level failure surfaces as fetch_blocked', async () => {
     const fetchImpl = jest.fn(fetchMap({
       'https://wavespestcontrol.com/x/': new Error('timeout'),
@@ -337,6 +366,18 @@ describe('collectCitedOwnedUrls', () => {
     ]);
     const result = await collectCitedOwnedUrls({ database, now: new Date('2026-09-27T12:00:00Z') });
     expect(result).toEqual([{ url: 'https://wavespestcontrol.com/pest-control-costs/', citationCount: 2 }]);
+  });
+
+  test('keeps the slash and no-slash forms of a cited path as separate candidates', async () => {
+    const database = fakeDb([
+      measuredRow(['https://wavespestcontrol.com/pest-control-costs']),
+      measuredRow(['https://wavespestcontrol.com/pest-control-costs/']),
+    ]);
+    const result = await collectCitedOwnedUrls({ database, now: new Date('2026-09-27T12:00:00Z') });
+    expect(result.map((r) => r.url).sort()).toEqual([
+      'https://wavespestcontrol.com/pest-control-costs',
+      'https://wavespestcontrol.com/pest-control-costs/',
+    ]);
   });
 
   test('an empty window returns an empty list', async () => {

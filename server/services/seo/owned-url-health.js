@@ -77,13 +77,16 @@ const BAD_VERDICTS = new Set(['soft_404', 'not_found', 'server_error', 'canonica
 const TRACKING_PARAM_RE = /^(utm_[a-z_]+|mc_[a-z]+|fbclid|gclid|msclkid|igshid|ref|ref_src|_ga|_gl)$/i;
 
 /**
- * Normalizes a cited URL to a stable identity for dedupe/persistence:
- * strips the fragment and tracking params, lowercases the host, and keeps
- * one consistent trailing-slash form (a trailing slash on every extension-
- * less path, matching the fleet's own URL convention). Not the same job as
- * content-registry.js's normalizeContentUrl, which collapses the hub host
- * to a relative path — this module's table keys on the full absolute URL
- * across every fleet host, so that normalization does not apply here.
+ * Normalizes a cited URL to the identity this module both persists AND
+ * probes: strips the fragment (never sent to a server), credentials and
+ * tracking params, and upgrades to https (the shared checker is https-only;
+ * every fleet host redirects http). The PATH and the rest of the query stay
+ * exactly as cited — `/page` and `/page/` are different requests a host may
+ * answer differently, so rewriting one into the other could report a cited
+ * URL healthy that was never fetched (Codex r4 on #5123). Not the same job
+ * as content-registry.js's normalizeContentUrl, which collapses the hub host
+ * to a relative path and the slash forms into one — this module's table
+ * keys on the full absolute URL as cited across every fleet host.
  */
 function normalizeOwnedUrl(value) {
   let parsed;
@@ -100,15 +103,12 @@ function normalizeOwnedUrl(value) {
   parsed.protocol = 'https:';
   parsed.hostname = parsed.hostname.toLowerCase();
   const params = new URLSearchParams(parsed.search);
-  for (const key of [...params.keys()]) {
-    if (TRACKING_PARAM_RE.test(key)) params.delete(key);
+  const tracking = [...params.keys()].filter((key) => TRACKING_PARAM_RE.test(key));
+  if (tracking.length) {
+    for (const key of tracking) params.delete(key);
+    const qs = params.toString();
+    parsed.search = qs ? `?${qs}` : '';
   }
-  params.sort();
-  const qs = params.toString();
-  parsed.search = qs ? `?${qs}` : '';
-  let pathname = parsed.pathname || '/';
-  if (!/\.[a-z0-9]{1,8}$/i.test(pathname) && !pathname.endsWith('/')) pathname += '/';
-  parsed.pathname = pathname;
   return parsed.toString();
 }
 
@@ -211,9 +211,13 @@ function mapSharedResultToVerdict(shared) {
     // owned page an answer engine is actively citing that redirects clean
     // but then self-declares a DIFFERENT canonical is not a confirmed-good
     // landing — checked here, not in the shared classifier.
+    // Compared the way the shared classifier compares a directly-served
+    // page's canonical (content-registry.js normalizeContentUrl: host, path,
+    // trailing slash ignored), so /page landing with a /page/ canonical is
+    // one page on both paths, not "elsewhere".
     if (shared.canonical_target_url) {
-      const normalizedCanonical = normalizeOwnedUrl(shared.canonical_target_url);
-      const normalizedFinal = normalizeOwnedUrl(shared.final_url);
+      const normalizedCanonical = registry.normalizeContentUrl(shared.canonical_target_url);
+      const normalizedFinal = registry.normalizeContentUrl(shared.final_url);
       if (normalizedCanonical && normalizedFinal && normalizedCanonical !== normalizedFinal) {
         return { verdict: 'canonical_elsewhere', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, canonicalUrl: shared.canonical_target_url } };
       }
