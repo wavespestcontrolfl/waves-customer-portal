@@ -42,6 +42,13 @@ describe('previewGate (shared by the blog and internal-link lanes)', () => {
     expect(await poller.previewGate(pr)).toMatchObject({ ok: false, failed: false });
   });
 
+  test('a canceled or skipped build of the head is terminal (abandoned), not a hold forever', async () => {
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ latest_stage: { status: 'canceled' }, deployment_trigger: { metadata: { commit_hash: HEAD } } });
+    expect(await poller.previewGate(pr)).toMatchObject({ ok: false, abandoned: true, failed: false });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ latest_stage: { status: 'skipped' }, deployment_trigger: { metadata: { commit_hash: HEAD } } });
+    expect(await poller.previewGate(pr)).toMatchObject({ ok: false, abandoned: true });
+  });
+
   test('no deployment yet is a transient hold', async () => {
     pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce(null);
     expect(await poller.previewGate(pr)).toMatchObject({ ok: false, transient: true, reason: 'preview_build_pending' });

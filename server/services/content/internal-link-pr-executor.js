@@ -225,6 +225,14 @@ async function previewBuildGate(ctx) {
       close: { status: 'failed', failureReason: 'internal_link_preview_build_failed', note: 'Hub preview build failed on the link PR head; PR closed.' },
     };
   }
+  if (preview.abandoned) {
+    // Canceled/skipped build of the head: not a content problem, so the
+    // links go back to the pool for a fresh PR instead of blocking the lane.
+    return {
+      reason: preview.reason,
+      close: { status: 'patch_candidate', note: `Hub preview build ${preview.reason.replace('preview_build_', '')} on the link PR head; PR closed, links returned to the candidate pool.` },
+    };
+  }
   return preview.ok ? null : { hold: preview.reason };
 }
 

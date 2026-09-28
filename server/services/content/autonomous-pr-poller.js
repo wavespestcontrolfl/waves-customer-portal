@@ -1234,8 +1234,14 @@ async function previewGate(pr) {
   if (!headSha) return { ok: false, reason: 'pr_head_sha_unknown' };
   const { status } = extractStatus(deploy);
   if (status !== 'success') {
-    const failed = status === 'failure' && !!deployedSha && deployedSha === headSha;
-    return { ok: false, failed, reason: `preview_build_${status || 'pending'}` };
+    // A terminal non-success of the CURRENT head never resolves on its own
+    // (no newer preview appears without another push): `failed` for a red
+    // build, `abandoned` for canceled/skipped. Callers that can't push
+    // (the link lane) close on either; maybeAutoMerge keeps holding.
+    const ofHead = !!deployedSha && deployedSha === headSha;
+    const failed = ofHead && status === 'failure';
+    const abandoned = ofHead && (status === 'canceled' || status === 'skipped');
+    return { ok: false, failed, abandoned, reason: `preview_build_${status || 'pending'}` };
   }
   if (!deployedSha) return { ok: false, reason: 'preview_build_commit_unknown' };
   if (deployedSha !== headSha) return { ok: false, reason: 'preview_build_stale_commit' };

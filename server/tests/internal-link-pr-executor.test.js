@@ -1507,6 +1507,13 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a canceled preview build closes the PR and returns the links to the pool', async () => {
+    require('../services/content-astro/pages-poll').latestDeploymentForBranch
+      .mockResolvedValueOnce({ latest_stage: { status: 'canceled' }, deployment_trigger: { metadata: { commit_hash: HEAD } } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'preview_build_canceled' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'patch_candidate' }));
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
