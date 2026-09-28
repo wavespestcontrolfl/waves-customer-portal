@@ -40,9 +40,9 @@ function bankBuilder() {
     where: jest.fn((c) => { wheres.push(c); return b; }),
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
-    // the upload's feed-history span read (min/max txn_date of feed rows)
-    min: jest.fn(() => b),
-    max: jest.fn(() => b),
+    // the upload's feed-history read (days the feed imported rows for)
+    whereBetween: jest.fn(() => b),
+    distinct: jest.fn(() => Promise.resolve([])),
     first: jest.fn((...cols) => {
       // appliedRefundTotal aggregates refund credits (raw select with the
       // refundAmount sum) — resolve the staged total

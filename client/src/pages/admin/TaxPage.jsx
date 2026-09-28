@@ -5493,7 +5493,7 @@ function BankImportTab() {
           text:
             `Imported ${r.imported} of ${r.parsed} rows (${r.duplicates} already imported, ${r.skippedTotal ?? r.skipped.length} skipped)` +
             (r.feedCovered
-              ? ` — ${r.feedCovered} row${r.feedCovered === 1 ? "" : "s"} not imported: a bank feed already covers ${r.feedCovered === 1 ? "that day" : "those days"}${r.feedLiveFrom ? ` (live from ${r.feedLiveFrom})` : ""}${r.feedHistory ? ` (imported ${r.feedHistory.from} to ${r.feedHistory.to})` : ""}`
+              ? ` — ${r.feedCovered} row${r.feedCovered === 1 ? "" : "s"} not imported: a bank feed already covers ${r.feedCovered === 1 ? "that day" : "those days"}${r.feedLiveFrom ? ` (live from ${r.feedLiveFrom})` : ""}`
               : "") +
             // skipped rows never reach staging or coverage — name each line
             // and reason so the operator can fix the statement and re-import

@@ -505,7 +505,7 @@ async function activate(itemId, overrides = {}) {
         }),
       });
       const out = await res.json();
-      expect(out).toMatchObject({ imported: 1, feedCovered: 2, feedLiveFrom: '2026-09-11', feedHistory: null, duplicates: 0 });
+      expect(out).toMatchObject({ imported: 1, feedCovered: 2, feedLiveFrom: '2026-09-11', feedDays: [], duplicates: 0 });
       const csvRows = await mockPg('bank_transactions').where({ source: 'csv' }).orderBy('txn_date');
       expect(csvRows.map(r => r.description)).toEqual(['EARLY', 'CSV row']);
 
@@ -520,11 +520,12 @@ async function activate(itemId, overrides = {}) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           accountLabel: 'capone-card', accountType: 'card', filename: 'oct.csv',
-          csv: 'Date,Description,Amount\n2026-09-13,IN FEED SPAN,-6.00\n2026-09-15,IN FEED SPAN 2,-8.00\n2026-09-16,AFTER FEED,-9.00',
+          csv: 'Date,Description,Amount\n2026-09-12,FEED DAY,-7.00\n2026-09-13,GAP DAY,-6.00\n2026-09-15,FEED DAY 2,-8.00\n2026-09-16,AFTER FEED,-9.00',
         }),
       });
-      expect(await res2.json()).toMatchObject({ imported: 1, feedCovered: 2, feedLiveFrom: null, feedHistory: { from: '2026-09-12', to: '2026-09-15' } });
-      expect((await mockPg('bank_transactions').where({ source: 'csv', description: 'AFTER FEED' })).length).toBe(1);
+      // 09-12 and 09-15 were fed (skipped); 09-13 (no feed rows) and 09-16 import
+      expect(await res2.json()).toMatchObject({ imported: 2, feedCovered: 2, feedLiveFrom: null, feedDays: ['2026-09-12', '2026-09-15'] });
+      expect((await mockPg('bank_transactions').where({ source: 'csv' }).whereIn('description', ['GAP DAY', 'AFTER FEED'])).length).toBe(2);
     } finally {
       server.close();
       delete process.env.GATE_BANK_IMPORT;

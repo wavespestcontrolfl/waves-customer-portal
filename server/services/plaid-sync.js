@@ -214,11 +214,13 @@ function publicAccount(a) {
 // Which days a bank feed covers for this label, for the CSV upload's
 // overlap guard (called under its per-label lock):
 //  - live: a connected, enabled feed covers its start date onward;
-//  - history: the span of feed rows actually imported — still covered
-//    after the feed is disabled, disconnected or its start date moved,
-//    because those rows stay in staging.
-// isCovered(date) is true when a CSV row that day would duplicate the feed.
-async function feedCoverageForLabel(conn, label) {
+//  - history: every DAY the feed actually imported rows for — still
+//    covered after the feed is disabled, disconnected or its start date
+//    moved, because those rows stay in staging. Day-level, not a min..max
+//    span: a gap between two feed periods stays open to statements. A day
+//    the feed covered with no transactions has none to duplicate either.
+// `dates` = the CSV's own dates, which bound the history read.
+async function feedCoverageForLabel(conn, label, dates = []) {
   const canonical = String(label).trim();
   const live = await conn('plaid_accounts as pa')
     .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
@@ -227,19 +229,21 @@ async function feedCoverageForLabel(conn, label) {
     .whereRaw('upper(trim(pa.account_label)) = upper(?)', [canonical])
     .min('pa.sync_from as cutoff')
     .first();
-  const hist = await conn('bank_transactions')
-    .whereRaw('upper(trim(account_label)) = upper(?)', [canonical])
-    .where({ source: 'plaid' })
-    .min('txn_date as first')
-    .max('txn_date as last')
-    .first();
   const liveFrom = toDateOnly(live && live.cutoff);
-  const histFrom = toDateOnly(hist && hist.first);
-  const histTo = toDateOnly(hist && hist.last);
+  const fedDays = new Set();
+  const sorted = [...new Set(dates)].sort();
+  if (sorted.length) {
+    const rows = await conn('bank_transactions')
+      .whereRaw('upper(trim(account_label)) = upper(?)', [canonical])
+      .where({ source: 'plaid' })
+      .whereBetween('txn_date', [sorted[0], sorted[sorted.length - 1]])
+      .distinct('txn_date');
+    for (const r of rows) fedDays.add(toDateOnly(r.txn_date));
+  }
   return {
     liveFrom,
-    history: histFrom ? { from: histFrom, to: histTo } : null,
-    isCovered: (d) => (!!liveFrom && d >= liveFrom) || (!!histFrom && d >= histFrom && d <= histTo),
+    fedDays: [...fedDays].sort(),
+    isCovered: (d) => (!!liveFrom && d >= liveFrom) || fedDays.has(d),
   };
 }
 
