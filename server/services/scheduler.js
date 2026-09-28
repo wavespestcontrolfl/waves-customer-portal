@@ -2298,6 +2298,38 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 10:30AM ET — Internal-link candidate sweep. Opens one Astro PR for
+  // patch candidates no run shipped (post-merge planning only plans; the
+  // runner only ships its own run's tasks). No-ops while
+  // SHADOW_MODE_ADD_INTERNAL_LINKS is on or a link PR is still open.
+  // Kill switch: AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP=false.
+  cron.schedule('30 10 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-candidate-sweep', async () => {
+        const executor = require('./content/internal-link-pr-executor');
+        const result = await executor.runCandidateSweep();
+        logger.info(`Internal-link candidate sweep: ${result?.status || 'unknown'}${result?.pr_url ? ` ${result.pr_url}` : ''}${result?.count ? ` (${result.count} link(s))` : ''}`);
+      });
+    } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
+  // Console has just off page one (position 8–20), ranked by impressions,
+  // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
+  // (see the 10:16 invoice follow-up block). Kill switch:
+  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  cron.schedule('23 10 * * 1', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-gsc-targets', async () => {
+        const targetPlanner = require('./content/internal-link-target-planner');
+        const result = await targetPlanner.planGscTargets();
+        logger.info(`Internal-link GSC targets: ${result?.status || 'unknown'} targets=${result?.targets ?? 0} queued=${result?.queued ?? 0} candidates=${result?.candidates ?? 0}`);
+      });
+    } catch (err) { logger.error(`Internal-link GSC target planning failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
   // the container mid-batch killed the 9am run in place on 2026-06-12 —
   // zero posts AND zero alerts, with claimable work still queued. The
@@ -3289,8 +3321,9 @@ function initScheduledJobs() {
   // human merge → completes the run (IndexNow + internal-link planning),
   // close-unmerged → fails it, and — ONLY when AUTONOMOUS_BLOG_AUTO_MERGE is
   // set (default off) — merges green + Codex-clear PRs itself, capped per
-  // tick. runExclusive: a merge and its post-merge chain must not double-run
-  // across overlapping deploy instances.
+  // tick. The internal-link lane rides the same tick and cap (open link PR →
+  // InternalLinkPrExecutor.runAutoMerge). runExclusive: a merge and its
+  // post-merge chain must not double-run across overlapping deploy instances.
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
     try {
