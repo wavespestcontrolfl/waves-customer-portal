@@ -35,7 +35,7 @@ const { dispatch } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const Ajv = require('ajv');
 const {
-  dedupeCandidates, sameCandidateKey,
+  dedupeCandidates, sameCandidateKey, deepestSharedNode,
 } = require('./pest-engine');
 const {
   CANDIDATES_A_SCHEMA,
@@ -774,8 +774,15 @@ function namedIdentityAnswer(named) {
   };
 }
 
-function climbedIdentityAnswer(candidates) {
-  const node = climbPlantLineage(candidates);
+/** An unnamed identity's group-level answer. A provider disagreement goes
+ * to the two tops' deepest SHARED node (the pest engine's "disagree ->
+ * shared node" rule) — never a confidence climb, which can pick a group
+ * only one provider supports (Codex pre-push audit on #5186 r1: queen palm
+ * vs citrus read "Looks like a palm"); otherwise the lineage climb. */
+function groupLevelIdentityAnswer(candidates, disagreementPair) {
+  const node = disagreementPair
+    ? deepestSharedNode(candidateNodeIdPlant(disagreementPair[0]), candidateNodeIdPlant(disagreementPair[1]))
+    : climbPlantLineage(candidates);
   if (!node) return { ...UNKNOWN_IDENTITY_ANSWER };
   return {
     level: node.level, node_id: node.id, wording: 'group_only', headline: `Looks like ${node.generic}`, subhead: null,
@@ -801,18 +808,17 @@ function buildIdentityResult(candidates, {
       tier: 'needs_more_evidence',
     };
   }
-  // A disagreement climbs the lineage exactly like an unnamed candidate
-  // would (the pest engine's own "disagree -> shared node" rule) — this
-  // builder already falls through to `climbPlantLineage` whenever `named`
-  // is null. Codex pre-push P1 round 2.
+  // A disagreement is never named (Codex pre-push P1 round 2); it resolves
+  // to the two providers' shared node instead.
+  const pair = disagreed ? disagreementPair : null;
   const named = identityEntryLevelAnswer(candidates[0] || null, { blockPrettySure, disagreed });
-  const { answer, entry } = named ? namedIdentityAnswer(named) : { answer: climbedIdentityAnswer(candidates), entry: null };
+  const { answer, entry } = named ? namedIdentityAnswer(named) : { answer: groupLevelIdentityAnswer(candidates, pair), entry: null };
   return {
     answer,
     entry,
     evidence: plantEvidenceFor(candidates),
     candidates: plantCandidatesBlockFor(candidates, currentMonth),
-    next_photo: plantNextPhotoFor(answer, candidates, subject, disagreed ? disagreementPair : null),
+    next_photo: plantNextPhotoFor(answer, candidates, subject, pair),
     tier: answer.level === 'entry' ? 'ai_suggestion' : 'needs_more_evidence',
   };
 }
@@ -1286,11 +1292,14 @@ function reasonsFrom(pairs) {
   return pairs.filter(([applies]) => applies).map(([, reason]) => reason);
 }
 
+/** `low_confidence` is checked per populated slot, off-catalog tops
+ * included (Codex pre-push audit on #5186 r1): a confident weed must not
+ * suppress the second read an uncertain turf answer needs. */
 function identityTriggerReasons(identity) {
-  const top = IDENTITY_SLOTS.flatMap((slot) => identity.slots[slot]).filter((c) => c.entry).sort(byConfidenceDesc)[0];
+  const lowSlot = IDENTITY_SLOTS.some((slot) => identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow());
   return reasonsFrom([
     [!identity.candidatesJson || identity.verifyMissed, 'gemini_missed'],
-    [!!top && top.confidence < escalateBelow(), 'low_confidence'],
+    [lowSlot, 'low_confidence'],
     [identity.selfContradiction, 'self_contradiction'],
   ]);
 }

@@ -91,9 +91,13 @@ empty turf answer. `internal.identity.lane` records the choice.
   wins, and otherwise Gemini's stands — never the `Math.max` of a checked
   and an unchecked number. OpenAI's cue numbers count as a check only for
   slugs it was given a numbered cue list for.
-- Self-contradiction (raw vs verified top) is checked per slot — turf,
-  weeds and host separately — so a flipped turf answer escalates even under
-  a higher-confidence weed, and a turf/weed confidence swap does not.
+- Self-contradiction (raw vs verified top) and low confidence are checked
+  per slot — turf, weeds and host separately, off-catalog tops included — so
+  a flipped or uncertain turf answer escalates even under a
+  higher-confidence weed, and a turf/weed confidence swap does not.
+- A provider disagreement in `mode: "identify"` resolves to the two tops'
+  deepest shared catalog node ("Looks like a plant" for a palm vs a citrus),
+  never to a group only one provider supports.
 - Each provider's selected conditions are ranked by confidence before the
   agreement check reads either provider's top.
 - **Off-catalog groups.** Call A and the escalation return a nullable
@@ -185,7 +189,7 @@ behavior was not attempted here; duplication is the documented trade-off
 `pest-engine.js`'s escalation combiner (many rounds of adversarial
 hardening), a Gemini/OpenAI identity disagreement doesn't climb to a shared
 lineage node for the WORKUP's `subject.plant` (it does for `mode: "identify"`,
-via `climbPlantLineage`) — the workup schema has no group-level identity slot,
+via the pest engine's `deepestSharedNode` over the two providers' tops) — the workup schema has no group-level identity slot,
 so a disagreed slot is simply left unnamed (`null`) rather than climbed. Two
 pre-push Codex rounds (both zero P0, three P1 each) caught and fixed real
 gaps: outcome-class checking was truncated to the display list, three

@@ -955,6 +955,40 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(agreed.possibilities[0].slug).toBe('fixture-cosmetic-spot');
     });
 
+    describe('pre-push audit on round 1 fixes', () => {
+      test('a disagreement resolves to the two providers\' deepest shared node, not a group only one of them supports', () => {
+        const queen = cand('fixture-queen-palm', 0.7);
+        const citrus = cand('fixture-citrus', 0.65);
+        const built = engine.buildIdentityResult([queen, citrus], {
+          subject: 'tree_shrub', currentMonth: 6, disagreed: true, disagreementPair: [queen, citrus],
+        });
+        expect(built.answer).toMatchObject({ level: 'category', node_id: 'plant', headline: 'Looks like a plant' });
+      });
+
+      test('low confidence is checked per populated slot: a confident weed does not suppress escalation for an uncertain turf', async () => {
+        queue(
+          candidatesLeg({ turf: [idItem('fixture-st-augustine', 0.6)], weeds: [idItem('fixture-nutsedge', 0.95)] }),
+          verifyLeg([['fixture-st-augustine', 0.6], ['fixture-nutsedge', 0.95]]),
+          conditionsLeg([['fixture-large-patch', 0.9]]),
+          MISS,
+        );
+        const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+        expect(dispatch).toHaveBeenCalledTimes(4);
+        expect(result.internal.identity.trigger_reasons).toEqual(['low_confidence']);
+        expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine', wording: 'likely' });
+      });
+
+      test('an off-catalog top below the threshold escalates too', async () => {
+        queue(
+          candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),
+          MISS,
+        );
+        const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'palm', mode: 'identify' });
+        expect(dispatch).toHaveBeenCalledTimes(2);
+        expect(result.internal.escalation_reasons).toEqual(['low_confidence']);
+      });
+    });
+
     describe('finding 14: self-contradiction is checked per identity slot', () => {
       test('a flipped turf answer escalates even while a weed is the global top', async () => {
         queue(
