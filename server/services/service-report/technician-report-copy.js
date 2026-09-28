@@ -499,6 +499,11 @@ const REPORT_INPUT_ACTION_TEXT = String.raw`(?:enter(?:s|ed|ing)?|typ(?:e|es|ed|
 const REPORT_ACCESS_INSTRUCTION_ACTION_TEXT = String.raw`(?:us(?:e|es|ed|ing)|${REPORT_INPUT_ACTION_TEXT}|provid(?:e|es|ed|ing)|giv(?:e|es|ing)|gave|sa(?:y|ys|id|ying))`;
 const REPORT_INPUT_ACCESS_LINK_TEXT = String.raw`(?:before|after|when|(?:and\s+)?then)`;
 const REPORT_DIRECT_ACCESS_ACTION_TEXT = String.raw`(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)`;
+const REPORT_ACCESS_CONDITION_SUBJECT_TEXT = String.raw`(?:you|we|they|the\s*technician|the\s*customer)`;
+const REPORT_ACCESS_CONDITION_FREQUENCY_TEXT = String.raw`(?:ever|still|again|now|later|occasionally|sometimes)`;
+const REPORT_ACCESS_CONDITION_AUX_TEXT = String.raw`(?:can|could|will|would|should|may|might|must|need(?:s|ed)?(?:\s+to)?|want(?:s|ed)?(?:\s+to)?|(?:have|has|had)(?:\s+to)?|(?:am|are|is|was|were)\s+able\s+to)`;
+const REPORT_ACCESS_ACTION_MANNER_TEXT = String.raw`(?:easily|readily|directly|successfully)`;
+const REPORT_CONDITIONAL_ACCESS_LINK_TEXT = String.raw`(?:(?:so(?:\s+that)?|if|when(?:ever)?|before|after|once)\s+(?:${REPORT_ACCESS_CONDITION_SUBJECT_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_FREQUENCY_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_AUX_TEXT}\s+)?|(?:and\s+)?then\s+)`;
 const REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
   String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}(?:\s+(?:with|using|via|code|pin|combo|combination)|\s*[:=])\s*(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
   'gi',
@@ -507,10 +512,18 @@ const REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
   String.raw`\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b\s+(?:was|were|is|are|has|have|had)\s+(?:been\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+by\s+(?:using|entering|typing|inputting|pressing)\s+(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
   'gi',
 );
+const REPORT_CONDITIONAL_ACCESS_CODE_RE = new RegExp(
+  String.raw`\b${REPORT_ACCESS_INSTRUCTION_ACTION_TEXT}\s+(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s+${REPORT_MEASUREMENT_UNIT_TEXT})?\s+${REPORT_CONDITIONAL_ACCESS_LINK_TEXT}(?:${REPORT_ACCESS_ACTION_MANNER_TEXT}\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`,
+  'gi',
+);
 
 function containsRawAccessDeviceCredential(text) {
   const value = String(text || '');
-  for (const pattern of [REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE, REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE]) {
+  for (const pattern of [
+    REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE,
+    REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE,
+    REPORT_CONDITIONAL_ACCESS_CODE_RE,
+  ]) {
     for (const match of value.matchAll(pattern)) {
       const digitCount = match[1].replace(/\D/g, '').length;
       if (digitCount >= 3 && digitCount <= 8) return true;
@@ -520,7 +533,7 @@ function containsRawAccessDeviceCredential(text) {
 }
 
 const REPORT_POSITIONAL_CREDENTIAL_INTERFACE_RE = new RegExp(
-  String.raw`\bus(?:e|es|ed|ing)\s+\d{3,8}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:keypad|lock\s?box)\b`,
+  String.raw`\bus(?:e|es|ed|ing)\s+(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:keypad|lock\s?box)\b`,
   'gi',
 );
 const REPORT_POSITIONAL_INTERFACE_WORK_TAIL_RE = new RegExp(
@@ -535,6 +548,8 @@ const REPORT_POSITIONAL_INTERFACE_ACCESS_TAIL_RE = new RegExp(
 function containsPositionalCredentialInterface(text) {
   const value = String(text || '');
   for (const match of value.matchAll(REPORT_POSITIONAL_CREDENTIAL_INTERFACE_RE)) {
+    const digitCount = match[1].replace(/\D/g, '').length;
+    if (digitCount < 3 || digitCount > 8) continue;
     const tail = value.slice(match.index + match[0].length).match(/^[^\n.!?]*/)?.[0] || '';
     const treatmentEvidence = REPORT_POSITIONAL_INTERFACE_WORK_TAIL_RE.test(tail);
     if (REPORT_POSITIONAL_INTERFACE_ACCESS_TAIL_RE.test(tail) || !treatmentEvidence) return true;
