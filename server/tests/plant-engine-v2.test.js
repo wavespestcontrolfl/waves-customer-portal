@@ -1078,7 +1078,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         );
         const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'palm', mode: 'identify' });
         expect(dispatch).toHaveBeenCalledTimes(2);
-        expect(result.internal.escalation_reasons).toEqual(['low_confidence']);
+        // 0.5 is too little to climb to `palms`, so the lane would answer unknown as well.
+        expect(result.internal.escalation_reasons).toEqual(['no_identity_candidate', 'low_confidence']);
       });
     });
 
@@ -1152,16 +1153,27 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.escalation_reasons).not.toContain('no_identity_candidate');
     });
 
-    test('finding 2: lane choice ranks real nameability before confidence — a verified turf at 0.85 beats an off-catalog weed guess at 0.95', () => {
+    test('finding 2: lane choice ranks each lane\'s real answer before confidence — a verified turf at 0.85 beats an off-catalog weed guess at 0.95', () => {
       const { identifyLaneFor, laneEligibilityRank } = engine._test;
       const turf = cand('fixture-st-augustine', 0.85);
-      expect(laneEligibilityRank(turf)).toBe(2); // pretty_sure
-      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.9, { verified: false }))).toBe(1); // checked, no clean cue -> likely
-      expect(laneEligibilityRank(offCatalog('some weed', 0.95))).toBe(0);
-      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.95, { uncovered: true }))).toBe(0);
-      expect(laneEligibilityRank(cand('fixture-zoysia-draft', 0.95))).toBe(0); // unapproved
-      expect(laneEligibilityRank(cand('fixture-st-augustine', 0.10))).toBe(0); // below the naming threshold
-      expect(laneEligibilityRank(turf, { disagreed: true })).toBe(0); // a disagreed slot has no answer
+      const groupedWeed = (confidence, name = 'some weed') => ({ ...offCatalog(name, confidence), groupId: 'broadleaf-weeds' });
+      expect(laneEligibilityRank([turf])).toBe(5); // pretty_sure
+      expect(laneEligibilityRank([cand('fixture-nutsedge', 0.9, { verified: false })])).toBe(4); // checked, no clean cue -> likely
+      // Unnamed, but the lineage climb reaches the group: uncovered, unapproved, disagreed, or an off-catalog guess with a valid group.
+      expect(laneEligibilityRank([cand('fixture-nutsedge', 0.95, { uncovered: true })])).toBe(2);
+      expect(laneEligibilityRank([cand('fixture-zoysia-draft', 0.95)])).toBe(2); // unapproved
+      expect(laneEligibilityRank([turf], { disagreed: true })).toBe(2); // a disagreed slot has no NAMED answer
+      expect(laneEligibilityRank([groupedWeed(0.85)])).toBe(2);
+      // Unknown: nothing resolves to a catalog node, or too little confidence to climb.
+      expect(laneEligibilityRank([offCatalog('some weed', 0.95)])).toBe(0);
+      expect(laneEligibilityRank([cand('fixture-st-augustine', 0.10)])).toBe(0);
+      // Pre-push audit on r4: a turf guess with no group (unknown) must not beat a weed guess with a valid group (a group answer).
+      expect(identifyLaneFor('lawn', { turf: [offCatalog('mystery turf', 0.95)], weeds: [groupedWeed(0.85)], host: [] })).toBe('weeds');
+      // The rank is the lane's built answer, not its top alone: a resolvable turf top too weak to climb answers unknown,
+      // and two weed guesses that climb together answer the group.
+      expect(identifyLaneFor('lawn', { turf: [cand('fixture-zoysia-draft', 0.40)], weeds: [groupedWeed(0.35), groupedWeed(0.30, 'other weed')], host: [] })).toBe('weeds');
+      // A more specific climbed answer wins: turf that only reaches the category ("a plant") yields to a weed group.
+      expect(identifyLaneFor('lawn', { turf: [cand('fixture-zoysia-draft', 0.45), { ...offCatalog('odd palm', 0.20), groupId: 'palms' }], weeds: [groupedWeed(0.31), groupedWeed(0.30, 'other weed')], host: [] })).toBe('weeds');
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [offCatalog('some weed', 0.95)], host: [] })).toBe('turf');
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.95, { uncovered: true })], host: [] })).toBe('turf');
       // Pre-push audit: a verified turf at 0.10 must not outrank a likely weed at 0.90.
@@ -1398,6 +1410,86 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(turf.entry).toMatchObject({ verdict_label: 'Lawn grass', role_label: 'Lawn grass' });
       const palm = engine.buildIdentityResult([cand('fixture-queen-palm', 0.9)], { subject: 'palm', currentMonth: 6 });
       expect(palm.entry.verdict_label).toBe('Palm');
+    });
+  });
+
+  describe('Codex #5186 round 5 regressions', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const MISS = { ok: false, reason: 'provider_error' };
+    const condItem = ([slug, confidence, elementsVisible = [1]]) => ({
+      slug, confidence, elements_visible: elementsVisible, signs_visible: [], symptoms_visible: [],
+    });
+    const queue = (...legs) => legs.forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+    // A confident, verified turf keeps the identity side quiet, so only the condition read can escalate.
+    const confidentTurfLegs = () => [
+      { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.95 }], weeds: [], host: [] } },
+      { ok: true, json: { candidates: [{ slug: 'fixture-bahia', confidence: 0.95, cues_visible: [1], cues_not_visible: [] }] } },
+    ];
+    const conditionsLeg = (items) => ({ ok: true, json: { quality: OK_QUALITY, observed_terms: ['browning'], candidates: items.map(condItem) } });
+    const cand = (slug, confidence) => {
+      const entry = catalog.getEntry(slug);
+      return {
+        slug, entry, confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: entry.group,
+      };
+    };
+
+    test('finding 1: a schema-valid condition read that selects nothing in the index still gets the second opinion', async () => {
+      queue(...confidentTurfLegs(), conditionsLeg([]), {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [condItem(['fixture-large-patch', 0.9])],
+        },
+      });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.internal.escalation_reasons).toEqual(['low_confidence']);
+      expect(result.v2.possibilities.map((p) => p.slug)).toEqual(['fixture-large-patch']);
+    });
+
+    test('finding 1: a condition read naming only slugs the index does not list escalates the same way', async () => {
+      queue(...confidentTurfLegs(), conditionsLeg([['not-in-the-index', 0.9]]), MISS);
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.internal.escalation_reasons).toEqual(['low_confidence']);
+      expect(result.v2.possibilities).toEqual([]);
+    });
+
+    test('finding 2: an entry-level identity whose deciding pair no photo can separate is needs_more_evidence, not an AI suggestion', () => {
+      const paspalum = engine.buildIdentityResult([cand('fixture-seashore-paspalum', 0.95)], { subject: 'lawn', currentMonth: 6 });
+      expect(paspalum.answer).toMatchObject({ level: 'entry', wording: 'likely' });
+      expect(paspalum.next_photo.photo_can_confirm).toBe(false);
+      expect(paspalum.tier).toBe('needs_more_evidence');
+      // A pair a photo can separate keeps the entry-level answer an AI suggestion.
+      const citrus = engine.buildIdentityResult([cand('fixture-citrus', 0.7)], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(citrus.answer).toMatchObject({ level: 'entry', wording: 'likely' });
+      expect(citrus.next_photo.photo_can_confirm).toBe(true);
+      expect(citrus.tier).toBe('ai_suggestion');
+    });
+
+    test('finding 2 (workup): a named condition whose runner-up no photo can separate is needs_more_evidence too', () => {
+      const large = possibility('fixture-large-patch', 0.9, [1]);
+      const build = (possibilities) => engine.buildWorkup({
+        subject: 'lawn', possibilities, observedTerms: ['browning'], currentMonth: 1, chips: {}, context: {}, photosCount: 3, quality: OK_QUALITY,
+      });
+      const withDrought = build([large, possibility('fixture-drought', 0.3, [1])]);
+      expect(withDrought.answer).toMatchObject({ level: 'entry', node_id: 'fixture-large-patch' });
+      expect(withDrought.settle_it).toMatchObject({ kind: 'technician', photo_can_confirm: false });
+      expect(withDrought.tier).toBe('needs_more_evidence');
+      // Alone, its own photo signature settles it.
+      const alone = build([large]);
+      expect(alone.settle_it.kind).toBe('photo');
+      expect(alone.tier).toBe('ai_suggestion');
+    });
+
+    test('finding 3: every retake prompt asks for no more views than the photos a request accepts', () => {
+      const { MAX_PHOTOS } = jest.requireActual('../utils/request-photo-validation');
+      for (const text of Object.values(engine.RETAKE_TEXT)) {
+        const views = text.slice(text.indexOf(': ') + 2).replace(/\.$/, '').split(/,\s*(?:and\s+)?/);
+        expect(views.length).toBeLessThanOrEqual(MAX_PHOTOS);
+      }
     });
   });
 });

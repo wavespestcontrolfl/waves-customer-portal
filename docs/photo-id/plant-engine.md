@@ -55,9 +55,12 @@ sections; that evidence (and the next-photo pair) is read only from the
 candidates that support the chosen answer node, never from a top candidate
 outside the group the headline names. The one identity lane is the host for `tree_shrub`/`palm`; for a
 lawn it is whichever of turf and weeds the photos populated, and when both
-are populated the one whose top candidate has the higher verified
-confidence (turf on a tie) — a photo of a weed returns the weed, not an
-empty turf answer. `internal.identity.lane` records the choice.
+are populated the one with the better answer the customer would actually
+get (`laneEligibilityRank`, read off `identitySlotAnswer` — the same
+function the builder uses: `pretty_sure` > `likely` > a subgroup > group >
+category climb > `unknown`), then the higher top confidence (turf on a
+tie) — a photo of a weed returns the weed, not an empty turf answer.
+`internal.identity.lane` records the choice.
 
 ## Photo reads that gate naming
 
@@ -218,11 +221,10 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   can answer from fires `no_identity_candidate`, so the second opinion runs
   before the customer gets an unknown.
 - **Lane choice ranks eligibility first**: when both lawn lanes are
-  populated, the lane whose top could actually be named wins
-  (`laneEligibilityRank`: checked + approved + a clean visible cue > checked
-  + approved > unchecked/uncovered/unapproved catalog > off-catalog), then
-  confidence, turf on a tie — a verified turf at 0.85 beats an off-catalog
-  weed guess at 0.95.
+  populated, the lane with the better real answer wins (see "Identify mode"
+  above; since round 5 the rank is read off the lane's built answer, not
+  its top candidate alone), then confidence, turf on a tie — a verified
+  turf at 0.85 beats an off-catalog weed guess at 0.95.
 - **A workup stands on Call C alone**: identity legs and the escalation can
   all miss and the conditions leg's symptom/possibility workup is still
   returned (`subject.plant` null); identify mode, which has no Call C, still
@@ -264,6 +266,27 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   `risk_label`, `action`/`action_label` for the identity card
   (`PLANT_ROLE_LABELS`, `PLANT_VERDICT_LABELS`; risk/action from the pest
   engine's maps).
+
+## Round 5 hardening (Codex #5186 r5, and the pre-push audit on r4)
+
+- One function, `identitySlotAnswer`, computes what an identity slot
+  answers (named, climbed, or unknown). The identity builder, identify
+  mode's lane choice and its `no_identity_candidate` trigger all read it,
+  so a turf guess with no group (unknown) never beats a weed guess that
+  climbs to its group, and the trigger fires exactly when every answerable
+  lane would say unknown.
+- A schema-valid Call C that selects nothing in the index (an empty list,
+  or only slugs the index does not list) reads as confidence 0, so
+  `low_confidence` fires and the OpenAI second opinion runs — the pest
+  engine's rule for an empty read.
+- `tier` follows the pest engine's rule in both modes (`answerTier`): only
+  an entry-level answer is an `ai_suggestion`, and not even that when the
+  pair that would settle it is one no photo can separate (identity
+  `next_photo.photo_can_confirm: false`, workup `settle_it.photo_can_confirm:
+  false`) — that answer is `needs_more_evidence`.
+- The palm retake prompt asks for three views (whole palm, oldest fronds,
+  newest fronds with the spear), matching the app's three guided palm shots
+  and the 3-photo request limit.
 
 ## What L4 must do
 

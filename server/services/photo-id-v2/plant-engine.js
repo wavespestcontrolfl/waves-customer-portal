@@ -70,7 +70,9 @@ const DEFAULT_QUALITY = Object.freeze({ usable: true, issue: 'none', shows: null
 const RETAKE_TEXT = Object.freeze({
   lawn: 'Take the three photos again in better light: the whole area, the edge where bad meets good, and a close-up.',
   tree_shrub: 'Take the three photos again in better light: the whole plant, a close-up of one leaf, and the underside of a leaf or the stem.',
-  palm: 'Take the three photos again in better light: the whole palm, the oldest fronds, the newest fronds, and the spear.',
+  // Three views, matching the app's three guided palm shots and its 3-photo
+  // limit (Codex #5186 r5 P2).
+  palm: 'Take the three photos again in better light: the whole palm, the oldest (lowest) fronds, and the newest fronds with the spear at the top.',
 });
 
 const TECHNICIAN_CONFIRM_TEXT = 'A technician confirms this on a visit.';
@@ -850,6 +852,15 @@ function namingGateFor(quality = {}) {
   return { unusable, blocked };
 }
 
+/** The pest engine's tier rule (its contract delta 2026-09-26 #3): only an
+ * entry-level answer is an `ai_suggestion`, and not even that when the pair
+ * that would settle it is one no photo can separate — the card must not say
+ * "AI suggestion" beside "a photo can't confirm this" (Codex #5186 r5 P2).
+ * `settling` is the identity's `next_photo` or the workup's `settle_it`. */
+function answerTier(answer, settling) {
+  return answer.level === 'entry' && settling?.photo_can_confirm !== false ? 'ai_suggestion' : 'needs_more_evidence';
+}
+
 const UNKNOWN_IDENTITY_ANSWER = Object.freeze({
   level: 'unknown', node_id: null, wording: 'unknown', headline: UNUSABLE_HEADLINE, subhead: null,
 });
@@ -913,6 +924,21 @@ function groupLevelIdentityAnswer(candidates, disagreementPair) {
   };
 }
 
+/** The answer ONE identity slot's candidates yield under that slot's own
+ * escalation flags: the entry-level name when the naming gate passes, else
+ * the group-level climb (a disagreement's shared node), else unknown. The
+ * builder, identify mode's lane choice and its `no_identity_candidate`
+ * trigger all read this, so the lane chosen is the lane with the better
+ * answer the customer would actually get. */
+function identitySlotAnswer(candidates, { blockPrettySure = false, disagreed = false, disagreementPair = null } = {}) {
+  // A disagreement is never named (Codex pre-push P1 round 2); it resolves
+  // to the two providers' shared node instead.
+  const pair = disagreed ? disagreementPair : null;
+  const named = identityEntryLevelAnswer(candidates[0] || null, { blockPrettySure, disagreed });
+  const { answer, entry } = named ? namedIdentityAnswer(named) : { answer: groupLevelIdentityAnswer(candidates, pair), entry: null };
+  return { answer, entry, pair };
+}
+
 /** Pure builder for `mode: "identify"` — Layer A only. `candidates` is the
  * final, already-combined (Gemini + OpenAI when escalated), ranked
  * identity-candidate list for ONE identity slot (turf, a weed, or a host
@@ -932,18 +958,15 @@ function buildIdentityResult(candidates, {
       tier: 'needs_more_evidence',
     };
   }
-  // A disagreement is never named (Codex pre-push P1 round 2); it resolves
-  // to the two providers' shared node instead.
-  const pair = disagreed ? disagreementPair : null;
-  const named = identityEntryLevelAnswer(candidates[0] || null, { blockPrettySure, disagreed });
-  const { answer, entry } = named ? namedIdentityAnswer(named) : { answer: groupLevelIdentityAnswer(candidates, pair), entry: null };
+  const { answer, entry, pair } = identitySlotAnswer(candidates, { blockPrettySure, disagreed, disagreementPair });
+  const nextPhoto = plantNextPhotoFor(answer, candidates, subject, pair);
   return {
     answer,
     entry,
     evidence: plantEvidenceFor(plantCandidatesSupporting(candidates, answer.level, answer.node_id)),
     candidates: plantCandidatesBlockFor(candidates, currentMonth),
-    next_photo: plantNextPhotoFor(answer, candidates, subject, pair),
-    tier: answer.level === 'entry' ? 'ai_suggestion' : 'needs_more_evidence',
+    next_photo: nextPhoto,
+    tier: answerTier(answer, nextPhoto),
   };
 }
 
@@ -1040,19 +1063,20 @@ function buildWorkup(ctx) {
   const namedAnswer = gate.blocked ? null : namedAnswerFor(allApprovedPossibilities, allApprovedPossibilities[0] || null, conditionFlags);
   const answer = workupAnswerFor(namedAnswer, gate.unusable ? [] : (ctx.observedTerms || []), subject);
   const { hint: nextStepHint, referral } = nextStepHintFor(approvedPossibilities);
+  const settleIt = settleItFor(approvedPossibilities, subject);
 
   return {
     version: 2,
     kind: 'workup',
     catalog_version: catalog.CATALOG_VERSION,
     subject_type: subject,
-    tier: answer.level === 'entry' ? 'ai_suggestion' : 'needs_more_evidence',
+    tier: answerTier(answer, settleIt),
     subject: { plant, weeds },
     answer,
     observed: observedFor(approvedPossibilities),
     possibilities: approvedPossibilities.map(possibilityBlockFor),
     evidence: { photos: photosCount, chips, account: accountTurf ? { grass_type: accountTurf.slug } : {} },
-    settle_it: settleItFor(approvedPossibilities, subject),
+    settle_it: settleIt,
     next_step_hint: nextStepHint,
     referral,
     quality: { ...quality },
@@ -1462,11 +1486,12 @@ function identifyLaneSlotsFor(subject) {
  * not skip the second opinion and hand the customer an unknown. */
 function identityTriggerReasons(identity, run) {
   const lowSlot = IDENTITY_SLOTS.some((slot) => identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow());
-  // A lane whose candidates cannot resolve to any catalog node (an off-catalog
-  // guess with no valid group) is as empty as no candidate at all — the
-  // customer would get `unknown` without the second read (Codex #5186 r4 P1).
+  // A lane whose candidates answer only `unknown` (an off-catalog guess with
+  // no valid group, or nothing that climbs) is as empty as no candidate at
+  // all — the customer would get `unknown` without the second read (Codex
+  // #5186 r4 P1).
   const noLaneCandidate = run.mode === 'identify' && !!identity.candidatesJson
-    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].every((c) => !candidateNodeIdPlant(c)));
+    && identifyLaneSlotsFor(run.subject).every((slot) => identitySlotAnswer(identity.slots[slot]).answer.level === 'unknown');
   return reasonsFrom([
     [!identity.candidatesJson || identity.verifyMissed, 'gemini_missed'],
     [noLaneCandidate, 'no_identity_candidate'],
@@ -1477,12 +1502,15 @@ function identityTriggerReasons(identity, run) {
 
 /** Includes the contract's new trigger: the top two possibilities read
  * different outcome classes (no_cure/regulated vs. the rest — potassium
- * deficiency vs. lethal bronzing, drought vs. chinch bug). */
+ * deficiency vs. lethal bronzing, drought vs. chinch bug). A schema-valid
+ * Call C with no possibility in the index (an empty selection, or only slugs
+ * the index does not list) reads as confidence 0, so the second opinion
+ * still runs — the pest engine's rule for an empty read (Codex #5186 r5 P1). */
 function conditionTriggerReasons(conditions) {
   const [first, second] = conditions.possibilities;
   return reasonsFrom([
     [conditions.index.length > 0 && !conditions.json, 'gemini_missed'],
-    [!!first && first.confidence < escalateBelow(), 'low_confidence'],
+    [!!conditions.json && (first?.confidence ?? 0) < escalateBelow(), 'low_confidence'],
     [!!second && outcomeClassOf(first.sig) !== outcomeClassOf(second.sig), 'different_outcome_classes'],
   ]);
 }
@@ -1579,30 +1607,34 @@ async function runEscalation(run, identity, conditions) {
   };
 }
 
-/** How far a lane's top could actually be NAMED (Codex #5186 r2 P2, and the
- * pre-push audit on it): the real answer the builder would give that top
- * under the lane's own escalation flags — 2 = `pretty_sure`, 1 = `likely`,
- * 0 = not nameable (off-catalog, uncovered, unapproved, disagreed, or below
- * the 0.55 threshold). A verified turf at 0.10 therefore ranks below a
- * checked weed at 0.90 with no visible cue (a `likely`). */
-function laneEligibilityRank(top, flags = {}) {
-  const named = identityEntryLevelAnswer(top || null, flags);
-  if (!named) return 0;
-  return named.wording === 'pretty_sure' ? 2 : 1;
+// A group-level answer's rank by how specific its rung is.
+const CLIMBED_ANSWER_RANK = Object.freeze({ subgroup: 3, group: 2, category: 1 });
+
+/** How good an answer a lane would actually give (Codex #5186 r2 P2 and the
+ * pre-push audits on it) — ranked off the lane's real built answer
+ * (`identitySlotAnswer`), never an estimate of it: `pretty_sure` 5, `likely`
+ * 4, then a climbed answer by rung (subgroup 3, group 2, category 1), and
+ * `unknown` 0. A verified turf at 0.10 (nothing to climb) ranks below a
+ * checked weed at 0.90 with no visible cue (a `likely`), and a turf guess
+ * with no group ranks below a weed guess with one. */
+function laneEligibilityRank(candidates, flags = {}) {
+  const { answer } = identitySlotAnswer(candidates, flags);
+  if (answer.level === 'entry') return answer.wording === 'pretty_sure' ? 5 : 4;
+  return CLIMBED_ANSWER_RANK[answer.level] || 0;
 }
 
 /** Identify mode's one identity lane (Codex #5186 r1 P1): the host for
  * tree_shrub/palm; for a lawn, whichever of turf/weeds is populated; when
- * both are, the lane whose top is more nameable (`laneEligibilityRank`) — a
+ * both are, the lane with the better real answer (`laneEligibilityRank`) — a
  * verified turf at 0.85 beats an off-catalog weed guess at 0.95 (Codex
- * #5186 r2 P2) — then the higher confidence, turf on a tie. */
+ * #5186 r2 P2) — then the higher top confidence, turf on a tie. */
 function identifyLaneFor(subject, slots, identityFlags = {}) {
   if (subject !== 'lawn') return 'host';
   const [turfTop] = slots.turf;
   const [weedTop] = slots.weeds;
   if (!weedTop) return 'turf';
   if (!turfTop) return 'weeds';
-  const rankGap = laneEligibilityRank(weedTop, identityFlags.weeds) - laneEligibilityRank(turfTop, identityFlags.turf);
+  const rankGap = laneEligibilityRank(slots.weeds, identityFlags.weeds) - laneEligibilityRank(slots.turf, identityFlags.turf);
   if (rankGap !== 0) return rankGap > 0 ? 'weeds' : 'turf';
   return weedTop.confidence > turfTop.confidence ? 'weeds' : 'turf';
 }
