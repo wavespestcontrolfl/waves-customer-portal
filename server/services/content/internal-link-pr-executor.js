@@ -1603,7 +1603,15 @@ function bumpFreshnessLine(body, day) {
     const bumped = block.replace(re, (_m, prefix, quote) => `${prefix}${quote}${value(day)}${quote}`);
     return bumped + String(body).slice(block.length);
   }
-  return body;
+  // Neither field present (legacy pages): add the page format's own field
+  // just before the closing fence — v2 blog frontmatter (`published:`)
+  // carries `updated`; v1 blog, services and locations carry `modified`
+  // (the astro blog schema maps updated → modified either way).
+  const field = /^published:/m.test(block) ? FRESHNESS_FIELDS[1] : FRESHNESS_FIELDS[0];
+  const line = field.key === 'modified' ? `modified: "${field.value(day)}"` : `updated: ${field.value(day)}`;
+  const closeAt = block.lastIndexOf('---');
+  const eol = block.includes('\r\n') ? '\r\n' : '\n';
+  return block.slice(0, closeAt) + line + eol + block.slice(closeAt) + String(body).slice(block.length);
 }
 
 // Undo a freshness bump on `head` by restoring base's line for that field —
@@ -1613,13 +1621,19 @@ function restoreFreshnessLine(head, base) {
   const headBlock = frontmatterBlock(head);
   const baseBlock = frontmatterBlock(base);
   if (!headBlock || !baseBlock) return head;
+  const wellFormed = (v) => /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/.test(v);
   for (const { key } of FRESHNESS_FIELDS) {
     const re = freshnessLineRe(key);
     const h = re.exec(headBlock);
     const b = re.exec(baseBlock);
-    if (!h || !b || h[0] === b[0]) continue;
-    if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/.test(h[3])) return head;
-    return headBlock.replace(re, () => b[0]) + String(head).slice(headBlock.length);
+    if (!h || (b && h[0] === b[0])) continue;
+    if (!wellFormed(h[3])) return head;
+    // Bumped in place → restore base's line; inserted (base had none) →
+    // drop head's line and its line break.
+    const restored = b
+      ? headBlock.replace(re, () => b[0])
+      : headBlock.replace(new RegExp(`${re.source}\\r?\\n`, 'm'), '');
+    return restored + String(head).slice(headBlock.length);
   }
   return head;
 }
@@ -1870,6 +1884,10 @@ async function requestCodexReview(pr, headSha, selected) {
 module.exports = new InternalLinkPrExecutor();
 module.exports.InternalLinkPrExecutor = InternalLinkPrExecutor;
 module.exports.REVIEWER_REJECTION_PREFIXES = REVIEWER_REJECTION_PREFIXES;
+// A load failure that is not a confirmed-missing file (rate limit, network,
+// 5xx) — callers retry instead of treating it as a verdict.
+module.exports.isTransientLoadFailure = (reason) => !!reason && !MISSING_FILE_RE.test(String(reason))
+  && /^(?!internal_link_|rendered_link_|frontmatter_)/.test(String(reason));
 module.exports._internals = {
   bumpFreshnessLine,
   restoreFreshnessLine,

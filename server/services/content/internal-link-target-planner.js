@@ -85,7 +85,9 @@ async function planGscTargets({
   minImpressions = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_MIN_IMPRESSIONS', 100),
 } = {}) {
   if (!enabled()) return { status: 'disabled' };
-  const pages = await strikingDistancePages({ limit, minImpressions });
+  // Over-fetch: Search Console keeps impressions for deleted/renamed URLs,
+  // so the cap applies AFTER dropping pages no longer in the corpus.
+  const pages = await strikingDistancePages({ limit: limit * 3, minImpressions });
   if (!pages.length) return { status: 'no_targets', targets: 0, queued: 0, candidates: 0 };
   const corpus = await loadCorpus();
   if (!corpus.length) return { status: 'no_corpus', targets: pages.length, queued: 0, candidates: 0 };
@@ -94,12 +96,15 @@ async function planGscTargets({
   const excludeSource = await require('./protected-pages').protectedSourcePredicate({ db });
   const taskIds = [];
   const summary = [];
+  let planned = 0;
   for (const page of pages) {
+    if (planned >= limit) break;
     const target = targetFacts(page.url, corpus);
     if (!target) {
       summary.push({ url: page.url, queued: 0, reason: 'not_in_corpus' });
       continue;
     }
+    planned += 1;
     const tasks = planner.planForTarget(target, { corpus, excludeSource });
     const ids = [];
     for (const task of tasks) {
@@ -119,8 +124,8 @@ async function planGscTargets({
     const dryRun = await executor.runDryRun({ taskIds, limit: taskIds.length });
     candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
   }
-  logger.info(`[internal-link-target-planner] ${pages.length} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
-  return { status: 'ok', targets: pages.length, queued: taskIds.length, candidates, summary };
+  logger.info(`[internal-link-target-planner] ${planned} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
+  return { status: 'ok', targets: planned, queued: taskIds.length, candidates, summary };
 }
 
 module.exports = { planGscTargets, strikingDistancePages, targetFacts };

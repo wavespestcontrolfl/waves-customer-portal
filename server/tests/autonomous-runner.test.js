@@ -2413,6 +2413,33 @@ describe('runNext internal-link shadow behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
+  test('a dry-run that only hit transient load failures releases the claim for retry', async () => {
+    const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    try {
+      const claimedAt = new Date('2026-05-23T05:10:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_links_transient', action_type: 'add_internal_links', claimed_at: claimedAt }),
+        complete: jest.fn(), pendingReview: jest.fn(), skip: jest.fn(),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'add_internal_links', page_type: 'internal-link', target_url: '/x/', target_keyword: 'x' }) };
+      const linkPlanner = { planForTarget: jest.fn().mockReturnValue([{ source_file: 's.md', target_url: '/x/', anchor_text: 'x' }]) };
+      const internalLinkExecutor = {
+        runDryRun: jest.fn().mockResolvedValue({ count: 1, results: [{ task_id: 'run_1', status: 'failed', failure_reason: 'GitHub 502' }] }),
+        isTransientLoadFailure: (r) => r === 'GitHub 502',
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
+      const result = await runner.runNext();
+      expect(result.outcome).toBe('deferred_gate_retry');
+      expect(queue.release).toHaveBeenCalledWith('opp_links_transient', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+      else process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = previousShadow;
+    }
+  });
+
   test('an unshadowed run plans candidates and completes; it never opens or waits on a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';

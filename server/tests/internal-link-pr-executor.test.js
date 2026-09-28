@@ -1502,8 +1502,13 @@ describe('internal-link freshness bump', () => {
     expect(bumpFreshnessLine(svc, '2026-09-27')).toBe('---\ntitle: "T"\nmodified: "2026-09-27T12:00:00"\n---\nBody\n');
     const blog = '---\ntitle: T\nupdated: 2026-01-02\n---\nBody\n';
     expect(bumpFreshnessLine(blog, '2026-09-27')).toBe('---\ntitle: T\nupdated: 2026-09-27\n---\nBody\n');
-    const none = '---\ntitle: T\n---\nBody\n';
-    expect(bumpFreshnessLine(none, '2026-09-27')).toBe(none);
+    // Absent: inserted in the page format's own field, and restorable.
+    const v1 = '---\ntitle: T\ndate: 2025-01-01\n---\nBody\n';
+    expect(bumpFreshnessLine(v1, '2026-09-27')).toBe('---\ntitle: T\ndate: 2025-01-01\nmodified: "2026-09-27T12:00:00"\n---\nBody\n');
+    expect(restoreFreshnessLine(bumpFreshnessLine(v1, '2026-09-27'), v1)).toBe(v1);
+    const v2 = '---\ntitle: T\npublished: 2025-01-01\n---\nBody\n';
+    expect(bumpFreshnessLine(v2, '2026-09-27')).toBe('---\ntitle: T\npublished: 2025-01-01\nupdated: 2026-09-27\n---\nBody\n');
+    expect(restoreFreshnessLine(bumpFreshnessLine(v2, '2026-09-27'), v2)).toBe(v2);
   });
   test('restore only undoes a well-formed date on the freshness line', () => {
     const base = '---\nmodified: "2026-06-19T00:00:00"\n---\nB\n';

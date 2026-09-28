@@ -471,6 +471,8 @@ class AutonomousRunner {
       const finalized = await finalize(run, t0, result.patch);
       if (result.claim === 'complete') {
         await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
+      } else if (result.claim === 'release') {
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
       } else if (result.claim === 'skip') {
         await this._skipClaimOrThrow(queue, opp.id, result.patch.skip_reason, { claimToken });
       } else if (result.patch.outcome === 'skipped_shadow_mode') {
@@ -2519,6 +2521,23 @@ class AutonomousRunner {
     const skipped = Number((dryRunResult?.results || []).filter((result) => result.status === 'skipped').length);
     const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
     const summary = `queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`;
+    // No candidate because GitHub/network was down (not because the links
+    // don't fit): release the claim so the opportunity is retried, rather
+    // than closing it as having no candidates. The failed rows are
+    // retryable and get re-queued when it is planned again.
+    const transient = (dryRunResult?.results || []).some((r) => r.status === 'failed' && executor?.isTransientLoadFailure?.(r.failure_reason));
+    if (!run.shadow_mode && candidates === 0 && transient) {
+      return {
+        claim: 'release',
+        notes: `internal_links_transient_failure:${summary}`,
+        patch: {
+          outcome: 'deferred_gate_retry',
+          skip_reason: 'internal_links_transient_failure',
+          link_tasks_queued: taskIds.length,
+          reviewer_notes: `Dry-run hit a transient load failure; opportunity released for retry (${summary}).`,
+        },
+      };
+    }
     // Live mode: the run's job ends at planning. Shipping belongs to ONE
     // path — the daily candidate sweep opens the PR and the autonomous PR
     // poller merges it (InternalLinkPrExecutor) — so a run never waits on a
@@ -3617,9 +3636,10 @@ class AutonomousRunner {
       const t3 = Date.now();
       try {
         const corpus = await this._loadAstroCorpus({ required: false });
+        const excludeSource = await getProtectedPages()?.protectedSourcePredicate?.({ db });
         const tasks = planner.planForTarget(
           { url: out.published_url, keyword: brief.target_keyword, city: brief.city, service: brief.service },
-          { corpus, opportunityId: run.opportunity_id }
+          { corpus, opportunityId: run.opportunity_id, excludeSource }
         );
         if (!tasks.length) {
           // No keyword in the log line — brief.target_keyword can carry the
