@@ -48,20 +48,36 @@ describe('buildRainExpectation', () => {
     expect(out.lines[0]).toMatch(/can vary/);
   });
 
-  it('adds the rain-fast clause ONLY when a product supplies rainfastMinutes (synthetic — prod catalog is NULL today)', () => {
+  it('states a specific rain-fast NUMBER only when a product supplies rainfastMinutes (synthetic — prod catalog is NULL today)', () => {
     const withRainfast = buildRainExpectation({
       weekWeather: { rainInches: 0.5, rainConfidence: null },
       products: [{ rainfastMinutes: 30 }],
       serviceMonth: 2,
     });
     expect(withRainfast.lines[0]).toMatch(/rain-fast once dry \(about 30 min, per the label\)/);
+  });
 
+  // Owner ruling 2026-09-28: never a hard-coded drying time not sourced
+  // from the catalog — but the clause still states the plain, generic
+  // "once it has dried" fact (no invented number) when products were
+  // applied and the catalog has no rainfast_minutes for any of them.
+  it('falls back to the generic "once it has dried" fact (no number) when no product supplies rainfastMinutes', () => {
     const withoutRainfast = buildRainExpectation({
       weekWeather: { rainInches: 0.5, rainConfidence: null },
       products: [{ rainfastMinutes: null }],
       serviceMonth: 2,
     });
-    expect(withoutRainfast.lines[0]).not.toMatch(/rain-fast/);
+    expect(withoutRainfast.lines[0]).toMatch(/rain-fast once it has dried\./);
+    expect(withoutRainfast.lines[0]).not.toMatch(/rain-fast once dry \(about/);
+  });
+
+  it('adds no rain-fast clause at all when no products were applied (nothing to claim rain-fast about)', () => {
+    const out = buildRainExpectation({
+      weekWeather: { rainInches: 0.5, rainConfidence: null },
+      products: [],
+      serviceMonth: 2,
+    });
+    expect(out.lines[0]).not.toMatch(/rain-fast/);
   });
 
   it('formats a >=60min rainfast time in hours', () => {
@@ -213,40 +229,66 @@ describe('buildSpiderExpectation', () => {
     expect(buildSpiderExpectation({ actionLabels: ['Treated exterior perimeter band'], applications: [{ targets: ['ants'] }] })).toBeNull();
   });
 
-  it('triggers on a completed eave/web action label — renders FIXED wording, never the raw label', () => {
+  // Owner ruling 2026-09-28: wording must match the evidence. A completed
+  // eave/web/soffit action proves SWEEPING happened — never treated on its
+  // own as proof a residual was applied. Three combos below.
+
+  it('combo 1 — action matched, NO spider-labeled residual applied: de-web wording only, no treatment claim', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
       applications: [],
     });
     expect(out.headline).toBe('Spiders');
-    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    // No treatment/residual claim anywhere in the card.
+    expect(out.whatWeDid).not.toMatch(/treated|residual/i);
+    expect(out.expectation).not.toMatch(/residual we applied/i);
+    expect(out.expectation).toMatch(/New webs can appear within days/);
+    expect(out.nextStep).toMatch(/keeps coming back/);
     // The raw protocol-action label text never leaks into the customer copy
     // (owner ruling 2026-09-28 — it can carry internal wording/product hints).
     expect(out.whatWeDid).not.toMatch(/Swept eaves, window frames, door frames, and lanai/);
-    expect(out.expectation).toMatch(/thin out over about two weeks/);
-    expect(out.nextStep).toBeTruthy();
   });
 
-  it('a differently-worded eave/web action label still renders the SAME fixed sentence, not its own text', () => {
+  it('combo 1 (internal-looking label): a differently-worded eave/web action still renders the SAME fixed de-web sentence, not its own text', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
       applications: [],
     });
-    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
   });
 
-  it('triggers on a spider-targeted product with no matching action label', () => {
+  it('combo 2 — spider-labeled residual applied, NO matching action label: treatment-only wording (unchanged fallback)', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Treated exterior perimeter band'],
       applications: [{ targets: ['spiders'] }],
     });
     expect(out.whatWeDid).toBe('We applied a residual treatment labeled for spiders during this visit.');
+    expect(out.expectation).toMatch(/residual we applied/i);
+    expect(out.expectation).toMatch(/thin out over about two weeks/);
   });
 
-  it('never guarantees a result', () => {
-    const out = buildSpiderExpectation({ actionLabels: ['Swept eaves, window frames, door frames, and lanai'], applications: [] });
-    expect(out.expectation + out.nextStep).not.toMatch(/guarantee/i);
+  it('combo 3 — BOTH action matched AND residual applied: combined treatment wording', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
+      applications: [{ targets: ['spiders'] }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.expectation).toMatch(/residual we applied/i);
+    expect(out.expectation).toMatch(/thin out over about two weeks/);
+    expect(out.nextStep).toMatch(/come take another look/);
+  });
+
+  it('never guarantees a result, in any combo', () => {
+    const combos = [
+      buildSpiderExpectation({ actionLabels: ['Swept eaves, window frames, door frames, and lanai'], applications: [] }),
+      buildSpiderExpectation({ actionLabels: [], applications: [{ targets: ['spiders'] }] }),
+      buildSpiderExpectation({ actionLabels: ['Swept eaves, window frames, door frames, and lanai'], applications: [{ targets: ['spiders'] }] }),
+    ];
+    for (const out of combos) {
+      expect(out.expectation + out.nextStep).not.toMatch(/guarantee/i);
+    }
   });
 });
 

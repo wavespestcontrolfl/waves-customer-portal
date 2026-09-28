@@ -726,6 +726,13 @@ function structuredActionScope(service = {}) {
 // Report V2 spider expectation (GATE_PEST_REPORT_EXPECTATIONS): a dedicated
 // list rather than reusing structuredActionScope's scope-only booleans,
 // which discard the label text this needs.
+//
+// SERVER-INTERNAL ONLY (codex P0 2026-09-28): labels are tech/protocol
+// vocabulary and must never reach the public /api/reports/:token/data
+// payload. reports-public.js calls this directly on `service` for the
+// gated pestReportV2.expectations builder and does NOT attach the result
+// to the returned report data — buildReportV1Data's return object carries
+// no protocolActionLabels field, gate on or off.
 function completedProtocolActionLabels(service = {}) {
   const structured = parseJsonObject(service.structured_notes);
   const entries = []
@@ -5552,10 +5559,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
     // tree & shrub already consume it inside their own V2 builders.
     customerConcern: structuredCustomerConcern(structured),
-    // Raw completed-action labels — feeds the Pest V2 spider expectation
-    // (GATE_PEST_REPORT_EXPECTATIONS; reports-public.js passes it to
-    // buildPestReportV2). Cheap and line-agnostic; computed unconditionally.
-    protocolActionLabels: completedProtocolActionLabels(service),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {

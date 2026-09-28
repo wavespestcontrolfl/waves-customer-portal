@@ -69,6 +69,75 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
+`GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
+call time, no redeploy to flip): on the pest-line service-report payload
+(`/api/reports/:token/data` and the PDF, which share `buildReportV1Data` /
+`reports-public.js`'s pest V2 composition), gate on adds an optional
+`data.pestReportV2.expectations` object with up to three keys — `rain`,
+`spiders`, `whatToExpect` — each present only when that block has something
+to say; gate off, or nothing to say, omits the whole `expectations` key
+(same always-present-but-nullable convention `defense` / `aiSummary` /
+`forecast` already use on `pestReportV2`; server/services/service-report/
+pest-report-expectations.js is the pure builder). `rain: { lines: [string] }`
+— one line stating the trailing 7-day rainfall at the property
+(`application-conditions.js` `fetchServiceWeekWeather`; low-confidence
+city-collective readings are hedged in the wording, never presented as an
+exact number), then, when at least one product was applied, a rain-fast
+clause: the plain, generic, product-agnostic fact ("...rain-fast once it has
+dried.") with NO invented duration, UPGRADED to a specific time ("...rain-fast
+once dry (about N, per the label).") only when `products_catalog.rainfast_minutes`
+is actually set for an applied product — NULL for every current pest product
+as of 2026-09-27, so the number-bearing form rarely fires against real data
+today; never a hard-coded drying time that isn't sourced from the catalog.
+Then, **live view only**, a forward-looking heavy-rain caveat
+sourced from the NWS forecast (`weather-forecast.js`
+`getDailyRainOutlookBounded`) — `reports-public.js` computes that forecast
+signal only when `mode === 'live'` and always passes `false` for the PDF and
+any other static render, so the PDF/static payload's `rain.lines` can only
+ever be the trailing-week fact + optional rainfast clause, never the
+forecast sentence; a second line may add an ants-after-rain expectation, but
+ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
+rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
+the higher 1" bar) or the same live-only forecast signal fires — never on
+the calendar month alone, and never when there is no rain data at all.
+`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+non-guaranteeing acknowledgment card that appears only when the visit
+recorded a completed eave/web/soffit protocol action or a spider-targeted
+applied product. `whatWeDid` / `expectation` / `nextStep` are ALWAYS one of
+three fixed combinations chosen by the underlying EVIDENCE (owner ruling
+2026-09-28 — wording must match evidence: a completed sweep action proves
+sweeping happened, never that a residual was applied there; only a
+spider-targeted applied product proves that): (1) action matched, no
+spider-labeled residual applied → de-web wording only, no treatment claim
+("We knocked down webs around the eaves and entry points.") and a
+de-web-only expectation that never says "the residual we applied"; (2) a
+spider-labeled residual applied, no matching action → the unchanged
+treatment-only fallback ("We applied a residual treatment labeled for
+spiders during this visit."); (3) both → combined wording ("We knocked down
+webs and treated the eaves and entry points where spiders build."). None of
+the three ever interpolates a raw completed protocol-action label. Raw
+protocol-action labels
+(`server/services/service-report/report-data.js`'s
+`completedProtocolActionLabels`) are internal tech/protocol vocabulary and
+are SERVER-INTERNAL ONLY: `reports-public.js` computes them directly from
+the DB-joined `service` row for this one gated builder call and they are
+never attached to `data`/the object `buildReportV1Data` returns, so no
+public report payload — `/data`, the PDF, `/map.svg`, or any other render —
+carries a `protocolActionLabels` field or any completed-action label text,
+regardless of the gate. `whatToExpect: { lines: [string] }` — up to 3
+de-duplicated, honest lines keyed to the product class of what was applied
+(`products_catalog.moa_group` / `active_ingredient` / `category`: non-repellent,
+roach gel bait, pyrethroid barrier, IGR), never a "guarantee" or
+"eliminate" claim (screened through the existing `validateCustomerCopy`
+banned-copy guard). The same rain + what-to-expect facts (never the spider
+block, never the live forecast clause) also feed an `EXPECTATIONS` section
+into the AI report writer's grounding context
+(`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
+so generated copy never contradicts the deterministic blocks — that
+grounding text is a prompt input, not part of any customer-fetchable
+payload.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may

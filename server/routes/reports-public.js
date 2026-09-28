@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -577,7 +577,11 @@ async function buildServiceReportV1ResponseData(service, token, {
         // term here is what makes the suppression killable.
         suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
         applications: data.applications || [],
-        actionLabels: data.protocolActionLabels || [],
+        // Server-internal only (codex P0 2026-09-28) — computed directly
+        // from `service`, never read off `data`/the returned report
+        // payload: a raw completed-action label must never reach the
+        // public /api/reports/:token/data response, gate on or off.
+        actionLabels: completedProtocolActionLabels(service),
         weekWeather,
         forecastHeavyRain,
         serviceMonth: monthFromDate(service.service_date),

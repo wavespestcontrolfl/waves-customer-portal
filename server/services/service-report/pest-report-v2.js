@@ -223,8 +223,11 @@ function buildPestReportV2({
   // GATE_PEST_REPORT_EXPECTATIONS): applications carries the same shape
   // report-data.js's `data.applications` already builds
   // ({ product: { active_ingredient, category, moa_group, rainfast_minutes },
-  // targets: [...] }); actionLabels is data.protocolActionLabels;
-  // weekWeather is application-conditions.js's fetchServiceWeekWeather
+  // targets: [...] }); actionLabels is report-data.js's
+  // completedProtocolActionLabels(service) — SERVER-INTERNAL ONLY (raw
+  // protocol-action labels never reach the public report payload; the
+  // caller computes this directly from `service`, never from returned
+  // report data); weekWeather is application-conditions.js's fetchServiceWeekWeather
   // result ({ rainInches, rainConfidence }); forecastHeavyRain is LIVE VIEW
   // ONLY (see pest-report-expectations.js) and must be false/omitted for
   // any PDF/static render; serviceMonth is 1–12.

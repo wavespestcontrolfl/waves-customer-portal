@@ -13,11 +13,13 @@
  * banned-copy guard (validateCustomerCopy) before it can render.
  *
  * Data-driven note: as of 2026-09-27 `products_catalog.rainfast_minutes` is
- * NULL for every currently-active pest product, so the "rain-fast once dry"
- * clause below almost never fires against real data today — it stays in the
- * SAME function (rather than a separate helper) because it is a natural
- * extension of the one rain sentence, and it is exercised by a synthetic-data
- * test (pest-report-expectations.test.js) rather than left as dead code.
+ * NULL for every currently-active pest product — the rain-fast clause below
+ * always states the plain, generic "once it has dried" fact when products
+ * were applied, and adds a SPECIFIC time number only when the catalog
+ * actually has one for an applied product (owner ruling 2026-09-28: never a
+ * hard-coded drying time that isn't sourced from label data). The
+ * number-bearing branch is exercised by a synthetic-data test
+ * (pest-report-expectations.test.js) since prod data doesn't reach it today.
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
@@ -73,6 +75,27 @@ function antsRainThresholdInches(rainConfidence, rainySeason) {
   return rainySeason ? 0.5 : 1;
 }
 
+// Rain-fast clause text — owner ruling 2026-09-28: a specific TIME NUMBER is
+// rendered ONLY when the catalog actually has rainfast_minutes for an
+// applied product — never a hard-coded drying time (e.g. "about 2 hours")
+// that isn't sourced from label data. Without a sourced number, still states
+// the plain, generic, product-agnostic fact ("once it has dried") with no
+// invented duration. Returns '' when no products were applied at all (there
+// is then nothing to call "your treatment"). Extracted from
+// buildRainExpectation to keep the two independent decisions (the rain-fact
+// sentence vs. the rain-fast clause) from compounding into one function's
+// branch count.
+function rainfastClauseText(products) {
+  if (!products.length) return '';
+  const rainfastMinutes = products
+    .map((p) => finiteOrNull(p?.rainfastMinutes))
+    .find((n) => n != null && n > 0);
+  const rainfastLabel = rainfastMinutes != null ? formatRainfastMinutes(rainfastMinutes) : null;
+  return rainfastLabel
+    ? ` Your treatment is rain-fast once dry (about ${rainfastLabel}, per the label).`
+    : ' Your treatment is rain-fast once it has dried.';
+}
+
 // ── Rain and your treatment ──────────────────────────────────────────────
 // weekWeather: { rainInches, rainConfidence } from application-conditions.js
 //   fetchServiceWeekWeather (7-day trailing window ending on the service date).
@@ -102,15 +125,7 @@ function buildRainExpectation({
       ? `Rain gauges for your area suggest roughly ${inchesText}" over the past week — local totals can vary.`
       : `It's rained about ${inchesText}" at your property over the past week.`;
 
-    // Rain-fast clause — only when a rainfast time actually exists for an
-    // applied product (see module header). Never invents a number.
-    const rainfastMinutes = products
-      .map((p) => finiteOrNull(p?.rainfastMinutes))
-      .find((n) => n != null && n > 0);
-    const rainfastLabel = rainfastMinutes != null ? formatRainfastMinutes(rainfastMinutes) : null;
-    if (rainfastLabel) {
-      sentence += ` Your treatment is rain-fast once dry (about ${rainfastLabel}, per the label).`;
-    }
+    sentence += rainfastClauseText(products);
 
     // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
     // Never a claim that rain can't otherwise affect the treatment beyond
@@ -143,34 +158,59 @@ function buildRainExpectation({
 // Eave/web/soffit work, tech-completed action labels (protocols.json —
 // e.g. "Swept eaves, window frames, door frames, and lanai"), regardless of
 // whether the label itself carries treatmentApplied (a sweep is still
-// spider-relevant work). actionLabels: raw completed-action label strings
-// for the visit. products: the same applications array pest-report-v2 already
-// builds ({ targets: [...] }) — a spider-targeted product also triggers.
+// spider-relevant work — but sweeping alone is NOT a treatment). actionLabels:
+// raw completed-action label strings for the visit. products: the same
+// applications array pest-report-v2 already builds ({ targets: [...] }) —
+// a spider-labeled applied product is the ONLY evidence of an actual residual.
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
 
 // Fixed customer wording only — owner ruling 2026-09-28: a raw completed
 // protocol-action label is NEVER rendered here. Labels are tech/protocol
 // vocabulary (can carry internal wording or a product hint) and are used
-// ONLY to decide which of these two fixed sentences applies, never quoted.
-const ACTION_MATCH_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
-const TARGET_ONLY_TEXT = 'We applied a residual treatment labeled for spiders during this visit.';
+// ONLY to decide which fixed sentence applies, never quoted.
+//
+// Wording must match the EVIDENCE (owner ruling 2026-09-28): a matched
+// eave/web/soffit action proves sweeping happened, NOT that a residual was
+// applied there — only a spider-labeled applied product proves that. So
+// three combos, three distinct "what we did" + expectation pairs:
+//   1. action matched, NO residual applied  -> de-web only, no treatment claim
+//   2. residual applied, NO action matched  -> treatment-only wording (unchanged)
+//   3. BOTH action matched AND residual applied -> combined wording
+const WEB_ONLY_TEXT = 'We knocked down webs around the eaves and entry points.';
+const RESIDUAL_ONLY_TEXT = 'We applied a residual treatment labeled for spiders during this visit.';
+const WEB_AND_RESIDUAL_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
+
+// De-web-only expectation (combo 1): no "the residual we applied" claim —
+// there is no residual to point to. New webs regrowing is just biology, not
+// evidence the sweep "isn't working" (there is no residual to work).
+const WEB_ONLY_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal.';
+const WEB_ONLY_NEXT_STEP = 'If webbing keeps coming back over the next two weeks, text us and we\'ll take another look.';
+
+// Residual-backed expectation (combos 2 and 3) — the only case where we can
+// honestly credit a residual for thinning webs out over time.
+const RESIDUAL_EXPECTATION = 'New webs can appear within days as new spiders arrive from outside — that\'s normal. '
+  + 'The residual we applied kills spiders that land on treated eaves and entry points, so webbing should '
+  + 'noticeably thin out over about two weeks.';
+const RESIDUAL_NEXT_STEP = 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.';
 
 function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
   const actionHit = (actionLabels || []).some(
     (label) => SPIDER_ACTION_RE.test(cleanText(label)),
   );
-  const targetHit = (applications || []).some(
+  // The ONLY evidence a residual was actually applied: a product this visit
+  // is tagged/targeted for spiders. A completed sweep action is never
+  // treated as treatment evidence on its own.
+  const residualApplied = (applications || []).some(
     (app) => Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t))),
   );
-  if (!actionHit && !targetHit) return null;
+  if (!actionHit && !residualApplied) return null;
 
-  const whatWeDid = actionHit ? ACTION_MATCH_TEXT : TARGET_ONLY_TEXT;
-
-  const expectation = 'New webs can appear within days as new spiders arrive from outside — that\'s normal. '
-    + 'The residual we applied kills spiders that land on treated eaves and entry points, so webbing should '
-    + 'noticeably thin out over about two weeks.';
-  const nextStep = 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.';
+  const whatWeDid = residualApplied
+    ? (actionHit ? WEB_AND_RESIDUAL_TEXT : RESIDUAL_ONLY_TEXT)
+    : WEB_ONLY_TEXT;
+  const expectation = residualApplied ? RESIDUAL_EXPECTATION : WEB_ONLY_EXPECTATION;
+  const nextStep = residualApplied ? RESIDUAL_NEXT_STEP : WEB_ONLY_NEXT_STEP;
 
   return {
     headline: 'Spiders',
