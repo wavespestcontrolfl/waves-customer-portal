@@ -18,7 +18,6 @@ const cockroachSchema = {
   fields: [
     { key: 'species', label: 'Species', type: 'text', placeholder: 'Synthetic species' },
   ],
-  nextStepChips: [],
 };
 
 const cockroachCatalog = [
