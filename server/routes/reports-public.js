@@ -1827,6 +1827,29 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
       .catch(() => null);
     if (!asset) return res.status(404).json({ error: 'preview_not_found' });
 
+    // Stored-identity check (owner pre-push P1, 2026-09-28): a preview built
+    // under a different GATE_REPORT_PHOTO_CONTENT state or an older render
+    // version — or whose photo set has since changed — must never keep
+    // serving as current. Cheap when the gate is off (a plain string
+    // compare on data already loaded above; no extra query — the photo-set
+    // signature is only read when the gate is on). A legacy row from
+    // before photo_content_signature existed reads that column as null,
+    // which only matches today's signature when the gate is ALSO off today
+    // (the safe direction: never wrongly served, worst case an extra
+    // rebuild). Any mismatch falls through to the SAME preview_not_found
+    // response the route already gives for no asset at all — this route has
+    // no rebuild path of its own, so it does not invent one here; the next
+    // completion/dispatch event rebuilds it.
+    const { RENDER_VERSION: currentPreviewRenderVersion } = require('../services/service-report/preview-image');
+    const currentPhotoGateOn = require('../config/feature-gates').reportPhotoContentLive();
+    const currentPhotoContentSignature = currentPhotoGateOn
+      ? `-pgon${await require('../services/service-report/photo-set-signature')
+        .reportPhotoSetPdfSignature(service.id, db).catch(() => '-phu')}`
+      : '';
+    const staleAsset = asset.render_version !== currentPreviewRenderVersion
+      || (asset.photo_content_signature || '') !== currentPhotoContentSignature;
+    if (staleAsset) return res.status(404).json({ error: 'preview_not_found' });
+
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
     const config = require('../config');
     if (!config.s3?.bucket) return res.status(404).json({ error: 'preview_not_found' });

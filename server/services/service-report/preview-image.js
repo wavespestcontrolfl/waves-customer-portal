@@ -28,6 +28,21 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+// Cached probe for the rollout window where the photo_content_signature
+// column has not migrated yet (new code, old schema) — same pattern as
+// pdf-queue.js's hasServiceTierSourceColumn. Resolves once per process; a
+// probe failure reads as "absent" and only costs this one column until
+// restart, never the whole insert.
+let photoContentSignatureColumnPresent = null;
+async function hasPhotoContentSignatureColumn(knex) {
+  if (photoContentSignatureColumnPresent === true) return true;
+  try {
+    const cols = await knex('service_report_notification_assets').columnInfo();
+    photoContentSignatureColumnPresent = !!cols.photo_content_signature;
+  } catch { return false; }
+  return photoContentSignatureColumnPresent;
+}
+
 function publicPreviewUrl(token) {
   const base = (process.env.PORTAL_URL || process.env.CLIENT_URL || config.clientUrl || 'http://localhost:5173')
     .replace(/\/+$/, '');
@@ -194,6 +209,10 @@ async function buildAndStoreSmsPreviewImage({
     byte_size: image.byteSize,
     input_hash: inputHash,
     render_version: RENDER_VERSION,
+    // The public read path (reports-public.js) re-verifies THIS value cheaply
+    // on every GET /preview.jpg — see the migration's docstring for why the
+    // opaque inputHash above can't be reproduced at read time.
+    ...(await hasPhotoContentSignatureColumn(knex) ? { photo_content_signature: photoContentSignature } : {}),
   };
 
   const inserted = await knex('service_report_notification_assets')

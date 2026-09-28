@@ -543,15 +543,24 @@ composites `previewPhoto` into the preview card only when
 `reportPhotoContentEnabled` is `true`; the screenshot's fixed viewport grows
 to fit the added photo (server/services/service-report/preview-image.js,
 capped to only ever grow, never shrink below the pre-existing default). The
-cached preview's identity (`service_report_notification_assets.input_hash`)
-includes whether the gate was on AND the visit's photo-row set (the same
-`reportPhotoSetPdfSignature` signature component the PDF storage key already
-carries) — so flipping the gate, or the eligible photo set changing (added/
-removed/reordered rows), never serves a preview cached under the other
-state; the asset's render version was also bumped so no pre-feature cached
-preview is ever served as current. No new fields, captions, or images reach
-`preview.jpg` beyond `previewPhoto` and the pre-existing `photos` `/data`
-already exposes for the SAME token,
+cached preview's identity (`service_report_notification_assets.input_hash`,
+plus its own `photo_content_signature` column) includes whether the gate was
+on AND the visit's photo-row set (the same `reportPhotoSetPdfSignature`
+signature component the PDF storage key already carries) — a BUILD request
+(`buildAndStoreSmsPreviewImage`) never reuses a cached row from the other
+state. The PUBLIC READ PATH (`GET /api/reports/:token/preview.jpg`) also
+re-verifies this on every request, cheaply (a plain string/version compare
+on the already-loaded row; the photo-set signature is read only when the
+gate is currently on) — a stored preview whose `render_version` or
+`photo_content_signature` no longer matches the CURRENT gate/photo-set state
+answers the SAME `404 {error:'preview_not_found'}` the route already gives
+for no stored preview at all, rather than serving the stale image; the route
+has no synchronous rebuild path, so a stale hit waits for the next
+completion/dispatch event to rebuild it. The asset's render version was also
+bumped (`sms_preview_v2`) so no pre-feature cached preview is ever served as
+current either. No new fields, captions, or images reach `preview.jpg`
+beyond `previewPhoto` and the pre-existing `photos` `/data` already exposes
+for the SAME token,
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +

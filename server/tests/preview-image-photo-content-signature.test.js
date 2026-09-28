@@ -116,3 +116,73 @@ describe('buildAndStoreSmsPreviewImage — wires the gate + photo-set signature 
     expect(off.input_hash).not.toBe(on.input_hash);
   });
 });
+
+describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on the stored row', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../config', () => ({ s3: { bucket: 'test-bucket', region: 'us-east-1' } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('@aws-sdk/client-s3', () => ({
+      S3Client: jest.fn().mockImplementation(() => ({ send: jest.fn().mockResolvedValue({}) })),
+      PutObjectCommand: jest.fn(),
+    }));
+    jest.doMock('../config/feature-gates', () => ({ reportPhotoContentLive: jest.fn(() => true) }));
+    jest.doMock('../services/service-report/photo-set-signature', () => ({
+      reportPhotoSetPdfSignature: jest.fn().mockResolvedValue('-ph1-aaaa1111'),
+    }));
+    const fakePage = {
+      goto: jest.fn().mockResolvedValue(),
+      waitForSelector: jest.fn().mockResolvedValue(),
+      evaluate: jest.fn().mockResolvedValue(0),
+      setViewportSize: jest.fn().mockResolvedValue(),
+      viewportSize: jest.fn(() => ({ width: 1200, height: 1500 })),
+      screenshot: jest.fn().mockResolvedValue(Buffer.from('fake-jpeg')),
+      close: jest.fn().mockResolvedValue(),
+    };
+    const fakeBrowser = {
+      newPage: jest.fn().mockResolvedValue(fakePage),
+      close: jest.fn().mockResolvedValue(),
+    };
+    jest.doMock('../services/service-report/pdf', () => ({
+      launchBrowser: jest.fn().mockResolvedValue(fakeBrowser),
+      serviceReportViewerUrl: jest.fn(() => 'https://example.test/report/token-1?mode=sms_preview'),
+    }));
+  });
+
+  afterEach(() => jest.dontMock('../config/feature-gates'));
+
+  test('a fresh build (gate on) writes photo_content_signature matching the lookup key it used', async () => {
+    const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+    let insertedRow = null;
+    const knex = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      columnInfo: jest.fn().mockResolvedValue({ photo_content_signature: {} }),
+      insert: jest.fn((row) => {
+        insertedRow = row;
+        return { returning: jest.fn().mockResolvedValue([{ ...row, id: 'asset-1' }]) };
+      }),
+    }));
+    const result = await buildAndStoreSmsPreviewImage({
+      recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex,
+    });
+    expect(insertedRow.photo_content_signature).toBe('-pgon-ph1-aaaa1111');
+    expect(result.photo_content_signature).toBe('-pgon-ph1-aaaa1111');
+  });
+
+  test('the column-missing rollout window (columnInfo omits it) writes no photo_content_signature rather than throwing', async () => {
+    const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+    let insertedRow = null;
+    const knex = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      columnInfo: jest.fn().mockResolvedValue({}), // pre-migration schema
+      insert: jest.fn((row) => {
+        insertedRow = row;
+        return { returning: jest.fn().mockResolvedValue([{ ...row, id: 'asset-1' }]) };
+      }),
+    }));
+    await buildAndStoreSmsPreviewImage({ recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex });
+    expect(insertedRow).not.toHaveProperty('photo_content_signature');
+  });
+});
