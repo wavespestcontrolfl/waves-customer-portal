@@ -3795,3 +3795,78 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     }
   });
 });
+
+// Refreshes had no in-loop self-lint (their guard options need the live
+// page), so every mechanical miss parked the run at gate 3c. The runner now
+// hydrates gate 3c's own options before the session.
+describe('W1 in-loop self-lint arms for refreshes with gate 3c options', () => {
+  const setup = (publisher) => {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_ref', action_type: 'refresh_existing_page', page_url: '/pest-control/signs-of-termites/', claimed_at: new Date('2026-09-28T10:00:00Z') }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const brief = {
+      id: 'brief_ref', opportunity_id: 'opp_ref', action_type: 'refresh_existing_page', page_type: 'refresh',
+      target_url: '/pest-control/signs-of-termites/', target_keyword: 'signs of termites', city: 'Sarasota', service: 'termite',
+      human_review_required: false,
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'test_stop_after_dispatch' }) };
+    const factsSufficiency = { check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true, city_id: 'sarasota', service_id: 'termite', county: 'sarasota' }) };
+    const runner = loadRunnerWith({ queue, briefBuilder: { compose: jest.fn().mockResolvedValue(brief) }, dispatcher, publisher, factsSufficiency });
+    return { runner, dispatcher };
+  };
+
+  test('a refresh session gets the hydrated options: live domains, protected metaTitle, live meta, prior body', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({
+        _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md',
+        domains: ['sarasotaflpestcontrol.com'],
+        metaTitle: 'Pest Control Near Me | Sarasota',
+        metaDescription: 'Live Sarasota meta.',
+      }),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toMatchObject({
+      isRefresh: true,
+      domains: ['sarasotaflpestcontrol.com'],
+      liveMetaTitle: 'Pest Control Near Me | Sarasota',
+      liveMetaDescription: 'Live Sarasota meta.',
+      priorBody: 'Live prior body.',
+      targetIsBlog: false,
+    });
+  });
+
+  test('a hydration failure disarms only the lint: the session still runs and gate 3c stays authoritative', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+      loadExistingPageBody: jest.fn().mockRejectedValue(new Error('github unavailable')),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+  });
+
+  test('the kill switch disarms the lint for refreshes too', async () => {
+    const prev = process.env.AUTONOMOUS_WRITER_SELF_LINT;
+    process.env.AUTONOMOUS_WRITER_SELF_LINT = 'false';
+    try {
+      const publisher = {
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+        loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+      };
+      const { runner, dispatcher } = setup(publisher);
+      await runner.runNext();
+      expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+      expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.AUTONOMOUS_WRITER_SELF_LINT;
+      else process.env.AUTONOMOUS_WRITER_SELF_LINT = prev;
+    }
+  });
+});

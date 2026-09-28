@@ -701,7 +701,7 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^stored-token lookup failed: Knex: Timeout/));
-    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }), expect.any(String));
+    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }), expect.any(String), expect.anything());
     expect(service._classifyLocationSyncHealth({ hasResource: true, source: 'places_fallback', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).not.toMatch(/credentials/);
     delete service._tokenLookupErrors.bradenton;
     degraded.mockRestore(); places.mockRestore(); health.mockRestore();
@@ -729,6 +729,25 @@ describe('Google Business review sync', () => {
       jest.useRealTimers();
       jest.dontMock('../services/review-incentives');
     }
+  });
+
+  test('a Places answer of no reviews reaches the health check as a confirmed zero and stores no stats row; a failed Places call confirms nothing', async () => {
+    const health = jest.spyOn(service, '_assessReviewSyncHealth').mockResolvedValue({});
+    const placesAnswers = (places) => {
+      global.fetch = jest.fn(async (url) => (String(url).includes('maps.googleapis.com')
+        ? { json: async () => places }
+        : jsonResponse({ reviews: [] })));
+    };
+
+    // The Venice shape: Google answers OK with no rating and no total.
+    placesAnswers({ status: 'OK', result: { name: 'Waves Pest Control Venice' } });
+    await service.syncAllReviews();
+    expect(health.mock.calls[0][4]).toEqual({ bradenton: 0 });
+    expect(db.__state.rows.google_reviews.filter((r) => r.reviewer_name === '_stats')).toHaveLength(0);
+
+    placesAnswers({ status: 'REQUEST_DENIED' });
+    await service.syncAllReviews();
+    expect(health.mock.calls[1][4]).toEqual({});
   });
 
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {

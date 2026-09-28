@@ -11,6 +11,17 @@ const {
   draftReplyToMessageIdSql,
 } = require('./sms-response-policy');
 
+// Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
+// Unanswered-filtered inbox only count inbound texts from this instant
+// forward, not the full historical backlog. Production callers pass this
+// constant as `since`; tests pass null/an earlier date to keep old fixtures
+// pending without rewriting their timestamps.
+const NEEDS_REPLY_SINCE = '2026-09-28T09:25:00Z';
+
+// Outbound rows older than this before an inbound cannot answer it or give it
+// context (outbound_events joins on it).
+const REPLY_LOOKBACK = "INTERVAL '24 hours'";
+
 // Shared source for the Messages needs-response badge, filtered inbox, and
 // unanswered-text watcher. The watcher opts into legacy-only rows so a failed
 // canonical write cannot erase historical work; badge IDs remain canonical.
@@ -19,6 +30,7 @@ async function loadPendingSmsConversations({
   customerId = null,
   includeLegacyOnly = false,
   cutoff = null,
+  since = null,
   includeExpired = true,
   limit = null,
 } = {}) {
@@ -50,6 +62,14 @@ async function loadPendingSmsConversations({
   const canonicalLegacyLink = canonicalSmsLegacyLinkSql({
     messageAlias: 's', conversationAlias: 'original_thread',
   });
+  // With a `since` floor only inbounds at/after it can be returned, and the
+  // outbound rows that can answer or give context to one start no earlier than
+  // REPLY_LOOKBACK before it. Bounding the raw SMS scans to that window returns
+  // the same rows as filtering the full history, without scanning it. A
+  // null-SID legacy twin shares its canonical row's created_at exactly, so both
+  // sides of that link fall in or out of the window together.
+  const inSinceWindow = (column) => `(CAST(:since AS timestamptz) IS NULL
+    OR ${column} > CAST(:since AS timestamptz) - ${REPLY_LOOKBACK})`;
   const { rows = [] } = await db.raw(`
     WITH canonical_sms AS MATERIALIZED (
       SELECT 'canonical'::text AS source, m.id, m.direction, m.body AS message_body,
@@ -63,6 +83,7 @@ async function loadPendingSmsConversations({
       JOIN conversations c ON c.id = m.conversation_id
       LEFT JOIN customers cu ON cu.id = c.customer_id
       WHERE m.channel = 'sms'
+        AND ${inSinceWindow('m.created_at')}
         AND (CAST(:customerId AS uuid) IS NULL OR m.direction = 'outbound'
           OR c.customer_id = CAST(:customerId AS uuid))
         AND NOT (COALESCE(c.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
@@ -76,6 +97,7 @@ async function loadPendingSmsConversations({
         ${canonicalLegacyLink}
       ) legacy ON true
       WHERE s.channel = 'sms'
+        AND ${inSinceWindow('s.created_at')}
     ), legacy_only_sms AS MATERIALIZED (
       SELECT 'legacy'::text AS source, sl.id, sl.direction, sl.message_body,
              sl.created_at, sl.twilio_sid, sl.message_type AS canonical_message_type,
@@ -87,6 +109,7 @@ async function loadPendingSmsConversations({
       LEFT JOIN customers cu ON cu.id = sl.customer_id
       WHERE (CAST(:customerId AS uuid) IS NULL OR sl.direction = 'outbound'
         OR sl.customer_id = CAST(:customerId AS uuid))
+        AND ${inSinceWindow('sl.created_at')}
         AND NOT EXISTS (
           SELECT 1 FROM messages twin
           WHERE twin.channel = 'sms' AND twin.twilio_sid = sl.twilio_sid
@@ -125,6 +148,7 @@ async function loadPendingSmsConversations({
       WHERE s.direction = 'inbound'
         AND (CAST(:cutoff AS timestamptz) IS NULL OR s.created_at <= CAST(:cutoff AS timestamptz))
         AND (CAST(:includeExpired AS boolean) OR s.created_at >= now() - interval '30 days')
+        AND (CAST(:since AS timestamptz) IS NULL OR s.created_at >= CAST(:since AS timestamptz))
     ), latest_inbound AS MATERIALIZED (
       SELECT DISTINCT ON (s.peer, s.endpoint)
         s.id, s.source, s.legacy_id, s.peer, s.endpoint, s.customer_id,
@@ -153,7 +177,7 @@ async function loadPendingSmsConversations({
       FROM enriched_inbound li
       JOIN projected_events s ON s.peer = li.peer AND s.endpoint = li.endpoint
         AND s.direction = 'outbound'
-        AND s.created_at > li.created_at - INTERVAL '24 hours'
+        AND s.created_at > li.created_at - ${REPLY_LOOKBACK}
       LEFT JOIN LATERAL (
         SELECT mal.metadata
         FROM messaging_audit_log mal
@@ -190,6 +214,8 @@ async function loadPendingSmsConversations({
       LEFT JOIN inbound_sms_optout_receipts stop_receipt
         ON stop_receipt.message_sid = stop_message.twilio_sid
       WHERE stop_message.channel = 'sms' AND stop_message.direction = 'inbound'
+        -- A STOP at or before since never suppresses a returned inbound.
+        AND ${inSinceWindow('stop_message.created_at')}
         AND (stop_receipt.message_sid IS NOT NULL
           OR COALESCE(stop_legacy.message_type, stop_message.message_type, '') = 'opt_out')
         AND NOT (COALESCE(stop_conversation.our_endpoint_id, '') = ANY(CAST(:excludePhones AS text[]))
@@ -263,6 +289,7 @@ async function loadPendingSmsConversations({
     excludePhones,
     includeLegacyOnly,
     cutoff: cutoff || null,
+    since: since || null,
     includeExpired,
     ignoredInboundTypes: NON_ACTIONABLE_INBOUND_TYPES,
     humanReplyTypes: HUMAN_REPLY_TYPES,
@@ -280,9 +307,9 @@ async function loadPendingSmsConversations({
 }
 
 async function countPendingSmsConversations({
-  excludePhones = [], customerId = null, includePending = false,
+  excludePhones = [], customerId = null, includePending = false, since = null,
 } = {}) {
-  const actionable = await loadPendingSmsConversations({ excludePhones, customerId });
+  const actionable = await loadPendingSmsConversations({ excludePhones, customerId, since });
   const result = {
     conversations: new Set(actionable.map((row) => row.peer)).size,
     messages: actionable.length,
@@ -295,4 +322,4 @@ async function countPendingSmsConversations({
   return result;
 }
 
-module.exports = { loadPendingSmsConversations, countPendingSmsConversations };
+module.exports = { loadPendingSmsConversations, countPendingSmsConversations, NEEDS_REPLY_SINCE };

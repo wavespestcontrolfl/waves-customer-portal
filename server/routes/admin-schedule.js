@@ -1335,7 +1335,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
       const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      const { arrivalWindowRange, formatSmsTimeRange, spokenArrivalWindow } = require('../utils/sms-time-format');
       // Customer-facing time is ALWAYS the 2-hour arrival window from the
       // start — never the exact start or the duration-driven window_end
       // (owner directive; see utils/sms-time-format).
@@ -1355,6 +1355,8 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, optio
           day: formatETDay(apptTime),
           date: formatETDate(apptTime),
           time: timeText,
+          // "between 9:00 AM and 11:00 AM" — the phrase every reminder uses.
+          window: spokenArrivalWindow(start),
         }, {
           workflow: 'schedule_update_reschedule',
           entity_type: 'scheduled_service',
@@ -6246,6 +6248,9 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.window_start', 'scheduled_services.window_end',
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
+          // Stamped combined-invoice provenance (PR #5021): lets the sibling
+          // lookup skip its per-visit fallback read on the week feed.
+          'scheduled_services.first_application_invoice_id',
           'scheduled_services.primary_line_price',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',

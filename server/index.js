@@ -442,6 +442,12 @@ app.use('/api/public/appointment', require('./middleware/no-store').noStore, (re
   }
   next();
 });
+// The visit-prep photos sub-gate + token-shape check (the router's own
+// definition, mounted here a second time): a dark or malformed photos
+// request must 404 BEFORE the shared express.json/urlencoded parsers below,
+// which would otherwise answer an oversized or malformed application/json
+// body with their own 413/400 first (Codex #5176 r1 P0).
+app.use('/api/public/appointment', require('./routes/appointment-public').visitPrepPreParserGuard);
 app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req, res, next) => {
   if (!require('./config/feature-gates').isEnabled('reserviceSelfServe')) {
     return res.status(404).json({ error: 'Not found' });
