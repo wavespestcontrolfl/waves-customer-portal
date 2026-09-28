@@ -205,7 +205,8 @@ describe('pest-insider proof catch-up', () => {
   });
 
   const DRAFTED_AT = new Date('2026-06-02T11:00:00Z'); // the first-Tuesday 7:00 AM ET creation
-  const FIRST_ATTEMPT = { created_at: new Date('2026-06-02T11:05:00Z') }; // the autopilot's own proof attempt
+  // The autopilot's own proof attempt at creation time, blocked by the validator (owner notified then).
+  const FIRST_ATTEMPT = { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason: 'validation_failed' } };
 
   test('the same-day catch-up on a blocked, unedited draft is skipped quietly — the owner was told at the first attempt', async () => {
     process.env.GATE_PEST_INSIDER_PROOF = 'true';
@@ -255,6 +256,34 @@ describe('pest-insider proof catch-up', () => {
 
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(result.reason).toBe('validation_failed');
+  });
+
+  test.each([
+    ['the shared proof gate was off', 'gate_off'],
+    ['no approver was configured', 'no_approvers_configured'],
+    ['SendGrid was not configured', 'sendgrid_not_configured'],
+    ['the attempt threw before validating', 'threw'],
+  ])('an attempt that never reached validation (%s) suppresses nothing: the owner has not been told, so attempt', async (_label, reason) => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: { sent: false, reason } } });
+    mockValidate.mockImplementation(() => ({ errors: ['blocked'], warnings: [] }));
+    mockSendProof.mockImplementationOnce(async () => ({ skipped: true, reason: 'validation_failed' }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+    expect(result.reason).toBe('validation_failed');
+  });
+
+  test('metadata stored as a JSON string is read the same way', async () => {
+    process.env.GATE_PEST_INSIDER_PROOF = 'true';
+    wireDb({ draft: { id: 'send-pi-1', updated_at: DRAFTED_AT }, lastAttempt: { created_at: new Date('2026-06-02T11:05:00Z'), metadata: JSON.stringify({ sent: false, reason: 'validation_failed' }) } });
+    mockValidate.mockImplementation(() => ({ errors: ['blocked'], warnings: [] }));
+
+    const result = await retryPestInsiderProof({ now: DAY_AFTER });
+
+    expect(result).toEqual({ skipped: true, reason: 'validation_failed', sendId: 'send-pi-1' });
+    expect(mockSendProof).not.toHaveBeenCalled();
   });
 
   test('a transient failure (validation passes now) is retried even with an attempt on record', async () => {

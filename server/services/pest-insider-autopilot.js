@@ -32,9 +32,12 @@
  * 10th of the ET month. A draft the validator blocks fails the same way
  * every day until someone edits it, and the owner was told the first time
  * (sendNewsletterProof notifies on a blocked draft), so the catch-up skips
- * it quietly unless the draft was edited since the LAST PROOF ATTEMPT —
- * every attempt is stamped in audit_log; the creation-time proof on the
- * first Tuesday counts, so the same-day catch-up never repeats its notice.
+ * it quietly unless the draft was edited since the LAST PROOF ATTEMPT that
+ * ended in that validation failure — every attempt is stamped in
+ * audit_log with its outcome; the creation-time proof on the first Tuesday
+ * counts, so the same-day catch-up never repeats its notice, while an
+ * attempt that never reached validation (gate off, SendGrid unconfigured)
+ * suppresses nothing.
  *
  * A draft that cannot be written at all (the fact register empty, the
  * writer down) is reported to the owner through the same
@@ -101,13 +104,16 @@ async function recordProofAttempt(sendId, outcome) {
   }
 }
 
-async function lastProofAttemptAt(sendId) {
+// The latest recorded attempt: when it ran and how it ended.
+async function lastProofAttempt(sendId) {
   try {
     const last = await db('audit_log')
       .where({ action: PROOF_ATTEMPT_ACTION, resource_type: 'newsletter_sends', resource_id: sendId })
       .orderBy('created_at', 'desc')
-      .first('created_at');
-    return last?.created_at ? new Date(last.created_at) : null;
+      .first('created_at', 'metadata');
+    if (!last?.created_at) return null;
+    const meta = typeof last.metadata === 'string' ? JSON.parse(last.metadata || '{}') : (last.metadata || {});
+    return { at: new Date(last.created_at), reason: meta.reason || null };
   } catch (e) {
     logger.warn(`[pest-insider-autopilot] could not read the last proof attempt: ${e.message}`);
     return null;
@@ -214,12 +220,15 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
 
   // Deterministic failure: the validator blocks this draft, nobody has
-  // edited it since the last proof attempt (the owner was notified then —
-  // sendNewsletterProof notifies on a blocked draft), so retrying would only
-  // re-send that notice. No attempt on record (the gate was off when the
-  // issue was drafted) means the owner has never been told: attempt.
-  const lastAttempt = await lastProofAttemptAt(draft.id);
-  if (lastAttempt && !editedSince(draft, lastAttempt) && await draftFailsValidation(draft)) {
+  // edited it since the last proof attempt, and that attempt ended in
+  // 'validation_failed' — the one outcome where sendNewsletterProof already
+  // notified the owner — so retrying would only re-send that notice. An
+  // attempt that ended earlier in the flow (gate off, no approver, SendGrid
+  // not configured, a throw) told the owner nothing, and no attempt on
+  // record (the gate was off when the issue was drafted) means the same:
+  // attempt, so the owner is told once.
+  const lastAttempt = await lastProofAttempt(draft.id);
+  if (lastAttempt?.reason === 'validation_failed' && !editedSince(draft, lastAttempt.at) && await draftFailsValidation(draft)) {
     logger.info(`[pest-insider-autopilot] proof catch-up skipped for ${draft.id}: draft still fails validation and has not been edited since the last attempt`);
     return { skipped: true, reason: 'validation_failed', sendId: draft.id };
   }
