@@ -165,6 +165,10 @@ describe('assertOwnerListForCommit', () => {
     await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body,
       frontmatter: { ...fm2, hero_image: { src: '/images/blog/x/hero.webp', alt: 'Orkin scams customers with hidden fees' } } }))
       .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
+    // The refresh lane's camelCase meta fields are read by the gate itself.
+    await expect(assertOwnerListForCommit({ draft: {}, brief: BLOG_BRIEF, body,
+      frontmatter: { title: 'Roach control options in Sarasota', metaTitle: 'Roach control in Sarasota', metaDescription: 'Orkin scams customers with hidden fees. Call for help.' } }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'comparison_table_failed' });
   });
 
   test('an incidental retailer mention the model does not list is not off-list', async () => {
