@@ -1444,8 +1444,15 @@ router.post(
       // an external send could. A failure is caught and logged, never
       // surfaced to the customer (see the function for exactly how this
       // stays in-app-feed-only).
+      //
+      // Built from result.svc — the RECHECKED row createVisitPrepSubmission
+      // now returns (Codex r1 P2) — never req.visitPrepSvc, the stale
+      // pre-lock read: a reschedule landing between the pre-lock read and
+      // the locked write must not leave the feed item naming the OLD date.
+      // Guaranteed present whenever result.created is true (persistLocked
+      // never reaches created:true without a non-null recheck() row).
       if (result.created) {
-        await notifyOfficeVisitPrepSubmission(req.visitPrepSvc, req.body?.topic);
+        await notifyOfficeVisitPrepSubmission(result.svc, req.body?.topic);
       }
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing

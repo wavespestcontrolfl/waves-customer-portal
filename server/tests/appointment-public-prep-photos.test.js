@@ -671,6 +671,20 @@ describe('POST /api/public/appointment/:token/photos — office feed item (PR 3b
     });
   });
 
+  test('the notification is built from the RECHECKED row, not the stale pre-lock read (Codex r1 P2)', async () => {
+    // The visit moves to a NEW date between the pre-lock read (svcRow) and
+    // the locked recheck (svcRowAfterRecheck) — e.g. a reschedule landing
+    // mid-submission. The office item must name the NEW date.
+    resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), scheduled_date: '2099-06-15' } });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(201);
+      const notif = dbState.inserted.notifications[0];
+      expect(notif.body).toMatch(/June 15/);
+      expect(notif.body).not.toMatch(/January 1/);
+    });
+  });
+
   test('an all-duplicate resubmit (result.created is false) writes NO office notification', async () => {
     const sha256 = crypto.createHash('sha256').update(JPEG_BYTES).digest('hex');
     resetDbState({ existingHashes: [sha256] });

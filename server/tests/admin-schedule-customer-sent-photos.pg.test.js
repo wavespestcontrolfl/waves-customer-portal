@@ -38,7 +38,7 @@ const { randomUUID } = require('node:crypto');
 const DATE = '2099-04-15';
 
 describeOrSkip('customerSentPhotos on GET /api/admin/schedule (PR 3b)', () => {
-  let db, server, baseUrl, adminTech, adminToken;
+  let db, server, baseUrl, adminTech, adminToken, techA, techB;
   const insertedCustomerIds = [];
   const insertedServiceIds = [];
   const insertedSubmissionIds = [];
@@ -59,6 +59,14 @@ describeOrSkip('customerSentPhotos on GET /api/admin/schedule (PR 3b)', () => {
       name: 'PR3b Admin', role: 'admin', employment_status: 'active', auth_token_version: 1,
     }).returning('*');
     adminToken = jwt.sign({ technicianId: adminTech.id, type: 'access', tokenVersion: 1 }, process.env.JWT_SECRET);
+    // Two real technician rows — the reassignment scenario needs a genuine
+    // technician_id divergence, not a random UUID.
+    [techA] = await db('technicians').insert({
+      name: 'PR3b Tech A', role: 'technician', employment_status: 'active', auth_token_version: 1,
+    }).returning('*');
+    [techB] = await db('technicians').insert({
+      name: 'PR3b Tech B', role: 'technician', employment_status: 'active', auth_token_version: 1,
+    }).returning('*');
   });
 
   afterAll(async () => {
@@ -71,7 +79,8 @@ describeOrSkip('customerSentPhotos on GET /api/admin/schedule (PR 3b)', () => {
       if (insertedServiceIds.length) await db('scheduled_services').whereIn('id', insertedServiceIds).del();
       if (insertedVisitIds.length) await db('service_visits').whereIn('id', insertedVisitIds).del();
       if (insertedCustomerIds.length) await db('customers').whereIn('id', insertedCustomerIds).del();
-      if (adminTech) await db('technicians').where({ id: adminTech.id }).del();
+      const techIds = [adminTech, techA, techB].filter(Boolean).map((t) => t.id);
+      if (techIds.length) await db('technicians').whereIn('id', techIds).del();
       await db.destroy();
     }
   });
@@ -206,10 +215,11 @@ describeOrSkip('customerSentPhotos on GET /api/admin/schedule (PR 3b)', () => {
     expect(body.services.find((s) => s.id === svcB).customerSentPhotos).toBe(false);
   });
 
-  test('gate on: ONE query against visit_prep_photos for the whole day, whatever the stop count', async () => {
+  test('gate on: ONE membership query + ONE photo query for the whole day, whatever the stop count', async () => {
     const customerId = await fixtureCustomer('QueryCount');
-    await fixtureSvc(customerId);
-    await fixtureSvc(customerId);
+    const visitId = await fixtureVisit(customerId);
+    await fixtureSvc(customerId, { visit_id: visitId, service_type: 'pest_control' });
+    await fixtureSvc(customerId, { visit_id: visitId, service_type: 'lawn_care' });
     await fixtureSvc(customerId);
 
     const queries = [];
@@ -222,6 +232,60 @@ describeOrSkip('customerSentPhotos on GET /api/admin/schedule (PR 3b)', () => {
       db.removeListener('query', onQuery);
     }
     const photoQueries = queries.filter((sql) => /visit_prep_photos/i.test(sql));
+    // The membership query selects FROM scheduled_services WHERE visit_id
+    // IN (...) — distinguished from the day-view's own scheduled_services
+    // query by the presence of "visit_id" in an IN-list WHERE clause.
+    const membershipQueries = queries.filter((sql) => /from "scheduled_services"/i.test(sql) && /"visit_id" in/i.test(sql));
     expect(photoQueries).toHaveLength(1);
+    expect(membershipQueries).toHaveLength(1);
+  });
+
+  test('gate on: a HIDDEN cancelled member (same tech/date) with photos still flags its live sibling true', async () => {
+    const customerId = await fixtureCustomer('HiddenCancelled');
+    const visitId = await fixtureVisit(customerId);
+    const svcLive = await fixtureSvc(customerId, {
+      visit_id: visitId, service_type: 'pest_control', technician_id: techA.id, status: 'confirmed',
+    });
+    // Cancelled rows are excluded from the day-view's own `services` query
+    // (whereNotIn 'cancelled', 'rescheduled') — invisible in body.services,
+    // but still a real scheduled_services row the membership query must see.
+    const svcCancelled = await fixtureSvc(customerId, {
+      visit_id: visitId, service_type: 'lawn_care', technician_id: techA.id, status: 'cancelled',
+    });
+    await fixturePhoto(svcCancelled, customerId);
+
+    const { status, body } = await get({ GATE_VISIT_PREP_PHOTOS: 'true' });
+    expect(status).toBe(200);
+    expect(body.services.find((s) => s.id === svcCancelled)).toBeUndefined();
+    expect(body.services.find((s) => s.id === svcLive).customerSentPhotos).toBe(true);
+  });
+
+  test('gate on: a member reassigned to a DIFFERENT technician is not counted as the same stop', async () => {
+    const customerId = await fixtureCustomer('Reassigned');
+    const visitId = await fixtureVisit(customerId);
+    const svcMine = await fixtureSvc(customerId, { visit_id: visitId, service_type: 'pest_control', technician_id: techA.id });
+    const svcOtherTech = await fixtureSvc(customerId, { visit_id: visitId, service_type: 'lawn_care', technician_id: techB.id });
+    // Photo lives only on the OTHER technician's row.
+    await fixturePhoto(svcOtherTech, customerId);
+
+    const { status, body } = await get({ GATE_VISIT_PREP_PHOTOS: 'true' });
+    expect(status).toBe(200);
+    expect(body.services.find((s) => s.id === svcMine).customerSentPhotos).toBe(false);
+    expect(body.services.find((s) => s.id === svcOtherTech).customerSentPhotos).toBe(true);
+  });
+
+  test('gate on: a member moved to a DIFFERENT day is not counted as the same stop', async () => {
+    const customerId = await fixtureCustomer('MovedDay');
+    const visitId = await fixtureVisit(customerId);
+    const svcToday = await fixtureSvc(customerId, { visit_id: visitId, service_type: 'pest_control', technician_id: techA.id });
+    const svcOtherDay = await fixtureSvc(customerId, {
+      visit_id: visitId, service_type: 'lawn_care', technician_id: techA.id, scheduled_date: '2099-04-16',
+    });
+    // Photo lives only on the row that moved to the other day.
+    await fixturePhoto(svcOtherDay, customerId);
+
+    const { status, body } = await get({ GATE_VISIT_PREP_PHOTOS: 'true' });
+    expect(status).toBe(200);
+    expect(body.services.find((s) => s.id === svcToday).customerSentPhotos).toBe(false);
   });
 });

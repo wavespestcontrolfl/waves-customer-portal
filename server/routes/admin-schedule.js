@@ -40,7 +40,7 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
-  formatETDay, formatETDate, formatETTime,
+  formatETDay, formatETDate, formatETTime, dateOnlyString,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
@@ -5722,33 +5722,57 @@ router.get('/', async (req, res, next) => {
     }
 
     // Customer-sent visit-prep photos chip (customer-visit-photos scope doc
-    // §5.4 item 2, PR 3b) — ONE batched query over the whole day's stops,
-    // never per-row, and dark unless visitPrepPhotosLive() (gate off keeps
-    // the payload byte-identical: the field is omitted below, not sent
-    // false). Stops are grouped the SAME way the client does (routeStops.js
-    // stopKeyOf: rows sharing a non-null visit_id are one stop, otherwise a
-    // row is its own stop), read fresh off THIS request's own `services`
-    // rows — the same CURRENT-membership rule visitPrepSummary/
-    // stopMemberIds apply in services/visit-prep.js: a grouped stop shows
-    // the chip once, and a member moved out of the group since the photos
-    // were submitted takes its own (denormalized at submission time)
-    // photos with it, since the flag is never read off a stale visit_id.
+    // §5.4 item 2, PR 3b) — dark unless visitPrepPhotosLive() (gate off
+    // keeps the payload byte-identical: the field is omitted below, not
+    // sent false). Codex r1 P2 on this PR: the day-view `services` array is
+    // ALREADY filtered to live statuses (`.whereNotIn(... 'cancelled',
+    // 'rescheduled')`), so grouping off it alone misses a HIDDEN member of
+    // a frozen visit (e.g. a cancelled row a regroup left behind) that
+    // still carries photos — that member's own stop would read false. This
+    // resolves membership with its OWN batched query straight off
+    // scheduled_services (every status), one extra query, never per-row:
+    // for a row with a visit_id, its members are every scheduled_services
+    // row sharing that visit_id with the SAME technician_id (null-safe —
+    // two nulls match) AND the SAME calendar date (`dateOnlyString`, since
+    // pg returns a DATE column as a JS Date), in ANY status, plus the row
+    // itself. This is deliberately the SAME technician+date restriction PR
+    // 3a's Visit Brief section uses (its own techStopMemberIds, Codex r1
+    // P1 there) — a frozen visit can keep visit_id on a member dispatch
+    // reassigned or moved to another day, and that member's photos belong
+    // to someone ELSE's stop now; the chip and the brief must always agree
+    // on who owns a photo. The ONE photo query then runs over the UNION of
+    // every candidate id this membership query found (not just today's
+    // `services` ids), so a hidden member's own photos are found too.
     const prepPhotosLive = visitPrepPhotosLive();
     const customerSentPhotosByServiceId = new Map();
     if (prepPhotosLive) {
-      const memberIdsByVisitId = new Map();
-      for (const s of services) {
-        if (!s.visit_id) continue;
-        if (!memberIdsByVisitId.has(s.visit_id)) memberIdsByVisitId.set(s.visit_id, []);
-        memberIdsByVisitId.get(s.visit_id).push(s.id);
+      const visitIds = [...new Set(services.map((s) => s.visit_id).filter(Boolean))];
+      const visitMemberRows = visitIds.length
+        ? await db('scheduled_services').whereIn('visit_id', visitIds)
+          .select('id', 'visit_id', 'technician_id', 'scheduled_date')
+        : [];
+      const candidatesByVisitId = new Map();
+      for (const row of visitMemberRows) {
+        if (!candidatesByVisitId.has(row.visit_id)) candidatesByVisitId.set(row.visit_id, []);
+        candidatesByVisitId.get(row.visit_id).push(row);
       }
-      const allServiceIds = services.map((s) => s.id);
-      const photoRows = allServiceIds.length
-        ? await db('visit_prep_photos').whereIn('scheduled_service_id', allServiceIds).distinct('scheduled_service_id')
+      const allCandidateIds = new Set(services.map((s) => s.id));
+      for (const row of visitMemberRows) allCandidateIds.add(row.id);
+      const photoRows = allCandidateIds.size
+        ? await db('visit_prep_photos').whereIn('scheduled_service_id', [...allCandidateIds]).distinct('scheduled_service_id')
         : [];
       const serviceIdsWithPhotos = new Set(photoRows.map((r) => r.scheduled_service_id));
       for (const s of services) {
-        const memberIds = s.visit_id ? (memberIdsByVisitId.get(s.visit_id) || [s.id]) : [s.id];
+        let memberIds;
+        if (s.visit_id) {
+          const sDate = dateOnlyString(s.scheduled_date);
+          memberIds = (candidatesByVisitId.get(s.visit_id) || [])
+            .filter((c) => (c.technician_id || null) === (s.technician_id || null) && dateOnlyString(c.scheduled_date) === sDate)
+            .map((c) => c.id);
+          if (!memberIds.includes(s.id)) memberIds.push(s.id);
+        } else {
+          memberIds = [s.id];
+        }
         customerSentPhotosByServiceId.set(s.id, memberIds.some((id) => serviceIdsWithPhotos.has(id)));
       }
     }

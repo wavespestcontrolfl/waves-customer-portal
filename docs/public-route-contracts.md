@@ -2920,9 +2920,18 @@ Only the route's OWN
 errors (visit-prep.js's `prepError`, marked internally so the route can
 tell them apart) are ever echoed to the caller; any other error — a library
 error that happens to carry a `statusCode` included — goes to the generic
-error handler, never its raw message. Sends NOTHING to anyone (no
-SMS/email/push/admin alert) and never touches `scheduled_services.status`,
-date, window, or technician. Additive on the existing GET: gate on adds a
+error handler, never its raw message. On a NEW submission only (never a
+duplicate-only resubmit), the route writes ONE admin in-app notification —
+a bounded, best-effort `NotificationService.notifyAdmin` call, category
+`visit_prep_photos`, direct (never through the `notification-triggers.js`
+registry, so it never pushes), linking to the customer; the category is on
+`notification-bell-policy.js`'s `DEFAULT_ON_CATEGORIES` (rings by default,
+owner-silenceable from Settings → Notifications) and a failed insert is
+caught and logged, never surfaced to the caller. This is STILL nothing to
+the customer or the technician — no SMS, email, native push, or socket
+event, to either, ever — and the route still never touches
+`scheduled_services.status`, date, window, or technician. Additive on the
+existing GET: gate on adds a
 top-level `prepPhotos: { eligible, photoCount, photosRemaining }` (the same
 shape, computed whether or not the visit is currently eligible, so the
 client can render the right empty/full state); gate off, the key is absent
