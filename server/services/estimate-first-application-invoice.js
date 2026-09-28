@@ -446,8 +446,8 @@ async function readFirstApplicationStamp(svc, conn) {
 // GATE for isSiblingCoverageEligibleVisit's priced branch, never a mint
 // decision itself: siblingInvoiceCoverageVerdict / combinedInvoiceVoidedWithoutLiveReplacement
 // still make the actual (fail-closed) call once a caller is eligible to ask
-// them. A missing svc.id/conn, no stamp, or an unreadable invoice row all
-// read false — never toward a false "is a member" that would wrongly widen
+// them. A missing svc.id/conn, no stamp, or a missing invoice row all
+// read false (a read ERROR reads true — see the catch) — never toward a false "is a member" that would wrongly widen
 // an ANCHOR's own priced mint (see that predicate's own header for why an
 // anchor must never reach the terminal-match-ahead-of-own-visit branches
 // this gate exists to keep the anchor out of).
@@ -459,8 +459,14 @@ async function isPricedCoveredMemberVisit(svc, conn) {
     const invoice = await conn('invoices').where({ id: stampedInvoiceId }).first('scheduled_service_id');
     if (!invoice?.scheduled_service_id) return false;
     return String(invoice.scheduled_service_id) !== String(svc.id);
-  } catch {
-    return false;
+  } catch (err) {
+    // A failed read is NOT "unstamped" (pre-push P1 on acb6a0ad54): false
+    // would let a covered priced member fall through to minting its own
+    // price — the double charge this gate exists to stop. Unknown admits the
+    // visit to the coverage verdict, which fails closed on its own (an error
+    // or ambiguous match refuses / holds for review, never mints).
+    require('./logger').warn(`[estimate-first-application-invoice] isPricedCoveredMemberVisit read failed for ${svc.id}; routing to the fail-closed coverage check: ${err?.message || err}`);
+    return true;
   }
 }
 

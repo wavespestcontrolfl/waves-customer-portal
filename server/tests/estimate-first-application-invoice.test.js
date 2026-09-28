@@ -600,9 +600,11 @@ describe('isPricedCoveredMemberVisit — priced-covered-member widening gate (Co
     await expect(isPricedCoveredMemberVisit({ id: 'lawn-sibling', first_application_invoice_id: 'x' }, null)).resolves.toBe(false);
   });
 
-  test('a throwing conn fails toward false, never toward an unhandled rejection', async () => {
+  test('a throwing conn reads TRUE (routes to the fail-closed coverage check), never false and never an unhandled rejection', async () => {
+    // pre-push P1 on acb6a0ad54: false on a read error would let a covered
+    // priced member mint its own price — the double charge this gate stops.
     const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
     const conn = () => { throw new Error('db down'); };
-    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
   });
 });
