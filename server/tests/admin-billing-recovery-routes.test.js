@@ -642,3 +642,39 @@ describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => 
     expect(dispositionQB.insert).not.toHaveBeenCalled();
   });
 });
+
+describe('billVisit pins self-pay through the mint (GH Codex r3)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  test('an invoice that comes out payer-billed (Bill-To assigned mid-mint) refuses and records no disposition', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-p', total: '129.00', payer_id: 'payer-1' });
+    const result = await billVisit('ss-1', { expectedPrice: 129 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/third-party billed/) }));
+    expect(dispositionQB.insert).not.toHaveBeenCalled();
+  });
+
+  test('the completion record join requires the visit\'s own customer', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    const qb = makeQB({ first: BILLABLE_VISIT });
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? qb : makeQB({ first: null })));
+    await assessVisitBillable('ss-1');
+    const [, joinFn] = qb.leftJoin.mock.calls[0];
+    const on = jest.fn(() => ({ andOn: andOnSpy }));
+    const andOnSpy = jest.fn();
+    joinFn.call({ on });
+    expect(on).toHaveBeenCalledWith('sr.scheduled_service_id', '=', 'ss.id');
+    expect(andOnSpy).toHaveBeenCalledWith('sr.customer_id', '=', 'ss.customer_id');
+  });
+});

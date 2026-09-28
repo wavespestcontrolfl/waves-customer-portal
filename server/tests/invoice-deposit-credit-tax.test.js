@@ -422,6 +422,14 @@ describe('createFromService — estimate-deposit roll-forward', () => {
     await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
       .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Deposit provenance/) });
 
+    // An unreadable deposit ledger in refusal mode is a quiet 409 — never the
+    // retry/alert path (the IB preview must not raise a real alert).
+    setupServiceDb();
+    mockPendingDepositCredit.mockRejectedValueOnce(new Error('ledger read failed'));
+    await expect(InvoiceService.createFromService('sr-1', { amount: 250, refuseDepositCredit: true }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Deposit balance could not be verified/) });
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+
     // No open balance: the refusal never fires and the plain invoice mints.
     setupServiceDb();
     mockPendingDepositCredit.mockResolvedValue(null);

@@ -48,6 +48,7 @@ const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const BillingRecoveryBill = require('../billing-recovery-bill');
+const { firstDeliveryOutcome, resolvedSendOutcome } = require('../invoice-send-outcome');
 // Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when an
 // invoice send is planned, never at IB boot.
 const invoiceEmail = () => require('../invoice-email');
@@ -60,7 +61,7 @@ const CLOSEOUT_REPAIR_TOOLS = [
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
 Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and bill a completed self-pay visit that was never invoiced (the Billing Recovery "Bill" checks; the card shows the exact invoice total) and send that invoice to the customer by email/text exactly as the Invoices "Send" button does — nothing is charged.
-Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
+Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, re-sends of invoices that already exist, receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -287,9 +288,7 @@ async function planInvoiceSend(status, knex) {
   const { customer, prefs } = await loadContact(status.visit?.customerId || null, knex);
   if (!customer) return why('the customer record could not be read — send the invoice from the Invoices page');
   if (prefs === PREFS_UNAVAILABLE) return why("the customer's billing settings could not be read — send the invoice from the Invoices page");
-  const { recipient } = invoiceEmail().invoiceRecipientFor(customer, prefs, null);
-  const email = recipient?.email ? String(recipient.email).trim().toLowerCase() : null;
-  const phone = customer.phone || null;
+  const { email, phone } = invoiceContacts(customer, prefs);
   if (!email && !phone) return why('no invoice email or phone on file — the invoice is created; send it from the Invoices page');
   const credit = await accountCreditTheSendWouldApply(customer.id, knex);
   if (credit > 0) {
@@ -305,9 +304,23 @@ async function planInvoiceSend(status, knex) {
       recipients: email ? [maskEmail(email)] : [],
       text_to: maskPhone(phone),
       // Binds the FULL email + phone (masks can collide).
-      recipients_key: crypto.createHash('sha256').update(JSON.stringify([email, phone])).digest('hex').slice(0, 16),
+      recipients_key: contactsKey(email, phone),
     },
   };
+}
+
+// The Send action's destinations: invoiceRecipientFor (its own email
+// resolver) and the phone on file for the pay-link text.
+function invoiceContacts(customer, prefs) {
+  const { recipient } = invoiceEmail().invoiceRecipientFor(customer, prefs, null);
+  return {
+    email: recipient?.email ? String(recipient.email).trim().toLowerCase() : null,
+    phone: customer.phone || null,
+  };
+}
+
+function contactsKey(email, phone) {
+  return crypto.createHash('sha256').update(JSON.stringify([email, phone])).digest('hex').slice(0, 16);
 }
 
 // Every open fact no step covers, with where it gets fixed.
@@ -401,9 +414,8 @@ const STEP_RUNNERS = {
     // Re-checked right before the send: credit that appeared since the card
     // was shown would be consumed by the send — refuse instead.
     const invoiceRow = await knex('invoices').where({ id: disposition.invoice_id }).first('customer_id');
-    if (invoiceRow && (await accountCreditTheSendWouldApply(invoiceRow.customer_id, knex)) > 0) {
-      return { status: 'failed', detail: 'the customer now has account credit the send would apply — send it from the Invoices page', invoice_id: disposition.invoice_id };
-    }
+    const blocked = await sendBoundaryRefusal(step, invoiceRow, knex);
+    if (blocked) return { status: 'failed', detail: blocked, invoice_id: disposition.invoice_id };
     try {
       const result = await require('../invoice').sendViaSMSAndEmail(disposition.invoice_id, {
         firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: step.actor_id || null,
@@ -418,25 +430,50 @@ const STEP_RUNNERS = {
   },
 };
 
-// The Send route's own reading of a send result.
-function invoiceSendOutcome(result) {
-  if (!result?.ok) {
-    return { status: 'failed', detail: result?.error || result?.sms?.error || result?.email?.error || 'invoice not sent' };
+// Right before the send: the destinations must still be the approved ones
+// (recipients_key), and no account credit may have appeared.
+async function sendBoundaryRefusal(step, invoiceRow, knex) {
+  if (!invoiceRow) return 'the created invoice could not be read';
+  const { customer, prefs } = await loadContact(invoiceRow.customer_id, knex);
+  if (!customer || prefs === PREFS_UNAVAILABLE) return "the customer's contact settings could not be read — send it from the Invoices page";
+  const { email, phone } = invoiceContacts(customer, prefs);
+  if (contactsKey(email, phone) !== step.recipients_key) {
+    return "the customer's invoice email or phone changed since the card was approved — send it from the Invoices page";
   }
+  if ((await accountCreditTheSendWouldApply(invoiceRow.customer_id, knex)) > 0) {
+    return 'the customer now has account credit the send would apply — send it from the Invoices page';
+  }
+  return null;
+}
+
+// A send result read through the Invoices Send route's own classifier
+// (services/invoice-send-outcome.js) — never a second interpretation.
+function invoiceSendOutcome(result) {
+  if (result?.code === 'INVOICE_VISIT_TERMINAL') {
+    return { status: 'completed', detail: 'the visit became terminal — the invoice was voided instead of sent' };
+  }
+  if (!result?.ok) return invoiceSendFailure(result);
+  if (result.settled_zero_due) return { status: 'completed', detail: 'nothing was due — the invoice was settled, no pay link sent' };
+  if (result.covered_by_credit) return { status: 'completed', detail: 'the invoice was fully covered — no pay link sent' };
   const legs = [result.email?.ok && 'emailed', result.sms?.ok && 'texted', result.sms?.scheduled && 'text queued for 8 AM'].filter(Boolean);
   return { status: 'completed', detail: `invoice sent (${legs.join(', ') || 'delivered'})` };
 }
 
-// Same no-op-success codes the Send route treats as delivered for a first
-// delivery; anything else is a failed step.
-const ALREADY_SENT = {
-  already_delivered: 'the invoice was already delivered — nothing re-sent',
-  queued_pay_link: 'the pay-link text was already queued — nothing re-sent',
-  delivery_in_progress: 'another send of this invoice is already in progress',
-};
+function invoiceSendFailure(result) {
+  const held = resolvedSendOutcome(result);
+  if (held?.type === 'held') return { status: 'failed', detail: `held for review: ${held.reason || held.code}` };
+  return { status: 'failed', detail: result?.error || result?.sms?.error || result?.email?.error || 'invoice not sent' };
+}
 
+// A thrown send refusal, same classifier: first-delivery no-ops (already
+// delivered / queued / in progress) are completed; held codes and anything
+// else are a failed step.
 function invoiceSendRefusal(err) {
-  if (ALREADY_SENT[err?.code]) return { status: 'completed', detail: ALREADY_SENT[err.code] };
+  const outcome = firstDeliveryOutcome(err, true);
+  if (outcome?.type === 'noop') {
+    return { status: 'completed', detail: outcome.voided ? 'the visit became terminal — the invoice was voided instead of sent' : `nothing re-sent (${outcome.code.replace(/_/g, ' ')})` };
+  }
+  if (outcome?.type === 'held') return { status: 'failed', detail: `held for review: ${outcome.reason || outcome.code}` };
   return { status: 'failed', detail: err?.message || 'invoice send failed' };
 }
 

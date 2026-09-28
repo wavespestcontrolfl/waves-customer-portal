@@ -45,7 +45,12 @@ const refuse = (status, error) => ({ ok: false, status, error });
 async function loadBillableVisit(scheduledServiceId, serviceRecordId, database) {
   const query = database({ ss: 'scheduled_services' })
     .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
-    .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
+    // The completion record must belong to the visit's own customer — a
+    // record linked to the visit but owned by another customer never bills
+    // (createFromService mints for the RECORD's customer).
+    .leftJoin({ sr: 'service_records' }, function joinOwnRecord() {
+      this.on('sr.scheduled_service_id', '=', 'ss.id').andOn('sr.customer_id', '=', 'ss.customer_id');
+    })
     .where('ss.id', scheduledServiceId);
   if (serviceRecordId) query.where('sr.id', serviceRecordId);
   return query
@@ -317,6 +322,14 @@ async function billVisit(scheduledServiceId, {
         refuseDepositCredit,
       });
 
+      // Self-pay is pinned through the mint: createFromService re-resolves
+      // Bill-To, so a payer assigned after the assessment would mint a
+      // payer-owned invoice — refuse and roll back instead.
+      if (created.payer_id) {
+        const e = new Error('The visit became third-party billed while billing — handle it via the payer AP flow.');
+        e.status = 409;
+        throw e;
+      }
       if (expectedTotal !== null && cents(created.total) !== cents(expectedTotal)) {
         const e = new Error(`The invoice total changed since it was approved ($${Number(expectedTotal).toFixed(2)} → $${Number(created.total).toFixed(2)}).`);
         e.status = 409;

@@ -421,7 +421,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
 
   test('confirmed: bills at the approved total, then sends that invoice as a first delivery; a total change refuses', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', invoice_number: 'WPC-2026-0042', total: '138.03', status: 'draft' } });
@@ -459,16 +459,48 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
   });
 
+  test('send: a recipient changed after approval refuses the send at the boundary (the invoice stays created)', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
+    InvoiceService.sendViaSMSAndEmail.mockClear();
+    // Planning (executor re-plan) still sees the approved email; the send boundary sees the new one.
+    invoiceRecipientFor
+      .mockReturnValueOnce({ recipient: { email: 'Pat@Example.com' } })
+      .mockReturnValueOnce({ recipient: { email: 'someone.else@example.com' } });
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.partial).toBe(true);
+    expect(run.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'failed', detail: expect.stringMatching(/changed since the card was approved/) }));
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
+  test('send: a terminal-visit void is the Send route\'s completed no-op, read through the shared classifier', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({ ok: false, code: 'INVOICE_VISIT_TERMINAL', sms: { ok: false }, email: { ok: false } });
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(run.success).toBe(true);
+    expect(run.receipt[1]).toEqual(expect.objectContaining({ status: 'completed', detail: expect.stringMatching(/voided instead of sent/) }));
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({ ok: true, settled_zero_due: true, sms: {}, email: {} });
+    const zero = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(zero.receipt[1]).toEqual(expect.objectContaining({ status: 'completed', detail: expect.stringMatching(/nothing was due/) }));
+  });
+
   test('send: an invoice already delivered by another path is a completed no-op; a refused send is a failed step (partial run)', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [{ id: 'inv-9', customer_id: 'cust-1' }], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
     InvoiceService.sendViaSMSAndEmail.mockRejectedValueOnce(Object.assign(new Error('already delivered'), { code: 'already_delivered' }));
     const noop = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
     expect(noop.success).toBe(true);
-    expect(noop.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'completed', detail: 'the invoice was already delivered — nothing re-sent' }));
+    expect(noop.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'completed', detail: 'nothing re-sent (already delivered)' }));
 
     InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({ ok: false, error: 'No invoice recipient email', sms: { ok: false }, email: { ok: false } });
     const partial = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });

@@ -5248,6 +5248,15 @@ const InvoiceService = {
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
           if (err.status) throw err;
+          // A refuseDepositCredit caller (the IB closeout repair, incl. its
+          // rolled-back preview) must not trigger the retry/alert path:
+          // an unreadable deposit ledger is a quiet refusal, never a real
+          // estimate_deposit_reconcile_needed alert from a planning call.
+          if (refuseDepositCredit) {
+            const refusal = new Error("Deposit balance could not be verified — bill it from Billing Recovery.");
+            refusal.status = 409;
+            throw refusal;
+          }
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
