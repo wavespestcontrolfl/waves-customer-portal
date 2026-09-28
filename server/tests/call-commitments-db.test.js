@@ -413,8 +413,11 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_from_this_call' }),
     }).returning('id');
     const statusOf = async () => (await db('call_commitments').where({ id: kept.id }).first('status', 'fulfilled_at', 'fulfillment'));
-    const lapses = async (change, restore) => {
+    // The sweep lists the call only once the records contradict the proof
+    // (a rewritten confirmed slot comes with a reprocess, which refreshes).
+    const lapses = async (change, restore, { swept = true } = {}) => {
       await change();
+      expect(await cc.listSlotKeptCallIds(db)).toEqual(swept ? expect.arrayContaining([call.id]) : expect.not.arrayContaining([call.id]));
       expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 1 });
       const lapsed = await statusOf();
       expect(lapsed).toMatchObject({ status: 'open', fulfilled_at: null });
@@ -425,15 +428,16 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     };
     expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 0 });
     expect((await statusOf()).status).toBe('fulfilled');
-    expect(await cc.listSlotKeptCallIds(db)).toContain(call.id);
+    expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
     const visitTo = (patch) => () => db('scheduled_services').where({ id: atSlot.id }).update(patch);
     await lapses(visitTo({ status: 'cancelled' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ status: 'rescheduled' }), visitTo({ status: 'pending' }));
+    await lapses(visitTo({ status: 'skipped' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ window_start: '16:30' }), visitTo({ window_start: '15:00' }));
     // Entered once the slot had come: a record of it, not the booking (codex #5081 r6 P2).
     await lapses(visitTo({ created_at: new Date(Date.parse(threePm) + 60 * 60 * 1000) }), visitTo({ created_at: new Date(Date.now() - 60 * 1000) }));
     // A reprocess rewrote the confirmed slot.
-    await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: parseETDateTime(`${day}T16:00`).toISOString() }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePm }));
+    await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: parseETDateTime(`${day}T16:00`).toISOString() }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePm }), { swept: false });
     // The office moved the call to another customer.
     const [elsewhere] = await db('customers').insert({ first_name: 'Elsewhere', phone: '+15555550173' }).returning('id');
     cleanup.customerIds.push(elsewhere.id);
@@ -445,9 +449,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 0 });
     expect((await statusOf()).status).toBe('fulfilled');
     expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
-    // No age cutoff: a relink can come long after the slot (codex #5081 r6 P1).
-    await db('call_commitments').where({ id: kept.id }).update({ human_state: null, due_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+    // No age cutoff: a relink made with the gate off, long after the slot,
+    // is still found by the sweep once the gate is back (codex #5081 r6 P1).
+    await db('scheduled_services').where({ id: atSlot.id }).update({ status: 'completed' });
+    await db('call_commitments').where({ id: kept.id }).update({ human_state: null });
+    expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
+    await db('call_log').where({ id: call.id }).update({ customer_id: elsewhere.id });
     expect(await cc.listSlotKeptCallIds(db)).toContain(call.id);
+    await db('call_log').where({ id: call.id }).update({ customer_id: cust.id });
   });
 
   test('a refresh racing a relink never keeps the promise with the previous customer\'s booking (pre-push audit P1 on 23ab49bc0f)', async () => {

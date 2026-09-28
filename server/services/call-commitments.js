@@ -1446,6 +1446,10 @@ function whereEstimateCustomerOwnership(query, customerId) {
 // the slot through inputs a reprocess rewrites, so every refresh judges it
 // again (refreshFulfillment; listSlotKeptCallIds feeds the sweep).
 const SLOT_BOOKING_BASIS = "visit_booked_at_the_promised_time";
+// A visit in one of these is off the books and proves no slot: cancelled,
+// the legacy reschedule's original row, or skipped by the office
+// (scheduled-service-statuses.js; codex #5081 r3 P1, r7 P2).
+const SLOT_OFF_BOOKS_STATUSES = ["cancelled", "canceled", "rescheduled", "skipped"];
 
 // A promise's stated time as a bookable slot — its ET day and minute of the
 // day — or null: no stated time, one labeled a deadline (the latest moment
@@ -1485,10 +1489,7 @@ async function slotBookingProof(conn, commitment, call, customerId, after) {
     .where("created_at", "<", slot.at)
     .where("scheduled_date", slot.day)
     .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slot.time])
-    // 'rescheduled' is the legacy reschedule's original row — off the
-    // books, as the booking-miss watchdog's confirmed-booking check reads
-    // it (codex #5081 r3 P1).
-    .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+    .whereNotIn("status", SLOT_OFF_BOOKS_STATUSES)
     .whereNull("recurring_parent_id")
     .whereNull("parent_service_id")
     .orderBy("created_at", "asc")
@@ -1986,19 +1987,33 @@ async function rejudgeSlotKept(conn, kept, row, callLogId) {
   return { reopened, failed };
 }
 
-// Calls holding a promise kept by a booking for its promised slot — the
-// periodic sweep refreshes them beside the calls with open promises, so a
-// visit cancelled or moved after the promise was kept, or a relink made
-// while the commitments gate was off, is judged again. No age cutoff: a
-// relink can come long after the slot (codex #5081 r6 P1); the set is the
-// few promises this rule has kept.
+// Calls holding a promise kept by a booking for its promised slot whose
+// proof no longer holds in the records themselves: the visit is gone, off
+// the books, moved off the stated slot, entered once the slot had come, or
+// no longer the call's customer's. The periodic sweep refreshes them beside
+// the calls with open promises, so a lapse is caught whenever it happened —
+// long after the slot, or while the commitments gate was off (codex #5081
+// r5/r6 P1) — while the sweep's work follows the lapses, not every promise
+// this rule ever kept (r7 P2). A rewritten confirmed slot comes with a
+// reprocess, which refreshes the call itself.
 async function listSlotKeptCallIds(conn) {
-  const rows = await conn("call_commitments")
-    .distinct("call_log_id")
-    .where({ status: "fulfilled" })
-    .whereNull("human_state")
-    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS]);
-  return rows.map((r) => r.call_log_id);
+  const rows = await conn.raw(
+    `SELECT DISTINCT cc.call_log_id
+       FROM call_commitments cc
+       JOIN call_log cl ON cl.id = cc.call_log_id
+       LEFT JOIN scheduled_services ss ON ss.id::text = cc.fulfillment ->> 'record_id'
+      WHERE cc.status = 'fulfilled' AND cc.human_state IS NULL
+        AND cc.fulfillment ->> 'basis' = ?
+        AND (ss.id IS NULL
+          OR ss.status = ANY(?)
+          OR ss.customer_id IS DISTINCT FROM cl.customer_id
+          OR cc.due_at IS NULL
+          OR ss.created_at >= cc.due_at
+          OR to_char(ss.scheduled_date, 'YYYY-MM-DD') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')
+          OR to_char(ss.window_start, 'HH24:MI') IS DISTINCT FROM to_char(cc.due_at AT TIME ZONE 'America/New_York', 'HH24:MI'))`,
+    [SLOT_BOOKING_BASIS, SLOT_OFF_BOOKS_STATUSES],
+  );
+  return (rows?.rows || []).map((r) => r.call_log_id);
 }
 
 

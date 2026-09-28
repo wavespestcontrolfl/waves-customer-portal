@@ -98,9 +98,9 @@ async function runInner({ now = new Date() } = {}) {
   // A call whose refresh FAILED — the call threw, or any of its lookups did
   // (`failed` in the summary) — is not verified either way. Carry forward
   // its existing reminder version while independently verified work proceeds.
-  // Calls holding a promise kept by a booking for its promised slot are
-  // judged again too: that proof can lapse (visit cancelled or moved, call
-  // relinked) with nothing open on the call to bring it here.
+  // Calls holding a promise kept by a booking for its promised slot whose
+  // proof has lapsed (visit cancelled, skipped or moved, call relinked) are
+  // judged again too — nothing open on the call would bring them here.
   const callIds = [...new Set([...rows.map((r) => r.call_log_id), ...await commitments.listSlotKeptCallIds(db)])];
   const unverifiedCalls = new Set();
   let refreshed = 0;

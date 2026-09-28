@@ -251,8 +251,9 @@ its stated slot (the
 stated ET day and start minute, confirmed by the call's own scheduling
 extraction; not a deadline; owner ruling 2026-09-27) — marks the open AI row
 fulfilled. That slot proof is never final: every refresh judges it again (the
-commitments watchdog sweeps every call holding one), so a
-cancelled or moved visit, a changed confirmed slot or a relink reopens it.
+commitments watchdog sweeps any whose visit or call no longer supports it), so a
+cancelled, skipped or moved visit, a changed confirmed slot or a relink
+reopens it.
 *Association* — a record that merely belongs to the same customer or phone
 within 14 days (a `confirmation` text to the caller, a completed outbound
 call ≥20 s, an inbound message with media, a customer estimate/visit/invoice)
