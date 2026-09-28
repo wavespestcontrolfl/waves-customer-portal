@@ -612,6 +612,13 @@ function requireCustomerPhotoIdGateOpen(req, res, next) {
 app.use('/api/photo-id', requireCustomerPhotoIdGateOpen);
 app.use('/api/photo-id', require('./middleware/large-body-auth').requireCustomerTokenForLargeBody);
 app.use('/api/photo-id', express.json({ limit: '30mb' }));
+// Per-link Open Graph preview images (/og/report/:token.jpg, /og/<kind>.jpg)
+// — the endpoint iMessage/SMS/email link-preview crawlers fetch, outside any
+// auth. Mounted BEFORE the global body parsers below: it reads no body, and
+// a junk body must never be parsed (or rejected) ahead of its privacy
+// headers and limiter. See server/routes/og-preview.js.
+app.use('/og', require('./routes/og-preview'));
+
 // Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
 // the verify hook stores them for /api/integrations/*-worker paths only.
 app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
@@ -982,9 +989,9 @@ if (config.nodeEnv === 'production') {
   const fs = require('fs');
   const {
     applyHtmlMetadata,
-    loadServiceReportPageMetadata,
-    redactReportPath,
   } = require('./services/report-page-metadata');
+  const { loadLinkPreviewMetadata, redactLinkPreviewPath } = require('./services/link-preview-metadata');
+  const { portalUrl } = require('./utils/portal-url');
 
   // Per-section PWA shape. /admin and /tech each install as their own
   // home-screen icon with their own name/manifest/start_url, instead of
@@ -1023,6 +1030,21 @@ if (config.nodeEnv === 'production') {
     // surrounding handlers are already no-cache, so fresh reads keep
     // deploys snappy without a stale-cache footgun.
     let html = fs.readFileSync(path.join(clientBuild, 'index.html'), 'utf8');
+    // Every page gets a branded, absolute default og:image FIRST — before
+    // the section/link-preview overrides below, which is what lets a more
+    // specific override (title/description included) win for a page that
+    // has one, while an ordinary page keeps this default image with the
+    // static title/description index.html already carries (applyHtmlMetadata
+    // falls back to those same defaults when a field isn't given).
+    html = applyHtmlMetadata(html, {
+      previewTitle: 'Waves',
+      image: {
+        url: portalUrl('/og/default.jpg'),
+        width: 1200,
+        height: 630,
+        alt: 'Waves Pest Control',
+      },
+    });
     const section = pickSection(reqPath);
     if (section) {
       html = html.replace(/href="\/manifest\.json"/, `href="${section.manifest}"`);
@@ -1034,10 +1056,10 @@ if (config.nodeEnv === 'production') {
       });
     }
     try {
-      const reportMetadata = await loadServiceReportPageMetadata(reqPath);
-      if (reportMetadata) html = applyHtmlMetadata(html, reportMetadata);
+      const linkPreviewMetadata = await loadLinkPreviewMetadata(reqPath);
+      if (linkPreviewMetadata) html = applyHtmlMetadata(html, linkPreviewMetadata);
     } catch (err) {
-      logger.warn(`[report-meta] Failed to render report metadata for ${redactReportPath(reqPath)}: ${err.message}`);
+      logger.warn(`[link-preview] Failed to render link-preview metadata for ${redactLinkPreviewPath(reqPath)}: ${err.code || err.name}`);
     }
     return html;
   }

@@ -2173,6 +2173,41 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
+(`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
+picture iMessage/SMS/email crawlers show under a texted or emailed customer
+link; `server/index.js` renderHTML writes the matching `og:image` into each
+customer page's `<head>`, and `og:title`/`twitter:title` read just "Waves").
+Mounted OUTSIDE the `/api/` limiter with its own 120/min per-key limiter
+(the `/l` budget), and BEFORE the global body parsers (it reads no body).
+Fixed cards change only the preview tags, never the page's own `<title>`.
+**Only the service report card looks its token up**
+(owner 2026-09-28): `/og/report/:token.jpg` (and the `/report/` and
+`/recap/` pages' head tags, both already behind the report limiter) resolve
+through report-page-metadata's lookup with its `typedReportDelivery`
+suppression — 32-hex format gate before any DB read, read-only, never
+URL-decoded, a failure logs only the error code (knex messages embed the
+token). Its privacy headers precede the limiter. **Deliberate exception to
+"generic 404":** an unknown, malformed or suppressed link returns the
+default card, 200, byte-identical to `/og/default.jpg` with the same
+headers — still no existence oracle, and the crawler shows a branded card.
+**Every other kind is a fixed card** (`/og/<kind>.jpg`, `FIXED_CARDS`:
+project report, appointment, reschedule, prep, invoice, receipt, statement,
+estimate, tracking, assessment, …): it reads nothing from the database,
+carries no token, and is served `public, max-age=3600` without privacy
+headers. A fixed card whose surface is dark (`GATE_APPOINTMENT_PAGE`,
+`payerStatements`, re-service self-serve, `leadInspectionLinkLive`,
+`recruitingComms`) resolves to the default card, matching that surface's
+uniform 404; an unregistered or inherited name gets the default too.
+Payload is a 1200x630 JPEG of an eyebrow, headline and subline: never a
+price, amount, name, address, phone, email, tech name or note, and
+estimates stay generic (no services or prices). Routes match the raw path
+(regex captures that can't hold `%`), so no parameter is URL-decoded and a
+malformed encoding can't reach the JSON error handler; any other `/og` path
+(another kind with a token, a bad token, no `.jpg`) is the default card.
+The file segment two levels under `/og` is always redacted from request
+logs (`redact-request-url.js`). No query parameters are read. The render cache is keyed by card content, never by
+token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
