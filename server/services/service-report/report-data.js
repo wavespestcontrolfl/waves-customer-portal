@@ -51,7 +51,7 @@ const {
   isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { etCalendarDayOf, etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -1934,6 +1934,7 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.upcomingVisitsCard;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
   delete data.planSummary;
@@ -5381,6 +5382,259 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     } catch { /* best-effort */ }
   }
 
+  // "Your upcoming visits" card (owner-approved 2026-09-27,
+  // GATE_REPORT_UPCOMING_VISITS): every LIVE report can list ALL of the
+  // customer's upcoming scheduled visits across EVERY program (pest, lawn,
+  // tree & shrub, mosquito, termite, rodent, …) for THIS report's property,
+  // for the next 90 days — cap ~6. Distinct from nextAppointment above,
+  // which stays scoped to the report's OWN service line and is left
+  // unchanged. Live-view-only for the same staleness reason as
+  // nextAppointment (a reschedule after render must not fossilize into a
+  // cached PDF — see stripLiveOnlyScheduleFields). Ships dark: unset or
+  // anything other than exactly 'true' keeps the payload absent. Read
+  // directly at call time (same same-file convention as
+  // GATE_RODENT_REPORT_REFRESH / COCKROACH_REPORT_V2 above). Best-effort:
+  // never blocks the report.
+  // OPT-IN on the same terms as composeOffers/planSummary (codex round-5
+  // P2): only the /data render path shows the card, so only it pays for
+  // the scheduled_services scan (paged, up to MAX_PAGES * PAGE_SIZE rows,
+  // plus the property/estimate/single-premises reads it can trigger). The
+  // Q&A endpoint (/api/reports/:token/ask) calls this builder purely for
+  // report CONTEXT and reads report-assistant.js never touches the field —
+  // every customer question was paying for this scan nobody reads, under
+  // the general report limiter, repeatedly.
+  let upcomingVisitsCard = null;
+  if (opts.mode === 'live' && opts.upcomingVisitsCard === true
+    && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
+    try {
+      // Shared stamp → property_id → source_estimate_id resolver (codex
+      // round-4 P1 — a FOURTH consecutive parallel reimplementation of
+      // this exact chain missed the source_estimate_id leg, so a
+      // secondary-property visit that is unstamped and carries no
+      // property_id — but WAS created from an estimate for that secondary
+      // property — was silently classified as the customer's primary
+      // property). server/services/service-report/visit-property-scope.js
+      // is the ONE implementation cross-sell.js's report-identity proof
+      // and this card both call — no more per-caller re-derivation to
+      // miss a leg on again. Key format is estimate-property-linkage.js's
+      // own `street|city|zip` scope key (not customer-properties.js's
+      // opaque addressKey hash) — only that format can be produced from
+      // an estimate's free-text address and carries the locality-lacks /
+      // locality-shares proofs a real property-equality compare needs.
+      const linkage = require('../estimate-property-linkage');
+      const { resolveVisitPropertyScope, sameResolvedProperty, customerHasOnlyPrimaryPremises } = require('./visit-property-scope');
+
+      // THIS report's property identity. A linked visit's own stamp /
+      // property_id / source_estimate_id is the truth (a phone-booked
+      // rental's report must never list another property's visits) — a
+      // linked row with NONE of the three (hasEvidence false), or a
+      // genuinely unlinked/legacy report, falls back to the route's
+      // already-COALESCEd mirror address (service.address_line1/city/zip),
+      // the SAME premise every other live-only field on this report (map,
+      // cross-sell) is anchored to.
+      //
+      // A link was EXPECTED (scheduled_service_id present) but the row
+      // could not be resolved — a transient read error is indistinguishable
+      // here from a genuinely missing/deleted row, and EITHER must fail
+      // closed (codex round-2 P1): treating it as "genuinely unlinked"
+      // below would fall back to the customer mirror, which can name a
+      // DIFFERENT (e.g. primary) property than the one this report was
+      // actually linked to — exposing that other property's visits on a
+      // secondary-property report's token.
+      let reportLinkUnresolved = false;
+      let reportScope = null;
+      if (service.scheduled_service_id) {
+        const reportSs = await knex('scheduled_services')
+          .where({ id: service.scheduled_service_id })
+          .first('property_id', 'source_estimate_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+          .catch(() => null);
+        if (reportSs) {
+          reportScope = await resolveVisitPropertyScope(reportSs, knex);
+        } else {
+          reportLinkUnresolved = true;
+        }
+      }
+      const mirrorKey = linkage.normalizedStampedStreet(
+        service.address_line1, service.address_line2, service.city, service.zip
+      ) || null;
+
+      // The mirror fallback (used below, and again per candidate) is only
+      // safe when this account can be PROVEN to have a single premises, the
+      // primary one (codex round-5 P1): a multi-property account's legacy
+      // no-evidence row — no stamp, no property_id, no source_estimate_id —
+      // could easily be the OTHER property, and without this proof it would
+      // pass sameResolvedProperty against a primary-property report on the
+      // mirror address alone. Reuses cross-sell.js's own single-premises
+      // proof (moved to visit-property-scope.js so both callers share it)
+      // anchored to the SAME mirrorKey the fallback itself uses — one
+      // customer read, and the proof can never disagree with the value it
+      // is guarding. Memoized: computed at most once per report, only the
+      // first time a no-evidence row actually needs the mirror. Fails
+      // CLOSED on any read failure (the proof throws on an unreadable
+      // witness by design) — a failed proof is "not proven single-premises",
+      // never "assume yes".
+      let singlePremisesProof = null;
+      const ensureSinglePremisesProven = async () => {
+        if (singlePremisesProof !== null) return singlePremisesProof;
+        if (!mirrorKey) { singlePremisesProof = false; return singlePremisesProof; }
+        try {
+          const customerRow = await knex('customers')
+            .where({ id: service.customer_id })
+            .first('has_multi_home');
+          // unresolvedFails: true (codex round-6 P1) — an unstamped witness
+          // row whose property_id/source_estimate_id cannot be resolved is
+          // NOT "no evidence either way" for this card's purposes: it might
+          // be the primary, or it might be the very secondary premises the
+          // mirror fallback would otherwise wrongly disclose. cross-sell.js
+          // keeps the default (unresolvedFails omitted) so its own
+          // behavior and tests stay byte-identical.
+          singlePremisesProof = await customerHasOnlyPrimaryPremises(knex, service.customer_id, customerRow, mirrorKey, { unresolvedFails: true });
+        } catch {
+          singlePremisesProof = false;
+        }
+        return singlePremisesProof;
+      };
+
+      // PRIVACY (P1 2026-09-28, extended round-5): a linked row whose
+      // stamp/property_id/source_estimate_id was present but UNRESOLVABLE
+      // (e.g. a deleted property row) fails CLOSED — never falls back to
+      // the customer mirror, which names a DIFFERENT property for a
+      // multi-property account. Only a report with NO identity evidence at
+      // all — linked or not — may use the mirror fallback, and even then
+      // only once the single-premises proof above clears it.
+      const reportPropertyKey = reportLinkUnresolved
+        ? null
+        : (reportScope && reportScope.hasEvidence ? reportScope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null));
+
+      if (reportPropertyKey) {
+        // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
+        // fixed 90 * 24h window built off Date.now() crosses a DST change
+        // at a different wall-clock instant than the ET calendar does, so
+        // it can admit day 91 or drop day 90 depending which side of
+        // midnight ET the run lands on. addETDays/etDateString are the
+        // shared ET-calendar helpers (datetime-et.js) — no ad hoc math.
+        const todayIso = etDateString();
+        const cutoffIso = etDateString(addETDays(new Date(), 90));
+        // Disclosable statuses only (same allow-list as nextAppointment
+        // above): pending/confirmed/en_route/on_site excludes
+        // cancelled/completed/rescheduled by construction.
+        //
+        // Property scoping runs in JS (address-key comparison, not a SQL
+        // predicate), so the visit cap can only apply AFTER it — a flat
+        // LIMIT 60 ahead of that filter truncates candidates before
+        // scoping ever runs, and a multi-property customer with >60
+        // visits elsewhere can lose this property's own visits entirely
+        // (codex round-1 P2). Paged instead: PAGE_SIZE rows at a time,
+        // oldest-first (matching the eventual 6-visit ordering), until 6
+        // property-scoped matches are found, the rows run out, or the
+        // hard MAX_PAGES bound is hit — bounded so a customer with an
+        // enormous schedule can never turn this into an unbounded scan.
+        const PAGE_SIZE = 60;
+        const MAX_PAGES = 5;
+        const matched = [];
+        // Batched per-page caches for resolveVisitPropertyScope — one
+        // `.whereIn()` read per distinct property_id/source_estimate_id
+        // per page instead of a query per candidate row (the same
+        // optimization the previous property_id-only implementation used,
+        // now covering the estimate leg too).
+        const propertyById = new Map();
+        const estimateById = new Map();
+
+        for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
+          const candidates = await knex('scheduled_services')
+            .where('customer_id', service.customer_id)
+            .andWhere('scheduled_date', '>=', todayIso)
+            .andWhere('scheduled_date', '<=', cutoffIso)
+            .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+            .modify((qb) => {
+              if (service.scheduled_service_id) qb.whereNot('id', service.scheduled_service_id);
+            })
+            .orderBy('scheduled_date', 'asc')
+            .orderBy('window_start', 'asc')
+            // `id` breaks ties (codex round-2 P2): scheduled_date +
+            // window_start alone is not a TOTAL order (same-day/same-window
+            // rows tie), so paging by LIMIT/OFFSET over it can duplicate or
+            // skip a row across pages once ties exist. A unique tie-breaker
+            // key gives every page a stable, non-overlapping slice.
+            .orderBy('id', 'asc')
+            .limit(PAGE_SIZE)
+            .offset(page * PAGE_SIZE)
+            .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id', 'source_estimate_id',
+              'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')
+            .catch(() => null);
+
+          if (!Array.isArray(candidates) || !candidates.length) break;
+
+          // Batch-resolve every CANDIDATE property_id / source_estimate_id
+          // in one read apiece per page (the report's own property, if
+          // linked, was already resolved above — fail-closed, never
+          // re-attempted here); ids already cached by an earlier page are
+          // skipped, and an id the batched read didn't return is cached as
+          // null (unresolvable) so resolveVisitPropertyScope's per-row
+          // cache lookup never re-queries it.
+          const newPropertyIds = [...new Set(candidates.map((row) => row.property_id).filter(Boolean))]
+            .filter((id) => !propertyById.has(id));
+          if (newPropertyIds.length) {
+            const propertyRows = await knex('customer_properties')
+              .whereIn('id', newPropertyIds)
+              .select('id', 'address_line1', 'address_line2', 'city', 'zip')
+              .catch(() => []);
+            const foundIds = new Set();
+            for (const row of (Array.isArray(propertyRows) ? propertyRows : [])) {
+              propertyById.set(row.id, row);
+              foundIds.add(row.id);
+            }
+            for (const id of newPropertyIds) if (!foundIds.has(id)) propertyById.set(id, null);
+          }
+
+          const newEstimateIds = [...new Set(candidates.map((row) => row.source_estimate_id).filter(Boolean))]
+            .filter((id) => !estimateById.has(id));
+          if (newEstimateIds.length) {
+            const estimateRows = await knex('estimates')
+              .whereIn('id', newEstimateIds)
+              .select('id', 'address')
+              .catch(() => []);
+            const foundIds = new Set();
+            for (const row of (Array.isArray(estimateRows) ? estimateRows : [])) {
+              estimateById.set(row.id, row);
+              foundIds.add(row.id);
+            }
+            for (const id of newEstimateIds) if (!foundIds.has(id)) estimateById.set(id, null);
+          }
+
+          for (const row of candidates) {
+            if (matched.length >= 6) break;
+            // Bounded (PAGE_SIZE rows/page, MAX_PAGES pages), and the
+            // property_id/source_estimate_id lookups below are cache hits
+            // after the batched reads above.
+            const scope = await resolveVisitPropertyScope(row, knex, { propertyById, estimateById });
+            // The customer mirror is the ONLY fallback for a candidate with
+            // NO stamp, property_id, or source_estimate_id at all (an
+            // unstamped legacy row) — and, same as the report's own
+            // resolution, only once the single-premises proof clears it
+            // (codex round-5 P1): an unscoped row on a MULTI-property
+            // account is excluded, never waved through on the mirror alone.
+            const rowKey = scope.hasEvidence ? scope.key : ((await ensureSinglePremisesProven()) ? mirrorKey : null);
+            if (sameResolvedProperty(rowKey, reportPropertyKey)) matched.push(row);
+          }
+
+          if (candidates.length < PAGE_SIZE) break;
+        }
+
+        if (matched.length) {
+          const visits = matched.map((row) => ({
+            serviceType: row.service_type || null,
+            scheduledDate: row.scheduled_date instanceof Date
+              ? row.scheduled_date.toISOString().slice(0, 10)
+              : String(row.scheduled_date).slice(0, 10),
+            windowStart: row.window_start || null,
+          }));
+          upcomingVisitsCard = { visits };
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
   // report uses, folding in the Pest Pressure trend, the visit's findings,
@@ -5936,6 +6190,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
+    // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
+    // same as nextAppointment. The KEY itself (not just its value) is
+    // omitted entirely while the gate is dark (codex round-2 P0): a
+    // null-valued key still changes the shape of every live payload while
+    // the gate is unset, contradicting the documented "gate off: the field
+    // is absent" contract. Read directly at call time, same convention as
+    // the flag's own gating above. Also omitted for a caller that never
+    // opted in (codex round-5 P2, e.g. the Q&A endpoint) — same
+    // opts.upcomingVisitsCard check the work above already gated on.
+    ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' && opts.upcomingVisitsCard === true ? { upcomingVisitsCard } : {}),
     // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
     // the gate is off, there's no customer, or there's nothing to show —
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same

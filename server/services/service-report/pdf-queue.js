@@ -62,12 +62,17 @@ async function ensureReportToken(serviceRecordId, knex = db) {
   if (!service) return null;
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write: two concurrent mints (completion + an IB closeout
+  // repair) must converge on ONE token — an overwrite would strand a link
+  // already queued in an email. The loser re-reads the winner's token.
   const token = crypto.randomBytes(16).toString('hex');
-  await knex('service_records').where({ id: serviceRecordId }).update({
+  const updated = await knex('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: knex.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await knex('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 // Cached probe for the rollout window where 20260830000050 has not run yet

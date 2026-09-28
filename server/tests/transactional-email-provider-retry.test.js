@@ -63,15 +63,17 @@ describe('transactional email provider retry classification', () => {
     expect(retry.isTransactionalRetryEligible(message({ subject_snapshot: null }))).toBe(false);
   });
 
-  // Owner ruling 2026-09-27: a late-payment or invoice follow-up email the
-  // provider blocks is never re-sent from its stored copy; the sender's next
-  // stage renders fresh.
+  // Owner ruling 2026-09-27: a late-payment, invoice follow-up, micro-deposit
+  // or legacy pre-visit balance email the provider blocks is never re-sent
+  // from its stored copy.
   const senderRendered = [
     'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
     'billing_late_payment_60_day', 'billing_late_payment_90_day',
     'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
     // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
     'invoice.followup_60_day', 'invoice.followup_90_day',
+    // Micro-deposit verification and the legacy pre-visit balance email.
+    'payment.microdeposit_verification', 'billing.previsit_balance',
   ];
 
   test.each(senderRendered)('a blocked %s email records the rejection but schedules no retry', (templateKey) => {
@@ -82,6 +84,24 @@ describe('transactional email provider retry classification', () => {
     expect(retry.retryStateForProviderBlock(blocked, new Date('2026-09-27T12:00:00Z'))).toEqual({
       provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'attempt-1',
     });
+  });
+
+  test.each([
+    ['billing.previsit_balance', null, true],
+    ['payment.microdeposit_verification', 'microdeposit_verification_email:inv1:90d', true],
+    ['payment.microdeposit_verification', 'microdeposit_verification_email:inv1:30d', false],
+    ['billing_late_payment_30_day', null, false],
+  ])('a blocked %s (%s) alerts staff only when it is a final notice: %s', async (templateKey, triggerEventId, final) => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereRaw = jest.fn(() => chain);
+    chain.first = jest.fn(async () => null);
+    db.mockReturnValue(chain);
+    await retry.alertIfProviderRetriesExhausted(message({ template_key: templateKey, trigger_event_id: triggerEventId,
+      recipient_id: 'c1', provider_retry_count: 0 }), { event: 'blocked' });
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals).toHaveLength(final ? 1 : 0);
+    if (final) expect(finals[0][3].metadata).toMatchObject({ cause: 'blocked', customer_id: 'c1' });
   });
 
   test('other billing emails keep the retry rail', () => {
@@ -105,6 +125,22 @@ describe('transactional email provider retry classification', () => {
     }));
     expect(emailTemplates.activeSuppressionFor).not.toHaveBeenCalled();
     expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('an already-scheduled final notice alerts staff when it is stopped', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+
+    await retry.retryOne(message({ template_key: 'billing.previsit_balance', recipient_id: 'c1',
+      suppression_group_key_snapshot: 'transactional_required', send_attempt_token: 'attempt-3' }));
+
+    const finals = NotificationService.notifyAdmin.mock.calls.filter((c) => c[1] === 'Final billing notice not delivered');
+    expect(finals).toHaveLength(1);
+    expect(finals[0][3]).toMatchObject({ dedupeKey: 'billing-final-notice-missed:message-1' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

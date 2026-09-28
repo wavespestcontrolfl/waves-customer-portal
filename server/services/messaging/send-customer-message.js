@@ -354,6 +354,15 @@ async function sendCustomerMessageCore(input) {
     preProviderCheck,
     preSendCheck,
     providerPreSendCheck: suppliedProviderPreSendCheck,
+    onDispatchStart,
+    onDispatchAbort,
+    // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
+    // INTO the handoff transaction (twilio.js's dispatch() reads this same
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort,
+    // through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // Omitted (the default for every caller that doesn't name it), twilio.js
+    // falls back to origin/main's own post-handoff, out-of-transaction insert.
+    logInHandoff,
     withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
     // Invoice-send-via-SMS's explicit billing Email leg only (see
@@ -419,7 +428,38 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'sms_auto_send_executor'
       && input.metadata?.original_message_type === 'ai_gratitude'
       && Boolean(input.metadata?.agentDecisionId)
-      && typeof providerPreSendCheck === 'function');
+      && typeof providerPreSendCheck === 'function')
+    // The delayed booking-link follow-up (call-booking-link-text.js, codex
+    // #5018 r11 P1): a lead with no customer row yet, so there is no
+    // customer-comms lock to hold — only the phone-lock leg (matching the
+    // STOP writer's own lockSmsPhone) applies. Suppression/consent reload
+    // under that lock, then the lane's own providerPreSendCheck (its mutable
+    // never-send checks) re-runs on the SAME held connection right after.
+    || (input.audience === 'lead' && input.purpose === 'missed_call_followup'
+      && input.entryPoint === 'call_booking_link_text'
+      && typeof providerPreSendCheck === 'function')
+    // Manual Leads-page compose (admin-leads.js POST /:id/send-sms, codex
+    // #5018 r15 P2): staff can type any message, a manual consultation
+    // link included — the SAME phone lock the automated lane above takes
+    // serializes the two so a concurrent worker's own delivered-link check
+    // and this send can't interleave. Either audience, since the route
+    // resolves 'customer' when the lead's own linked customer owns this
+    // exact phone, 'lead' otherwise — manual semantics are unconditional
+    // either way, so no providerPreSendCheck requirement here.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'conversational'
+      && input.entryPoint === 'admin_leads_send_sms')
+    // Communications composer sends (admin-communications.js POST /sms,
+    // codex #5018 pre-push P2): the SAME shape and reason as the manual
+    // Leads-page compose above — a consultation link can ride this
+    // composer's body too, racing the SAME worker's own delivered-link
+    // check. Covers both purposes this ONE route's sendMessage ever emits
+    // (card_request when the composer carries a visit's card-request link,
+    // conversational otherwise) — applied to every composer SMS from this
+    // route, not only consultation-carrying ones, since it is a phone lock
+    // only and manual semantics are unconditional either way.
+    || (['lead', 'customer'].includes(input.audience)
+      && ['conversational', 'card_request'].includes(input.purpose)
+      && input.entryPoint === 'admin_communications_manual_sms');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -1022,6 +1062,26 @@ async function sendCustomerMessageCore(input) {
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
     providerPreSendCheck: activeProviderPreSendCheck,
+    // The REAL attempt boundary (codex #5018 r15 P1) — invoked by twilio.js
+    // itself, immediately before dispatchStarted flips true and
+    // messages.create() runs, AFTER providerPreSendCheck and
+    // disclaimedNumberBlocksSend/preSendCheck.isStillValid have all
+    // cleared. A caller's durable "this attempt may have reached the
+    // provider" marker belongs here, never inside providerPreSendCheck
+    // itself, which still has real refusal paths ahead of it.
+    onDispatchStart,
+    // codex #5018 r15 pre-push P1: onDispatchStart's own await is real
+    // wall-clock time, which can itself cross the send window's close
+    // boundary that the LAST synchronous isStillValid() check ran before
+    // it. twilio.js invokes this to let the caller UNDO its own marker
+    // when that recheck, run again right after onDispatchStart, finds the
+    // window has closed — otherwise a send that never reached
+    // messages.create() would be misclassified as ambiguous forever.
+    onDispatchAbort,
+    // codex #5018 structural fix (post-r7): threaded straight through, same
+    // as onDispatchStart/onDispatchAbort above — see this file's own
+    // destructure comment and twilio.js's dispatch() for what it gates.
+    logInHandoff,
     providerHandoffReservation,
   });
   };

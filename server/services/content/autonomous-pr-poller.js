@@ -1111,10 +1111,15 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
         if (result) {
           patch.link_tasks_queued = result.queued || 0;
           logger.info(`[autonomous-pr-poller] internal-link planning for ${result.url}: queued=${result.queued} candidates=${result.candidates}`);
+        } else {
+          // Planning could not run (no corpus): retry marker for the daily
+          // sweep (InternalLinkPrExecutor._replanUnplannedPublishes).
+          patch.link_planning_failed_at = new Date();
         }
       }
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] internal-link planning failed for ${target.url}: ${err.message}`);
+      patch.link_planning_failed_at = new Date();
     }
   }
 

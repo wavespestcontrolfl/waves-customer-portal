@@ -35,18 +35,24 @@ function enabled() {
 }
 
 // Hub pages averaging position 8–20 (impression-weighted) over 28 days.
+// Grouped by the canonical route (query string dropped — the same
+// split_part(page_url, chr(63), 1) the GSC opportunity miner uses), so
+// ?variants of one page pool their impressions instead of splitting them
+// below the threshold or taking several target slots.
+const CANONICAL_URL = 'split_part(page_url, chr(63), 1)';
+
 async function strikingDistancePages({ limit, minImpressions, offset = 0 }) {
   const rows = await db('gsc_pages')
     .where('date', '>=', db.raw("now() - interval '28 days'"))
     .where('page_url', 'like', `${HUB_ORIGIN}%`)
-    .whereNot('page_url', HUB_ORIGIN)
-    .groupBy('page_url')
+    .whereRaw(`${CANONICAL_URL} <> ?`, [HUB_ORIGIN])
+    .groupByRaw(CANONICAL_URL)
     .havingRaw('sum(impressions) >= ?', [minImpressions])
     .havingRaw('sum(position * impressions) / nullif(sum(impressions), 0) between 8 and 20')
-    .orderByRaw('sum(impressions) desc, page_url')
+    .orderByRaw(`sum(impressions) desc, ${CANONICAL_URL}`)
     .limit(limit)
     .offset(offset)
-    .select('page_url', db.raw('sum(impressions)::int as impressions'),
+    .select(db.raw(`${CANONICAL_URL} as page_url`), db.raw('sum(impressions)::int as impressions'),
       db.raw('sum(position * impressions) / nullif(sum(impressions), 0) as position'));
   return rows.map((r) => ({ url: r.page_url, impressions: Number(r.impressions) || 0, position: Number(r.position) || null }));
 }

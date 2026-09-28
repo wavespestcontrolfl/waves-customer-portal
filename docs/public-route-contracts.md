@@ -811,6 +811,151 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+
+"Your upcoming visits" card (owner-approved 2026-09-27): on the same
+`/api/reports/:token/*` payload, `GATE_REPORT_UPCOMING_VISITS` (dark, off
+unless exactly `true`, read at call time) adds an optional
+`upcomingVisitsCard: { visits: [{ serviceType, scheduledDate, windowStart }] }`
+— LIVE VIEW ONLY (`opts.mode === 'live'`; absent from the PDF, `/map.svg`,
+static, and sms_preview renders, and stripped by the shared
+`stripLiveOnlyScheduleFields` the same way `nextAppointment` already is, so a
+reschedule after a cached PDF render never fossilizes into the download),
+AND only for a caller that opts in with `upcomingVisitsCard: true` (codex
+round-5 P2, the same `composeOffers`/`planSummary` shape): `/api/reports/:token/data`
+is the only caller that opts in; the `/ask` Q&A build (which still needs
+`mode: 'live'` for its own `nextAppointment` context) neither reads nor pays
+for the card's paged scheduled_services scan.
+Lists every one of the customer's upcoming scheduled visits across ANY
+program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
+the report's own service line (`nextAppointment` above is unchanged and
+stays same-line-first with a cross-line fallback), for the next 90 days,
+capped at 6, excluding cancelled/completed/rescheduled rows (same
+disclosable-status allow-list as `nextAppointment`: pending/confirmed/
+en_route/on_site). Scoped to THIS report's property only, resolved through
+the shared `server/services/service-report/visit-property-scope.js`
+module (the SAME resolver `cross-sell.js`'s report-identity proof uses —
+codex round-4 P1: a parallel per-caller reimplementation of this chain had
+missed a case in each of three earlier rounds): the linked visit's own
+stamped `service_address_*` is authoritative when present; else its
+`scheduled_services.property_id`'s resolved `customer_properties` address;
+else its `scheduled_services.source_estimate_id`'s resolved
+`estimates.address` — `customer_properties.js` deliberately leaves an
+estimate-backed row unanchored (no `property_id`), so this third leg is
+the only way such a row resolves to its actual (possibly secondary)
+premises; an unlinked/legacy report, or a linked visit carrying NONE of
+the three, falls back to the already-COALESCEd customer-mirror address
+ONLY once this account is PROVEN to have a single premises, the primary
+one (`customerHasOnlyPrimaryPremises`, also moved into
+`visit-property-scope.js` — codex round-5 P1: a multi-property account's
+own legacy no-evidence row is exactly as likely to be the OTHER property,
+and the mirror alone cannot tell the two apart). That proof fails CLOSED
+on any unreadable witness — a second premises the account has ever had
+(active or since deactivated), a query failure, or (this card's own
+strict option, `{ unresolvedFails: true }`, codex round-6 P1) an
+UNRESOLVED witness elsewhere on the account: an unstamped
+`scheduled_services` row whose `property_id` names no `customer_properties`
+row, or whose `source_estimate_id` names no `estimates` row or one with no
+address, fails the proof outright rather than being skipped as "not
+evidence either way" — it might just as easily BE the second premises this
+card would then wrongly disclose. Any of these refuses the mirror
+outright, and the one unscoped row is excluded rather than shown.
+`cross-sell.js` calls the same proof WITHOUT this strict option (its
+unchanged, pre-existing behavior): there, an unresolved witness is treated
+as not being evidence of a second premises and the proof continues past it.
+Every address key folds in `address_line2` (the unit — a normalized
+"Apt 4"/"#4"/"Unit 4" all key identically), so a condo/apartment
+building's units never compare equal (a unit on one side and none on the
+other is a NON-match, not a fallback match), and a key with neither city
+nor zip at all is rejected as unprovable rather than compared. PRIVACY
+(P1 2026-09-28, extended round-4 and round-5): a report whose visit IS
+property/estimate-linked but whose `property_id` or `source_estimate_id`
+cannot be RESOLVED (row deleted, bad link, or the address it names has no
+locality) fails CLOSED — the card is omitted entirely, never falling back
+to the customer mirror (which would name a DIFFERENT property on a
+multi-property account). Only a report carrying NONE of stamp/
+`property_id`/`source_estimate_id`, on an account PROVEN single-premises,
+may use the mirror fallback. Each candidate row is resolved through the
+SAME shared module before being compared to the report's property, so a
+multi-property account's report can never list another property's visits.
+Gate off (default): the field is absent and the payload is byte-identical
+to today.
+
+Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
+rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
+from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
+off unless exactly `true`, read at call time; inert unless
+`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
+without it) layers a priority on top of the existing `crossSell` offer
+ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
+On, the payload's existing `crossSell` object may additionally carry
+`reason` — one short, honest, reason-tied FIXED sentence rendered above
+the CTA button, one per branch below, never composed from or naming a
+location or severity the structured field itself doesn't state (roach:
+"We noted roach activity during this visit — our cockroach control
+program is a focused two-treatment cleanout."; rodent: "We noted signs of
+rodent activity during this visit — …"; termite: "We noted possible
+termite activity during this visit — …" ("during this visit", never
+"today" — reopening an older report recomputes these reasons from the
+same visit's saved snapshot, so a same-day claim would misdate historical
+findings as current); season-mosquito: "Mosquito season is here in SW Florida — …";
+season-termite: "It's termite swarm season in SW Florida — …") — and
+`serviceKey` may resolve to two targets the ladder itself never picks:
+`rodent_bait` and `mosquito`, priced through the SAME
+`buildCustomerPricingResponse` estimator path and per-application-only
+serialization rule as the existing ladder targets. Their prompts/labels
+live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
+deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
+vocabulary the portal offer card and the photo-triage lane
+(`buildPortalOffer`, `buildOfferForFamily`) also read by
+`requestedTargetKey` — those two surfaces are unaffected by this gate and
+still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
+may also resolve to `cockroach_control` — the one target priced OUTSIDE
+the estimator (a fixed one-time catalog price; `mode` is always
+`quote_cta`, `option` is always `null`) — gated on the live `services`
+catalog row (`is_active`, `!is_archived`, `customer_visible`,
+`booking_enabled`) and on the customer having no already-open
+(pending/confirmed/en_route/on_site) visit linked to it.
+
+Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
+visit's typed report snapshots (`service_records.service_data`'s
+`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
+`server/services/project-types.js` is the one source of truth for these
+keys/options) — free-text parsing of `service_findings`
+(category/title/detail/recommendation) and any negation handling over it
+was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
+rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
+observation, text no regex could reliably separate from an actual finding.
+`technician_notes` was never read (raw notes must never egress on a
+customer surface) and still isn't. An UNTYPED (general pest) visit carries
+no typed snapshot at all — no findings signal, season/ladder decides. The
+surviving structured checks, each "unknown/empty value → no signal": roach
+— a COMPANION (never the primary — a primary cockroach report means the
+customer is already mid-program today) typed `cockroach` snapshot's
+`activity_level` is anything other than `'None observed'`; rodent — a
+`rodent_trapping` snapshot's `captures` count is > 0, OR a
+`rodent_bait_station` snapshot's `bait_consumption` is anything other than
+`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
+`'Yes'` (primary or companion, no exclusion); termite — a
+`termite_bait_station` snapshot's `termite_activity` is `'Active termites
+present'` or `'Previous feeding noted'`, OR a `termite_inspection`
+snapshot's `activity_status` is `'Active infestation'` (primary or
+companion, no exclusion; a merely historical `'Old / inactive damage'`
+value is NOT current activity and is not a signal). Mosquito has NO
+findings branch at all (removed 2026-09-28, a prior round: a mention count
+in short structured text could not be tied reliably to genuine severity)
+— it is offered ONLY by season (America/New_York May–Oct) or the
+unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
+runs only when no findings branch fired; May favors mosquito when neither
+is already owned. Never offers a family the customer already owns —
+reuses the ladder's own property-scoped ownership + plan-rate evidence,
+including the `termite_bait` → `termite` ownership mapping (this also
+covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
+visit's own family is already counted owned by the ladder's existing
+report-identity corroboration, so no separate primary-exclusion rule is
+needed for rodent/termite the way roach's is). Gate off (default):
+`crossSell` is byte-identical to today's unchanged ladder pick and carries
+no `reason` field.
+
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
 `structuredObservationsProvenance: "completion_form_snapshot"`. Live reports

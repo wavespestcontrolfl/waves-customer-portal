@@ -1085,8 +1085,71 @@ const TwilioService = {
       // re-scope an SMS already handed off (Codex #4816 r49/r50). Not inside
       // dispatch(): the provider call stays the handoff's last await.
       const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId);
+      // Moved up from just after the withSmsHandoff block (codex #5018 r15
+      // pre-push P1) so dispatch() below can stamp the sms_log row with it
+      // — a pure, side-effect-free read of `to`, safe this early.
+      const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
       let message;
       let dispatchStarted = false;
+      // sms_log row shape shared by dispatch()'s own in-transaction insert
+      // and the post-handoff-rollback recovery insert below (codex #5018
+      // round-2 P1) — one field list, never two hand-maintained copies that
+      // could drift. Reads `message`/`handoffAt` at CALL time, so it is
+      // safe to define here, before dispatch() ever sets either — this
+      // function is only ever invoked once both are set.
+      const buildSmsLogRow = () => ({
+        customer_id: options.customerId || null,
+        direction: "outbound",
+        from_phone: fromNumber,
+        to_phone: to,
+        message_body: body,
+        twilio_sid: message.sid,
+        status: "sent",
+        created_at: handoffAt,
+        message_type: options.messageType || "manual",
+        admin_user_id: options.adminUserId || null,
+        // Decision linkage makes the sent row recoverable: if the process
+        // dies after Twilio accepts but before the caller resolves the
+        // Agent Review decisions (composer send or scheduled-SMS cron),
+        // the nightly suggest sweep resolves the used decision and ignores
+        // the parked ones from this linkage instead of reopening cards on
+        // an answered thread.
+        // scheduled_sms_log_id ties this provider row back to the queued
+        // row that dispatched it, so stale-claim recovery can prove the
+        // send happened instead of retrying (double-send) or reopening.
+        // pre_handoff_stamp marks created_at as the PRE-handoff capture
+        // above — the delayed-callback readers (21610/30006 ordering)
+        // apply their race grace only to rows WITHOUT it (hook P1: the
+        // grace exists for legacy post-handoff writers; backdating a
+        // pre-stamped row misorders a START received between handoff and
+        // the carrier verdict).
+        metadata: JSON.stringify({
+          pre_handoff_stamp: true,
+          ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+          // Which explicit billing-channel leg this accepted send IS
+          // (billing-channel-routing.js's sendBillingLeg) — scopes a later
+          // replay's notificationEventKey dedupe lookup
+          // (messaging/billing-text-leg-dedupe.js) to an explicit billing
+          // Text leg, never a legacy send or another producer's own reuse
+          // of the same-shaped key.
+          ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
+          ...(options.humanAuthored === true ? { human_authored: true } : {}),
+          ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
+          ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
+          ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+          ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+            ? { parked_decision_ids: options.parkedDecisionIds }
+            : {}),
+          ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+          ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+          // The visit this send is about, on the primary row itself: the
+          // messaging audit is best-effort, and readers that scope by
+          // property (SMS commitment evidence) must not depend on it
+          // (Codex #4816 r41). Same key the push proof row uses.
+          // The visit and its send-time property (Codex #4816 r41/r49).
+          ...noticeScopeStamp,
+        }),
+      });
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
       // OPTIONAL trx — send-customer-message.js's own withSmsHandoff bridge
       // (the sole path every withSmsHandoff caller in the repo funnels
@@ -1235,6 +1298,40 @@ const TwilioService = {
           err.retryable = true;
           throw err;
         }
+        // The REAL attempt boundary (codex #5018 r15 P1) — the LAST
+        // synchronous point before dispatchStarted flips true and
+        // messages.create() runs; providerPreSendCheck above and
+        // disclaimedNumberBlocksSend/preSendCheck.isStillValid still ahead
+        // of it can each block or throw, so a caller's durable "this attempt
+        // may have reached the provider" marker must not commit until here,
+        // or a block/crash in that gap would leave a marker for an unsent
+        // SMS. Optional and additive — a no-op for every caller that
+        // doesn't pass it, byte-identical to before.
+        if (typeof options.onDispatchStart === 'function') {
+          await options.onDispatchStart();
+          // codex #5018 r15 pre-push P1: that await is a real DB write, real
+          // wall-clock time that can itself carry the send window's own
+          // close boundary — the isStillValid() check above ran BEFORE it,
+          // not after. Only reachable when onDispatchStart actually ran
+          // (every other caller keeps the ORIGINAL single isStillValid()
+          // call, unchanged). The marker is already committed at this
+          // point, so a window-closed refusal here must ALSO let the caller
+          // undo it (onDispatchAbort, the same optional/additive shape) —
+          // otherwise recoverAbandonedClaim would treat a send that never
+          // reached dispatchStarted/messages.create() as ambiguous forever,
+          // when it is provably safe to retry.
+          if (typeof options.preSendCheck?.isStillValid === 'function'
+              && options.preSendCheck.isStillValid() !== true) {
+            if (typeof options.onDispatchAbort === 'function') {
+              try { await options.onDispatchAbort(); } catch (undoErr) { logger.error(`[twilio] onDispatchAbort failed after a post-marker window close: ${undoErr.message}`); }
+            }
+            const err = new Error('send window closed during the provider handoff marker write');
+            err.code = 'QUIET_HOURS_HOLD';
+            err.sendWindowClosed = true;
+            err.retryable = true;
+            throw err;
+          }
+        }
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;
@@ -1254,6 +1351,43 @@ const TwilioService = {
         providerCoordination.recordProviderOutcome(providerHandoffReservation, {
           deliveryOutcome: 'accepted', providerMessageId: message.sid, channel: 'sms',
         });
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // below is now OPT-IN (`options.logInHandoff`). r15 moved it inside
+        // dispatch() unconditionally so linkSentRecently and its siblings
+        // could see the evidence before a caller's phone lock released —
+        // but every OTHER withSmsHandoff caller in the repo already holds
+        // its own row locks (customers, call_log, etc.) when this insert
+        // takes sms_log's customer_id FK's KEY SHARE lock, and each new
+        // caller found so far (reschedule links, review requests, executeMerge)
+        // needed its own lock-order fix to avoid an inversion against THIS
+        // insert. Narrowing it to only the callers whose evidence actually
+        // needs to commit before the lock releases stops that from
+        // recurring for every future withSmsHandoff caller. Non-opt-in
+        // callers get main's original post-handoff, plain-`db`, out-of-
+        // transaction insert further down (`if (!options.logInHandoff)`),
+        // byte-identical to origin/main's behavior.
+        if (options.logInHandoff) {
+          try {
+            await (trx || db)("sms_log").insert(buildSmsLogRow());
+          } catch (logErr) {
+            logger.error(`SMS log failed: ${logErr.message}`);
+            // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
+            // leaves Postgres's transaction aborted — its later COMMIT does
+            // not error, it silently performs a ROLLBACK instead (standard
+            // Postgres protocol behavior for a COMMIT issued on an aborted
+            // transaction), so swallowing this error here would let the
+            // caller's own `conn.transaction(...)` resolve as if it had
+            // succeeded. That would skip the withSmsHandoff catch's own
+            // accepted-send recovery entirely (it only runs when
+            // withSmsHandoff's promise actually REJECTS), losing the sms_log
+            // row with no recovery attempt at all. Rethrow so the caller's
+            // transaction genuinely rolls back and rejects, landing in that
+            // recovery path. A bare `dispatch()` call (no trx) has no
+            // transaction to abort — this insert's own failure is already
+            // the final word there, so it stays swallowed, unchanged.
+            if (trx) throw logErr;
+          }
+        }
       };
       if (typeof options.withSmsHandoff === 'function') {
         let verdict;
@@ -1295,6 +1429,66 @@ const TwilioService = {
             // The read-only guard may fail to commit after Twilio accepts.
             // Preserve that known acceptance so callers cannot retry the SMS.
             logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+            // codex #5018 round-2 P1, now scoped to the opt-in path only:
+            // dispatch()'s own sms_log insert only ran INSIDE the caller's
+            // handoff transaction when `options.logInHandoff` is set (see
+            // dispatch() above) — a non-opt-in caller's insert hasn't
+            // happened yet at all (it runs post-handoff, further down,
+            // unconditionally, main's original behavior), so there is
+            // nothing to recover here for it. For an opt-in caller: if that
+            // transaction rolled back, or its own commit itself failed
+            // (this catch), the insert rolls back with it even though
+            // Twilio genuinely accepted the message. Readers like
+            // linkSentRecently and delivery reconciliation would then see
+            // no evidence at all and permit a duplicate send. Recreate the
+            // row on the base connection, outside the now-dead
+            // transaction — never `trx`, which the caller's own rollback
+            // may already have released or which never committed at all.
+            // Idempotent on twilio_sid: a caller whose commit actually
+            // SUCCEEDED and only threw some later, unrelated error (e.g.
+            // releasing its own advisory lock after commit) must never get
+            // a duplicate row for the one send that already landed.
+            if (options.logInHandoff) {
+              try {
+                // codex #5018 P2: twilio_sid carries no UNIQUE constraint
+                // (never added here — a migration on this hot table, which
+                // may already hold duplicates, is out of scope) — so a bare
+                // SELECT-then-INSERT can still race ITSELF: two recovery
+                // attempts for the SAME sid (e.g. this same catch running
+                // twice for one send, or two processes each recovering
+                // after a lost commit acknowledgement) could both see
+                // `alreadyLogged` as false and both insert. Serialize the
+                // check-then-insert with a transaction-scoped advisory
+                // lock keyed on the sid, in a FRESH transaction on the
+                // base connection — never `trx`, the caller's own
+                // transaction is already dead by the time this catch
+                // runs. Same single-key hashtextextended(key, 0)
+                // derivation utils/customer-comms-lock.js's
+                // lockCustomerComms uses, in its own namespace so it can
+                // never collide with that lock or with lockSmsPhone's
+                // separate two-key family.
+                //
+                // What this does NOT close: the ORIGINAL commit itself
+                // becoming visible to a reader on a different connection
+                // AFTER this lock releases. This lock only serializes
+                // recovery attempts against EACH OTHER — if the caller's
+                // own transaction actually committed (the "lost ack" case
+                // this recovery exists for) but that commit's row is not
+                // yet visible to a read here (a snapshot taken before the
+                // commit finished landing), the SELECT below can still see
+                // nothing and this insert can still land as a genuine
+                // duplicate. Stated plainly: nothing short of a real
+                // UNIQUE constraint on twilio_sid closes that specific
+                // window, and this lock does not claim to.
+                await db.transaction(async (trx) => {
+                  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${message.sid}`]);
+                  const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');
+                  if (!alreadyLogged) await trx('sms_log').insert(buildSmsLogRow());
+                });
+              } catch (recoveryErr) {
+                logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
+              }
+            }
           }
         }
         if (!acceptedMessage) {
@@ -1327,79 +1521,30 @@ const TwilioService = {
         }).catch(() => {});
       }
 
-      // Log to sms_log (legacy) AND dual-write to unified messages.
-      // PR 2 cuts the inbox read path over to messages; sms_log stays as
-      // long as anything still queries it (scheduled-SMS queue, BI scripts).
-      // An explicit internal_alert/admin_alert send to a known owner phone
-      // never reaches here (redirectInternalAdminSmsToNotification above
-      // diverts it to a bell/push instead) — so a row landing here with an
-      // owner-phone recipient is always an UNTYPED alert (e.g. the office
-      // satisfaction-request text) that would otherwise pass the compliance
-      // gate's message_type exclusion. Stamp that provenance durably, at
-      // send time, rather than leaving the compliance reader (twilio-webhook
-      // hasOutboundHistory) to re-derive it from the CURRENT owner-phone env
-      // vars: if ADAM_PHONE later changes and this number is reassigned, a
-      // read-time check would stop recognizing it as ever having been an
-      // operator alert and treat the row as ordinary customer-facing
-      // history (codex #4211 P2).
-      const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
-      try {
-        await db("sms_log").insert({
-          customer_id: options.customerId || null,
-          direction: "outbound",
-          from_phone: fromNumber,
-          to_phone: to,
-          message_body: body,
-          twilio_sid: message.sid,
-          status: "sent",
-          created_at: handoffAt,
-          message_type: options.messageType || "manual",
-          admin_user_id: options.adminUserId || null,
-          // Decision linkage makes the sent row recoverable: if the process
-          // dies after Twilio accepts but before the caller resolves the
-          // Agent Review decisions (composer send or scheduled-SMS cron),
-          // the nightly suggest sweep resolves the used decision and ignores
-          // the parked ones from this linkage instead of reopening cards on
-          // an answered thread.
-          // scheduled_sms_log_id ties this provider row back to the queued
-          // row that dispatched it, so stale-claim recovery can prove the
-          // send happened instead of retrying (double-send) or reopening.
-          // pre_handoff_stamp marks created_at as the PRE-handoff capture
-          // above — the delayed-callback readers (21610/30006 ordering)
-          // apply their race grace only to rows WITHOUT it (hook P1: the
-          // grace exists for legacy post-handoff writers; backdating a
-          // pre-stamped row misorders a START received between handoff and
-          // the carrier verdict).
-          metadata: JSON.stringify({
-            pre_handoff_stamp: true,
-            ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
-            // Which explicit billing-channel leg this accepted send IS
-            // (billing-channel-routing.js's sendBillingLeg) — scopes a later
-            // replay's notificationEventKey dedupe lookup
-            // (messaging/billing-text-leg-dedupe.js) to an explicit billing
-            // Text leg, never a legacy send or another producer's own reuse
-            // of the same-shaped key.
-            ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
-            ...(options.humanAuthored === true ? { human_authored: true } : {}),
-            ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
-            ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
-            ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
-            ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
-              ? { parked_decision_ids: options.parkedDecisionIds }
-              : {}),
-            ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
-            ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
-            // The visit this send is about, on the primary row itself: the
-            // messaging audit is best-effort, and readers that scope by
-            // property (SMS commitment evidence) must not depend on it
-            // (Codex #4816 r41). Same key the push proof row uses.
-            // The visit and its send-time property (Codex #4816 r41/r49).
-            ...noticeScopeStamp,
-          }),
-        });
-      } catch (logErr) {
-        logger.error(`SMS log failed: ${logErr.message}`);
+      if (options.logInHandoff) {
+        // sms_log was already written INSIDE dispatch() (codex #5018 r15
+        // pre-push P1, now opt-in — see dispatch()'s own comment), on the
+        // caller's held trx, so the evidence linkSentRecently and its
+        // siblings read commits before any lock guarding this send
+        // releases. Nothing left to do here for this caller.
+      } else {
+        // origin/main's original sms_log insert, unchanged: post-handoff,
+        // on the plain base connection (never `trx`), log-and-swallow on
+        // failure. Every withSmsHandoff caller that does not opt into
+        // `logInHandoff` gets exactly this — the transaction it already
+        // committed (or rolled back) by this point never sees this insert,
+        // so it can hold whatever row locks it needs without a new
+        // ordering conflict against sms_log's customer_id FK KEY SHARE.
+        try {
+          await db("sms_log").insert(buildSmsLogRow());
+        } catch (logErr) {
+          logger.error(`SMS log failed: ${logErr.message}`);
+        }
       }
+      // The dual-write to unified messages below is unaffected either way —
+      // it is a fire-and-forget `.then()`, never awaited into the send
+      // path, and not the row linkSentRecently or delivery reconciliation
+      // read as evidence.
       require("./conversations")
         .recordTouchpoint({
           customerId: options.customerId || null,
