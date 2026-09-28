@@ -5,7 +5,7 @@ const Ajv = require('ajv/dist/2020');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
-const { parseQuotedETDeadline, parseQuotedETDay, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
+const { parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
@@ -220,20 +220,12 @@ function statesClock(text) {
   return (value.match(CLOCK_TOKEN) || []).length > 0 || CLOCK_PREPOSITION.test(value);
 }
 
-// The day expressions a promise's timing can name, as parseQuotedETDay reads
-// them. Bare "sat" / "sun" count only after a day preposition, as in
-// STATED_TIMING, since both are ordinary words.
-const DAY_EXPRESSION = /\b(?:today|tonight|tomorrow|tmrw|weekend|next week|(?:sun|mon|tues?|wednes|thurs?|fri|satur)day|mon|tues?|weds?|thu(?:rs?)?|fri|(?:on|by|this|before|until|till) (?:sat|sun)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{4})?|\d{4}-\d{2}-\d{2})\b/gi;
-const WEEKDAY_OF = { sun: 'sunday', mon: 'monday', tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday',
-  thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday', sat: 'saturday' };
-// True when a promise's quote names exactly one day, however often.
-function namesOneDay(quote) {
-  const days = new Set((String(quote || '').match(DAY_EXPRESSION) || []).map((token) => {
-    const bare = token.toLowerCase().replace(/^(?:on|by|this|before|until|till) /, '');
-    return WEEKDAY_OF[bare] || bare;
-  }));
-  return days.size === 1;
-}
+// A promise offering another day beside the one it names ("Wednesday or
+// Thursday", "Wed-Fri", "tomorrow and Friday") commits to no single day; a
+// date that only names its subject ("the September 10 report tomorrow") is
+// no alternative (Codex #5248 r2/r3).
+const DAY_TOKEN = String.raw`(?:today|tonight|tomorrow|tmrw|(?:the |this |over the )?weekend|next week|(?:sun|mon|tues?|wednes|thurs?|fri|satur)day|mon|tues?|weds?|thu(?:rs?)?|fri|sat|sun|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2}(?:st|nd|rd|th)?|\d{1,2}\/\d{1,2}(?:\/\d{4})?|\d{4}-\d{2}-\d{2})`;
+const DAY_ALTERNATIVE = new RegExp(String.raw`\b${DAY_TOKEN}\.?\s*(?:,?\s*\bor\b|\/|-|–|—|\bto\b|\bthrough\b|\bthru\b|\buntil\b|\band\b|&)\s*(?:(?:maybe|possibly|early|late|by|on|next|this)\s+)?${DAY_TOKEN}\b`, 'i');
 
 // The calendar day a staff promise names (due_date): the extraction's day
 // must be the one its quoted timing resolves to (parseQuotedETDay), as a
@@ -296,7 +288,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     const timingAmbiguous = clocks.length > 1 || hasClockRange(body)
       || /\b(?:between|sometime|anytime|or so|or later|or earlier|i think|i believe|i guess|probably|maybe|perhaps|possibly|roughly|approximately|give or take|not sure|if i can|if possible|hopefully|tentatively)\b|(?:[ap]\.?m\.?|[ap]|o['’]?clock|noon|midnight|\d)\s*-?\s*ish\b/i.test(body);
     const resolved = timingGrounded && clockStated && !timingAmbiguous
-      ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
+      ? parseQuotedETDeadline(expandWeekdayAbbreviations(item.due_text), new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;
     const due = resolved && proposed instanceof Date && proposed.getTime() === resolved.getTime() ? resolved : null;
     return { ...item, property_id: properties.length === 1 ? item.property_id : null,
@@ -309,7 +301,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
       // quoted and no clock anywhere in the text (that is due_at's job).
       // A hedge or a second day ("Wednesday or Thursday") leaves no single
       // day, whatever the extraction shortened due_text to (Codex #5248 r2).
-      due_date: outbound && timingGrounded && !clockStated && !timingAmbiguous && namesOneDay(item.quote)
+      due_date: outbound && timingGrounded && !clockStated && !timingAmbiguous && !DAY_ALTERNATIVE.test(item.quote)
         ? promiseDueDate(item.due_text, item.due_date, message.created_at) : null,
       timing_unverified: !!clockStated && !(due instanceof Date) };
   });

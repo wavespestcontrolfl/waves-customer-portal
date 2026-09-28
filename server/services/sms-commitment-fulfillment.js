@@ -60,7 +60,9 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     the check is told a promise is kept only by doing it on that day.
 // 21: a general staff promise admits any delivered text written after it and
 //     an email to the customer's account as delivery of the promised item.
-const FULFILLMENT_POLICY = 21;
+// 22: a text stamped with another property never witnesses a staff promise,
+//     whatever its type.
+const FULFILLMENT_POLICY = 22;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -630,11 +632,15 @@ function smsDelivered(record) {
 // Human texts stay with the model, which reads their words.
 function automatedNoticeInScope(record, commitment) {
   const propertyId = commitment.sms_context?.property_id;
-  if (!propertyId || HUMAN_SMS_TYPES.includes(record.message_type)) return true;
+  if (!propertyId) return true;
+  // A general staff promise takes texts of any type, so a stamp for another
+  // property is refused before the human-type exemption: 'manual' is reused
+  // by automated senders (Codex #5248 r3).
+  if (staffPromise(commitment) && record.linked_property_id) return String(record.linked_property_id) === String(propertyId);
+  if (HUMAN_SMS_TYPES.includes(record.message_type)) return true;
   // A general staff promise is kept by the promised item itself (a prep
   // guide, a link), which no visit stamps: an unstamped text may carry it,
-  // for the model to judge; one stamped with another property never does
-  // (Codex #5248 r2).
+  // for the model to judge (Codex #5248 r2).
   if (!record.linked_property_id) return staffPromise(commitment);
   return String(record.linked_property_id) === String(propertyId);
 }

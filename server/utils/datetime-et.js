@@ -130,9 +130,9 @@ function quotedDayParts(dayText, reference) {
       (m) => etParts(addETDays(reference, (QUOTED_WEEKDAYS.indexOf(m[1].toLowerCase()) - base.dayOfWeek + 7) % 7))],
     [/^(\d{4})-(\d{2})-(\d{2})$/, (m) => ({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) })],
     [/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/,
-      (m) => ({ year: Number(m[3] || base.year), month: Number(m[1]), day: Number(m[2]) })],
+      (m) => ({ year: Number(m[3] || base.year), month: Number(m[1]), day: Number(m[2]), yearless: !m[3] })],
     [/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$/i,
-      (m) => ({ year: Number(m[3] || base.year), day: Number(m[2]),
+      (m) => ({ year: Number(m[3] || base.year), day: Number(m[2]), yearless: !m[3],
         month: QUOTED_MONTHS.findIndex((name) => [name, name.slice(0, 3)].includes(m[1].toLowerCase())) + 1 })],
   ];
   return formats.map(([pattern, resolve]) => {
@@ -149,10 +149,19 @@ function quotedDayParts(dayText, reference) {
 // week's Friday. Common weekday abbreviations read as the day ("Wed",
 // "Thurs"). A leading "by / on / until / to / for" is read through;
 // "before" is exclusive, so "before Wednesday" is Tuesday (Codex #5248 r2).
-// Anything else ("next Wednesday", "in two weeks", a clock), a past date or
-// a date that does not exist is null.
+// A yearless date is its next occurrence. Anything else ("next Wednesday",
+// "in two weeks", a clock), a past dated day or a date that does not exist is
+// null.
 const WEEKDAY_ABBREVIATIONS = { mon: 'monday', tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday',
   thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday', sat: 'saturday', sun: 'sunday' };
+// Spell out weekday abbreviations in a short quoted timing phrase ("Wed at
+// 3pm" → "wednesday at 3pm"), for callers that hand quoted SMS timing to the
+// resolvers here. parseQuotedETDeadline itself stays full-name only for its
+// other callers.
+function expandWeekdayAbbreviations(text) {
+  return String(text == null ? '' : text)
+    .replace(/\b(mon|tues?|weds?|thu(?:rs?)?|fri|sat|sun)\.?(?=\s|$|,)/gi, (_, abbr) => WEEKDAY_ABBREVIATIONS[abbr.toLowerCase()]);
+}
 function parseQuotedETDay(text, reference) {
   if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
   const quoted = String(text).trim().toLowerCase().replace(/[.!]+$/, '');
@@ -162,8 +171,7 @@ function parseQuotedETDay(text, reference) {
     const dayBefore = boundary && etDateString(addETDays(parseETDateTime(`${boundary}T12:00`), -1));
     return dayBefore && dayBefore >= etDateString(reference) ? dayBefore : null;
   }
-  const phrase = quoted.replace(/^(?:by|on|until|till|to|for)\s+/, '')
-    .replace(/^(this\s+)?(mon|tues?|weds?|thu(?:rs?)?|fri|sat|sun)\.?(?=\s|$)/, (_, lead, abbr) => `${lead || ''}${WEEKDAY_ABBREVIATIONS[abbr]}`);
+  const phrase = expandWeekdayAbbreviations(quoted.replace(/^(?:by|on|until|till|to|for)\s+/, ''));
   const offset = (days) => etDateString(addETDays(reference, days));
   const dow = etParts(reference).dayOfWeek;
   if (/^(?:tonight|this (?:morning|afternoon|evening)|later today|end of (?:the )?day|eod)$/.test(phrase)) return offset(0);
@@ -175,8 +183,13 @@ function parseQuotedETDay(text, reference) {
   const parts = quotedDayParts(core, reference);
   if (!parts) return null;
   const pad = (n) => String(n).padStart(2, '0');
-  const day = validCalendarDate(`${parts.year}-${pad(parts.month)}-${pad(parts.day)}`);
-  return day && day >= etDateString(reference) ? day : null;
+  const today = etDateString(reference);
+  const dated = (year) => validCalendarDate(`${year}-${pad(parts.month)}-${pad(parts.day)}`);
+  const day = dated(parts.year);
+  // A yearless date already past this year is its next occurrence ("Jan 2"
+  // said on Dec 28 is next January), never a past day (Codex #5248 r3).
+  const upcoming = day && day < today && parts.yearless ? dated(parts.year + 1) : day;
+  return upcoming && upcoming >= today ? upcoming : null;
 }
 
 // Resolve only explicit, unambiguous quoted day + clock expressions. This
@@ -441,7 +454,7 @@ function dateOnlyString(value) {
 module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

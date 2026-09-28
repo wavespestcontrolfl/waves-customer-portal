@@ -763,9 +763,33 @@ describe('Owner-approved staff-promise plan (2026-09-28): a promise staff texted
     ['a second day in the promise', "I'll stop by Wednesday or Thursday", 'Wednesday', '2040-03-14', null],
     ['a hedge in the text', "I'll probably stop by Wednesday", 'Wednesday', '2040-03-14', null],
     ['one day named twice', 'Wednesday works, see you Wednesday', 'Wednesday', '2040-03-14', '2040-03-14'],
+    // Codex #5248 r3: a subject date is no alternative; a range or a second day is.
+    ['a dated subject beside its deadline', "I'll send the September 10 report tomorrow", 'tomorrow', '2040-03-11', '2040-03-11'],
+    ['a range of days', "I'll be there Wed-Fri", 'Wed', '2040-03-14', null],
+    ['two days joined by and', "I'll come tomorrow and Friday", 'tomorrow', '2040-03-11', null],
   ])('Codex #5248 r2 due_date: %s', (_label, body, dueText, dueDate, expected) => {
     const [kept] = groundExtraction(extracted([promise(body, { due_text: dueText, due_date: dueDate })]), { message: staff(body), properties }).obligations;
     expect(kept.due_date).toBe(expected);
+  });
+
+  test('Codex #5248 r3: "Wed at 3pm" resolves its clock; a yearless date near year-end is next year\'s', () => {
+    const clocked = staff("I'll call Wed at 3pm");
+    expect(groundExtraction(extracted([promise("I'll call Wed at 3pm", { due_text: 'Wed at 3pm', due_at: '2040-03-14T15:00:00-04:00' })]),
+      { message: clocked, properties }).obligations[0]).toMatchObject({ due_at: '2040-03-14T19:00:00.000Z', timing_unverified: false });
+    const yearEnd = { ...staff("I'll send it Jan 2"), created_at: '2040-12-28T15:00:00Z' };
+    expect(groundExtraction(extracted([promise("I'll send it Jan 2", { due_text: 'Jan 2', due_date: '2041-01-02' })]),
+      { message: yearEnd, properties }).obligations[0].due_date).toBe('2041-01-02');
+  });
+
+  test('Codex #5248 r3: a text stamped for another property never witnesses a scoped staff promise, whatever its type', () => {
+    const scoped = { kind: 'other', sms_context: { source_at: '2040-03-10T15:00:00Z', basis: 'promise', property_id: 'home' } };
+    const manual = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    expect(admissibleWitness({ ...manual, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...manual, operator_sent: false, linked_property_id: 'rental' }, scoped)).toBe(false);
+    expect(admissibleWitness({ ...manual, linked_property_id: 'home' }, scoped)).toBe(true);
+    expect(admissibleWitness(manual, scoped)).toBe(true);
+    // A customer's ask keeps the human-type exemption unchanged.
+    expect(admissibleWitness({ ...manual, linked_property_id: 'rental' }, { ...scoped, sms_context: { ...scoped.sms_context, basis: 'request' } })).toBe(true);
   });
 
   test('Codex #5248 r2: a general staff promise admits any delivered text written after it and an email to the customer; an ask does not', () => {
