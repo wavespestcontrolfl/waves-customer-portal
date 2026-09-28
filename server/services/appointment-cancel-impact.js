@@ -37,6 +37,7 @@
  */
 
 const db = require('../models/db');
+const { dateOnlyString } = require('../utils/datetime-et');
 
 async function loadAppointmentFacts(scheduledServiceId) {
   const row = await db('scheduled_services as s')
@@ -48,7 +49,7 @@ async function loadAppointmentFacts(scheduledServiceId) {
   return {
     id: row.id,
     status: row.status || null,
-    scheduled_date: row.scheduled_date ? String(row.scheduled_date).slice(0, 10) : null,
+    scheduled_date: row.scheduled_date ? dateOnlyString(row.scheduled_date) : null,
     service_type: row.service_type || null,
     customer_name: customerName,
   };

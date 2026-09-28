@@ -1706,7 +1706,9 @@ async function reverseInspectionCreditForBooking({
         // Fail CLOSED on a failed check — never move money blind.
         try {
           const unresolved = await require('./invoice')
-            .unresolvedInvoicesForCancelledService(db, scheduledServiceId)
+            .unresolvedInvoicesForCancelledService(db, scheduledServiceId, {
+              serviceRecordLinks: Array.isArray(pinnedReversalOfferIds),
+            })
             .first('id');
           if (unresolved) {
             await alertReversalNeedsOffice(offer, scheduledServiceId, {

@@ -11305,27 +11305,37 @@ const InvoiceService = {
    * reverseInspectionCreditForBooking defer (office alerted). The real gate
    * runs AFTER the void, so the invoices the void preview says it would void
    * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
-   * gates (unresolvedInvoicesForCancelledService). Returns true when an
-   * invoice would still be unresolved. Throws when the read fails: the
-   * caller treats the effect set as undeterminable rather than guessing.
+   * gates in their card-confirmed (pinned) scope,
+   * unresolvedInvoicesForCancelledService with serviceRecordLinks. Returns
+   * true when an invoice would still be unresolved. Throws when the read
+   * fails: the caller treats the effect set as undeterminable rather than
+   * guessing.
    */
   async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
     if (!scheduledServiceId) return false;
-    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId);
+    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId, { serviceRecordLinks: true });
     if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
     return Boolean(await query.first("id"));
   },
 
   /**
    * The invoices of a cancelled scheduled service that still hold money
-   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES), linked directly OR through
-   * a service record — the same two links the void sweep scans, since most
-   * post-completion invoices carry only service_record_id. The ONE scope for
-   * every post-void gate: the follow-through's fee gate, the inspection-
-   * credit reversal's invoice guard, and the Intelligence Bar preview.
-   * Returns a query builder.
+   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES) — the ONE query for every
+   * post-void gate: the follow-through's fee gate, the inspection-credit
+   * reversal's invoice guard, and the Intelligence Bar preview. By default
+   * it matches the direct scheduled_service_id link only, as those gates
+   * always have. `serviceRecordLinks` also matches invoices linked only
+   * through a service record (the second link the void sweep scans); a
+   * card-confirmed cancel uses it, so its card and its commit both see an
+   * invoice the direct link misses. Widening the default for every cancel
+   * surface is a separate change. Returns a query builder.
    */
-  unresolvedInvoicesForCancelledService(conn, scheduledServiceId) {
+  unresolvedInvoicesForCancelledService(conn, scheduledServiceId, { serviceRecordLinks = false } = {}) {
+    if (!serviceRecordLinks) {
+      return conn("invoices")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    }
     return conn("invoices")
       .where((q) => {
         q.where({ scheduled_service_id: scheduledServiceId })
