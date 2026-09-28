@@ -148,28 +148,43 @@ test('omitting ringOnRefresh preserves today\'s behavior exactly — any content
 // trigger plus this scope's ringOnRefresh must combine so a quiet flip
 // still applies its feed (never leaves the owner's action hidden behind a
 // stale feed:'activity', or a now-engineering row still showing in the bell).
-test('a quiet refresh (ringOnRefresh false) that is ALSO an audience flip still applies feed/quiet — an audience flip always wins', async () => {
+test('an engineering -> owner flip rings into the bell even when ringOnRefresh says no news (it may have been read in Activity)', async () => {
   await NotificationService.notifyAdmin('ops_digest', 'Reviews — sync down', null, {
     dedupeKey: 'k-audience-flip', refreshOnDedupe: true, detail: 'same report',
     metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' },
   });
   mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
-  // ringOnRefresh says "no news" (quiet) — but the kind/audience/feed
-  // changed, so the routing must still land even though read_at does not
-  // clear (this is not new information the owner needs to re-read, only a
-  // reclassification of where it belongs).
   const flipped = await NotificationService.notifyAdmin('ops_digest', 'Reviews — sync down', null, {
     dedupeKey: 'k-audience-flip', refreshOnDedupe: true, ringOnRefresh: () => false, detail: 'same report',
     metadata: { kind: 'ACT', audience: 'owner', feed: null, quiet: false },
+  });
+  expect(flipped.refreshed).toBe(true);
+  expect(flipped.rung).toBe(true);
+  const row = mockRows.notifications[0];
+  expect(row.read_at).toBeNull();
+  const meta = JSON.parse(row.metadata);
+  expect(meta.kind).toBe('ACT');
+  expect(meta.audience).toBe('owner');
+  expect(meta.feed).toBeNull();
+});
+
+test('a quiet refresh (ringOnRefresh false) that is ALSO an owner -> engineering flip still applies the new feed — an audience flip always routes', async () => {
+  await NotificationService.notifyAdmin('ops_digest', 'Reviews — sync down', null, {
+    dedupeKey: 'k-audience-flip-down', refreshOnDedupe: true, detail: 'same report',
+    metadata: { kind: 'ACT', audience: 'owner', feed: null, quiet: false },
+  });
+  mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
+  const flipped = await NotificationService.notifyAdmin('ops_digest', 'Reviews — sync down', null, {
+    dedupeKey: 'k-audience-flip-down', refreshOnDedupe: true, ringOnRefresh: () => false, detail: 'same report',
+    metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' },
   });
   expect(flipped.refreshed).toBe(true);
   expect(flipped.rung).toBe(false);
   const row = mockRows.notifications[0];
   expect(row.read_at).not.toBeNull(); // not cleared — this refresh did not ring
   const meta = JSON.parse(row.metadata);
-  expect(meta.kind).toBe('ACT');
-  expect(meta.audience).toBe('owner');
-  expect(meta.feed).toBeNull(); // applied despite the quiet refresh
+  expect(meta.audience).toBe('engineering');
+  expect(meta.feed).toBe('activity'); // applied despite the quiet refresh
 });
 
 test('a quiet refresh with NO audience change drops feed/quiet from the merge, same as before this flip rule existed', async () => {

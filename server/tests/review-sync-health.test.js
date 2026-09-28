@@ -413,7 +413,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
   // the row belongs to, not merely whether it rings — a FIX->ACT flip whose
   // count hasn't grown (quiet by the plain ring test) must still land the
   // owner's row visible, or it stays hidden behind a stale feed:'activity'.
-  test('a FIX->ACT flip with a flat/shrinking count still applies the new feed/quiet, even though the refresh does not ring', async () => {
+  test('a FIX->ACT flip rings into the owner bell even with a flat/shrinking count (the FIX row may have been read in Activity)', async () => {
     const t1 = new Date(NOW - 3 * 3600000).toISOString();
     const t3 = new Date(NOW - 3600000).toISOString();
     // The standing row is CURRENTLY engineering/Activity-only, with a count
@@ -431,7 +431,7 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(out).toEqual({ deduped: true });
     expect(updates).toHaveLength(3);
     const rewrite = updates[2];
-    expect(rewrite).not.toHaveProperty('read_at'); // not ringing — count fell (10 -> 4)
+    expect(rewrite.read_at).toBeNull(); // entering the owner audience rings even though the count fell (10 -> 4)
     const rewriteMeta = JSON.parse(rewrite.metadata.bindings[0]);
     expect(rewriteMeta.kind).toBe('ACT');
     expect(rewriteMeta.audience).toBe('owner');

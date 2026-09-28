@@ -380,6 +380,14 @@ describe('the check -> destination map fills in what the caller did not send', (
       expect(ringOnRefresh({}, { count: 60 })).toBe(true); // backlog grew (60 -> 66)
       expect(ringOnRefresh({}, { count: 66 })).toBe(false); // flat — the existing row's own visibility stands
     });
+
+    test('an engineering-audience refresh gets no ringOnRefresh — notifyAdmin default re-surfaces any content change', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-eng-refresh', deduped: true, refreshed: true });
+      await post({ ...good(), key: 'z98-engineering-check:x', subject: '4 jobs failed', audience: 'engineering', link: undefined });
+      const opts = mockNotifyAdmin.mock.calls[0][3];
+      expect(opts.metadata.audience).toBe('engineering');
+      expect(opts).not.toHaveProperty('ringOnRefresh');
+    });
   });
 
   // For an unmapped check with no route.counts(), the generic fallback is

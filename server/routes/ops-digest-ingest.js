@@ -349,7 +349,9 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
         dedupeKey,
         dedupeWindowMs: DEDUPE_WINDOW_MS,
         refreshOnDedupe: true,
-        ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount }),
+        // Owner rows only: an engineering/fyi refresh keeps notifyAdmin's
+        // default (any content change re-surfaces it), same as in-process.
+        ...(resolvedAudience === 'owner' ? { ringOnRefresh: ringOnRefreshFrom({ count: resolvedCount, newCount: resolvedNewCount }) } : {}),
         // Without a caller timestamp, identical content has no new event
         // identity. Let content changes refresh; retries keep their read state.
         dedupeVersion: req.body.observedAt == null ? undefined : effectiveObservedAt,

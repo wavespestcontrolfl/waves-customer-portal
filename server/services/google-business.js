@@ -182,10 +182,12 @@ async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary,
   const contentChanged = standingRow.title !== next.title || next.body !== (standingRow.body ?? null)
     || next.detail !== (standingRow.detail ?? null) || standingMeta.kind !== fields.kind;
   if (!contentChanged) return;
-  const shouldRing = fields.audience !== 'owner'
-    || ringOnRefreshFrom({ count: findings.length })(standingRow, standingMeta);
   const audienceFlipped = Object.prototype.hasOwnProperty.call(standingMeta, 'audience')
     && standingMeta.audience !== fields.audience;
+  // FIX -> ACT is news to the owner even at an equal count (the FIX row may
+  // have been read in Activity), so entering the owner audience rings.
+  const shouldRing = fields.audience !== 'owner' || audienceFlipped
+    || ringOnRefreshFrom({ count: findings.length })(standingRow, standingMeta);
   const applyRouting = shouldRing || audienceFlipped;
   await trx('notifications').where({ id: standingRow.id }).update({
     title: next.title,

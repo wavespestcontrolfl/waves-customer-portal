@@ -617,7 +617,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // record ids across every lane — a count-only digest can't otherwise
   // tell "same backlog" from "the whole list turned over" at a flat total.
-  const itemKeys = [...callbackCards, ...a, ...b, ...c, ...d].map((r) => String(r.id)).filter(Boolean);
+  // Only when every lane's page is its whole backlog: past a lane's row
+  // cap, an older item moving onto the page would read as a new one.
+  const shownAll = callbackCards.length + a.length + b.length + c.length + d.length === total;
+  const itemKeys = shownAll ? [...callbackCards, ...a, ...b, ...c, ...d].map((r) => String(r.id)).filter(Boolean) : null;
 
   return {
     subject,

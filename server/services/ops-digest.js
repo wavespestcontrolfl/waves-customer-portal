@@ -141,6 +141,10 @@ function trimVariableTail(s) {
   }
   return next;
 }
+function stableRouteFor(key) {
+  const route = resolveRoute(String(key || ''));
+  return route && typeof route.counts === 'function' && route.alertClass ? route : null;
+}
 function alertClassFor(key, source) {
   const k = String(key || '');
   if (source !== 'ops-crons') return k;
@@ -154,10 +158,8 @@ function alertClassFor(key, source) {
   // STABLE class instead: the check-id prefix (through the ':') plus the
   // route's own id, so two runs with different counters land in the same
   // alert class.
-  const route = resolveRoute(k);
-  if (route && typeof route.counts === 'function' && route.alertClass) {
-    return k.slice(0, i + 1) + route.alertClass;
-  }
+  const route = stableRouteFor(k);
+  if (route) return k.slice(0, i + 1) + route.alertClass;
   return k.slice(0, i + 1) + trimVariableTail(k.slice(i + 1));
 }
 
@@ -169,6 +171,12 @@ function alertClassFor(key, source) {
 // ones" — deduped, sorted, capped so the comparison and the stored column
 // both stay bounded.
 const MAX_ITEM_KEYS = 200;
+// An explicit null (a sender whose page overflowed its row cap) clears a
+// stored list, so a later full page never compares against a stale one.
+function itemKeysMetaFor(raw, normalized) {
+  if (normalized) return { itemKeys: normalized };
+  return raw === null ? { itemKeys: null } : {};
+}
 function normalizeItemKeys(raw) {
   if (!Array.isArray(raw)) return null;
   const cleaned = [...new Set(raw.map((k) => String(k ?? '').trim()).filter(Boolean))].sort();
@@ -288,7 +296,11 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
   // senders pass no opsKey — one class is one list.
   // A prior row with no stored key (not a real ops-crons shape) can't prove a
   // different set, so it falls back to the counts alone.
-  const sameSet = !opsKey || !priorMeta.opsKey || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  // A mapped check with a stable class (data-hygiene) embeds its run
+  // counters in the key, so its keys never describe an item set — its
+  // parsed counts are the whole comparison.
+  const sameSet = !opsKey || !priorMeta.opsKey || Boolean(stableRouteFor(opsKey))
+    || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
   return ringDecision({
     newCount, count, priorCount: metaCount(priorMeta), sameSet,
     itemKeys, priorItemKeys: Array.isArray(priorMeta.itemKeys) ? priorMeta.itemKeys : undefined,
@@ -454,7 +466,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
   const countMeta = Number.isFinite(Number(count)) ? { count: Number(count) } : {};
   const newCountMeta = Number.isFinite(Number(newCount)) ? { newCount: Number(newCount) } : {};
   const normalizedItemKeys = normalizeItemKeys(itemKeys);
-  const itemKeysMeta = normalizedItemKeys ? { itemKeys: normalizedItemKeys } : {};
+  const itemKeysMeta = itemKeysMetaFor(itemKeys, normalizedItemKeys);
   // Ring-only-on-change (owner audience only — see ringOptionsFor). Two
   // different mechanisms, matching the two ways a sender's row reaches the
   // table:

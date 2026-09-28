@@ -176,6 +176,14 @@ describe('decideRingForNewRow', () => {
     await expect(decideRingForNewRow(conn, { alertClass: 'a', source: null, key: 'a', count: 5, newCount: 0 })).resolves.toBe(true);
   });
 
+  test('data-hygiene: a different run-counter key at the same count is the same set -> quiet', async () => {
+    const conn = makeConn({ metadata: { count: 63, opsKey: 'local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_' } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'local:data-hygiene', source: 'ops-crons', key: null,
+      opsKey: 'local:data-hygiene_sweep_2_fixed_63_exceptions_0_new_', count: 63, newCount: 0,
+    })).resolves.toBe(false);
+  });
+
   test('a prior row with the SAME count -> quiet', async () => {
     const conn = makeConn({ metadata: { count: 63 } });
     await expect(decideRingForNewRow(conn, { alertClass: 'a', source: null, key: 'a', count: 63, newCount: 0 })).resolves.toBe(false);

@@ -237,7 +237,9 @@ function composePromisedEstimateDigest(rows) {
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // call ids — a count-only digest can't otherwise tell "same 25" from "25
   // different calls" when the backlog churns at a flat size.
-  const itemKeys = lines.map((l) => String(l.callId)).filter(Boolean);
+  // Only when the page IS the whole backlog: past the row cap, an older
+  // promise moving onto the page would read as a new one.
+  const itemKeys = total <= lines.length ? lines.map((l) => String(l.callId)).filter(Boolean) : null;
   return { subject, text, html, count: total, oldestDays: oldest, headline, summary, itemKeys };
 }
 

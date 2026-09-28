@@ -3884,8 +3884,13 @@ only, these feed the same ring-only-on-change test the in-process digests
 use — the bell rings again when `newCount` is greater than zero, when
 `count` is higher than the most recent matching row's own count (by alert
 class, ops-crons scoped, within its last 7-day ring), or when that row has
-no recorded count at all; an equal or lower `count` keeps the refresh
-quiet. A quiet row still updates its title/body/detail and stays in the
+no recorded count at all. An equal `count` also rings when the finding
+is about a different set of items: for a fresh row, the two ops-cron keys
+with their run dates removed differ (the key names the items — a mapped
+check with a stable class such as data-hygiene is compared by its counts
+only, since its key carries run counters); for any row, a stored
+`metadata.itemKeys` list (in-process senders) that gains an id. Otherwise
+an equal or lower `count` keeps the refresh quiet. A quiet row still updates its title/body/detail and stays in the
 Activity feed (`metadata.quiet = true`, `metadata.feed = 'activity'`) — it
 is simply not re-surfaced in the bell (unread count, list, mark-all-read)
 until something actually grows. A non-`owner` audience is never gated by

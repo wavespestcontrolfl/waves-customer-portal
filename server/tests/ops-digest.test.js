@@ -230,6 +230,13 @@ describe('deliverOpsDigest — itemKeys', () => {
     expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('itemKeys');
   });
 
+  it('an explicit null itemKeys (page past its row cap) stores itemKeys: null, clearing a stale list on refresh', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-overflow', deduped: false });
+    await deliverOpsDigest({ key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 30, itemKeys: null, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata.itemKeys).toBeNull();
+  });
+
   it('an ACT sender with no dedupeKey: itemKeys reach the ringGate — a different item rings even at a flat count', async () => {
     withGate(true);
     mockNotifyAdmin.mockResolvedValue({ id: 'n-gate', deduped: false });

@@ -479,7 +479,11 @@ const NotificationService = {
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
           if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
-            const shouldRing = await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
+            // A row that newly enters the owner audience (engineering/fyi ->
+            // owner) is news to the owner even at an equal count: it may
+            // have been read in Activity, so it must ring into the bell.
+            const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
+            const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };

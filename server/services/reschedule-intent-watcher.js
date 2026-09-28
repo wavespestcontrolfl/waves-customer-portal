@@ -347,7 +347,9 @@ function composeRescheduleIntentDigest(rows) {
   // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
   // agent_decisions ids — a count-only digest can't otherwise tell "same
   // requests" from "different ones" at a flat total.
-  const itemKeys = flags.map((row) => String(row.id)).filter(Boolean);
+  // Only when the page IS the whole backlog: past MAX_ROWS, an older flag
+  // moving onto the page would read as a new one.
+  const itemKeys = total <= flags.length ? flags.map((row) => String(row.id)).filter(Boolean) : null;
   return { subject, text, html, count: total, headline, summary, itemKeys };
 }
 
