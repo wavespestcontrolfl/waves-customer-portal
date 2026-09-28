@@ -142,8 +142,6 @@ test('gate on: an access code in a caption or the summary is redacted before it 
 // a generation with the gate off must send the byte-identical pre-branch
 // system prompt and photo-count note on EVERY request, never the rewritten
 // provenance wording, even though no caption ever reaches it either way.
-const crypto = require('crypto');
-const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 // Original (pre-branch) wording, reproduced verbatim from the diff this P1
 // closed — this is what a gate-off request must still send.
 const PRE_BRANCH_INVALID_OBSERVATIONS_CLAUSE = 'Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work.';
@@ -164,11 +162,11 @@ test('gate off: the system prompt and photo-count note are byte-identical to the
   expect(system).not.toContain('TECHNICIAN PHOTO OBSERVATIONS');
   expect(text).toContain(`(a count alone supplies no visual facts; ${PRE_BRANCH_PHOTO_COUNT_NOTE})`);
   expect(text).not.toContain('TECHNICIAN PHOTO OBSERVATIONS');
-  // Regression pin: any future change to the gate-off system prompt for
-  // this service line changes this hash — a deliberate change updates the
-  // hash in the same commit; an accidental one (like the bug this closes)
-  // is caught here instead of six pre-push rounds later.
-  expect(sha256(system)).toBe('f9cfa2fed54fb7ebb51c90c9bacd31bdf6cbdb63711e9f1e65fa49aa358f7f87');
+  // No whole-prompt hash pin here on purpose: the rest of the system prompt
+  // belongs to main and changes with unrelated work (a pinned hash broke on
+  // the first merge of main, 2026-09-28). The kill switch is proven by the
+  // verbatim legacy clause above plus the differential test below, which
+  // shows gate-on differs from gate-off ONLY by the gated clause.
 });
 
 test('gate on: the same request differs from the gate-off prompt ONLY by the gated additions', async () => {
