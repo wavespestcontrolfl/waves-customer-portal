@@ -18966,6 +18966,19 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
   return topupSeriesSkipReason(trx, parent, parentId, cols);
 }
 
+// The cancel reseed's prepay try-lock + series rules (above, kept inline
+// there because its source-order pin reads that body), packaged for the
+// rider-series sync: annual prepay, family plan hold, duplicate series.
+async function prepayLockedSeriesSkipReason(conn, parent, parentId, cols) {
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  const prepayLockResult = await conn.raw(
+    'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+    [ANNUAL_PREPAY_LOCK_NS, String(parent.customer_id)],
+  );
+  if (!advisoryTryLockAcquired(prepayLockResult)) return 'annual_prepay_busy';
+  return topupSeriesSkipReason(conn, parent, parentId, cols);
+}
+
 // The plan-reduction ledger, read as STANDING reductions per series root
 // (standingPlanReductions): every `recurring_cancel_reseed_declined` entry
 // for these customers (optionally only these roots), plus the current
@@ -25560,6 +25573,7 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // one-shot ops script), same avoid-a-route-load-cycle reason as above.
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
+module.exports.prepayLockedSeriesSkipReason = prepayLockedSeriesSkipReason;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
 // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily
 // by services/recurring-series-cancel-reseed.js from the four single-visit

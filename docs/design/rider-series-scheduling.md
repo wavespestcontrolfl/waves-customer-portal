@@ -83,6 +83,12 @@ own 84-day cadence rather than lapsing.
    (`services/series-customer-eligibility.js`): a deleted, genuinely
    held, inactive or churned customer skips with that reason, and a
    locked customer row skips with `customer_row_locked`.
+   It then takes the annual-prepay namespace as a try-lock and applies the
+   top-up's series rules to the rider (`prepayLockedSeriesSkipReason`,
+   `routes/admin-schedule.js`): an annual-prepay series, a family on plan
+   hold or a duplicate active series skips with that reason. A prepaid
+   term owns its own visit count and dates, so a prepaid pest series does
+   not ride lawn. New rider rows never copy `annual_prepay_term_id`.
 3. Host dates = the host's live future rows (parent + children,
    `JOIN_INELIGIBLE_STATUSES` excluded, `>= today`).
 4. `lastRiderDate` (the anchor) = the rider's latest row that is

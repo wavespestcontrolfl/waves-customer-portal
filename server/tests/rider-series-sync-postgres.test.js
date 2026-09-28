@@ -791,4 +791,33 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     const set = await _internals.immovableRowIdSet(trx, [row.id]);
     expect(set.has(row.id)).toBe(immovable);
   });
+
+  test('an annual-prepay rider series is refused (annual_prepay_series), nothing written', async () => {
+    const { pestParent } = await linkedPair();
+    await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).update({ prepaid_method: 'annual_prepay_invoice' });
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBe('annual_prepay_series');
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
+  test('a rider whose customer has a second active pest series is refused (duplicate_series), nothing written', async () => {
+    const { pestParent } = await linkedPair();
+    const other = await makeParent({ pattern: 'quarterly', scheduledDate: '2098-02-05' });
+    await seedChildren(other, 'quarterly', 4);
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBe('duplicate_series');
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
+  test('an inserted rider row never inherits the template row\'s annual_prepay_term_id', () => {
+    const { _internals } = require('../services/rider-series');
+    const row = _internals.buildRiderRowFromTemplate(
+      { customer_id: customerId, service_type: 'Pest Control', annual_prepay_term_id: randomUUID() }, '2098-04-02', null, randomUUID(),
+    );
+    expect(row.annual_prepay_term_id).toBeUndefined();
+  });
 });

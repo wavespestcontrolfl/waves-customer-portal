@@ -251,14 +251,16 @@ function immovableByOwnFields(row) {
 // logic. A rider's own price does not vary by date the way a host's
 // due-add-on rows can (owner ruling 2026-09-28: keep the per-visit pest
 // price), so a flat copy of these fields from the template needs no
-// per-date recomputation.
+// per-date recomputation. annual_prepay_term_id is deliberately NOT
+// copied: a prepaid series is refused before any write (the series gate in
+// syncRiderSeries), and a new row must never inherit a term's coverage.
 const TEMPLATE_COPY_FIELDS = [
   'customer_id', 'service_type', 'notes', 'time_window', 'zone',
   'estimated_duration_minutes', 'estimated_price', 'payment_method_preference',
   'source_estimate_id', 'source', 'is_recurring', 'recurring_pattern',
   'recurring_ongoing', 'skip_weekends', 'weekend_shift',
   'recurring_nth', 'recurring_weekday', 'recurring_interval_days',
-  'appointment_type', 'create_invoice_on_complete', 'annual_prepay_term_id',
+  'appointment_type', 'create_invoice_on_complete',
   'service_id', 'service_key_snapshot', 'service_category_snapshot',
   'discount_type', 'discount_amount', 'discount_dollars',
   'line_discount_id', 'line_discount_type', 'line_discount_amount',
@@ -403,6 +405,14 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     }
     const customerSkip = seriesCustomerSkipReason(customer);
     if (customerSkip) return { ...empty(), skipped: customerSkip };
+
+    // Same series gate as the top-up and the cancel reseed: an annual-prepay
+    // series (its term owns the visit count and dates), a family on plan
+    // hold, or a duplicate active series is never re-dated here. The
+    // annual-prepay namespace is a try-lock, so this stays non-blocking.
+    const { prepayLockedSeriesSkipReason } = require('../routes/admin-schedule');
+    const seriesSkip = await prepayLockedSeriesSkipReason(trx, riderParent, riderParentId, cols);
+    if (seriesSkip) return { ...empty(), skipped: seriesSkip };
 
     const todayStr = etDateString();
 
