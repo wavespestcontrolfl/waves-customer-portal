@@ -27,13 +27,15 @@
  *                       same mint, rolled back) and the run must match it
  *   send_invoice        InvoiceService.sendViaSMSAndEmail — the Invoices
  *                       page "Send" action, first delivery only; never charges
+ *   queue_receipt       enqueueReceiptDelivery — the receipt worker emails
+ *                       (and may text) the paid receipt; the card names the
+ *                       email recipient from the worker's own resolver
+ *                       (invoice-email resolveReceiptEmailRecipient) and
+ *                       opt-out check (receiptEmailOptOutState)
  *   book_followup       completion-followup-booking bookCompletionFollowup —
  *                       the Dispatch follow-up CTA: a PENDING $0 visit on the
  *                       frozen verdict's date (idempotent per source visit)
- * Everything else stays manual. Paid receipts too: the receipt worker routes
- * per invoice (payer AP inbox, billing-email authority, channel settings), so
- * a card here could not name the real recipients without a second copy of
- * that routing. Otherwise: field evidence (application log, photos,
+ * Everything else stays manual: field evidence (application log, photos,
  * license) is never generated, payer / auto-charge / parked billing stays
  * with its own flows, and
  * exhausted deliveries have no safe re-queue.
@@ -52,8 +54,9 @@ const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const BillingRecoveryBill = require('../billing-recovery-bill');
 const { firstDeliveryOutcome, resolvedSendOutcome } = require('../invoice-send-outcome');
+const { enqueueReceiptDelivery, receiptEmailOptOutState, expectedEmailSkip } = require('../receipt-delivery-queue');
 // Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when an
-// invoice send is planned, never at IB boot.
+// invoice send or a receipt step is planned, never at IB boot.
 const invoiceEmail = () => require('../invoice-email');
 // Lazy: the booking service pulls in the whole completion module graph —
 // loaded only when a follow-up step is planned or run, never at IB boot.
@@ -66,8 +69,8 @@ const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), bill a completed self-pay visit that was never invoiced (the Billing Recovery "Bill" checks; the card shows the exact invoice total) and send that invoice to the customer by email/text exactly as the Invoices "Send" button does — nothing is charged — and book a follow-up visit the completion called for but nobody booked (a PENDING $0 visit on the program-interval date, exactly as the Dispatch follow-up button books it — no text now; the usual reminders go out before the visit).
-Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, re-sends of invoices that already exist, receipt sends, follow-ups whose date has passed, completion texts, and exhausted/failed deliveries.
+Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), bill a completed self-pay visit that was never invoiced (the Billing Recovery "Bill" checks; the card shows the exact invoice total) and send that invoice to the customer by email/text exactly as the Invoices "Send" button does — nothing is charged — queue a paid receipt that was never queued (the receipt worker emails it — to the payer's billing inbox for a payer-billed invoice — and may text it per the customer's receipt settings), and book a follow-up visit the completion called for but nobody booked (a PENDING $0 visit on the program-interval date, exactly as the Dispatch follow-up button books it — no text now; the usual reminders go out before the visit).
+Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, re-sends of invoices or receipts that already went out, follow-ups whose date has passed, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
       type: 'object',
@@ -98,6 +101,7 @@ const STEP_EFFECTS = {
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
   bill_visit: { kind: 'billing', label: 'Create the invoice (the Billing Recovery "Bill" action) — nothing is charged' },
   send_invoice: { kind: 'comms', label: 'Send the invoice to the customer (the Invoices "Send" action)' },
+  queue_receipt: { kind: 'comms', label: 'Queue the paid receipt — the receipt worker sends it' },
   book_followup: { kind: 'operational', label: 'Book the PENDING $0 follow-up visit (the Dispatch follow-up action)' },
 };
 
@@ -160,6 +164,88 @@ async function reportEmailBlocker(status, recordRow, knex) {
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
+}
+
+// Who the receipt worker would reach — through its OWN resolvers, so the card
+// never names a different inbox than the send: the opt-out/kill-switch check,
+// then resolveReceiptEmailRecipient (payer AP inbox for payer-billed invoices,
+// the billing-email authority otherwise). The text/App leg is decided at send
+// by the messaging pipeline (consent, channel choice, STOP), so the card
+// states it as conditional; payer-billed receipts never reach the homeowner.
+// A phone-less customer is still reachable when they chose App for payment
+// receipts (sendReceipt's own explicitBillingAppSelected admission).
+// A paid, unsent invoice with no receipt job — else why not.
+async function receiptInvoiceOrBlocker(invoiceId, knex) {
+  const invoice = await knex('invoices').where({ id: invoiceId }).first();
+  if (!invoice) return { blocker: 'invoice not found' };
+  if (String(invoice.status || '').toLowerCase() !== 'paid') return { blocker: `invoice is ${invoice.status}, not paid` };
+  if (invoice.receipt_sent_at) return { blocker: 'receipt already sent' };
+  const job = await knex('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first('id');
+  if (job) return { blocker: 'a receipt job already exists' };
+  const optOut = await receiptEmailOptOutState(invoice);
+  if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
+  if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
+  return { invoice };
+}
+
+// The email leg through the worker's resolver. Only the worker's own
+// expected skips (no email on file, opted out, Email not the chosen receipt
+// channel) mean "no email, on purpose". Any other refusal — a settings
+// lookup outage, an aborted resolution — is unknown, not "nobody": the
+// worker could still email someone the card didn't name.
+async function receiptEmailLeg(invoice) {
+  const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: 'payment_receipt' });
+  if (resolved.ok) return { email: String(resolved.recipient.email).trim().toLowerCase(), customer: resolved.customer };
+  if (!expectedEmailSkip(resolved)) {
+    return { blocker: `the receipt email recipient could not be verified (${String(resolved.error || resolved.code || 'unknown').replace(/\.$/, '')})` };
+  }
+  return { email: null, customer: null, skipReason: String(resolved.error || '') };
+}
+
+// Whether the receipt may notify the Waves app: the phone-less admission
+// sendReceipt uses (explicitBillingAppSelected), OR the customer's full
+// payment-receipt channel resolution — explicit channels or the legacy
+// single payment_receipt_channel (billingChannelsPayload, the one reader of
+// both) — naming App, which the App routing reads for phone-bearing
+// customers too. A prefs read failure is treated as "may" (never hidden).
+async function receiptMayReachApp(customerId, emailAvailable, knex) {
+  if (await require('../invoice').explicitBillingAppSelected(customerId, 'payment_receipt')) return true;
+  const READ_FAILED = Symbol('prefs-read-failed');
+  const prefs = await knex('notification_prefs').where({ customer_id: customerId }).first().catch(() => READ_FAILED);
+  if (prefs === READ_FAILED) return true;
+  const { billingChannelsPayload } = require('../billing-delivery-channels');
+  return (billingChannelsPayload(prefs || {}, { emailAvailable }).paymentConfirmationChannels || []).includes('push');
+}
+
+async function receiptRecipients(invoiceId, knex) {
+  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex);
+  if (eligible.blocker) return eligible;
+  const { invoice } = eligible;
+  const emailLeg = await receiptEmailLeg(invoice);
+  if (emailLeg.blocker) return emailLeg;
+  const payerBilled = Boolean(invoice.payer_id);
+  const phone = payerBilled ? null
+    : (emailLeg.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
+  const app = !payerBilled && await receiptMayReachApp(invoice.customer_id, Boolean(emailLeg.email), knex);
+  if (!emailLeg.email && !phone && !app) return { blocker: emailLeg.skipReason || 'no receipt recipient on file' };
+  // Which receipt, for how much — the amount the receipt itself states.
+  let amount;
+  try {
+    amount = await require('../invoice').receiptAmountFor(invoice, { failClosed: true });
+  } catch {
+    return { blocker: 'the receipt amount could not be verified (payment lookup failed)' };
+  }
+  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
+}
+
+// The card's plain-words description of where a queued receipt can go.
+function receiptReach(s) {
+  const which = `receipt for ${s.invoice_number ? `invoice ${s.invoice_number}` : 'the paid invoice'}, $${s.amount} paid — `;
+  const email = `${which}email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}`;
+  if (s.payer_billed) return `${email} (the payer's billing inbox — a payer-billed receipt is never texted)`;
+  const legs = [s.text_to && `text ${s.text_to}`, s.app && 'a Waves app notification'].filter(Boolean);
+  if (!legs.length) return `${email}; no text (no phone on file)`;
+  return `${email}; may also send ${legs.join(' or ')}, per the customer's receipt settings (texts wait for 8 AM–8 PM)`;
 }
 
 function maskEmail(address) {
@@ -317,6 +403,30 @@ async function planInvoiceSend(status, knex) {
   };
 }
 
+// A paid invoice whose receipt was never queued.
+async function planReceiptStep(status, knex) {
+  const invDelivery = status.facts.invoiceDelivery;
+  if (!(invDelivery?.state === 'pending' && invDelivery.reason === 'paid_receipt_not_sent' && invDelivery.invoiceId)) return {};
+  const who = await receiptRecipients(invDelivery.invoiceId, knex);
+  if (who.blocker) return { skip: { fact: 'invoiceDelivery', reason: invDelivery.reason, why: who.blocker } };
+  return {
+    step: {
+      step: 'queue_receipt',
+      fact: 'invoiceDelivery',
+      reason: invDelivery.reason,
+      invoice_id: invDelivery.invoiceId,
+      invoice_number: who.invoiceNumber,
+      amount: who.amount,
+      recipients: who.email ? [maskEmail(who.email)] : [],
+      text_to: maskPhone(who.phone),
+      app: who.app === true,
+      payer_billed: who.payerBilled,
+      // Binds the FULL email + phone + App choice (masks can collide).
+      recipients_key: crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone, who.app === true])).digest('hex').slice(0, 16),
+    },
+  };
+}
+
 // The Dispatch follow-up CTA's own dry run on the verdict's date.
 async function planFollowupStep(status, knex) {
   const followUpFact = status.facts.followUp;
@@ -403,9 +513,10 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   };
   const report = await planReportSteps({ ...status, facts }, getContact, knex);
   const invoice = await planInvoiceStep({ ...status, facts }, knex);
+  const receipt = await planReceiptStep({ ...status, facts }, knex);
   const followup = await planFollowupStep({ ...status, facts }, knex);
-  const steps = [...report.steps, ...(invoice.steps || []), ...(followup.step ? [followup.step] : [])];
-  const skipped = [...report.skipped, ...(invoice.skip ? [invoice.skip] : []), ...(followup.skip ? [followup.skip] : [])];
+  const steps = [...report.steps, ...(invoice.steps || []), ...(receipt.step ? [receipt.step] : []), ...(followup.step ? [followup.step] : [])];
+  const skipped = [...report.skipped, ...(invoice.skip ? [invoice.skip] : []), ...(receipt.skip ? [receipt.skip] : []), ...(followup.skip ? [followup.skip] : [])];
   // Who the card is about — resolved by the server, never the model.
   const who = steps.length ? (await getContact()).customer : null;
   const customerName = who ? [who.first_name, who.last_name].filter(Boolean).join(' ') || null : null;
@@ -508,6 +619,24 @@ const STEP_RUNNERS = {
       return { ...invoiceSendRefusal(err), invoice_id: disposition.invoice_id };
     }
   },
+  async queue_receipt(step, knex) {
+    // The unsent check and the enqueue are one transaction on the LOCKED
+    // invoice row: a receipt sent by hand in between (receipt_sent_at
+    // stamped) refuses instead of queueing a duplicate. A machine-queued
+    // receipt (customerInitiated false): its text waits for the 8 AM–8 PM
+    // window, exactly like an autopay receipt.
+    const queued = await knex.transaction(async (trx) => {
+      const inv = await trx('invoices').where({ id: step.invoice_id }).forUpdate().first('id', 'status', 'receipt_sent_at');
+      if (!inv || String(inv.status || '').toLowerCase() !== 'paid' || inv.receipt_sent_at) {
+        return { refused: inv?.receipt_sent_at ? 'the receipt was sent in the meantime — nothing queued' : 'the invoice is no longer paid — nothing queued' };
+      }
+      return enqueueReceiptDelivery({ invoiceId: step.invoice_id, source: 'ib_closeout_repair', customerInitiated: false, database: trx });
+    });
+    if (queued?.refused) return { status: 'failed', detail: queued.refused };
+    if (queued?.enqueued) return { status: 'completed', detail: 'receipt queued', receipt_job_id: queued.job?.id || null };
+    if (queued?.deduped) return { status: 'completed', detail: 'a receipt job already existed — nothing new queued' };
+    return { status: 'failed', detail: queued?.reason || 'receipt could not be queued' };
+  },
 };
 
 // Right before the send: the destinations must still be the approved ones
@@ -592,7 +721,7 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 
 function stepsKey(steps) {
   return JSON.stringify((steps || []).map((s) => [
-    s.step, s.service_record_id || null, s.scheduled_service_id || null, s.depends_on || null, s.recipients_key || null,
+    s.step, s.service_record_id || null, s.scheduled_service_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null,
     s.amount ?? null, s.total ?? null, s.due_date || null,
     s.date || null, s.window_start || null, s.window_end || null, s.technician_id || null, s.customer_id || null, s.overlap === true,
   ]));
@@ -607,6 +736,7 @@ function stepEffect(s) {
     const parts = [`${money(s.subtotal)} services`, s.discount ? `−${money(s.discount)} discounts` : null, `${money(s.tax)} tax`].filter(Boolean);
     return `${label}: ${money(s.total)} total (${parts.join(', ')})${s.due_date ? `, due ${s.due_date}` : ''}`;
   }
+  if (s.step === 'queue_receipt') return `${label}: ${receiptReach(s)}`;
   if (s.step === 'book_followup') {
     const window = s.window_start ? ` ${String(s.window_start).slice(0, 5)}–${String(s.window_end || '').slice(0, 5)}` : '';
     const who = s.technician_name || (s.technician_id ? "the source visit's technician" : 'no technician (unassigned)');

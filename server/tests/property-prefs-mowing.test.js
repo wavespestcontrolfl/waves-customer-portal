@@ -58,28 +58,36 @@ describe('property preferences — mowing schedule fields', () => {
   });
 
   test('route source wires mowing fields through schema, allowlist, and JSON round-trip', () => {
-    // The Joi schema, ALLOWED_FIELDS, JSON_COLS, and JSON_FIELDS are private
-    // to the module. Read the source once and pin each wiring point — this is
-    // deliberately a source-level contract so "field saves but comes back as a
-    // JSON string" or "field validates but is filtered before storage" cannot
+    // The Joi schema and ALLOWED_FIELDS live in the shared
+    // property-preferences-schema module (extracted 2026-09-27 so the admin
+    // writer can reuse them without duplicating them); JSON_COLS (GET-side
+    // parsing) and the GET defaults stay in route-module scope. Read both
+    // sources once and pin each wiring point — this is deliberately a
+    // source-level contract so "field saves but comes back as a JSON
+    // string" or "field validates but is filtered before storage" cannot
     // slip through unnoticed.
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
+    const schemaSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'property-preferences-schema.js'), 'utf8');
+    const routeSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
 
     // Both mowing enums are validated against the exact keys the pills emit.
     // A length-only check would persist values ("Monday", a 40-char time)
     // that the summary and the technician alert both filter out — a silent
     // write that vanishes from every surface — or overflow varchar(30).
-    expect(src).toMatch(/mowingDays:\s*Joi\.array\(\)[\s\S]{0,200}?\.valid\('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'\)/);
-    expect(src).toMatch(/mowingTimeOfDay:\s*Joi\.string\(\)[^\n]*\.valid\(/);
-    expect(src).toMatch(/mowingNotes:\s*longText/);
-    expect(src).toMatch(/'mowing_days',\s*'mowing_time_of_day',\s*'mowing_notes'/);
+    expect(schemaSrc).toMatch(/mowingDays:\s*Joi\.array\(\)[\s\S]{0,200}?\.valid\('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'\)/);
+    expect(schemaSrc).toMatch(/mowingTimeOfDay:\s*Joi\.string\(\)[^\n]*\.valid\(/);
+    expect(schemaSrc).toMatch(/mowingNotes:\s*longText/);
+    expect(schemaSrc).toMatch(/'mowing_days',\s*'mowing_time_of_day',\s*'mowing_notes'/);
 
-    const jsonListMentions = src.match(/JSON_(?:COLS|FIELDS)\s*=\s*\[[^\]]*'mowing_days'[^\]]*\]/g) || [];
-    expect(jsonListMentions).toHaveLength(2);
+    // One JSON_COLS list in the route (GET-side parsing) and one JSON_FIELDS
+    // list in the shared schema module (PUT-side stringification).
+    const routeJsonListMentions = routeSrc.match(/JSON_COLS\s*=\s*\[[^\]]*'mowing_days'[^\]]*\]/g) || [];
+    const schemaJsonListMentions = schemaSrc.match(/JSON_FIELDS\s*=\s*\[[^\]]*'mowing_days'[^\]]*\]/g) || [];
+    expect(routeJsonListMentions).toHaveLength(1);
+    expect(schemaJsonListMentions).toHaveLength(1);
 
-    const defaults = src.match(/mowingDays:\s*\[\],\s*mowingTimeOfDay:\s*'',\s*mowingNotes:\s*''/);
+    const defaults = routeSrc.match(/mowingDays:\s*\[\],\s*mowingTimeOfDay:\s*'',\s*mowingNotes:\s*''/);
     expect(defaults).not.toBeNull();
   });
 });
