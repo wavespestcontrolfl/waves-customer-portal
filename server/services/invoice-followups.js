@@ -137,9 +137,16 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, invoiceIds = null) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
+    customerId,
+    invoiceId,
+    // A combined touch's aggregate re-check (Codex round-2 P1) passes the
+    // FULL covered set here; rail-guard's own includesQuotedInvoices reads
+    // invoiceIds over invoiceId when both are given, so the single-invoice
+    // callers above are unaffected by this parameter's mere existence.
+    ...(invoiceIds ? { invoiceIds } : {}),
+    channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
   });
 }
 
@@ -409,7 +416,29 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
     if (!Number.isInteger(linesTotal) || linesTotal !== Math.round(link.balance.total * 100)) return null;
 
     const invoiceRows = await db('invoices').whereIn('id', coveredIds)
-      .select('id', 'invoice_number', 'title', 'service_type');
+      .select('id', 'invoice_number', 'title', 'service_type', 'stripe_payment_intent_id');
+
+    // Any covered invoice awaiting ACH microdeposit verification disqualifies
+    // the combined render (Codex round-2 P1): fireTouch's OWN mdPending
+    // diversion only ever checks THIS touch's row.invoice_id, but
+    // buildPayBalanceLink picks its own anchor (the oldest open invoice
+    // across the account) — coveredIds can legitimately include a
+    // DIFFERENT invoice that is itself blocked on microdeposit
+    // verification. Combined copy would then dun the customer for money on
+    // an invoice that isn't ready to be collected yet (its own
+    // single-invoice touch would instead divert to the verification
+    // nudge), and the linked pay page would still attempt to charge it.
+    // Same gate + the SAME StripeService check fireTouch's own mdPending
+    // diversion uses, applied to every covered invoice.
+    if (gates.divertMicrodepositDunning) {
+      const mdPendingChecks = await Promise.all(invoiceRows.map((inv) => (
+        StripeService.isInvoiceAwaitingMicrodepositVerification({
+          id: inv.id, stripe_payment_intent_id: inv.stripe_payment_intent_id,
+        })
+      )));
+      if (mdPendingChecks.some(Boolean)) return null;
+    }
+
     const invoices = coveredIds.map((id) => {
       const inv = invoiceRows.find((r) => String(r.id) === id);
       return {
@@ -1144,7 +1173,27 @@ async function fireGroupedRows(toFire) {
       (a, b) => new Date(sequenceAnchor(a)).getTime() - new Date(sequenceAnchor(b)).getTime(),
     );
     const [anchor, ...siblings] = sorted;
-    const anchorOutcome = await fireOne(anchor);
+    // Fired inline rather than through fireOne (Codex round-2 P1): fireOne
+    // swallows a thrown error into the SAME `undefined` outcome an early,
+    // nothing-delivered RETURN produces, and fireStep/fireTouch can throw
+    // AFTER a leg already delivered (the SMS await, the final sequence-
+    // advance write, …) — a throw carries no outcome at all, so there is
+    // no way to tell from an `undefined` outcome alone whether the
+    // customer was already told. `anchorThrew` keeps that distinction so
+    // the sibling loop below can refuse to fire them individually on a
+    // throw specifically (risking a DUPLICATE collection contact), while
+    // an ordinary "nothing delivered" outcome (anchorToldCustomer false,
+    // anchorThrew false) still lets a sibling fire on its own as before.
+    let anchorThrew = false;
+    let anchorOutcome;
+    try {
+      anchorOutcome = await fireStep(anchor);
+      sent++;
+    } catch (err) {
+      logger.error(`[invoice-followups] step fire failed for invoice ${anchor.invoice_id}: ${err.message}`);
+      skipped++;
+      anchorThrew = true;
+    }
     // The anchor told the customer about every covered invoice whenever it
     // completed the normal send path (`sent: true`) OR — Codex round-1 P1
     // — it returned early with `deliveredCombined: true`: a held/deferred
@@ -1178,6 +1227,17 @@ async function fireGroupedRows(toFire) {
     const coveredIds = anchorOutcome?.coveredInvoiceIds || null;
     for (const sibling of siblings) {
       const siblingCovered = !!coveredIds && coveredIds.includes(String(sibling.invoice_id));
+      // The anchor's own fire THREW (Codex round-2 P1) — unlike an
+      // ordinary "nothing delivered" outcome, a throw gives no evidence
+      // either way about what the customer was already told, and could
+      // follow a leg that already delivered. Never fire the sibling
+      // individually here: a duplicate collection contact is worse than a
+      // one-run delay. Leave it exactly where it is; the next run
+      // re-selects and re-decides from a clean read.
+      if (anchorThrew) {
+        skipped++;
+        continue;
+      }
       // A sibling already further along its OWN cadence than the anchor —
       // rare, but never deferred: it fires exactly as it would ungrouped.
       // Same for one the anchor's own send did not actually cover.
@@ -1943,9 +2003,35 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // A grouped sibling (fireGroupedRows) never renders combined: only the
   // group's anchor may, so a customer gets at most one "N invoices" message
   // per run.
-  const combinedVariant = (allowCombined && !mdPending)
+  let combinedVariant = (allowCombined && !mdPending)
     ? await resolveCombinedVariant(customer, row.invoice_id, step)
     : null;
+  // Authorize every invoice a combined touch actually NAMES, on every
+  // channel it will actually use (Codex round-2 P1): channelPolicy above
+  // (policyResults/policyChannels) only proves row.invoice_id itself is
+  // policy-eligible — a covered sibling can carry its OWN collections
+  // denial (a per-invoice do-not-contact flag, an eligibility the
+  // aggregate policy tracks independently of invoice_followup_sequences'
+  // own status) that the single-invoice verdict never sees. Re-check the
+  // SAME selected channels against the EXACT combined set; if ANY
+  // channel's aggregate verdict denies it, fall the whole touch back to
+  // the single-invoice template rather than dropping just that channel —
+  // the SMS and email legs must agree on what they're allowed to say, and
+  // a channel silently dropped here would otherwise look identical to an
+  // ordinary delivery failure downstream. The single-invoice verdict
+  // above (channelPolicy/smsPermitted/emailPermitted) is untouched by
+  // this — it still governs whether each channel sends at all.
+  if (combinedVariant) {
+    const aggregateResults = await Promise.all(policyChannels.map((channel) => (
+      collectionsChannelPermitted(
+        row.customer_id, null, channel, ownLedgerIds, true, combinedVariant.coveredInvoiceIds,
+      )
+    )));
+    if (aggregateResults.some((result) => !verdictAllows(result))) {
+      logger.info(`[invoice-followups] combined render for sequence ${row.id} fell back to single-invoice — the aggregate collections policy check denied a selected channel for the covered set`);
+      combinedVariant = null;
+    }
+  }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
   // ADMIN-BUG-R23: service_date is a DATE column, not an instant — formatting

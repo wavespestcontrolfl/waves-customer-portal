@@ -62,6 +62,15 @@ jest.mock('../services/composer-customer-links', () => ({
 jest.mock('../services/microdeposit-verification-email', () => ({
   sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })),
 }));
+// The shared collections rail-guard (Codex round-2 P3's aggregate
+// re-check) — mocked so the single test that exercises GATE_COLLECTIONS_
+// POLICY controls its verdict directly rather than exercising the real
+// contact-policy module/DB. Defaults to "always allowed" every test, reset
+// in beforeEach — byte-identical to the gate-off short-circuit the real
+// module itself applies when GATE_COLLECTIONS_POLICY is unset.
+jest.mock('../services/collections/rail-guard', () => ({
+  collectionsChannelPermitted: jest.fn(async () => true),
+}));
 
 const db = require('../models/db');
 const BillingEmailAuthority = require('../services/billing-channel-email-authority');
@@ -69,6 +78,7 @@ const smsTemplates = require('../routes/admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplates = require('../services/email-template-library');
 const ComposerLinks = require('../services/composer-customer-links');
+const RailGuard = require('../services/collections/rail-guard');
 // NOT mocked via jest.mock — finding #2's test spies on its one method
 // directly (StripeService.isInvoiceAwaitingMicrodepositVerification), the
 // same way the rest of this suite leaves it untouched: every other test's
@@ -201,6 +211,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     db.raw = jest.fn((sql) => ({ sql }));
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
     ComposerLinks.buildPayBalanceLink.mockReset().mockResolvedValue(payLink());
+    RailGuard.collectionsChannelPermitted.mockReset().mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -905,5 +916,163 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       templateKey: 'invoice.followup_combined_3_day',
       idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
     }));
+  });
+
+  // ---------------------------------------------------------------------
+  // Codex round 2 (#5270) — each proven to fail with its own fix reverted.
+  // ---------------------------------------------------------------------
+
+  test('a covered invoice awaiting microdeposit verification disqualifies the combined render, even when the ANCHOR itself is not the one blocked (round-2 finding #1)', async () => {
+    // The anchor (inv-1, row.invoice_id) is NOT itself microdeposit-blocked
+    // — its own mdPending check passes — but buildPayBalanceLink's anchor
+    // (the oldest open invoice across the account) can legitimately differ
+    // from THIS touch's row.invoice_id, and a DIFFERENT covered invoice
+    // (inv-2) can be awaiting verification. The combined text must not dun
+    // the customer for money inv-2 isn't ready to collect yet.
+    const mdSpy = jest.spyOn(StripeService, 'isInvoiceAwaitingMicrodepositVerification')
+      .mockImplementation(async ({ id }) => id === 'inv-2');
+    try {
+      const seq = followupRow();
+      const sequenceUpdate = chain();
+      setDbQueues({
+        'invoice_followup_sequences as s': [chain({ result: [seq] })],
+        customers: [chain({ first: customer() })],
+        invoices: [
+          chain({ first: invoice() }), // claim-txn row lock read
+          chain({ first: invoice() }), // liveInvoice
+          chain({ first: invoice() }), // pre-dun refresh
+          chain({ result: [
+            { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control', stripe_payment_intent_id: null },
+            { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care', stripe_payment_intent_id: 'pi_inv2' },
+          ] }),
+          chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+        ],
+        notification_prefs: [chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain(), chain()],
+        invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+      });
+
+      await InvoiceFollowUps.runPending();
+
+      // The link WAS built (resolveCombinedVariant got that far)...
+      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+      expect(mdSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-2', stripe_payment_intent_id: 'pi_inv2' }));
+      // ...but the touch fell back to the single-invoice template.
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'invoice.followup_3_day',
+      }));
+    } finally {
+      mdSpy.mockRestore();
+    }
+  });
+
+  test('the anchor throwing after the email delivered does not fire or advance its siblings (round-2 finding #2)', async () => {
+    // fireStep/fireTouch can throw AFTER a leg already delivered — here,
+    // the FINAL step_index-advance write itself throws. fireOne's own
+    // catch would normally swallow this into the same `undefined` outcome
+    // an ordinary "nothing delivered" early return produces, and the
+    // sibling loop would then fire inv-2 individually — a DUPLICATE
+    // collection contact, since the email already told the customer about
+    // both invoices. The fix must leave the sibling untouched instead.
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const throwingCadenceUpdate = chain();
+    throwingCadenceUpdate.update = jest.fn(() => Promise.reject(new Error('DB write failed mid-touch')));
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      // The 2nd entry is only consumed if this finding were reverted and
+      // the sibling fired individually — harmless and unused while the
+      // fix holds (same discipline as finding B's own test).
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (anchor)
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }), // sendFollowupEmail read (anchor)
+        // Only consumed if this finding were reverted and the sibling
+        // fired individually — harmless and unused while the fix holds.
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
+      // Only the email audit log is guaranteed — the final "Log to
+      // customer_interactions" insert is never reached for the anchor
+      // because the write before it throws; 2 more spare entries are only
+      // consumed if the sibling fired individually (reverted).
+      customer_interactions: [chain(), chain(), chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: anchorSeq.id, customer_id: anchorSeq.customer_id, status: 'active', step_index: anchorSeq.step_index, next_touch_at: anchorSeq.next_touch_at, anchor_at: null } }),
+        chain({ result: 1 }), // touch claim
+        chain({ first: undefined }), // resolveCombinedVariant's stopped/paused/autopay_hold check
+        throwingCadenceUpdate, // the step_index-advance write throws
+        chain({ result: 1 }), // claim clear (fireStep's own finally, unconditional)
+        // Only consumed if the sibling fired individually (reverted).
+        ...claimCycle(siblingSeq, chain()),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // Only the anchor's combined email went out — the sibling was never
+    // fired individually.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+      idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
+    }));
+  });
+
+  test('GATE_COLLECTIONS_POLICY on: an aggregate verdict that denies a covered invoice falls the touch back to the single-invoice template (round-2 finding #3)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      // The single-invoice verdict (row.invoice_id only) allows every
+      // selected channel; the SAME channels' verdict against the full
+      // combined set (coveredInvoiceIds) denies — a covered sibling can
+      // carry its own collections denial the single-invoice check never
+      // sees.
+      RailGuard.collectionsChannelPermitted.mockImplementation(async ({ invoiceIds }) => !invoiceIds);
+      const seq = followupRow();
+      const sequenceUpdate = chain();
+      setDbQueues({
+        'invoice_followup_sequences as s': [chain({ result: [seq] })],
+        customers: [chain({ first: customer() })],
+        invoices: [
+          chain({ first: invoice() }), // claim-txn row lock read
+          chain({ first: invoice() }), // liveInvoice
+          chain({ first: invoice() }), // pre-dun refresh
+          chain({ result: [
+            { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+            { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+          ] }), // resolveCombinedVariant's per-invoice line lookup — reached; the fallback happens AFTER
+          chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+        ],
+        notification_prefs: [chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain(), chain()],
+        invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+      });
+
+      await InvoiceFollowUps.runPending();
+
+      // The link WAS built and the single-invoice verdict WAS consulted
+      // (row.invoice_id alone)...
+      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+      expect(RailGuard.collectionsChannelPermitted).toHaveBeenCalledWith(
+        expect.objectContaining({ invoiceId: 'inv-1' }),
+      );
+      // ...and the aggregate re-check against the covered set WAS run...
+      expect(RailGuard.collectionsChannelPermitted).toHaveBeenCalledWith(
+        expect.objectContaining({ invoiceIds: ['inv-1', 'inv-2'] }),
+      );
+      // ...but it denied, so the touch fell back to the single template —
+      // never a channel silently dropped from an otherwise-combined send.
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'invoice.followup_3_day',
+      }));
+    } finally {
+      delete process.env.GATE_COLLECTIONS_POLICY;
+    }
   });
 });
