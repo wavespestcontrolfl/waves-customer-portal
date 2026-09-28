@@ -384,9 +384,12 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
     if (!smsRow || !emailRow) return null;
 
     const { buildPayBalanceLink } = require('./composer-customer-links');
-    const link = await buildPayBalanceLink([customer.id]);
+    // Resolved without minting; the short link is minted only after every
+    // check below passes (Codex round-3 P2: a rejected candidate must not
+    // leave a permanent short_codes row behind).
+    const link = await buildPayBalanceLink([customer.id], { deferMint: true });
     const coveredIds = (link?.coveredInvoiceIds || []).map(String);
-    if (!link?.url || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
+    if (typeof link?.mintUrl !== 'function' || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
     if (!coveredIds.includes(String(invoiceId))) return null;
 
     // buildPayBalanceLink's own siblings filter (pay-combined.js) excludes
@@ -451,7 +454,10 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
     return {
       smsTemplateKey,
       emailTemplateKey,
-      payUrl: link.url,
+      // Minted by fireTouch only once the combined render is final (after
+      // its aggregate collections-policy re-check), never here.
+      mintPayUrl: link.mintUrl,
+      payUrl: null,
       totalDue: link.balance.total.toFixed(2),
       invoiceCount: coveredIds.length,
       invoices,
@@ -1216,8 +1222,13 @@ async function fireGroupedRows(toFire) {
     // the finding calls for: never fire the sibling individually (it was
     // already told), but leave its sequence exactly where it is; the next
     // run re-decides once the anchor's held retry has resolved.
-    const anchorPartialDelivered = !anchorSent && anchorOutcome?.deliveredCombined === true;
-    const anchorToldCustomer = anchorSent || anchorPartialDelivered;
+    // anchorAdvanced: a deduped retry that finished the anchor's step (it
+    // covers siblings like a fresh send); without it the anchor is held.
+    const anchorPartialDelivered = !anchorSent && anchorOutcome?.deliveredCombined === true
+      && anchorOutcome?.anchorAdvanced !== true;
+    const anchorDedupedAdvance = !anchorSent && anchorOutcome?.deliveredCombined === true
+      && anchorOutcome?.anchorAdvanced === true;
+    const anchorToldCustomer = anchorSent || anchorPartialDelivered || anchorDedupedAdvance;
     // Which invoices the anchor's ACTUAL rendered message named — null
     // unless it rendered combined (the anchor may have sent its own plain
     // single-invoice touch: template inactive, link unavailable, fewer
@@ -2032,6 +2043,14 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       combinedVariant = null;
     }
   }
+  // Every combined check has passed: mint the pay-balance short link now,
+  // so a rejected candidate never leaves a short_codes row behind (Codex
+  // round-3 P2). A mint that returns nothing falls back to single.
+  if (combinedVariant) {
+    const mintedPayUrl = await combinedVariant.mintPayUrl();
+    if (mintedPayUrl) combinedVariant = { ...combinedVariant, payUrl: mintedPayUrl };
+    else combinedVariant = null;
+  }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
   // ADMIN-BUG-R23: service_date is a DATE column, not an instant — formatting
@@ -2385,7 +2404,9 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // (Codex round-1 P1): a held/deferred leg below must not silently drop
   // that evidence just because fireTouch is about to return early instead
   // of reaching its normal end-of-function return.
-  const combinedDelivered = !!combinedVariant && (actualSmsSent || appSent || emailResult.ok === true);
+  // smsSent (not actualSmsSent): an SMS/push leg an earlier attempt already
+  // delivered (claim.delivered / a deduped provider result) counts too.
+  const combinedDelivered = !!combinedVariant && (smsSent || appSent || emailResult.ok === true);
   const combinedDeliveredInteractionType = selectedChannels === null || actualSmsSent ? 'sms_outbound'
     : appSent ? 'app_outbound' : 'email_outbound';
 
@@ -2510,8 +2531,18 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // never actually told about this run. Every other early `return;` above
   // is equivalent to { sent: false }; callers that don't check it (the
   // existing sendNextTouchNow) are unaffected.
+  // A retry that only found legs an earlier attempt already delivered
+  // (Codex round-3 P1: that attempt threw before its sequence update) still
+  // advanced this row above, so a combined delivery covers the siblings
+  // exactly like a fresh send: anchorAdvanced lets fireGroupedRows advance
+  // them instead of sending each its own reminder.
   if (!freshDelivery) {
-    return { sent: false, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
+    return combinedDelivered
+      ? {
+        sent: false, deliveredCombined: true, anchorAdvanced: true, nextTouchAt: nextAt,
+        coveredInvoiceIds: combinedVariant.coveredInvoiceIds, interactionType: combinedDeliveredInteractionType,
+      }
+      : { sent: false, nextTouchAt: nextAt, coveredInvoiceIds: combinedVariant?.coveredInvoiceIds || null };
   }
 
   // Log to customer_interactions for the 360 view

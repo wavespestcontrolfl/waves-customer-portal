@@ -97,7 +97,11 @@ async function buildReviewRequestLink(customerId) {
   };
 }
 
-async function buildPayBalanceLink(customerIds) {
+// `deferMint: true` resolves everything WITHOUT minting: `url` is null and
+// `mintUrl()` mints the short link, so a caller that may still reject the
+// link mints only when it will actually send it (findLatestOpenEstimate's
+// resolve-then-mint rule, GH codex #3814 r1 P2).
+async function buildPayBalanceLink(customerIds, { deferMint = false } = {}) {
   const { openBalanceSummary } = require('./open-balance');
 
   // Oldest open self-pay invoice across the account is the anchor — the pay
@@ -167,7 +171,7 @@ async function buildPayBalanceLink(customerIds) {
     coveredInvoiceIds = [invoice.id, ...siblings.map((sib) => sib.id)];
     coveredInvoiceCents = Object.fromEntries([invoice, ...siblings].map((inv) => [String(inv.id), amountDueCents(inv)]));
   }
-  const url = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+  const mintUrl = () => shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
     kind: 'invoice',
     entityType: 'invoices',
     entityId: invoice.id,
@@ -176,6 +180,10 @@ async function buildPayBalanceLink(customerIds) {
     purpose: 'composer_insert',
     codePrefix: invoiceShortCodePrefix(invoice),
   });
+  if (deferMint) {
+    return { url: null, mintUrl, balance, coveredInvoiceIds, coveredInvoiceCents };
+  }
+  const url = await mintUrl();
   return {
     url,
     line: `You can view and pay your balance securely here: ${url}\n\n`,

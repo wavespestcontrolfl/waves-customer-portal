@@ -160,9 +160,14 @@ function invoice(overrides = {}) {
 }
 
 // The buildPayBalanceLink shape resolveCombinedVariant reads.
+// buildPayBalanceLink is called with { deferMint: true }: it answers url
+// null plus a mintUrl() the touch calls only once the combined render is
+// final.
+const mintCombinedUrl = jest.fn(async () => 'https://portal.wavespestcontrol.com/pay/combined-token');
 function payLink(overrides = {}) {
   return {
-    url: 'https://portal.wavespestcontrol.com/pay/combined-token',
+    url: null,
+    mintUrl: mintCombinedUrl,
     balance: { total: 258, count: 2 },
     coveredInvoiceIds: ['inv-1', 'inv-2'],
     coveredInvoiceCents: { 'inv-1': 12900, 'inv-2': 12900 },
@@ -242,7 +247,8 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
 
     await InvoiceFollowUps.runPending();
 
-    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1'], { deferMint: true });
+    expect(mintCombinedUrl).toHaveBeenCalledTimes(1);
     expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
       'invoice_followup_combined_3day',
       expect.objectContaining({ first_name: 'Taylor', invoice_count: '2', total_due: '258.00', pay_url: 'https://portal.wavespestcontrol.com/pay/combined-token' }),
@@ -381,6 +387,92 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       customer_id: 'cust-1',
       metadata: expect.stringContaining('"invoice_id":"inv-2"'),
     }));
+  });
+
+  test('a retry that finds the anchor\'s combined legs already delivered advances the covered sibling instead of sending it its own reminder (Codex round-3 P1)', async () => {
+    // Both anchor legs were delivered by an earlier attempt that threw
+    // before its sequence update: with explicit billing channels, both
+    // ledger claims answer delivered on this run.
+    const ContactLedger = require('../services/collections/contact-ledger');
+    ContactLedger.claimAttempt
+      .mockResolvedValueOnce({ delivered: true })
+      .mockResolvedValueOnce({ delivered: true });
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    const sequenceUpdate = chain();
+    const siblingLiveRead = chain({ first: {
+      id: siblingSeq.id, customer_id: siblingSeq.customer_id, status: 'active',
+      step_index: siblingSeq.step_index, next_touch_at: siblingSeq.next_touch_at, anchor_at: null,
+    } });
+    const siblingUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }),
+        chain({ first: invoice({ id: 'inv-2' }) }),
+        // Spare capacity so a regression that fires the sibling on its own
+        // can complete and show up as a send, not a queue error.
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+      ],
+      notification_prefs: [
+        chain({ first: { email_enabled: true, invoice_channels: ['sms', 'email'] } }),
+        chain({ first: { email_enabled: true, invoice_channels: ['sms', 'email'] } }),
+      ],
+      customer_interactions: [chain(), chain(), chain(), chain()],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }), siblingLiveRead, siblingUpdate,
+        ...claimCycle(siblingSeq, chain()),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // Nothing new reaches the customer: the anchor's legs were deduped and
+    // the sibling is advanced as covered, never sent its own reminder.
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(siblingUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+  });
+
+  test('a combined candidate rejected after resolution never mints its pay-balance short link (Codex round-3 P2)', async () => {
+    // Rejected by the aggregate collections-policy re-check, the last gate
+    // before the mint.
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    RailGuard.collectionsChannelPermitted.mockImplementation(async ({ invoiceIds }) => !invoiceIds);
+    try {
+      const seq = followupRow();
+      setDbQueues({
+        'invoice_followup_sequences as s': [chain({ result: [seq] })],
+        customers: [chain({ first: customer() })],
+        invoices: [
+          chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }),
+          chain({ result: [
+            { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+            { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+          ] }),
+          chain({ first: invoice() }), chain({ first: invoice() }),
+        ],
+        notification_prefs: [chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain(), chain()],
+        invoice_followup_sequences: claimCycle(seq, chain(), { combinedCheck: true }),
+      });
+
+      await InvoiceFollowUps.runPending();
+
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+      expect(mintCombinedUrl).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_COLLECTIONS_POLICY;
+    }
   });
 
   test('a sibling invoice paid after the batch select is neither advanced nor logged as covered', async () => {
@@ -712,7 +804,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     await InvoiceFollowUps.runPending();
 
     // The link WAS built (resolveCombinedVariant got that far)...
-    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1'], { deferMint: true });
     // ...but the touch fell back to the single-invoice template.
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'invoice.followup_3_day',
@@ -955,7 +1047,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       await InvoiceFollowUps.runPending();
 
       // The link WAS built (resolveCombinedVariant got that far)...
-      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1'], { deferMint: true });
       expect(mdSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-2', stripe_payment_intent_id: 'pi_inv2' }));
       // ...but the touch fell back to the single-invoice template.
       expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
@@ -1058,7 +1150,7 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
 
       // The link WAS built and the single-invoice verdict WAS consulted
       // (row.invoice_id alone)...
-      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+      expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1'], { deferMint: true });
       expect(RailGuard.collectionsChannelPermitted).toHaveBeenCalledWith(
         expect.objectContaining({ invoiceId: 'inv-1' }),
       );
