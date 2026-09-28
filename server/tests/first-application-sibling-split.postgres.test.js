@@ -605,6 +605,140 @@ suite('first-application-sibling-split — periodic sweep', () => {
   }));
 
   // ---------------------------------------------------------------------
+  // Codex round 21 P2: raiseDivergenceAlert's own dedupeKey advisory lock is
+  // purely cooperative — it only excludes another caller that takes the
+  // SAME advisory lock, and markReadAdmin (an office dismissal) never does.
+  // Before the fix, raiseDivergenceAlert read the existing notification row
+  // with a plain SELECT, so a dismissal landing between THAT READ and
+  // notifyAdmin's refresh write (inside notification-service.js's
+  // dedupeAndInsert) could be silently undone: the refresh's unconditional
+  // read_at:null overwrote the dismissal's read_at, and the alert
+  // "resurrected" even though the office had just dismissed it. The
+  // vulnerable window is the gap between raiseDivergenceAlert's own read
+  // and the moment notifyAdmin's UPDATE actually executes (an UPDATE always
+  // takes a row lock the instant it runs, fix or no fix — the fix moves
+  // that lock earlier, onto the READ, so nothing can land in between at
+  // all). To hit that exact window deterministically (not by timing luck),
+  // notifyAdmin itself is spied on to insert a delay BEFORE calling through
+  // to the real implementation — landing the delay precisely between
+  // raiseDivergenceAlert's read (line ~705) and notifyAdmin's own write.
+  // These tests drive TWO genuinely separate sessions — the sweep's own
+  // trx-based `db` (this file's own instance) and notification-service's
+  // module-level `../models/db` (what markReadAdmin actually writes
+  // through) — so the proof is real PostgreSQL row-lock blocking, not a
+  // mocked ordering. Fixture rows are inserted and cleaned up by hand: a
+  // real race needs both sessions to see already-COMMITTED state, so this
+  // suite cannot run inside rollbackTest's single shared transaction.
+  // ---------------------------------------------------------------------
+  describe('raiseDivergenceAlert refresh vs. a concurrent dismissal (Codex round 21 P2)', () => {
+    const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+    const notificationService = require('../services/notification-service');
+    const { markReadAdmin } = notificationService;
+
+    async function cleanupFixture(ids) {
+      await db('notifications').whereRaw("metadata->>'dedupeKey' LIKE ?", [`first_application_sibling_divergence:${ids.estimateId}:%`]).del();
+      // scheduled_services references estimates (no cascade there), so it
+      // must go first; scheduled_services and invoices both cascade off
+      // customers, but estimates does not, so it's deleted explicitly too.
+      await db('scheduled_services').whereIn('id', [ids.pestId, ids.lawnId]).del();
+      await db('estimates').where({ id: ids.estimateId }).del();
+      await db('customers').where({ id: ids.customerId }).del(); // cascades invoices
+    }
+
+    test('a dismissal landing between raiseDivergenceAlert\'s read and notifyAdmin\'s write is not undone by the refresh', async () => {
+      const ids = await fixture(db); // committed, real rows — not rolled back
+      const realNotifyAdmin = notificationService.notifyAdmin.bind(notificationService);
+      // Delays ONLY the call raiseDivergenceAlert makes into notifyAdmin —
+      // landing squarely between its own read of `existing` and notifyAdmin's
+      // actual dedupe read + write, which is exactly the window Codex found.
+      const spy = jest.spyOn(notificationService, 'notifyAdmin').mockImplementation(async (...args) => {
+        await sleep(300);
+        return realNotifyAdmin(...args);
+      });
+      try {
+        // First tick: the sibling moves to a different day — raises the
+        // ordinary "split it by hand" alert. (Runs before the spy matters —
+        // this is a fresh insert, not a refresh.)
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+        await sweepOnce(db, ids.estimateId);
+        const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
+        const initial = await readBell(db, dedupeKey);
+        expect(initial.read_at).toBeNull();
+
+        // The sibling ALSO goes never-ran — same dedupeKey (same diverging
+        // member), but genuinely different copy/fingerprint, so the next
+        // tick's raiseDivergenceAlert call is a REFRESH of this exact row,
+        // not a fresh insert.
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+
+        // Session A: the sweep's refresh tick. raiseDivergenceAlert's own
+        // read happens almost immediately; the mocked 300ms delay then sits
+        // between that read and notifyAdmin's actual write, all inside this
+        // one open transaction.
+        const refreshDone = db.transaction((trx) => sweepOnce(trx, ids.estimateId));
+
+        // Session B: a genuinely separate connection (notification-service's
+        // own db module) — the office dismissing the SAME bell — starts
+        // once session A's read has certainly already happened, and races
+        // the still-open refresh transaction.
+        const dismissDone = (async () => {
+          await sleep(60);
+          const startedAt = Date.now();
+          await markReadAdmin(initial.id);
+          return Date.now() - startedAt;
+        })();
+
+        const [[refreshResult], dismissMs] = await Promise.all([refreshDone, dismissDone]);
+        expect(refreshResult.action).toBe('alerted');
+
+        // The dismissal must have genuinely WAITED on session A's row lock
+        // rather than applying instantly — proof this is real row-lock
+        // blocking, not a coincidence of timing (an unlocked dismiss here
+        // would complete in a few ms, well under 100).
+        expect(dismissMs).toBeGreaterThan(150);
+
+        // The last action to actually commit — the dismissal, which only
+        // unblocks and re-applies AFTER session A's refresh commits — must
+        // be what the row ends up holding. Never read_at:null (the
+        // refresh's own unconditional write) silently overwriting it.
+        const final = await readBell(db, dedupeKey);
+        expect(final.id).toBe(initial.id);
+        expect(final.read_at).not.toBeNull();
+      } finally {
+        spy.mockRestore();
+        await cleanupFixture(ids);
+      }
+    });
+
+    test('a dismissal that fully precedes the refresh is visible to it — refresh still resurfaces a genuinely changed alert', async () => {
+      // Sequential (not racing): the dismissal FULLY commits, and only then
+      // does the refresh evaluate — this is the pre-existing, legitimate
+      // "content genuinely changed since the human dismissed it" resurface
+      // behavior (unrelated to the race), which the round-21 P2 fix must
+      // not disturb.
+      const ids = await fixture(db);
+      try {
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+        await sweepOnce(db, ids.estimateId);
+        const dedupeKey = DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.lawnId]);
+        const initial = await readBell(db, dedupeKey);
+
+        await markReadAdmin(initial.id);
+        expect((await readBell(db, dedupeKey)).read_at).not.toBeNull();
+
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
+        const [result] = await sweepOnce(db, ids.estimateId);
+        expect(result.action).toBe('alerted');
+
+        const final = await readBell(db, dedupeKey);
+        expect(final.read_at).toBeNull();
+      } finally {
+        await cleanupFixture(ids);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------
   // Voided stamped invoice + a LIVE REPLACEMENT on the SAME anchor visit
   // (Charge Now / completion re-minting the combined amount on
   // invoices.scheduled_service_id) — Codex round 7 P1 on the prior
@@ -1901,6 +2035,87 @@ suite('first-application-sibling-split — periodic sweep', () => {
       const [result] = await sweepOnce(trx, ids.estimateId);
       expect(result.action).toBe('cleared');
       expect(metaOf(await readBell(trx, REFUND_DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]))).autoCleared).toBe(true);
+    }));
+  });
+
+  // ---------------------------------------------------------------------
+  // Codex round 19 P2: voidOpenInvoicesForCancelledService (job-status.js)
+  // is fired-and-forget off the anchor's own cancel/skip/no-show — when
+  // that void fails (or simply hasn't landed yet), a still-OPEN combined
+  // invoice keeps charging for an anchor that will never run.
+  // neverRanCoveredMembers now includes the anchor for the OPEN-invoice
+  // verdict the same way it already did for paid/processing, so this shape
+  // raises (or keeps) the alert instead of reading the group as realigned
+  // and silently clearing it.
+  // ---------------------------------------------------------------------
+  describe('open combined invoice + never-ran ANCHOR (Codex round 19 P2)', () => {
+    test('open invoice + anchor cancelled (sibling active) → candidate, alert naming the anchor', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx); // default invoiceStatus: 'draft' — still open
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status: 'cancelled' });
+      const candidates = await loadCandidates(trx);
+      expect(candidates.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(true);
+
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result).toEqual({ estimateId: ids.estimateId, action: 'alerted', divergingSiblingIds: [ids.pestId] });
+      const bell = await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]));
+      expect(bell.read_at).toBeNull();
+      expect(bell.body).toContain(`visit ${ids.pestId} was cancelled — remove its charge from the combined invoice`);
+      expect(bell.body).toContain('still charges for it — remove that charge.');
+    }));
+
+    test.each(['skipped', 'no_show'])('open invoice + a %s anchor behaves exactly like cancelled — alert raised', (status) => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(result.divergingSiblingIds).toEqual([ids.pestId]);
+      expect(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]))).toBeTruthy();
+    }));
+
+    test('open invoice + anchor cancelled + a genuinely separate live invoice on the anchor → still alerts (the combined charge never moved)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status: 'cancelled' });
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'sent', title: 'Repair charge', notes: 'A one-off hand invoice.',
+        line_items: JSON.stringify([{ description: 'Repair', quantity: 1, unit_price: 40, amount: 40 }]),
+        subtotal: 40, total: 40,
+      });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      expect(result.divergingSiblingIds).toEqual([ids.pestId]);
+      const bell = await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]));
+      expect(bell.link).toBe(`/admin/invoices?invoice=${ids.invoiceId}`);
+    }));
+
+    test('open invoice + anchor AND sibling cancelled → one alert naming both', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').whereIn('id', [ids.pestId, ids.lawnId]).update({ status: 'cancelled' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.divergingSiblingIds).toEqual([ids.pestId, ids.lawnId].map(String).sort());
+      expect(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId, ids.lawnId]))).toBeTruthy();
+    }));
+
+    test('the anchor is reactivated → the alert auto-clears (the only resolution while the invoice stays open)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status: 'cancelled' });
+      await sweepOnce(trx, ids.estimateId);
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status: 'confirmed' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(metaOf(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]))).autoCleared).toBe(true);
+    }));
+
+    test('the open invoice is voided (the void that should have fired eventually lands) → the alert auto-clears', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.pestId }).update({ status: 'cancelled' });
+      await sweepOnce(trx, ids.estimateId);
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      expect(metaOf(await readBell(trx, DEDUPE_KEY(ids.estimateId, ids.invoiceId, [ids.pestId]))).autoCleared).toBe(true);
     }));
   });
 
