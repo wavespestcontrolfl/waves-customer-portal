@@ -10,7 +10,9 @@ jest.mock('../models/db', () => jest.fn());
 const {
   rankRelatedPosts,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   candidateFromRow,
+  candidateFromAutonomousRun,
   candidateFromRegistryRow,
   RELATED_POSTS_DEFAULT_LIMIT,
 } = require('../services/content/related-posts');
@@ -293,6 +295,47 @@ describe('candidateFromRow', () => {
   });
 });
 
+describe('candidateFromAutonomousRun', () => {
+  // Fields arrive pre-projected from SQL (Codex #4984 r6+ P2: never load the
+  // full draft_payload JSONB blob for every historical run) — not a nested
+  // draft_payload/frontmatter object.
+  test('uses projected frontmatter and brief signals for a fleet URL', () => {
+    expect(candidateFromAutonomousRun({
+      id: 'run-1',
+      published_url: 'https://www.wavespestcontrol.com/termite/autonomous-post/',
+      brief_service: 'termite',
+      frontmatter_title: 'Autonomous Termite Post',
+      frontmatter_primary_keyword: 'termite mud tubes',
+    })).toMatchObject({
+      path: '/termite/autonomous-post/',
+      service: 'termite',
+      title: 'Autonomous Termite Post',
+      keyword: 'termite mud tubes',
+    });
+  });
+
+  test('falls back to the top-level payload title and brief/frontmatter service/city/category', () => {
+    expect(candidateFromAutonomousRun({
+      id: 'run-2',
+      published_url: 'https://www.wavespestcontrol.com/termite/fallback-post/',
+      payload_title: 'Top-Level Payload Title',
+      frontmatter_first_area: 'Venice',
+      frontmatter_service: 'termite',
+      frontmatter_category: 'termite',
+      brief_city: 'Sarasota',
+    })).toMatchObject({
+      title: 'Top-Level Payload Title',
+      city: 'Venice',
+      service: 'termite',
+      category: 'termite',
+    });
+  });
+
+  test('rejects an off-fleet absolute URL', () => {
+    expect(candidateFromAutonomousRun({ published_url: 'https://example.com/post/' })).toBeNull();
+  });
+});
+
 describe('candidateFromRegistryRow', () => {
   const liveAstroOnly = {
     id: 'registry-1',
@@ -318,6 +361,55 @@ describe('candidateFromRegistryRow', () => {
       astroStatus: 'live',
       pathVerified: true,
     });
+  });
+
+  // Codex #4984 r7 P2: a republish at the same URL flags the row
+  // astro_changed_since_sync (content-registry.js's astro-item/no-db-match
+  // branch — the SAME lineage as astro_only, never db_changed_since_sync,
+  // which only a DB-matched row reaches and the blog_posts query already
+  // covers) while its live-status fields stay accurate until the next sync.
+  test('accepts an astro_changed_since_sync row exactly like astro_only, provided it is still published/present/live/indexable', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'astro_changed_since_sync',
+    })).toMatchObject({
+      path: '/termite/direct-astro-post/',
+      service: 'termite',
+      targetSites: ['wavespestcontrol.com'],
+      workflowStatus: 'published',
+      astroStatus: 'live',
+      pathVerified: true,
+    });
+  });
+
+  test('still rejects an astro_changed_since_sync row that is no longer live/present/published/indexable', () => {
+    for (const override of [
+      { live_status: 'missing' },
+      { astro_status: 'draft' },
+      { workflow_status: 'draft' },
+      { noindex_detected: true },
+    ]) {
+      expect(candidateFromRegistryRow({
+        ...liveAstroOnly,
+        reconciliation_status: 'astro_changed_since_sync',
+        ...override,
+      })).toBeNull();
+    }
+  });
+
+  test('rejects an astro_changed_since_sync row that is DB-matched (db_blog_id set) — not Astro-only lineage', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'astro_changed_since_sync',
+      db_blog_id: 'blog-123',
+    })).toBeNull();
+  });
+
+  test('rejects db_changed_since_sync — that status is only reachable from a DB-matched row the blog_posts query already covers', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      reconciliation_status: 'db_changed_since_sync',
+    })).toBeNull();
   });
 
   test.each([
@@ -378,12 +470,24 @@ describe('candidateFromRegistryRow', () => {
 });
 
 describe('getRelatedPostsForBrief — DB wrapper', () => {
-  function fakeDb({ blogRows = [], registryRows = [] } = {}) {
+  function fakeDb({ blogRows = [], autonomousRows = [], registryRows = [] } = {}) {
+    const autonomousQuery = {};
+    autonomousQuery.leftJoin = jest.fn(() => autonomousQuery);
+    autonomousQuery.where = jest.fn(() => autonomousQuery);
+    autonomousQuery.whereNotNull = jest.fn(() => autonomousQuery);
+    autonomousQuery.select = jest.fn().mockResolvedValue(autonomousRows);
     const database = jest.fn((table) => {
       if (table === 'blog_posts') return { select: jest.fn().mockResolvedValue(blogRows) };
       if (table === 'content_registry') return { select: jest.fn().mockResolvedValue(registryRows) };
+      if (table === 'autonomous_runs') return autonomousQuery;
       throw new Error(`unexpected table: ${table}`);
     });
+    // The autonomous-run query projects frontmatter_*/payload_title fields
+    // via db.raw(...) instead of selecting the whole draft_payload column
+    // (Codex #4984 r6+ P2) — a passthrough is enough since these fixtures
+    // supply the already-projected row shape directly.
+    database.raw = jest.fn((sql) => sql);
+    database.autonomousQuery = autonomousQuery;
     return database;
   }
 
@@ -436,6 +540,94 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
   });
 
+  test('getLiveRelatedPaths keeps only frozen paths that are still verified live', async () => {
+    const registryRows = [{
+      id: 'registry-1',
+      canonical_url_normalized: '/termite/direct-astro-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Direct Astro Termite Post',
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ registryRows });
+    const live = await getLiveRelatedPaths(['/termite/direct-astro-post/', '/termite/unpublished-since/'], { database });
+    expect([...live]).toEqual(['/termite/direct-astro-post/']);
+    expect([...(await getLiveRelatedPaths([], { database }))]).toEqual([]);
+  });
+
+  test('getLiveRelatedPaths sees every host when two live rows share a pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Shared Path Post',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const database = fakeDb({ registryRows: rows });
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+      expect([...(await getLiveRelatedPaths(['/termite/shared-path/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/shared-path/']);
+    }
+  });
+
+  test('a spoke brief still gets its spoke row when a hub row shares the pathname', async () => {
+    const base = {
+      canonical_url_normalized: '/termite/shared-path/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Termite swarm season guide',
+      target_keyword: 'termite swarm season',
+      target_service: 'termite',
+    };
+    const registryRows = [
+      { ...base, id: 'hub-row', metadata: { frontmatter: {} } },
+      { ...base, id: 'spoke-row', live_url: 'https://www.sarasotaflpestcontrol.com/termite/shared-path/', metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } } },
+    ];
+    for (const rows of [registryRows, [...registryRows].reverse()]) {
+      const out = await getRelatedPostsForBrief(
+        { service: 'termite', keyword: 'termite swarm season', domains: ['sarasotaflpestcontrol.com'] },
+        { database: fakeDb({ registryRows: rows }) }
+      );
+      expect(out.map((r) => r.path)).toEqual(['/termite/shared-path/']);
+    }
+  });
+
+  test('getLiveRelatedPaths requires the path to be live on the frozen publish host', async () => {
+    // The selected hub post has since moved to a spoke: its path is still
+    // live in the fleet, but not on the hub the draft publishes to.
+    const registryRows = [{
+      id: 'registry-moved',
+      canonical_url_normalized: '/termite/moved-post/',
+      live_url: 'https://www.sarasotaflpestcontrol.com/termite/moved-post/',
+      content_type: 'blog',
+      reconciliation_status: 'astro_only',
+      workflow_status: 'published',
+      astro_status: 'present',
+      live_status: 'live',
+      noindex_detected: false,
+      title: 'Moved Termite Post',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ registryRows });
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['wavespestcontrol.com'] }))]).toEqual([]);
+    expect([...(await getLiveRelatedPaths(['/termite/moved-post/'], { database, hosts: ['sarasotaflpestcontrol.com'] }))]).toEqual(['/termite/moved-post/']);
+  });
+
   test('matches current registry health to an absolute spoke URL by domain and path', async () => {
     const spoke = 'sarasotaflpestcontrol.com';
     const path = '/termite/spoke-live/';
@@ -475,6 +667,100 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       { service: 'termite', keyword: 'termite damage inspection' },
       { database: fakeDb({ blogRows, registryRows }) }
     )).resolves.toEqual([]);
+  });
+
+  test('admits completed autonomous posts only through matching current live registry truth', async () => {
+    const autonomousRows = [
+      { id: 'live-run', published_url: 'https://www.wavespestcontrol.com/termite/live-run/', brief_service: 'rodent', frontmatter_title: 'Old Rodent Title', frontmatter_primary_keyword: 'old rodent topic' },
+      { id: 'stale-run', published_url: 'https://www.wavespestcontrol.com/termite/stale-run/', brief_service: 'termite', frontmatter_title: 'Stale Run' },
+      { id: 'missing-run', published_url: 'https://www.wavespestcontrol.com/termite/missing-run/', brief_service: 'termite', frontmatter_title: 'Missing Run' },
+    ];
+    const baseRegistry = {
+      content_type: 'blog', reconciliation_status: 'astro_only', workflow_status: 'published',
+      astro_status: 'present', live_status: 'live', noindex_detected: false,
+      target_service: 'termite', metadata: { frontmatter: { domains: ['wavespestcontrol.com'] } },
+    };
+    const registryRows = [
+      { ...baseRegistry, id: 'live-registry', canonical_url_normalized: '/termite/live-run/', title: 'Current Termite Title', target_keyword: 'current termite topic', target_service: 'termite' },
+      { ...baseRegistry, id: 'stale-registry', canonical_url_normalized: '/termite/stale-run/', live_status: 'missing' },
+    ];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'termite' }, { database });
+
+    expect(out.map((candidate) => candidate.path)).toEqual(['/termite/live-run/']);
+    expect(out[0]).toMatchObject({
+      title: 'Current Termite Title',
+      keyword: 'current termite topic',
+      path: '/termite/live-run/',
+    });
+  });
+
+  test('uses current registry domains for an autonomous path', async () => {
+    const autonomousRows = [{ id: 'run', published_url: 'https://www.wavespestcontrol.com/termite/domain-run/', brief_service: 'termite' }];
+    const registryRows = [{
+      id: 'registry', canonical_url_normalized: '/termite/domain-run/', content_type: 'blog',
+      reconciliation_status: 'astro_only', workflow_status: 'published', astro_status: 'present',
+      live_status: 'live', noindex_detected: false, target_service: 'termite',
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    await expect(getRelatedPostsForBrief(
+      { service: 'termite', domains: ['wavespestcontrol.com'] },
+      { database }
+    )).resolves.toEqual([]);
+  });
+
+  test('never donates a stale run\'s metadata to an unrelated page that reused its pathname on another domain (Codex #4984 r6+ P2)', async () => {
+    const spoke = 'sarasotaflpestcontrol.com';
+    const path = '/lawn-care/shared-slug/';
+    // A hub run once published at this SAME pathname; the slug was later
+    // reused on a completely different spoke page. Path-only matching would
+    // let the hub run's own keyword (a fallback field the registry lacks)
+    // leak onto the unrelated spoke page.
+    const autonomousRows = [{
+      id: 'hub-old-run', published_url: `https://www.wavespestcontrol.com${path}`,
+      brief_service: 'rodent', frontmatter_primary_keyword: 'old hub rodent topic',
+    }];
+    const registryRows = [{
+      id: 'spoke-registry', canonical_url_normalized: `https://www.${spoke}${path}`,
+      content_type: 'blog', reconciliation_status: 'astro_only', workflow_status: 'published',
+      astro_status: 'present', live_status: 'live', noindex_detected: false,
+      title: 'Current Spoke Lawn Post', target_service: 'lawn',
+      // No target_keyword: the merge loop would otherwise mask the bug by
+      // always overwriting candidate.keyword with the registry's own value.
+      metadata: { frontmatter: { domains: [spoke] } },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'lawn', domains: [spoke] }, { database });
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path, title: 'Current Spoke Lawn Post' });
+    expect(out[0].keyword).not.toBe('old hub rodent topic');
+  });
+
+  test('keeps only the newest completed run for a re-published domain+path before ranking (Codex #4984 r6+ P2)', async () => {
+    const path = '/termite/republished/';
+    const autonomousRows = [
+      { id: 'older-run', published_url: `https://www.wavespestcontrol.com${path}`, brief_service: 'termite', completed_at: '2026-01-01T00:00:00Z', frontmatter_primary_keyword: 'old topic version' },
+      { id: 'newer-run', published_url: `https://www.wavespestcontrol.com${path}`, brief_service: 'termite', completed_at: '2026-06-01T00:00:00Z', frontmatter_primary_keyword: 'new topic version' },
+    ];
+    const registryRows = [{
+      id: 'registry-republished', canonical_url_normalized: path, content_type: 'blog',
+      reconciliation_status: 'astro_only', workflow_status: 'published', astro_status: 'present',
+      live_status: 'live', noindex_detected: false, title: 'Current Registry Title', target_service: 'termite',
+      // No target_keyword: whichever run's keyword survives dedup is the
+      // one that reaches the final candidate — the test signal.
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'termite' }, { database });
+
+    expect(out).toHaveLength(1);
+    expect(out[0].keyword).toBe('new topic version');
   });
 
   test('a DB read failure propagates (the caller is responsible for the fallback-to-empty catch)', async () => {

@@ -15,6 +15,7 @@ const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadli
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
+const { parseETDateTime } = require('../utils/datetime-et');
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
 const PROPERTY_ID = '00000000-0000-4000-8000-000000000102';
 const properties = [{ id: PROPERTY_ID }];
@@ -24,7 +25,8 @@ const source = (message_body, direction = 'inbound') => ({
 });
 const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
-  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, answered_by_payment: false, ...extra,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null,
+  answered_by_payment: false, answered_by_reply: false, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
@@ -722,7 +724,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'request', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
   });
 
-  test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
+  test.each(['Can you call me tomorrow?', 'Can someone come out Friday?', 'Schedule me mid Oct',
     'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week',
     'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed',
     'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call',
@@ -739,7 +741,7 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Please call me from Friday onward', 'Call me from tomorrow on', 'Available from Monday through Wednesday, call me',
     'Please call me about the report from last week tomorrow', 'Send the photos from Monday through Wednesday by Friday',
     'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
-    'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
+    'Call me regarding the estimate next week'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
@@ -810,6 +812,131 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
 
   test('send_reschedule_link shares the 24h scheduling window', () => {
     expect(DEFAULT_DEADLINE_HOURS.send_reschedule_link).toBe(24);
+  });
+});
+
+describe('Owner ruling 2026-09-28: a same-day-only ask about TODAY gets an end-of-day deadline instead of staying undated', () => {
+  const wavesItem = (quote, overrides = {}) => ({ party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null, quote, ...overrides });
+
+  test.each(["Can you call about tonight's visit?", "Confirm this afternoon's appointment please"])(
+    // Codex #5170 r3 P2: a possessive same-day form names the topic, never the deadline.
+    '"%s" names the visit, not the timing, so it never takes the same-day path', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      const item = { ...wavesItem(quote), due_text: quote.match(/(tonight|this afternoon)'s/)[0] };
+      expect(resolveDueDeadline(item, at).due_at).not.toBe(parseETDateTime('2040-03-12T20:00').toISOString());
+    });
+
+  test.each(['Did you come today or not?', 'Can you call or text me today?', 'Can you come this afternoon or tonight?',
+    // Codex #5170 r3 P2: a qualifier bound to the same-day form stays same-day.
+    'Can you call later tonight?', 'Can you come any time today?', 'Stop by sometime this afternoon', 'Can you come later today?'])(
+    // Codex #5170 r2 P2: a bare "or" with only same-day timing is still same-day.
+    '"%s" offers no later option, so it gets the 8 PM ET same-day deadline', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    });
+
+  test('"Did you come to my house today?" at 10:00 ET gets an 8 PM ET same-day deadline', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    expect(resolveDueDeadline(wavesItem('Did you come to my house today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('"Should we skip today?" at 19:30 ET is less than an hour from 8 PM, so it rolls to 9 AM ET the next day', () => {
+    const at = parseETDateTime('2040-03-12T19:30');
+    expect(resolveDueDeadline(wavesItem('Should we skip today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-13T09:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('exactly 1 hour before 8 PM ET still keeps the 8 PM deadline (the rollover is strictly "less than" an hour)', () => {
+    const at = parseETDateTime('2040-03-12T19:00');
+    expect(resolveDueDeadline(wavesItem('Did you come today?'), at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test.each(['tonight', 'this morning', 'this afternoon', 'this evening', 'later today', 'EOD', 'end of the day', 'end of day'])(
+    'same-day token "%s" alone still gets the 8 PM ET deadline', (token) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(`Can you take care of that ${token}?`), at))
+        .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    });
+
+  test.each(['Can you come today or tomorrow?', 'Come today, else Friday', 'Can you stop by today and Friday?',
+    // Codex #5170 r1 P2: a bare later alternative STATED_TIMING alone would miss.
+    'Can you come today or next visit?', 'Come today, otherwise whenever works', 'Skip today or next time is fine'])(
+    '"%s" states more than same-day timing, so it keeps the legacy undated behavior', (quote) => {
+      const at = parseETDateTime('2040-03-12T10:00');
+      expect(resolveDueDeadline(wavesItem(quote), at)).toEqual({ due_at: null, due_basis: null });
+    });
+
+  test('"Please send it this afternoon" and "Call about the termite quote this afternoon" now bell at end of day — this ruling supersedes their prior Codex #4816 r20 undated case', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    for (const quote of ['Please send it this afternoon', 'Call about the termite quote this afternoon']) {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
+        .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+    }
+  });
+
+  test('"today at 3" still resolves through the existing stated path — an explicit due_at is never overridden by the same-day rule', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const stated = parseETDateTime('2040-03-12T15:00').toISOString();
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: stated, quote: 'Come by today at 3' }, at))
+      .toEqual({ due_at: stated, due_basis: 'stated' });
+  });
+
+  test('a customer-owned promise mentioning "today" stays undated — the same-day rule only applies to Waves obligations', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'promise', due_at: null, quote: "I'll be home today" }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('an unresolved clock ("by 3pm today") always keeps the row undated, even though "today" alone would otherwise qualify', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: null,
+      quote: 'Can you come by 3pm today?', timing_unverified: true };
+    expect(statesClock(item.quote)).toBe(true);
+    expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('a due_text naming only a same-day token still qualifies even if the surrounding quote has extra words', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: 'today',
+      quote: 'Any chance you can swing by today, the yard looks rough?' };
+    expect(resolveDueDeadline(item, at))
+      .toEqual({ due_at: parseETDateTime('2040-03-12T20:00').toISOString(), due_basis: 'default_kind' });
+  });
+
+  test('a due_text naming more than the same day keeps the row undated', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const item = { party: 'waves', kind: 'other', basis: 'request', due_at: null, due_text: 'today or tomorrow',
+      quote: 'Come by today or tomorrow' };
+    expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('"today\'s appointment" (possessive) is a topic reference, not same-day timing — falls through to the ordinary per-kind default like today', () => {
+    const at = parseETDateTime('2040-03-12T10:00');
+    const result = resolveDueDeadline(wavesItem("Can we reschedule today's appointment?", { kind: 'schedule_visit' }), at);
+    // STATED_TIMING's own NOT_POSSESSIVE already keeps "today's" out of stated
+    // timing entirely (unrelated to this ruling), so the row gets the
+    // ordinary R5 per-kind default rather than the same-day 8 PM deadline —
+    // still a real deadline either way, never left undated.
+    expect(result.due_basis).toBe('default_kind');
+    expect(result.due_at).toBe(new Date(at.getTime() + DEFAULT_DEADLINE_HOURS.schedule_visit * 3600000).toISOString());
+  });
+
+  test('DST boundary: a same-day deadline that rolls to the next ET day across the fall-back transition lands on the correct wall-clock instant', () => {
+    // 2040-11-04 is the fall-back Sunday (America/New_York: 2 AM EDT -> 1 AM
+    // EST). A message late Saturday the 3rd (still EDT, UTC-4) whose
+    // rollover lands on the 4th (already EST, UTC-5) must read as 9 AM EST
+    // — parseETDateTime resolves this from the calendar day + wall clock,
+    // never a hand-rolled +23h/+24h offset.
+    const at = parseETDateTime('2040-11-03T19:45'); // Saturday, EDT, 15 min to 8 PM
+    const result = resolveDueDeadline(wavesItem('Should we skip today?'), at);
+    const expected = parseETDateTime('2040-11-04T09:00'); // Sunday, after fall-back, EST
+    expect(result).toEqual({ due_at: expected.toISOString(), due_basis: 'default_kind' });
+    // Sanity: the instant actually crossed the DST seam — EDT is UTC-4 and
+    // EST is UTC-5, so a naive same-offset +13h15m from 19:45 EDT would have
+    // landed one hour off of the real 9 AM EST instant.
+    expect(expected.getTime() - at.getTime()).toBe((13 * 60 + 15) * 60000 + 3600000);
   });
 });
 
@@ -921,6 +1048,30 @@ describe('fulfillment proof', () => {
       recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
     // `callback` keeps its existing call/visit mix — unaffected by R3.
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
+  });
+
+  test('owner ruling 2026-09-28 partly reverses R3: a plain-information "other" ask (reply_answerable) admits an operator-sent staff sms; an unstamped or action-request ask keeps R3', () => {
+    const info = { kind: 'other', sms_context: { reply_answerable: true } };
+    const humanSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
+    const humanCall = { type: 'call', status: 'completed', duration_seconds: 90 };
+    expect(admissibleWitness(humanSms, info)).toBe(true);
+    // Staff draft-approval sends carry their own provenance type.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false, message_type: 'ai_approved' }, info)).toBe(true);
+    // Codex #5169 r1 P1: a bare 'manual' type is overloaded across automated
+    // senders, and call_log records no human provenance at all.
+    expect(admissibleWitness({ ...humanSms, operator_sent: false }, info)).toBe(false);
+    expect(admissibleWitness(humanCall, info)).toBe(false);
+    // An automated notice never answers, even on a reply-answerable row.
+    expect(admissibleWitness({ ...humanSms, message_type: 'confirmation' }, info)).toBe(false);
+    // Unstamped (a row from before this lane, the R3 "separate the charges"
+    // case) or explicitly false: sms/call stay refused, R3 unchanged.
+    expect(admissibleWitness(humanSms, { kind: 'other' })).toBe(false);
+    expect(admissibleWitness(humanCall, { kind: 'other' })).toBe(false);
+    expect(admissibleWitness(humanSms, { kind: 'other', sms_context: { reply_answerable: false } })).toBe(false);
+    // Payment admissibility is untouched: still gated by money_answerable alone.
+    const paid = { type: 'payment', payment_source: 'ledger' };
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: false } })).toBe(false);
+    expect(admissibleWitness(paid, { kind: 'other', sms_context: { reply_answerable: true, money_answerable: true } })).toBe(true);
   });
 
   test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
@@ -1291,6 +1442,27 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     await verifySmsFulfillment({ kind: 'other', description: 'Did my payment go through?', sms_context: ctx }, { records: [invoicePaid], failures: [] });
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
       .toContain('it never answers money going back to the customer (a refund, reversal, reimbursement or chargeback, however worded)');
+  });
+
+  test('owner ruling 2026-09-28: the extraction schema and prompt carry answered_by_reply for a plain-information "other" ask', () => {
+    const { buildPrompt, SCHEMA } = require('../services/sms-operational-extractor');
+    const obligationSchema = SCHEMA.properties.obligations.items;
+    expect(obligationSchema.required).toContain('answered_by_reply');
+    expect(obligationSchema.properties.answered_by_reply).toEqual({ type: 'boolean' });
+    const prompt = buildPrompt({ message: source("What's the Zelle number?") });
+    expect(prompt).toContain('answered_by_reply is true only when the obligation is a plain question');
+    for (const phrase of ['change, cancel, book, come out, fix, send a document', 'a complaint', 'a customer-owned promise']) {
+      expect(prompt).toContain(phrase);
+    }
+  });
+
+  test('owner ruling 2026-09-28: the completion check tells the model a staff reply must actually answer the question, not just acknowledge it', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'The Zelle number is 941-555-0101' };
+    await verifySmsFulfillment({ kind: 'other', description: "What's the Zelle number?", sms_context: { ...ctx, reply_answerable: true, money_answerable: false } },
+      { records: [staffSms], failures: [] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text)
+      .toContain('it answers only when it actually gives the asked-for information');
   });
 
   test('rule 6: a property-scoped ask refuses only a payment tied to another property; an unscoped ask admits any of the customer\'s own payments', () => {

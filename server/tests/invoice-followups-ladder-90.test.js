@@ -58,7 +58,7 @@ function setupDb({ joinedReads = [], seqUpdateResult = 1 }) {
     if (table === 'invoice_followup_sequences as s') {
       const rows = reads.shift() || [];
       const q = { wheres: [] };
-      for (const method of ['join', 'whereNotIn', 'whereNull', 'select']) q[method] = jest.fn(() => q);
+      for (const method of ['join', 'whereNotIn', 'whereIn', 'whereNull', 'select']) q[method] = jest.fn(() => q);
       q.where = jest.fn((...args) => { q.wheres.push(args); return q; });
       q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
       joined.push(q);
@@ -261,7 +261,9 @@ describe('runPending under the Day 90 ladder', () => {
     expect(revivalWheres).toEqual(expect.arrayContaining([
       ['s.status', 'completed'], ['s.step_index', '>=', 4], ['s.step_index', '<', 6],
     ]));
-    expect(joined[0].whereNotIn).toHaveBeenCalledWith('i.status', expect.arrayContaining(['paid', 'void']));
+    // Published/delivered statuses only (Fable pre-push P2 F) — same
+    // whitelist adoptOrphanInvoices uses, not the wider "not terminal" test.
+    expect(joined[0].whereIn).toHaveBeenCalledWith('i.status', ['sent', 'viewed', 'overdue']);
     expect(joined[0].whereNull).toHaveBeenCalledWith('i.payer_id');
     // Guarded on the row still being that finished sequence.
     expect(seqUpdates).toHaveLength(1);

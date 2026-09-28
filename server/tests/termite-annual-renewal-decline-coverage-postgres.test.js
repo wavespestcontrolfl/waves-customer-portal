@@ -55,7 +55,7 @@ async function createScratchDb() {
   // Same narrow schema as termite-annual-decline-before-install-coverage-
   // postgres.test.js (see its notes on omitted columns), plus what the
   // decline writes: the decision columns, annual_plan_version, activity_log.
-  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text)');
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), first_name text, last_name text, deleted_at timestamptz)');
   await db.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL)');
   await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, property_id uuid)');
   await db.raw(`CREATE TABLE invoices (
@@ -65,6 +65,8 @@ async function createScratchDb() {
     paid_at timestamptz,
     stripe_payment_intent_id text,
     stripe_charge_id text,
+    -- statement-backed parent revocation read (Codex #4971 r15/r16)
+    payer_statement_id uuid,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
   await db.raw(`CREATE TABLE payments (
@@ -72,7 +74,9 @@ async function createScratchDb() {
     status text,
     refund_status text,
     stripe_payment_intent_id text,
-    stripe_charge_id text
+    stripe_charge_id text,
+    statement_id uuid,
+    metadata jsonb
   )`);
   await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid, amount numeric)');
   // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open
@@ -155,6 +159,13 @@ async function createScratchDb() {
     renewal_notes text,
     renewed_from_term_id uuid,
     annual_plan_version text,
+    -- Codex #4971 r17 P2 (finding 5): reconcileParentRenewedStamps' scan
+    -- excludes on this directly in SQL (20260928000100) — needed on every
+    -- test in this file that calls it, not only a specific scenario.
+    renewal_parent_deleted_conflict_belled_at timestamptz,
+    -- Codex #4971 r20 P1 (finding 2): a term-window move's own timestamp,
+    -- one more arm of parentChangedAtSql (20260928020000).
+    term_window_changed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -209,7 +220,12 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     };
   }
 
-  const etToday = () => new Date().toISOString().slice(0, 10);
+  // Production due/coverage checks use the Eastern business date. Building
+  // fixtures from UTC makes "yesterday" become today between midnight UTC
+  // and midnight ET, so genuinely due terms disappear from the candidate
+  // scan and current anchored coverage can be judged against a different
+  // day than the fixture itself.
+  const etToday = () => jest.requireActual('../utils/datetime-et').etDateString();
   const ymd = (value) => (value instanceof Date
     ? [value.getFullYear(), String(value.getMonth() + 1).padStart(2, '0'), String(value.getDate()).padStart(2, '0')].join('-')
     : String(value).slice(0, 10));
@@ -519,6 +535,66 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 
+  test('renewal-lineage visits stay with a null-source successor; other service and malformed lineage require staff', async () => {
+    const { db, Renewals } = await load();
+    const fx = await paidInstalledTerm(db);
+    const propertyId = randomUUID();
+    await db('estimates').where({ id: fx.term.source_estimate_id }).update({ property_id: propertyId });
+    const [original] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId,
+      source_estimate_id: fx.term.source_estimate_id,
+      term_start: addMonths(fx.today, -26),
+      term_end: addMonths(fx.today, -14),
+      status: 'expired',
+      annual_plan_version: 'v3',
+    }).returning('*');
+    const [predecessor] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId,
+      renewed_from_term_id: original.id,
+      term_start: addMonths(fx.today, -14),
+      term_end: addMonths(fx.today, -2),
+      status: 'expired',
+      annual_plan_version: 'v3',
+    }).returning('*');
+    const [successor] = await db('annual_prepay_terms').where({ id: fx.term.id }).update({
+      source_estimate_id: null,
+      renewed_from_term_id: predecessor.id,
+    }).returning('*');
+    await db('scheduled_services').insert([
+      {
+        customer_id: fx.customerId,
+        source_estimate_id: original.source_estimate_id,
+        property_id: propertyId,
+        status: 'confirmed',
+        service_type: 'Termite Monitoring Visit',
+        scheduled_date: addMonths(fx.today, 2),
+      },
+      {
+        customer_id: fx.customerId,
+        annual_prepay_term_id: predecessor.id,
+        property_id: propertyId,
+        status: 'confirmed',
+        service_type: 'Termite Monitoring Visit',
+        scheduled_date: addMonths(fx.today, 3),
+      },
+    ]);
+
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBeNull();
+
+    const [otherService] = await db('scheduled_services').insert({
+      customer_id: fx.customerId,
+      property_id: randomUUID(),
+      status: 'confirmed',
+      service_type: 'Quarterly Termite Bait Monitoring',
+      scheduled_date: addMonths(fx.today, 2),
+    }).returning('id');
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBe('other_termite_service');
+
+    await db('scheduled_services').where({ id: otherService.id }).del();
+    await db('annual_prepay_terms').where({ id: predecessor.id }).update({ renewed_from_term_id: randomUUID() });
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBe('other_termite_service');
+  });
+
   test('a staff bell that is NOT stored leaves the term unsettled — the next sweep retries it', async () => {
     const { db, Renewals, notifyAdmin } = await load();
     const fx = await dueDeclinedTerm(db);
@@ -610,6 +686,158 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
     expect(await Renewals.isPaidDecidedLapseTerm(after, db)).toBe(false);
     expect([...(await Renewals.getPaymentPendingCustomerIds(fx.today))]).not.toContain(fx.customerId);
+  });
+
+  // Codex #4971 r8 P2: a renewal SUCCESSOR declined (its NEXT renewal) while
+  // its own renewal invoice is still unpaid, then paid, settles to the paid
+  // decided-lapse shape (move 15) — and that payment still proves the PARENT
+  // renewed, so the parent takes its 'renewed' stamp as the activation
+  // branches give it. A voided (never paid) decided successor does not, and
+  // neither does the backstop.
+  async function declinedPendingSuccessor(db) {
+    // The invoice evidence columns the renewal checks read (chokepoint A).
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz, ADD COLUMN IF NOT EXISTS stripe_charge_id text');
+    const fx = await paidInstalledTerm(db);
+    const termStart = addMonths(fx.today, -2); // paidInstalledTerm's own term_start
+    const [parentInvoice] = await db('invoices').insert({
+      customer_id: fx.customerId, status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000), stripe_payment_intent_id: `pi_${randomUUID()}`,
+    }).returning('*');
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId, prepay_invoice_id: parentInvoice.id, prepay_amount: 450,
+      term_start: addMonths(termStart, -12), term_end: dayOffset(termStart, -1),
+      status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date(),
+    }).returning('*');
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending', renewed_from_term_id: parent.id });
+    return { ...fx, parent };
+  }
+  const parentRow = (db, id) => db('annual_prepay_terms').where({ id }).first('status', 'renewal_decision');
+  // What the portal decline records on an unpaid term (move 15: the
+  // decision, no status change) — the decline itself has its own tests above.
+  const declineWhileUnpaid = (db, fx) => db('annual_prepay_terms').where({ id: fx.term.id })
+    .update({ renewal_decision: 'cancel', renewal_decision_at: new Date(), cancel_disposition: 'end_at_term' });
+
+  test('a renewal successor declined while unpaid, then paid: a paid decided lapse, and the PARENT is stamped renewed', async () => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    const synced = await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    expect(synced.map((t) => t.status)).toEqual(['cancelled']);
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+  });
+
+  test('the backstop stamps the parent behind a paid decided-lapse successor whose inline stamp was lost', async () => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    // The shape the paid sync leaves, without its stamp (lost to an error).
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+
+    expect(await Renewals.reconcileParentRenewedStamps({ conn: db })).toEqual({ scanned: 1, stamped: 1 });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+  });
+
+  test.each([
+    ['voided', { status: 'void', paid_at: null }, null],
+    ['refunded in full on the ledger', { status: 'paid', paid_at: new Date() }, 'refunded'],
+  ])('a declined successor whose renewal invoice was %s: never stamps the parent, inline or by the backstop', async (_label, invoicePatch, ledger) => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    await db('invoices').where({ id: fx.invoice.id }).update(invoicePatch);
+    if (ledger) {
+      await db('payments').insert({ status: ledger, refund_status: 'full', stripe_payment_intent_id: fx.invoice.stripe_payment_intent_id });
+    }
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    // The ledger-refunded case: the sync (paid-looking invoice) settles it
+    // to the decided lapse; either way the successor ends cancelled/cancel.
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    expect(await Renewals.reconcileParentRenewedStamps({ conn: db })).toEqual({ scanned: 0, stamped: 0 });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+  });
+
+  // Codex #4971 pre-push P1: a declined-while-unpaid successor paid AFTER its
+  // parent was refunded is still a paid renewal behind a parent that no
+  // longer authorizes it — the parent stamp refuses (r8), and staff get the
+  // ONE refund-or-honor alert: inline from the decided-pending settlement's
+  // own paid hook, or from leg 7e when that alert is lost.
+  async function declinedSuccessorBehindRefundedParent(db) {
+    await db.raw('ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at timestamptz');
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text, ADD COLUMN IF NOT EXISTS renewal_sweep_deferred_at timestamptz');
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    const parentInvoice = await db('invoices').where({ id: fx.parent.prepay_invoice_id }).first();
+    // The parent's year refunded in full while the renewal payment cleared.
+    await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * 60000) });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    return fx;
+  }
+  const latePaidBells = (notifyAdmin, fx) => notifyAdmin.mock.calls
+    .filter(([, , , opts]) => opts?.dedupeKey === `termite-renewal-charge:${fx.term.id}:paid_after_parent_ended`);
+
+  test('declined while unpaid, parent refunded, then paid: the settlement\'s paid hook rings the refund-or-honor alert once; the parent is never stamped', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await declinedSuccessorBehindRefundedParent(db);
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db); // a replayed sync never re-rings
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(after.renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(1);
+    expect(latePaidBells(notifyAdmin, fx)[0][2]).toContain('already declined the NEXT renewal');
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+
+    // Leg 7e has nothing left to do.
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await require('../services/termite-annual-renewal-charge')._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    expect(counts).toEqual({ latePaidScanned: 0, latePaidBelled: 0 });
+  });
+
+  test('the inline alert lost: leg 7e selects the paid decided-lapse successor and rings it once', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await declinedSuccessorBehindRefundedParent(db);
+    notifyAdmin.mockResolvedValueOnce(null); // the inline notification does not persist
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).renewal_late_paid_belled_at).toBeNull();
+
+    const { bellLatePaidRenewals } = require('../services/termite-annual-renewal-charge')._private;
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    await bellLatePaidRenewals({ conn: db, limit: 50, counts: { latePaidScanned: 0, latePaidBelled: 0 } });
+
+    expect(counts).toEqual({ latePaidScanned: 1, latePaidBelled: 1 });
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(2); // the lost inline one + 7e's
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+  });
+
+  test('parent still eligible: declined-unpaid successor paid → parent stamped renewed, no alert, and 7e never selects it', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text, ADD COLUMN IF NOT EXISTS renewal_sweep_deferred_at timestamptz');
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(0);
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await require('../services/termite-annual-renewal-charge')._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    expect(counts.latePaidScanned).toBe(0);
   });
 
   // Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time
@@ -1017,6 +1245,70 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: current.term.id }).first()).status).toBe('active');
     expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
   });
+  // Codex #4971 r5 P1: the reachable "decline while the renewal payment
+  // clears" case, on the REAL decline: past the prior year's term_end the
+  // parent's card is refused as term_ended, and the payment_pending renewal
+  // SUCCESSOR — its own ACH debit still processing — is refused as
+  // renewal_payment_clearing, with nothing written.
+  test('declining a renewal successor whose own renewal payment is clearing is refused; the ended parent is term_ended', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz');
+    const customerId = randomUUID();
+    const today = etToday();
+    await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe' });
+    const [parentInvoice] = await db('invoices').insert({ customer_id: customerId, status: 'paid', paid_at: new Date() }).returning('*');
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, prepay_invoice_id: parentInvoice.id, prepay_amount: 450, term_start: addMonths(today, -12),
+      term_end: addMonths(today, -1), status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date(),
+    }).returning('*');
+    const [renewalInvoice] = await db('invoices').insert({ customer_id: customerId, status: 'processing' }).returning('*');
+    const [successor] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, prepay_invoice_id: renewalInvoice.id, prepay_amount: 450, term_start: addMonths(today, -1),
+      term_end: addMonths(today, 11), status: 'payment_pending', annual_plan_version: 'v3', renewed_from_term_id: parent.id,
+    }).returning('*');
+
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId, termId: parent.id, today })).toMatchObject({ ok: false, reason: 'term_ended' });
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId, termId: successor.id, today }))
+      .toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: successor.id });
+    expect(await db('annual_prepay_terms').where({ id: successor.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'payment_pending', renewal_decision: null });
+    expect(await db('activity_log').where({ customer_id: customerId }).count('* as n').first()).toMatchObject({ n: '0' });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // Codex #4971 r4 P1: the REAL paid sync (pending -> active) of a termite
+  // renewal successor ends its write-ahead charge outcome, and — its parent
+  // cancelled while the payment cleared — leaves it ACTIVE with ONE staff
+  // alert to refund or honor it. The parent is not touched.
+  test('a renewal successor paid behind a cancelled parent: activated, pending outcome cleared, one late-paid alert', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS scheduled_service_id uuid, ADD COLUMN IF NOT EXISTS line_items jsonb, ADD COLUMN IF NOT EXISTS annual_prepay_covered_term_id uuid, ADD COLUMN IF NOT EXISTS payer_id uuid, ADD COLUMN IF NOT EXISTS payment_recorded_at timestamptz, ADD COLUMN IF NOT EXISTS notes text, ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz, ADD COLUMN IF NOT EXISTS payer_statement_id uuid, ADD COLUMN IF NOT EXISTS credit_applied numeric, ADD COLUMN IF NOT EXISTS total numeric, ADD COLUMN IF NOT EXISTS amount_paid numeric, ADD COLUMN IF NOT EXISTS updated_at timestamptz, ADD COLUMN IF NOT EXISTS annual_prepay_term_id uuid');
+    await db.raw('ALTER TABLE scheduled_services ADD COLUMN IF NOT EXISTS service_id uuid, ADD COLUMN IF NOT EXISTS pending_setup_fee numeric, ADD COLUMN IF NOT EXISTS recurring_parent_id uuid');
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text');
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    const fx = await paidTermAwaitingAnchor(db, { installedMonthsAgo: 2, declined: false });
+    // The prior year, cancelled while the renewal's ACH debit cleared.
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId, term_start: addMonths(fx.today, -26), term_end: addMonths(fx.today, -14),
+      status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3',
+      renewal_decision_at: new Date(Date.now() - 3600000), updated_at: new Date(Date.now() - 3600000),
+    }).returning('*');
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({
+      status: 'payment_pending', renewed_from_term_id: parent.id, renewal_charge_failure_kind: 'outcome_pending',
+    });
+    await db('invoices').where({ id: fx.term.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
+
+    await Renewals.syncTermForInvoicePayment(fx.term.prepay_invoice_id, db);
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after.status).toBe('active');
+    expect(after.renewal_charge_failure_kind).toBeNull();
+    expect(after.renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    const latePaid = notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.dedupeKey === `termite-renewal-charge:${fx.term.id}:paid_after_parent_ended`);
+    expect(latePaid).toHaveLength(1);
+    expect(await db('annual_prepay_terms').where({ id: parent.id }).first()).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+  });
+
   // Codex #4940 r11 P1: opening the bell marks the task READ — that is not
   // the retrieval. A read task still gets the date correction.
   test('a READ task, then term_end extended: a replacement task at the new date plus a correction bell; once only', async () => {

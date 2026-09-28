@@ -226,7 +226,15 @@ function assertInvoiceNotWithdrawnFromCustomer(invoice) {
 
 function assertInvoiceVoidable(currentStatus) {
   if (currentStatus === 'paid') {
-    throw new Error('Cannot void a paid invoice — issue a refund instead');
+    const err = new Error('Cannot void a paid invoice — issue a refund instead');
+    // Codex round-3 audit P0 follow-up: tagged so a caller with its OWN
+    // "genuinely unsettled" requirement (e.g. voidInvoice's
+    // requireUnsettled option, termite-annual-renewal-charge.js's grace
+    // lapse) can classify this refusal as a DURABLE settlement without
+    // string-matching the message — purely additive; every existing
+    // caller is unaffected.
+    err.code = 'INVOICE_ALREADY_PAID';
+    throw err;
   }
   // 'prepaid' IS voidable: the void path returns the applied account credit to
   // the customer's balance (restoreAccountCreditForVoidedInvoice), so it is no
@@ -234,7 +242,9 @@ function assertInvoiceVoidable(currentStatus) {
   // are caught by the in-flight/paid guards above and the void path's own
   // payment_recorded_at check.)
   if (currentStatus === 'processing') {
-    throw new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
+    const err = new Error('Cannot void an invoice with a payment in flight — wait for it to settle, then refund if needed');
+    err.code = 'INVOICE_PAYMENT_IN_FLIGHT';
+    throw err;
   }
   // 'sending' is a live send claim: the provider call may still be in
   // flight, and its finalize accepts draft/scheduled/sending rows — voiding
@@ -242,7 +252,9 @@ function assertInvoiceVoidable(currentStatus) {
   // deliver the stale pre-void message and flip the restored draft back to
   // sent. The claim clears in seconds; refuse and retry (Codex #3493 r10).
   if (currentStatus === 'sending') {
-    throw new Error('Cannot void this invoice — a send is already in progress; wait a moment and retry');
+    const err = new Error('Cannot void this invoice — a send is already in progress; wait a moment and retry');
+    err.code = 'INVOICE_SEND_IN_PROGRESS';
+    throw err;
   }
 }
 
