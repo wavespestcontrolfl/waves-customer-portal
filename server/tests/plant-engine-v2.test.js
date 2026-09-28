@@ -987,6 +987,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
           quality: OK_QUALITY,
         });
         expect(built.subject.plant).toBeNull();
+        // Nor by slug in the evidence echo (Codex #5186 r8 P2).
+        expect(built.evidence.account).toEqual({});
       });
 
       test('an inspection-required possibility ranked 3rd still routes inspection (contract §6.6 "any possibility")', () => {
