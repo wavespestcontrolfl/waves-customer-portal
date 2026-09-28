@@ -101,6 +101,16 @@ const FLAGSHIP_SEASONAL_CONTEXT = [
   '- SWFL pests: subterranean termites, German cockroaches, palmetto bugs, no-see-ums, salt-marsh mosquitoes, fire ants, chinch bugs, sod webworms',
 ].join('\n');
 
+async function loadFactsBlock({ required }) {
+  try {
+    return await require('./email-division/fact-register').factsPromptBlock();
+  } catch (err) {
+    if (required) throw err;
+    logger.warn(`[newsletter-draft] flagship facts block unavailable, drafting without pest facts: ${err.message}`);
+    return '';
+  }
+}
+
 function buildFlagshipSystemPrompt(voice, month) {
   return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
@@ -1772,8 +1782,12 @@ async function createNewsletterDraft({
   // Both lanes are grounded in the same live register: the flagship's
   // seasonal context names topics only, so its pest facts too come from the
   // block appended here and stop reaching the writer the moment a fact is
-  // withdrawn (codex round 14 P1).
-  const factsBlock = await require('./email-division/fact-register').factsPromptBlock();
+  // withdrawn (codex round 14 P1). The Pest Insider IS its facts and fails
+  // closed without them; the weekly events guide is not — an empty or
+  // unreachable register logs, the block is omitted, and the prompt's own
+  // rule ("from the verified facts block, or left out") keeps pest facts
+  // out of that issue (pre-push audit P1 on e0dd938596).
+  const factsBlock = await loadFactsBlock({ required: isPestInsider });
   const systemPrompt = (isPestInsider
     ? buildPestInsiderSystemPrompt(voice, month)
     : buildFlagshipSystemPrompt(voice, month)) + factsBlock;

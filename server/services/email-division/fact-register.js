@@ -958,12 +958,19 @@ function reentryTimeInSentence(sentence) {
   return null;
 }
 
+// The safety and re-entry rules are about a TREATMENT: in copy that is not
+// all about treatments (the weekly events guide, which now sources the same
+// register facts), they apply only to sentences that talk about one — "our
+// treatment is safe once dry" is caught, "a family-safe fun run" is not
+// (codex round 15 P1). The pest-fact rules need no such scope: a false
+// termite or large-patch claim is false in any newsletter.
+const TREATMENT_CONTEXT = /\b(?:treat\w*|spray\w*|pesticides?|insecticides?|herbicides?|chemicals?|products?|applications?|applied|appl(?:y|ies|ying)|technicians?|barriers?|baits?|granul\w*|dusts?|fogg\w*|misting|re-?ent(?:ry|er)\w*|(?:once|until|when|after)\s+(?:it\s+(?:is|has)\s+)?dr(?:y|ied|ies))\b/i;
 const CLAIM_RULES = [
   { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
   { rule: 'large_patch_summer_disease', find: (sentence, previous) => patchClaimInSentence(sentence, previous) },
   { rule: 'non_flea_vacuum_advice', find: (sentence) => vacuumClaimInSentence(sentence) },
-  { rule: 'absolute_safety_claim', find: (sentence) => safetyClaimInSentence(sentence) },
-  { rule: 'fixed_reentry_time', find: (sentence) => reentryTimeInSentence(sentence) },
+  { rule: 'absolute_safety_claim', treatmentScoped: true, find: (sentence) => safetyClaimInSentence(sentence) },
+  { rule: 'fixed_reentry_time', treatmentScoped: true, find: (sentence) => reentryTimeInSentence(sentence) },
 ];
 
 /**
@@ -972,15 +979,17 @@ const CLAIM_RULES = [
  * than one per rule, mirroring findHallucinatedClaims' one-per-label shape);
  * the excerpt is the offending clause. Every sentence is checked — one
  * exempt mention does not clear a LATER, non-exempt occurrence of the same
- * shape.
+ * shape. `treatmentContextOnly` confines the treatment-scoped rules to
+ * sentences that talk about a treatment (see TREATMENT_CONTEXT).
  */
-function findUnverifiedClaims(text) {
+function findUnverifiedClaims(text, { treatmentContextOnly = false } = {}) {
   const body = normaliseText(text);
   if (!body) return [];
   const sentences = splitSentences(body);
   const results = [];
-  for (const { rule, find } of CLAIM_RULES) {
+  for (const { rule, find, treatmentScoped } of CLAIM_RULES) {
     for (let i = 0; i < sentences.length; i += 1) {
+      if (treatmentContextOnly && treatmentScoped && !TREATMENT_CONTEXT.test(sentences[i])) continue;
       const hit = find(sentences[i], i > 0 ? sentences[i - 1] : '');
       if (hit) {
         results.push({ rule, excerpt: hit.trim().slice(0, 160) });

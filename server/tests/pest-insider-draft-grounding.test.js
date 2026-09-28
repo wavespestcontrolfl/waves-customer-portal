@@ -46,6 +46,28 @@ describe('Pest Insider draft grounding', () => {
     expect(args.system.endsWith('VERIFIED FACTS — test marker')).toBe(true);
   });
 
+  test('the weekly flagship gets the same live facts block (codex round 14 P1)', async () => {
+    await expect(createNewsletterDraft({
+      prompt: 'Weekend events for Bradenton.',
+      newsletterType: 'local-weekly-fresh-events',
+    })).rejects.toBe(STOP);
+    const [, args] = mockDispatch.mock.calls[0];
+    expect(args.system).toContain('SWFL SEASONAL CONTEXT');
+    expect(args.system.endsWith('VERIFIED FACTS — test marker')).toBe(true);
+  });
+
+  test('the weekly flagship still drafts when the register is empty or unreachable — without pest facts (pre-push audit P1 on e0dd938596)', async () => {
+    mockFactsBlock.mockRejectedValue(new Error('fact register is empty: no verified facts to ground the draft'));
+    await expect(createNewsletterDraft({
+      prompt: 'Weekend events for Bradenton.',
+      newsletterType: 'local-weekly-fresh-events',
+    })).rejects.toBe(STOP);
+    const [, args] = mockDispatch.mock.calls[0];
+    // the prompt's own rule still names the block; the block itself is absent
+    expect(args.system).not.toContain('VERIFIED FACTS — test marker');
+    expect(args.system).toContain('SWFL SEASONAL CONTEXT');
+  });
+
   test('a draft that cannot load its facts is never sent to the writer', async () => {
     mockFactsBlock.mockRejectedValue(new Error('fact register is empty: no verified facts to ground the draft'));
 

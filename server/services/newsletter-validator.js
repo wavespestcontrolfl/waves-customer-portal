@@ -179,7 +179,11 @@ function scanUnverifiedClaims(send) {
     // / "ｓecond swarm" / "don&rsquo;t" renders as the claim to subscribers
     // and must not slip past the rules; Markdown emphasis markers go too.
     const bodyText = claimScanText(body);
-    for (const { rule, excerpt } of findUnverifiedClaims(bodyText)) {
+    // The Pest Insider is all treatment copy; the weekly events guide is
+    // not, so its safety/re-entry rules apply only to sentences about a
+    // treatment (codex round 15 P1) — the pest-fact rules apply in full.
+    const treatmentContextOnly = send.newsletter_type !== 'pest-insider-monthly';
+    for (const { rule, excerpt } of findUnverifiedClaims(bodyText, { treatmentContextOnly })) {
       if (seen.has(rule)) continue;
       seen.add(rule);
       errors.push(`Unverified claim (${rule}): "${excerpt}" — not supported by the email-division fact register (server/services/email-division/fact-register.js)`);
@@ -276,7 +280,11 @@ function validateNewsletterDraft(send, opts = {}) {
 
     // "family-safe fun" is not a pesticide claim and must not hold the week).
 
-    if (send.newsletter_type === 'pest-insider-monthly') errors.push(...scanUnverifiedClaims(send));
+    // Every claim-validated type: the weekly flagship sources the same
+    // register facts as the Pest Insider now, and the safety / re-entry /
+    // second-swarm rules are AGENTS.md rules for all customer copy
+    // (pre-push audit P1 on e0dd938596).
+    errors.push(...scanUnverifiedClaims(send));
   }
 
   // Affiliate links are WEB-ONLY (owner monetization pilot 2026-08-31: the

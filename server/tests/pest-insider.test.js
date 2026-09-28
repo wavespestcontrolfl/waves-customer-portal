@@ -274,12 +274,30 @@ describe('pest-insider claim validation at the send gates', () => {
     expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(false);
   });
 
-  test('the register rules are the Pest Insider\'s: the same sentence in a weekly flagship body is not scanned by them', () => {
+  test('the register rules cover every claim-validated type: the same claim in a weekly flagship body is scanned too (pre-push audit P1 on e0dd938596)', () => {
     const { validateNewsletterDraft: validate } = require('../services/newsletter-validator');
     // 'local-weekly-fresh-events' is the flagship key and a claim-validated type.
-    const weekly = { ...baseSend, newsletter_type: 'local-weekly-fresh-events', html_body: `${baseSend.html_body}<p>A kid-safe family event this Saturday.</p>` };
+    const weekly = { ...baseSend, newsletter_type: 'local-weekly-fresh-events', html_body: `${baseSend.html_body}<p>Termites swarm again after storms.</p>` };
     const { errors } = validate(weekly, { recipientCount: 100 });
-    expect(errors.some((e) => e.includes('Unverified claim'))).toBe(false);
+    expect(errors.some((e) => e.includes('Unverified claim (termite_second_swarm)'))).toBe(true);
+    // an events line with no pest claim in it is untouched
+    const clean = { ...baseSend, newsletter_type: 'local-weekly-fresh-events', html_body: `${baseSend.html_body}<p>Bring a foldable chair for the Saturday concert.</p>` };
+    expect(validate(clean, { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim'))).toBe(false);
+  });
+
+  test('flagship copy: the safety and re-entry rules apply to sentences about a treatment, never to benign event phrasing (codex round 15 P1)', () => {
+    const { validateNewsletterDraft: validate } = require('../services/newsletter-validator');
+    const flagship = (line) => ({ ...baseSend, newsletter_type: 'local-weekly-fresh-events', html_body: `${baseSend.html_body}<p>${line}</p>` });
+    const unsafe = validate(flagship('Our treatment is safe once dry.'), { recipientCount: 100 }).errors;
+    expect(unsafe.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
+    const minutes = validate(flagship('Keep pets off the sprayed lawn for 30 minutes.'), { recipientCount: 100 }).errors;
+    expect(minutes.some((e) => e.includes('Unverified claim (fixed_reentry_time)'))).toBe(true);
+    for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.']) {
+      expect(validate(flagship(benign), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim'))).toBe(false);
+    }
+    // the Pest Insider is all treatment copy: the same phrase stays a claim there
+    const insider = { ...baseSend, html_body: `${baseSend.html_body}<p>A family-safe fun run this Saturday.</p>` };
+    expect(validate(insider, { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
   });
 
   test('the A/B subject variant is scanned too — variant-B recipients see it', () => {
