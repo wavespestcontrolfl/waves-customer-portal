@@ -5214,6 +5214,11 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // The caller's check under the visit row lock (replay mints only —
+      // the only path that takes it): same contract as
+      // mintScheduledServiceInvoiceWithDeposit's recheckInTrx. Completion
+      // passes refuseCoveredMemberMintInTrx (Codex r4 P1 on #5237).
+      recheckInTrx = null,
     },
   ) {
     const sr = await db("service_records")
@@ -5270,6 +5275,7 @@ const InvoiceService = {
             throw scheduledPriceMovedError(lockedRow);
           }
         }
+        if (recheckInTrx) await recheckInTrx(conn);
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {

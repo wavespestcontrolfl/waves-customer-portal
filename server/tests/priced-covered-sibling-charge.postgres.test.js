@@ -51,7 +51,9 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
   const { perApplicationCompletionVoidHold, siblingCoverageForSchedule } = require('../services/billing-lane');
   const {
     findFirstApplicationInvoiceForEstimateService, isPricedCoveredMemberVisit, pricedCoveredMemberOwnRefundHold,
+    refuseCoveredMemberMintInTrx, stampGroupRevalidated,
   } = require('../services/estimate-first-application-invoice');
+  const { acquireScheduledMintLockChain } = require('../services/scheduled-invoice-mint');
   const { completionTerminalInvoiceLookup } = require('../services/completion-invoice-candidate');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -351,5 +353,52 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
     const { coverage, prediction } = await siblingCoverageForSchedule({ svc: lawn, dbConn: trx });
     expect(coverage.state).toBe('review');
     expect(prediction.kind).toBe('sibling_needs_review');
+  }));
+
+  // Codex r4 P1 on #5237 — completion's mint lock and the stamper lock the
+  // SAME scheduled_services row, so whichever commits first decides. Half 1:
+  // a stamp that committed before the mint lock is seen under it and refuses.
+  test('completion mint guard: a stamp committed after the pre-lock lookup refuses the mint under the visit lock', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    await acquireScheduledMintLockChain(trx, { scheduledServiceId: ids.lawnId, customerId: ids.customerId });
+    await expect(refuseCoveredMemberMintInTrx(trx, ids.lawnId)).rejects.toMatchObject({
+      code: 'FIRST_APPLICATION_COVERED', status: 409,
+    });
+  }));
+
+  test('completion mint guard never refuses the ANCHOR, an unstamped visit, or a member split off by hand', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    await expect(refuseCoveredMemberMintInTrx(trx, ids.pestId)).resolves.toBeUndefined();
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent', title: 'Lawn Care',
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]),
+      subtotal: 65, total: 65,
+    });
+    await expect(refuseCoveredMemberMintInTrx(trx, ids.lawnId)).resolves.toBeUndefined();
+    const other = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: 65 });
+    await trx('scheduled_services').where({ id: other.lawnId }).update({ first_application_invoice_id: null });
+    await expect(refuseCoveredMemberMintInTrx(trx, other.lawnId)).resolves.toBeUndefined();
+  }));
+
+  // Half 2: a mint that committed first leaves the visit its own live
+  // invoice, and the stamper (which locks the same rows) then skips it.
+  test('the stamper never stamps a sibling whose own invoice was minted first', () => rollbackTest(async (trx) => {
+    // Control: the same unstamped group WITHOUT an own invoice is stamped.
+    const control = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: null });
+    await trx('scheduled_services').whereIn('id', [control.pestId, control.lawnId]).update({ first_application_invoice_id: null });
+    expect(await stampGroupRevalidated(trx, { invoiceId: control.invoiceId, anchorId: control.pestId, siblingIds: [control.lawnId] })).toBe(2);
+
+    const ids = await fixture(trx, { invoiceStatus: 'sent', siblingPrice: null });
+    await trx('scheduled_services').whereIn('id', [ids.pestId, ids.lawnId]).update({ first_application_invoice_id: null });
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent', title: 'Lawn Care',
+      line_items: JSON.stringify([{ client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 65, amount: 65 }]),
+      subtotal: 65, total: 65,
+    });
+    expect(await stampGroupRevalidated(trx, { invoiceId: ids.invoiceId, anchorId: ids.pestId, siblingIds: [ids.lawnId] })).toBe(0);
+    const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first('first_application_invoice_id');
+    expect(lawn.first_application_invoice_id).toBeNull();
   }));
 });

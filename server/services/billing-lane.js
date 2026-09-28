@@ -1366,7 +1366,19 @@ async function scheduleSiblingCoverageEligible(svc, dbConn) {
   // Priced-covered-member widening (see isSiblingCoverageEligibleVisit's own
   // header) — the same shape the Charge Now resolver and completion's void
   // guard ask, so this sheet prediction can never disagree with either.
-  const isPricedCoveredMember = hasOwnPrice
+  // Feed cost (Codex r4 P2 on #5237): the day/week feeds call this per visit,
+  // so the DB-backed member check runs only for a priced visit whose SHAPE
+  // could be covered and whose feed row carries a stamp. A NULL on the
+  // feed's own fresh row is trusted here: this is a read-only prediction,
+  // so a stamp landing mid-render changes only what the sheet shows until
+  // the next refresh; every charge path re-reads under its own lock
+  // (refuseCoveredMemberMintInTrx, siblingCoverageRecheckInTrx).
+  const couldBeMember = hasOwnPrice
+    && svc?.first_application_invoice_id !== null
+    && isSiblingCoverageEligibleVisit({
+      sourceEstimateId: svc?.source_estimate_id, hasOwnPrice: false, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    });
+  const isPricedCoveredMember = couldBeMember
     ? await require('./estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
     : false;
   const eligible = isSiblingCoverageEligibleVisit({

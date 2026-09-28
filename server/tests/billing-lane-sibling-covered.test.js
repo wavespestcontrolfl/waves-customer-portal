@@ -629,6 +629,26 @@ describe('siblingCoverageForSchedule', () => {
     // The own-refund short-circuit never even asks the sibling lookup.
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
+
+  // Codex r4 P2 on #5237: the day/week feeds call this per visit, so a
+  // priced row whose feed read carries a NULL stamp spends no member-check
+  // query at all (read-only prediction; charge paths re-read under a lock).
+  test('a PRICED row whose feed read carries a NULL stamp spends no member-check query', async () => {
+    const PRICED_UNSTAMPED = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: null };
+    const dbConn = jest.fn(() => { throw new Error('no query expected'); });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: PRICED_UNSTAMPED, dbConn });
+    expect(coverage.state).toBe('none');
+    expect(prediction).toBeNull();
+    expect(dbConn).not.toHaveBeenCalled();
+  });
+
+  test('...nor does a priced CALLBACK row, even stamped (shape fails before any read)', async () => {
+    const PRICED_CALLBACK = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-1', is_callback: true };
+    const dbConn = jest.fn(() => { throw new Error('no query expected'); });
+    const { coverage } = await siblingCoverageForSchedule({ svc: PRICED_CALLBACK, dbConn });
+    expect(coverage.state).toBe('none');
+    expect(dbConn).not.toHaveBeenCalled();
+  });
 });
 
 // Codex pre-push P0 (x2): a MINT decision (resolveScheduledServiceCharge,

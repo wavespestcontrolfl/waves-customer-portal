@@ -7,6 +7,7 @@ const {
   invoiceHasPositiveSetupFeeLine,
   classifyAcceptedEstimateInvoiceCoverage,
   isPricedCoveredMemberVisit,
+  refuseCoveredMemberMintInTrx,
   pricedCoveredMemberOwnRefundHold,
 } = require('../services/estimate-first-application-invoice');
 
@@ -727,5 +728,33 @@ describe('pricedCoveredMemberOwnRefundHold', () => {
     const svc = { id: 'lawn-sibling' };
     const conn = () => { throw new Error('db down'); };
     await expect(pricedCoveredMemberOwnRefundHold(svc, conn)).rejects.toThrow('db down');
+  });
+});
+
+// Codex r4 P1 on #5237: completion's in-lock mint guard.
+describe('refuseCoveredMemberMintInTrx — completion mint guard under the visit lock', () => {
+  test('a covered member (stamp read fresh by id) → 409 FIRST_APPLICATION_COVERED', async () => {
+    const conn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(refuseCoveredMemberMintInTrx(conn, 'lawn-sibling')).rejects.toMatchObject({
+      code: 'FIRST_APPLICATION_COVERED', status: 409,
+    });
+  });
+
+  test('the anchor, or an unstamped visit → no refusal', async () => {
+    const anchorConn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(refuseCoveredMemberMintInTrx(anchorConn, 'pest-anchor')).resolves.toBeUndefined();
+    const unstampedConn = fakeAnchorLookupConn({ stampRow: { first_application_invoice_id: null } });
+    await expect(refuseCoveredMemberMintInTrx(unstampedConn, 'lawn-sibling')).resolves.toBeUndefined();
+  });
+
+  test('a read error refuses (never mints on an unknown)', async () => {
+    const conn = () => { throw new Error('db down'); };
+    await expect(refuseCoveredMemberMintInTrx(conn, 'lawn-sibling')).rejects.toMatchObject({ code: 'FIRST_APPLICATION_COVERED' });
   });
 });
