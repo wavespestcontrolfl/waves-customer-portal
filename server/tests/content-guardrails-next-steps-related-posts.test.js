@@ -37,6 +37,18 @@ describe('next_steps labels are customer copy (Apply content guardrails to next-
     expect(asNextStep).toEqual(asBody);
   });
 
+  // Codex r7 on #5216 ("Apply the CTA wording gate to next-step labels").
+  test('a banned CTA wording in a next-step label is flagged like the same body link', () => {
+    const cta = (fm, body = BODY) => guardrails.evaluate({ frontmatter: fm, body }, { publishHosts: HUB, targetIsBlog: true })
+      .findings.some((f) => f.code === 'FORBIDDEN_CTA_WORDING');
+    expect(cta({}, `${BODY}\n\n[Request an Inspection](/contact/)`)).toBe(true);
+    expect(cta({ next_steps: [{ label: 'Request an Inspection', href: '/contact/' }] })).toBe(true);
+    // Same rule as a body link: a conversion path needs the estimate wording.
+    expect(cta({ next_steps: [{ label: 'Found a live one?', href: '/contact/' }] })).toBe(true);
+    expect(cta({ next_steps: [{ label: 'Get My Free Pest Estimate', href: '/contact/' }] })).toBe(false);
+    expect(cta({}, `${BODY}\n\n[Get My Free Pest Estimate](/contact/)`)).toBe(false);
+  });
+
   test('a clean label on an allowlisted path passes', () => {
     expect(blocking({ next_steps: [{ label: 'Found a live one?', href: '/contact/' }] })).toEqual([]);
   });

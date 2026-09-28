@@ -237,3 +237,16 @@ describe('buildPhotoSlots', () => {
   });
 });
 
+// Codex r7 on #5216 ("Recognize suffixed look-like identification queries").
+describe('identification phrasing with an ordinary qualifier', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['what do fire ants look like in Florida?', 'fire ant'],
+    ['what do fire ants look like up close', 'fire ant'],
+    ['what do fire ants look like in comparison to red ants', null],
+    ['bugs that look like fire ants in Florida', null],
+  ])('%s -> %s', (topic, species) => {
+    expect(matchSpecies(topic) ? matchSpecies(topic).toLowerCase() : null).toBe(species);
+  });
+});
+

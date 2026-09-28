@@ -661,3 +661,57 @@ describe('answer_in_first_paragraph reads the leading verdict box', () => {
     expect(checkAnswerInFirstParagraph({ body: generic }, ghostQ)).toEqual({ ok: false, reason: 'verdict_does_not_answer_question' });
   });
 });
+
+// ── Codex r7 on #5216 ────────────────────────────────────────────────
+describe('Codex r7: catalog attribution lines vs the generic scans', () => {
+  const { checkRedactionPassed } = require('../services/content/content-quality-gate')._internals;
+  const guardrails = require('../services/content/content-guardrails');
+  test.each(PHOTO_LIBRARY.map((p) => [p.catalog_slug, p]))('%s: its exact attribution line passes the syntax and PII scans', (_slug, photo) => {
+    const body = `Fire ants sting.\n\n![${photo.alt}](${photo.src})\n\n${photoAttributionLine(photo)}\n\nMore prose here.`;
+    expect(guardrails.unsupportedBodySyntax(body)).toEqual([]);
+    expect(checkRedactionPassed({ body }).ok).toBe(true);
+  });
+  test('a non-catalog encoded destination is still unsupported syntax', () => {
+    expect(guardrails.unsupportedBodySyntax('See [this](https://example.com/File:Ant_%28x%29.jpg).')).toContain('entity_or_encoded_destination');
+  });
+});
+
+describe('Codex r7: verdict keywords match whole words', () => {
+  const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+  const wh = { target_keyword: 'What do fire ants look like?' };
+  const box = (v) => `<BottomLineBox verdict="${v}" recommendation="Keep kids off the mound." />\n\nMore.`;
+  test('"Plants grow nearby." does not answer a fire-ant question', () => {
+    expect(checkAnswerInFirstParagraph({ body: box('Plants grow nearby.') }, wh)).toEqual({ ok: false, reason: 'verdict_does_not_answer_question' });
+  });
+  test('a singular/plural form still matches', () => {
+    expect(checkAnswerInFirstParagraph({ body: box('A fire ant is small and reddish-brown.') }, wh)).toEqual({ ok: true });
+    expect(checkAnswerInFirstParagraph({ body: box('A cockroach can glide short distances.') }, { target_keyword: 'Can cockroaches fly?' })).toEqual({ ok: true });
+  });
+});
+
+describe('Codex r7: a decision post\'s leading box is not a question marker', () => {
+  const refresh = brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+  const live = '<BottomLineBox verdict="Go with a plan." recommendation="Compare the two." />\n\nIntro.';
+  const moved = { frontmatter: {}, body: 'New intro.\n\n<BottomLineBox verdict="Go with a plan." recommendation="Compare the two." />' };
+  test('a decision refresh may move its box', () => {
+    const ctx = { liveFrontmatter: { post_type: 'decision' }, previousVersion: { body: live } };
+    expect(checkVerdictBoxFirst(moved, refresh, ctx)).toEqual({ ok: true, reason: 'not_identification_or_question' });
+  });
+  test('a non-decision page that opened on a box keeps it first', () => {
+    const ctx = { liveFrontmatter: { post_type: 'location' }, previousVersion: { body: live } };
+    expect(checkVerdictBoxFirst(moved, refresh, ctx)).toEqual({ ok: false, reason: 'verdict_box_not_first_block' });
+  });
+});
+
+describe('Codex r7: a legacy .md target is read like the publisher reads it', () => {
+  const refresh = brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+  const ctx = { liveFrontmatter: { post_type: 'diagnostic' }, previousVersion: { body: 'Old intro.' } };
+  const body = '<BottomLineBox verdict="Yes, they sting." recommendation="Avoid the mound." />\n\n<div>\n![not an image here](/images/blog/other/x.webp)\n</div>\n\nMore.';
+  test('Markdown inside a raw HTML block of a .md file is literal text, not an image', () => {
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body }, { ...refresh, target_file_path: 'src/content/blog/pest-control/x.md' }, ctx)).toEqual({ ok: true });
+  });
+  test('the same body on an .mdx target is judged as an image', () => {
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body }, { ...refresh, target_file_path: 'src/content/blog/pest-control/x.mdx' }, ctx).ok).toBe(false);
+  });
+});
+

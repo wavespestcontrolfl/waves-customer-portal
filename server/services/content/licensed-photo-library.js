@@ -194,7 +194,7 @@ function escapeRegExp(value) {
 // vs huntsman spider" names one catalog species plus an uncatalogued one,
 // and a safety post must never show a licensed-but-wrong species as THE
 // pest. Deliberately broad; a false trigger only sends a slot to a human.
-const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences)\b/i;
+const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?)\b/i;
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as
 // comparison"): the bare `like` alternative above makes ordinary TERMINAL
@@ -204,7 +204,10 @@ const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|tha
 // like" is stripped before the comparison test; "bugs that look like fire
 // ants" and "fire ant-like insects" still have "like" mid-string and stay
 // comparison-shaped (fail closed, unchanged).
-const TERMINAL_LOOKS_LIKE_RE = /\blooks?\s+like\s*\??\s*$/i;
+// Codex r7: an ordinary place/viewing qualifier may follow ("look like in
+// Florida?", "look like up close"); the qualifier itself stays in the
+// comparison test, only the identification phrase is removed.
+const TERMINAL_LOOKS_LIKE_RE = /\blooks?\s+like\b(?=\s*(?:\?|$|(?:in|around|near|on|at|up)\b))/i;
 
 /**
  * matchSpecies(topic) → the ONE library entry whose alias matches `topic`
@@ -276,6 +279,20 @@ function photoAttributionLine(photo) {
   return `Photo: [${photo.credit}](${photo.source_page}) ([${photo.license}](${photo.license_url}))`;
 }
 
+// Codex r7 on #5216: an exact catalog attribution line is fixed, reviewed
+// catalog text (a photographer's name, a percent-encoded Commons URL), so
+// the generic syntax and customer-PII scans must not judge it — the photo
+// gate already requires it verbatim. Blanked to equal-length spaces, so
+// offsets and line structure are unchanged for every other rule.
+function blankLibraryPhotoAttributions(text) {
+  let out = String(text || '');
+  for (const photo of PHOTO_LIBRARY) {
+    const line = photoAttributionLine(photo);
+    if (out.includes(line)) out = out.split(line).join(' '.repeat(line.length));
+  }
+  return out;
+}
+
 module.exports = {
   PHOTO_LIBRARY,
   matchSpecies,
@@ -286,4 +303,5 @@ module.exports = {
   htmlAttrValue,
   isIdentificationPost,
   photoAttributionLine,
+  blankLibraryPhotoAttributions,
 };

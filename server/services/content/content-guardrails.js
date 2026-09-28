@@ -4373,7 +4373,9 @@ const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className|popove
 // category (a legacy `<a>` must not license a NEW, differently-hidden
 // anchor). Matches use a global clone of each rule.
 function unsupportedBodySyntaxConstructs(body) {
-  const text = String(body || '');
+  // Exact licensed-photo attribution lines are catalog text (their Commons
+  // URLs carry %28/%29), judged verbatim by the photo gate — Codex r7.
+  const text = require('./licensed-photo-library').blankLibraryPhotoAttributions(String(body || ''));
   const out = [];
   for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) {
     const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
@@ -6935,6 +6937,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // grandfather; the post's service (when the lane knows it) arms the
     // service-tying half too (see forbiddenCtaWordingFinding).
     forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody, service }),
+    // next_steps labels render as CTA links too (Codex r7 on #5216); a
+    // refresh never ships them (nextStepsLinks is empty there).
+    nextStepsLinks ? forbiddenCtaWordingFinding(nextStepsLinks, { targetIsBlog, isRefresh: false, priorBody: null, service }) : null,
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park

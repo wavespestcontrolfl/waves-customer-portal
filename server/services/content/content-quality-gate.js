@@ -702,10 +702,14 @@ function questionKeywords(question) {
   const long = words.filter((w) => w.length > 4);
   return long.length ? long : words.filter((w) => w.length === 4);
 }
+// Whole words only (Codex r7: "plants" contained "ants"); a plain plural
+// on either side still matches ("ant" / "ants", "cockroach" / "cockroaches").
 function verdictAnswersQuestion(question, verdictText) {
   const keys = questionKeywords(question);
-  const v = String(verdictText || '').toLowerCase();
-  if (keys.some((k) => v.includes(k))) return true;
+  const words = new Set(String(verdictText || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean));
+  const said = (k) => words.has(k) || words.has(`${k}s`) || words.has(`${k}es`)
+    || (k.endsWith('es') && words.has(k.slice(0, -2))) || (k.endsWith('s') && words.has(k.slice(0, -1)));
+  if (keys.some(said)) return true;
   if (YES_NO_QUESTION_RE.test(question)) return DIRECT_ANSWER_WORD_RE.test(String(verdictText || '').trim());
   return keys.length === 0;
 }
@@ -965,7 +969,9 @@ function checkNextStepsRedacted(draft, brief) {
 }
 
 function checkRedactionPassed(draft) {
-  const body = String(draft.body || '');
+  // Exact licensed-photo attribution lines (a photographer's name, a long
+  // numeric Commons URL) are catalog text, not customer PII — Codex r7.
+  const body = require('./licensed-photo-library').blankLibraryPhotoAttributions(String(draft.body || ''));
   const bodyPhoneHit = scanPhones(body, 'body');
   if (bodyPhoneHit) return bodyPhoneHit;
   // Waves' own addresses are legitimate page furniture (city-service NAP
@@ -1246,7 +1252,11 @@ function isIdentificationDraft(draft, brief, context) {
 // `^<BottomLineBox` check checkVerdictBoxFirst runs on the DRAFT.
 function isIdentificationOrQuestionDraft(draft, brief, context) {
   if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
-  if (brief?.action_type === 'refresh_existing_page' && leadingVerdictBox(context?.previousVersion?.body)) return true;
+  // A "decision" post carries a BottomLineBox by its own post-type contract
+  // (and answer-first does not apply to it), so its leading box proves
+  // nothing about the page being a question page (Codex r7).
+  const livePostType = String(context?.liveFrontmatter?.post_type || '').trim().toLowerCase();
+  if (brief?.action_type === 'refresh_existing_page' && livePostType !== 'decision' && leadingVerdictBox(context?.previousVersion?.body)) return true;
   return false;
 }
 
@@ -1405,7 +1415,7 @@ function allowedIdentificationPhotoSrcs(brief, context) {
     // Same parser as everywhere else here (bodyImageRefs, via
     // collectBodyImageOccurrences) — a shortcut or reference-style photo the
     // live body already carried grandfathers exactly like an inline one now.
-    for (const { url, form } of collectBodyImageOccurrences(prior)) {
+    for (const { url, form } of collectBodyImageOccurrences(prior, { mdx: !markdownOnlyTarget(brief) })) {
       if (form === 'markdown' && libraryPhotoBySrc(url)) allowed.add(url);
     }
   }
@@ -1423,7 +1433,10 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   const cg = require('./content-guardrails');
   const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
   const allowed = allowedIdentificationPhotoSrcs(brief, context);
-  const occurrences = collectBodyImageOccurrences(body);
+  // Same Markdown/MDX flavor the publisher reads the target with (a legacy
+  // .md refresh renders Markdown inside raw HTML as literal text) — Codex r7.
+  const mdx = !markdownOnlyTarget(brief);
+  const occurrences = collectBodyImageOccurrences(body, { mdx });
   for (const { alt, url, form } of occurrences) {
     const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
     if (failure) return failure;
@@ -1440,7 +1453,7 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   // that are present, so a draft that omitted them all passed. A refresh
   // carries no slots and is never required to add a photo.
   if (brief?.action_type !== 'refresh_existing_page') {
-    const shown = new Set(collectBodyImageOccurrences(cg.blankDefinitelyHiddenContent(body)).filter((o) => o.form === 'markdown').map((o) => o.url));
+    const shown = new Set(collectBodyImageOccurrences(cg.blankDefinitelyHiddenContent(body), { mdx }).filter((o) => o.form === 'markdown').map((o) => o.url));
     const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
     for (const slot of slots) {
       const src = slot?.photo?.src;
