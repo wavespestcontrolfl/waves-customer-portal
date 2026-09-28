@@ -16,7 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 
 vi.mock('./WdoIntelligenceBar', () => ({ default: () => null }));
-vi.mock('./DictationButton', () => ({ default: () => null }));
+// A non-interactive stub: data-disabled mirrors the prop, and a click on it
+// stands in for a transcript chunk arriving from the browser.
+vi.mock('./DictationButton', () => ({
+  default: (props) => (
+    <span data-testid="dictation-mock" data-disabled={props.disabled ? 'true' : 'false'} onClick={() => props.onAppend('late spoken words')} />
+  ),
+}));
 vi.mock('../AddressAutocomplete', () => ({ default: () => null }));
 // jsdom has no canvas — the real pad's initCanvas would throw. The mock
 // exposes the wiring the sign-step tests pin: which project it signs, the
@@ -247,6 +253,33 @@ describe('CreateProjectModal queued-photo exits', () => {
     expect(confirmClose).toHaveBeenCalledWith('Discard unsaved report edits?');
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByText('evidence.jpg')).toBeTruthy();
+  });
+});
+
+describe('CreateProjectModal dictation vs AI draft', () => {
+  it('stops the notes mic while an AI draft is in flight and drops a late chunk the draft would overwrite', async () => {
+    const draft = deferred();
+    fetch.mockImplementation((url) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/ai-write-preview')) return draft.promise;
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      return jsonResponse({});
+    });
+    renderWdoSheet({ allowAiDraft: true });
+    const notes = await screen.findByPlaceholderText(/Write raw notes/);
+    const notesMic = () => notes.parentElement.querySelector('[data-testid="dictation-mock"]');
+    fireEvent.change(notes, { target: { value: 'mud tubes on the east wall' } });
+    expect(notesMic().dataset.disabled).toBe('false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'AI draft' }));
+    await waitFor(() => expect(notesMic().dataset.disabled).toBe('true'));
+    fireEvent.click(notesMic()); // a chunk lands mid-request
+    expect(notes.value).toBe('mud tubes on the east wall');
+
+    draft.resolve({ ok: true, json: () => Promise.resolve({ report: 'WHAT WE INSPECTED: the east wall.' }) });
+    await waitFor(() => expect(notes.value).toBe('WHAT WE INSPECTED: the east wall.'));
+    expect(notesMic().dataset.disabled).toBe('false');
   });
 });
 
