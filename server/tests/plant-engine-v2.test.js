@@ -265,6 +265,23 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       };
     }
 
+    test('resolveIdentityCandidate only matches within the slot\'s own index — an out-of-slot slug degrades to off-catalog (Codex pre-push P1 round 2)', () => {
+      const turfOnlyIndex = [catalog.getEntry('fixture-st-augustine')];
+      const resolved = engine.resolveIdentityCandidate({ slug: 'fixture-nutsedge', off_catalog_name: '', confidence: 0.9 }, turfOnlyIndex);
+      expect(resolved.entry).toBeNull();
+      expect(resolved.offCatalogName).toBe('fixture-nutsedge');
+    });
+
+    test('a disagreed identity slot is never named', () => {
+      const named = engine.identityEntryLevelAnswer(identityCand('fixture-st-augustine', 0.95), { disagreed: true });
+      expect(named).toBeNull();
+    });
+
+    test('an unanswered escalation trigger caps identity wording at likely, never pretty_sure', () => {
+      const named = engine.identityEntryLevelAnswer(identityCand('fixture-st-augustine', 0.95), { blockPrettySure: true });
+      expect(named.wording).toBe('likely');
+    });
+
     test('account grass type wins over a photo guess for lawn subject.plant', () => {
       const built = engine.buildWorkup({
         subject: 'lawn',
@@ -564,6 +581,62 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       // The bogus 0.99 must not have been consumed — an unverified 0.6
       // reads "likely" at best, never "pretty_sure".
       expect(result.v2.subject.plant.wording).not.toBe('pretty_sure');
+    });
+
+    test('an unusable-photo read from the CONDITIONS leg alone still gates naming, even when the candidates leg read usable (Codex pre-push P1 round 2)', async () => {
+      dispatch.mockResolvedValueOnce({
+        ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'damage', turf: [], weeds: [], host: [] },
+      });
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: false, issue: 'blurry' },
+          observed_terms: ['browning'],
+          candidates: [{ slug: 'fixture-large-patch', confidence: 0.9, elements_visible: [1], signs_visible: [1, 2], symptoms_visible: [1] }],
+        },
+      });
+      dispatch.mockResolvedValue({ ok: false, reason: 'provider_error' });
+
+      const result = await engine.identifyPlantV2({ photos: [{ data: 'x', mimeType: 'image/jpeg' }], subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(result.v2.quality.usable).toBe(false);
+      expect(result.v2.answer.level).toBe('symptom');
+      expect(result.v2.answer.headline).toBe(engine.UNUSABLE_HEADLINE);
+      expect(result.v2.tier).toBe('needs_more_evidence');
+      expect(result.v2.next_step_hint.kind).toBe('unclear');
+    });
+
+    test('conditions disagreement (Gemini and OpenAI name different top possibilities) forces the symptom fallback, never a named answer (Codex pre-push P1 round 2)', async () => {
+      dispatch.mockResolvedValueOnce({
+        ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'damage', turf: [], weeds: [], host: [] },
+      });
+      // Gemini: low confidence on large-patch -> triggers escalation.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' },
+          observed_terms: ['browning'],
+          candidates: [{ slug: 'fixture-large-patch', confidence: 0.6, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      // OpenAI escalation: names a DIFFERENT top possibility.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' },
+          shows: 'damage',
+          turf: [],
+          weeds: [],
+          host: [],
+          observed_terms: ['browning'],
+          conditions: [{ slug: 'fixture-cosmetic-spot', confidence: 0.85, elements_visible: [1], signs_visible: [1], symptoms_visible: [] }],
+        },
+      });
+
+      const result = await engine.identifyPlantV2({ photos: [{ data: 'x', mimeType: 'image/jpeg' }], subject: 'lawn' });
+      expect(result.ok).toBe(true);
+      expect(result.v2.answer.level).toBe('symptom');
+      expect(result.v2.tier).toBe('needs_more_evidence');
     });
   });
 });

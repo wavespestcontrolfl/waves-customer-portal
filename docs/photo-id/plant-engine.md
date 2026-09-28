@@ -100,12 +100,18 @@ behavior was not attempted here; duplication is the documented trade-off
 
 **Known simplification for L4/first review to scrutinize**: unlike
 `pest-engine.js`'s escalation combiner (many rounds of adversarial
-hardening), `identifyPlantV2`'s combine step does not climb identity
-disagreements to a shared lineage node — a Gemini/OpenAI identity split just
-keeps both top candidates in the ranked list rather than a
-`deepestSharedNode` climb. The deterministic **workup builder** (naming gate,
-hard cap, `settle_it`, `next_step_hint`, headline table) — the part the
-contract's §8 test list actually exercises — has no such shortcut.
+hardening), a Gemini/OpenAI identity disagreement doesn't climb to a shared
+lineage node for the WORKUP's `subject.plant` (it does for `mode: "identify"`,
+via `climbPlantLineage`) — the workup schema has no group-level identity slot,
+so a disagreed slot is simply left unnamed (`null`) rather than climbed. Two
+pre-push Codex rounds (both zero P0, three P1 each) caught and fixed real
+gaps: outcome-class checking was truncated to the display list, three
+higher-confidence weeds could silently discard a valid turf candidate, the
+identity verify response was never Ajv-validated, escalation
+disagreement/non-answer never reached either builder, an unusable-photo read
+from the conditions leg alone didn't gate naming, and identity resolution
+accepted any catalog slug rather than restricting to its own slot — all six
+now have regression tests in `plant-engine-v2.test.js`.
 
 ## What L4 must do
 

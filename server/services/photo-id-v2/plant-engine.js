@@ -264,9 +264,16 @@ function idCuesFor(entry) {
   return (cues && cues.length) ? cues : (entry.traits || []);
 }
 
+/** Resolve a model's raw identity item against ONLY the slot's own index
+ * (turf, weeds, or host — never the whole catalog). Codex pre-push P1: a
+ * global `catalog.getEntry(rawSlug)` fallback accepted any existing slug —
+ * an unrelated pest or condition entry, or a weed slug returned in the
+ * "turf" slot — as a real identity, approval checks notwithstanding. An
+ * out-of-slot slug now degrades to an off-catalog candidate, same as any
+ * hallucinated one. */
 function resolveIdentityCandidate(raw, indexEntries) {
   const rawSlug = String(raw?.slug || '').trim();
-  const entry = rawSlug ? (indexEntries.find((e) => e.slug === rawSlug) || catalog.getEntry(rawSlug)) : null;
+  const entry = rawSlug ? (indexEntries.find((e) => e.slug === rawSlug) || null) : null;
   const confidence = clamp01(raw?.confidence);
   const cuesVisible = Array.isArray(raw?.cues_visible) ? raw.cues_visible.filter(Number.isFinite) : [];
   const cuesNotVisible = Array.isArray(raw?.cues_not_visible) ? raw.cues_not_visible.filter(Number.isFinite) : [];
@@ -318,10 +325,19 @@ function mergeIdentityVerify(candidates, verifyJson) {
 /** Same threshold ladder as `pest-engine.buildAnswer`'s entry-level rule,
  * for ONE identity slot (turf, one weed, or a host plant): `pretty_sure` at
  * >=0.80, `likely` 0.55-0.80, else null (the caller climbs the lineage
- * instead). Approval-gated. */
-function identityEntryLevelAnswer(top) {
-  if (!top?.entry || !isApproved(top.entry)) return null;
-  const blocked = !top.verified;
+ * instead). Approval-gated.
+ *
+ * `disagreed` (Gemini/OpenAI escalation split on this slot's own top pick)
+ * means this slot has no real answer at all — null, same as no candidate.
+ * `blockPrettySure` (an escalation trigger fired for this slot but OpenAI
+ * never answered) caps the wording at `likely` even at >=0.80 confidence —
+ * the same "never pretty_sure on an unanswered trigger" rule
+ * `pest-engine.buildAnswer` enforces (Codex pre-push P1 round 2: escalation
+ * uncertainty was recorded in `internal` but never reached either builder).
+ */
+function identityEntryLevelAnswer(top, { blockPrettySure = false, disagreed = false } = {}) {
+  if (disagreed || !top?.entry || !isApproved(top.entry)) return null;
+  const blocked = !top.verified || blockPrettySure;
   if (top.confidence >= PRETTY_SURE_MIN && !blocked) return { wording: 'pretty_sure', entry: top.entry };
   if (top.confidence >= LIKELY_MIN) return { wording: 'likely', entry: top.entry };
   return null;
@@ -367,11 +383,16 @@ function hasConflictingOutcomeClassAlt(possibilities, top) {
   return possibilities.some((p) => p !== top && p.confidence >= OUTCOME_CLASS_ALT_MIN && outcomeClassOf(p.sig) !== topClass);
 }
 
-function namedAnswerFor(possibilities, top) {
-  if (!top || !isApproved(top.entry)) return null;
+/** `disagreed` (Gemini's and OpenAI's own top condition pick differ) forces
+ * no answer at all — the contract's escalation "disagree" rule, applied to
+ * conditions the same way `identityEntryLevelAnswer` applies it to identity.
+ * `blockPrettySure` (an escalation trigger fired but OpenAI never answered)
+ * caps the wording at `likely` even past 0.80 (Codex pre-push P1 round 2). */
+function namedAnswerFor(possibilities, top, { blockPrettySure = false, disagreed = false } = {}) {
+  if (disagreed || !top || !isApproved(top.entry)) return null;
   if (!passesOwnSignatureGate(top)) return null;
   if (hasConflictingOutcomeClassAlt(possibilities, top)) return null;
-  const wording = (top.confidence >= PRETTY_SURE_MIN && !isHardCapped(top.entry, top.sig)) ? 'pretty_sure' : 'likely';
+  const wording = (top.confidence >= PRETTY_SURE_MIN && !isHardCapped(top.entry, top.sig) && !blockPrettySure) ? 'pretty_sure' : 'likely';
   return { wording, entry: top.entry, sig: top.sig };
 }
 
@@ -651,9 +672,15 @@ function plantNextPhotoFor(wording, candidates, subject) {
  * final, already-combined (Gemini + OpenAI when escalated), ranked
  * identity-candidate list for ONE identity slot (turf, a weed, or a host
  * plant). */
-function buildIdentityResult(candidates, { subject, currentMonth }) {
+function buildIdentityResult(candidates, {
+  subject, currentMonth, blockPrettySure = false, disagreed = false,
+}) {
   const top = candidates[0] || null;
-  const named = identityEntryLevelAnswer(top);
+  // A disagreement climbs the lineage exactly like an unnamed candidate
+  // would (the pest engine's own "disagree -> shared node" rule) — this
+  // builder already falls through to `climbPlantLineage` whenever `named`
+  // is null. Codex pre-push P1 round 2.
+  const named = identityEntryLevelAnswer(top, { blockPrettySure, disagreed });
   let level; let nodeId; let wording; let headline; let subhead; let entryBlock;
   if (named) {
     level = 'entry'; nodeId = named.entry.slug; wording = named.wording;
@@ -701,6 +728,13 @@ function buildWorkup(ctx) {
   const {
     subject, possibilities = [], turfCandidates = [], weedCandidates = [], hostCandidates = [],
     currentMonth, chips = {}, context = {}, photosCount = 0, quality = { usable: true, issue: 'none' },
+    // Escalation uncertainty (Codex pre-push P1 round 2): recorded in
+    // `internal` by the orchestration function, but must ALSO reach the
+    // builder — a disagreement or an unanswered trigger changes the
+    // customer-facing answer, not just an admin-only log line.
+    turfDisagreed = false, weedDisagreed = false, hostDisagreed = false,
+    turfBlockPrettySure = false, weedBlockPrettySure = false, hostBlockPrettySure = false,
+    possibilitiesDisagreed = false, possibilitiesBlockPrettySure = false,
   } = ctx;
 
   // Codex pre-push P1: the naming gate's outcome-class check (§6.3 condition
@@ -715,6 +749,13 @@ function buildWorkup(ctx) {
     .slice(0, 3)
     .map((p) => ({ ...p, localCtx: { currentMonth, chips, context } }));
 
+  // Codex pre-push P1 round 2: a photo the model itself flagged unusable (or
+  // that Gemini/OpenAI disagreed on whether it even shows the subject) must
+  // never carry a named answer, a treatment-shaped next step, or a
+  // confident tier — combineQuality already folds in every attempted leg's
+  // own read (candidates, conditions, escalation).
+  const qualityBlocksNaming = quality.usable === false;
+
   // ── subject identity (Layer A) ──
   let plantBlock = null;
   const accountTurf = subject === 'lawn' ? resolveAccountTurf(context) : null;
@@ -722,21 +763,25 @@ function buildWorkup(ctx) {
     plantBlock = {
       slug: accountTurf.slug, common_name: accountTurf.common_name, scientific_name: accountTurf.scientific_name || null, source: 'account', wording: null,
     };
-  } else {
+  } else if (!qualityBlocksNaming) {
     const identityCandidates = subject === 'lawn' ? turfCandidates : hostCandidates;
-    const named = identityEntryLevelAnswer(identityCandidates[0] || null);
+    const identityDisagreed = subject === 'lawn' ? turfDisagreed : hostDisagreed;
+    const identityBlockPrettySure = subject === 'lawn' ? turfBlockPrettySure : hostBlockPrettySure;
+    const named = identityEntryLevelAnswer(identityCandidates[0] || null, { blockPrettySure: identityBlockPrettySure, disagreed: identityDisagreed });
     if (named) {
       plantBlock = {
         slug: named.entry.slug, common_name: named.entry.common_name, scientific_name: named.entry.scientific_name || null, source: 'photo', wording: named.wording,
       };
     }
   }
-  const weeds = subject === 'lawn'
-    ? weedCandidates.map((c) => identityEntryLevelAnswer(c)).filter(Boolean).slice(0, 2).map((n) => weedWordingLine(n.entry, n.wording))
+  const weeds = (subject === 'lawn' && !qualityBlocksNaming && !weedDisagreed)
+    ? weedCandidates.map((c) => identityEntryLevelAnswer(c, { blockPrettySure: weedBlockPrettySure })).filter(Boolean).slice(0, 2).map((n) => weedWordingLine(n.entry, n.wording))
     : [];
 
   // ── answer (naming gate, §6.3) ──
-  const namedAnswer = namedAnswerFor(allApprovedPossibilities, allApprovedPossibilities[0] || null);
+  const namedAnswer = qualityBlocksNaming ? null : namedAnswerFor(allApprovedPossibilities, allApprovedPossibilities[0] || null, {
+    blockPrettySure: possibilitiesBlockPrettySure, disagreed: possibilitiesDisagreed,
+  });
   let answer;
   if (namedAnswer) {
     answer = {
@@ -748,7 +793,9 @@ function buildWorkup(ctx) {
       symptom: null,
     };
   } else {
-    const observedTermsRaw = ctx.observedTerms || [];
+    // An unusable photo's own `observed_terms` are not trustworthy either —
+    // always the fixed unusable headline, never a term-based guess.
+    const observedTermsRaw = qualityBlocksNaming ? [] : (ctx.observedTerms || []);
     const term = observedTermsRaw[0] || null;
     answer = {
       level: 'symptom',
@@ -760,8 +807,11 @@ function buildWorkup(ctx) {
     };
   }
 
-  const { hint: nextStepHint, referral } = nextStepHintFor(approvedPossibilities);
-  const tier = answer.level === 'entry' ? 'ai_suggestion' : 'needs_more_evidence';
+  // An unusable photo also never earns a treatment-shaped next step.
+  const { hint: nextStepHint, referral } = qualityBlocksNaming
+    ? { hint: { kind: 'unclear', text: NEXT_STEP_TEMPLATES.unclear }, referral: null }
+    : nextStepHintFor(approvedPossibilities);
+  const tier = (answer.level === 'entry' && !qualityBlocksNaming) ? 'ai_suggestion' : 'needs_more_evidence';
   const accountBlock = accountTurf ? { grass_type: accountTurf.slug } : {};
 
   return {
@@ -920,22 +970,34 @@ function dedupePossibilities(list) {
   return [...bySlug.values()].sort((a, b) => b.confidence - a.confidence);
 }
 
+/** Same "agree bumps confidence / disagree is uncertain" combination as
+ * `combineIdentity`, for the condition/possibility list. `disagreed` means
+ * Gemini's and OpenAI's OWN top pick differ — the contract's escalation
+ * "disagree" rule (drop to uncertain, tier needs_more_evidence) applies to
+ * conditions the same way it does to identity; `buildWorkup` reads it to
+ * force the symptom-level fallback rather than name a possibility neither
+ * provider actually agreed was top. */
 function combinePossibilities(geminiPossibilities, escalationRaw, indexEntries) {
-  if (!Array.isArray(escalationRaw)) return geminiPossibilities;
+  if (!Array.isArray(escalationRaw)) return { possibilities: geminiPossibilities, disagreed: false, openaiAnswered: false };
   const openaiPossibilities = escalationRaw.map((raw) => resolveConditionCandidate(raw, indexEntries)).filter(Boolean);
-  return dedupePossibilities([...geminiPossibilities, ...openaiPossibilities]);
+  const geminiTop = geminiPossibilities[0] || null;
+  const openaiTop = openaiPossibilities[0] || null;
+  const openaiAnswered = !!openaiTop;
+  const combined = dedupePossibilities([...geminiPossibilities, ...openaiPossibilities]);
+  const disagreed = !!(geminiTop && openaiTop && geminiTop.slug !== openaiTop.slug);
+  return { possibilities: combined, disagreed, openaiAnswered };
 }
 
-function combineQuality(a, b) {
-  if (!a && !b) return { usable: true, issue: 'none' };
-  if (!a) return b;
-  if (!b) return a;
-  const usable = a.usable !== false && b.usable !== false;
-  let issue = 'none';
-  if (a.issue === 'multiple_subjects' || b.issue === 'multiple_subjects') issue = 'multiple_subjects';
-  else if (a.issue && a.issue !== 'none') issue = a.issue;
-  else if (b.issue && b.issue !== 'none') issue = b.issue;
-  return { usable, issue };
+/** Conservative combine across every leg that reported a photo-quality read
+ * (candidates, conditions, escalation — Codex pre-push P1 round 2: the
+ * conditions leg's own read was dropped entirely before). Any leg saying
+ * `usable:false` wins; `multiple_subjects` outranks any other issue. */
+function combineQuality(...reads) {
+  const present = reads.filter(Boolean);
+  if (!present.length) return { usable: true, issue: 'none' };
+  const usable = present.every((q) => q.usable !== false);
+  const withIssue = present.find((q) => q.issue === 'multiple_subjects') || present.find((q) => q.issue && q.issue !== 'none');
+  return { usable, issue: withIssue ? withIssue.issue : 'none' };
 }
 
 /**
@@ -959,7 +1021,6 @@ async function identifyPlantV2({
   const turfIndex = subject === 'lawn' ? turfIndexFor() : [];
   const weedIndex = subject === 'lawn' ? weedIndexFor() : [];
   const hostIndex = subject !== 'lawn' ? hostIndexFor(subject) : [];
-  const identityIndex = [...turfIndex, ...weedIndex, ...hostIndex];
   const indexTexts = {
     turfIndexText: buildCatalogIndexText(turfIndex),
     weedIndexText: buildCatalogIndexText(weedIndex),
@@ -978,9 +1039,12 @@ async function identifyPlantV2({
   const rawTurf = candidatesJson?.turf || [];
   const rawWeeds = candidatesJson?.weeds || [];
   const rawHost = candidatesJson?.host || [];
-  const turfFromCall1 = dedupeCandidates(rawTurf.map((r) => resolveIdentityCandidate(r, identityIndex)));
-  const weedsFromCall1 = dedupeCandidates(rawWeeds.map((r) => resolveIdentityCandidate(r, identityIndex)));
-  const hostFromCall1 = dedupeCandidates(rawHost.map((r) => resolveIdentityCandidate(r, identityIndex)));
+  // Codex pre-push P1 (round 2): each slot resolves against ONLY its own
+  // index — never the combined one — so a weed slug can't become the turf
+  // identity (or vice versa) just because it exists somewhere in the catalog.
+  const turfFromCall1 = dedupeCandidates(rawTurf.map((r) => resolveIdentityCandidate(r, turfIndex)));
+  const weedsFromCall1 = dedupeCandidates(rawWeeds.map((r) => resolveIdentityCandidate(r, weedIndex)));
+  const hostFromCall1 = dedupeCandidates(rawHost.map((r) => resolveIdentityCandidate(r, hostIndex)));
   const identityFromCall1 = [...turfFromCall1, ...weedsFromCall1, ...hostFromCall1];
   const identityCatalogCandidates = identityFromCall1.filter((c) => c.entry);
 
@@ -1064,6 +1128,13 @@ async function identifyPlantV2({
   let escalationResult = null;
   let escalationJson = null;
   let openaiAnswered = false;
+  // Escalation uncertainty per slot — Codex pre-push P1 round 2: recorded
+  // for `internal` before, but never reached either builder. An unanswered
+  // trigger caps that slot's wording at `likely`; a disagreement blocks
+  // naming it at all (see `identityEntryLevelAnswer` / `namedAnswerFor`).
+  let turfDisagreed = false; let weedDisagreed = false; let hostDisagreed = false;
+  let turfBlockPrettySure = false; let weedBlockPrettySure = false; let hostBlockPrettySure = false;
+  let possibilitiesDisagreed = false; let possibilitiesBlockPrettySure = false;
 
   if (escalationTriggered) {
     escalationResult = await callEscalation(images, {
@@ -1080,14 +1151,27 @@ async function identifyPlantV2({
     }, legTimeoutMs(1));
     escalationJson = validJson(escalationResult, 'escalation');
     if (escalationJson) {
-      const turfCombined = combineIdentity(turfCandidates, escalationJson.turf, identityIndex);
-      const weedCombined = combineIdentity(weedCandidates, escalationJson.weeds, identityIndex);
-      const hostCombined = combineIdentity(hostCandidates, escalationJson.host, identityIndex);
+      // Codex pre-push P1 round 2: each slot combines against its OWN index
+      // only (never the merged one) — same reasoning as Call A's resolution.
+      const turfCombined = combineIdentity(turfCandidates, escalationJson.turf, turfIndex);
+      const weedCombined = combineIdentity(weedCandidates, escalationJson.weeds, weedIndex);
+      const hostCombined = combineIdentity(hostCandidates, escalationJson.host, hostIndex);
       finalIdentity = { turf: turfCombined.candidates, weed: weedCombined.candidates, host: hostCombined.candidates };
       disagreed = turfCombined.disagreed || weedCombined.disagreed || hostCombined.disagreed;
       openaiAnswered = turfCombined.openaiAnswered || weedCombined.openaiAnswered || hostCombined.openaiAnswered;
-      finalPossibilities = combinePossibilities(possibilitiesFromCall1, escalationJson.conditions, conditionIndex);
+      turfDisagreed = turfCombined.disagreed; weedDisagreed = weedCombined.disagreed; hostDisagreed = hostCombined.disagreed;
+      turfBlockPrettySure = !turfCombined.openaiAnswered; weedBlockPrettySure = !weedCombined.openaiAnswered; hostBlockPrettySure = !hostCombined.openaiAnswered;
+
+      const possibilitiesCombined = combinePossibilities(possibilitiesFromCall1, escalationJson.conditions, conditionIndex);
+      finalPossibilities = possibilitiesCombined.possibilities;
+      possibilitiesDisagreed = possibilitiesCombined.disagreed;
+      possibilitiesBlockPrettySure = !possibilitiesCombined.openaiAnswered;
       if (escalationJson.observed_terms?.length) observedTerms = escalationJson.observed_terms;
+    } else {
+      // OpenAI unavailable (or answered something Ajv-invalid) entirely — no
+      // disagreement is possible, but a trigger fired and got no real
+      // second opinion, so nothing escalated may read `pretty_sure`.
+      turfBlockPrettySure = true; weedBlockPrettySure = true; hostBlockPrettySure = true; possibilitiesBlockPrettySure = true;
     }
   }
 
@@ -1099,12 +1183,20 @@ async function identifyPlantV2({
     return { ok: false, reason: 'vision_unavailable' };
   }
 
-  const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
+  // Codex pre-push P1 round 2: the conditions leg's own photo-quality read
+  // was dropped entirely before — every leg that could have reported one
+  // now feeds the combine, so a `usable:false` from ANY of them gates
+  // naming (see `buildWorkup`'s `qualityBlocksNaming`).
+  const quality = combineQuality(candidatesJson?.quality, conditionsJson?.quality, escalationJson?.quality);
 
   let v2;
   if (mode === 'identify') {
     const identityCandidates = subject === 'lawn' ? finalIdentity.turf : finalIdentity.host;
-    const built = buildIdentityResult(identityCandidates, { subject, currentMonth });
+    const identityDisagreed = subject === 'lawn' ? turfDisagreed : hostDisagreed;
+    const identityBlockPrettySure = subject === 'lawn' ? turfBlockPrettySure : hostBlockPrettySure;
+    const built = buildIdentityResult(identityCandidates, {
+      subject, currentMonth, blockPrettySure: identityBlockPrettySure, disagreed: identityDisagreed,
+    });
     v2 = {
       version: 2, kind: 'identity', subject_type: subject, tier: built.tier, answer: built.answer, entry: built.entry, candidates: built.candidates, next_photo: built.next_photo, quality,
     };
@@ -1115,6 +1207,14 @@ async function identifyPlantV2({
       turfCandidates: finalIdentity.turf,
       weedCandidates: finalIdentity.weed,
       hostCandidates: finalIdentity.host,
+      turfDisagreed,
+      weedDisagreed,
+      hostDisagreed,
+      turfBlockPrettySure,
+      weedBlockPrettySure,
+      hostBlockPrettySure,
+      possibilitiesDisagreed,
+      possibilitiesBlockPrettySure,
       observedTerms,
       currentMonth,
       chips,
