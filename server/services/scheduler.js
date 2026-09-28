@@ -358,8 +358,25 @@ async function claimDueScheduledSms(now) {
       SELECT id
       FROM sms_log
       WHERE status = 'scheduled'
-        AND scheduled_for IS NOT NULL
-        AND scheduled_for <= ?
+        AND (
+          (scheduled_for IS NOT NULL AND scheduled_for <= ?)
+          -- Owner ruling 2026-09-28: the 8am-8pm window no longer fences the
+          -- voicemail text-back at all (missed_call_text_back /
+          -- voicemail_lead_sms are CUSTOMER_ACTION_ENTRY_POINTS), so a row
+          -- queued only because that window was closed
+          -- (original_block_code QUIET_HOURS_HOLD) is due NOW — whether it
+          -- was queued before this code shipped, or by an old instance
+          -- still running mid-deploy. Every OTHER voicemail_lead_sms_deferred
+          -- retry reason (suppression retry, an in-flight dedupe wait, …)
+          -- keeps its own scheduled_for. Only a row never claimed yet
+          -- (no scheduled_sms_attempts) is pulled forward: original_block_code
+          -- survives retries, so once the first accelerated attempt has run,
+          -- a failure's backoff (scheduled_for) must be honored rather than
+          -- re-claimed every tick until its attempts are exhausted.
+          OR (metadata->>'entry_point' = 'voicemail_lead_sms_deferred'
+              AND metadata->>'original_block_code' = 'QUIET_HOURS_HOLD'
+              AND COALESCE(NULLIF(metadata->>'scheduled_sms_attempts', ''), '0') = '0')
+        )
       ORDER BY scheduled_for ASC, created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT ?
@@ -367,6 +384,11 @@ async function claimDueScheduledSms(now) {
     UPDATE sms_log AS s
     SET status = 'sending',
         updated_at = ?,
+        -- A quiet-hours voicemail row claimed ahead of its old 8 AM
+        -- scheduled_for (above) is pulled to the claim time, so
+        -- recoverStaleScheduledSmsClaims (scheduled_for <= now) can recover
+        -- it if this worker dies mid-send. A plainly due row is unchanged.
+        scheduled_for = LEAST(s.scheduled_for, ?::timestamptz),
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
@@ -388,7 +410,7 @@ async function claimDueScheduledSms(now) {
     FROM due
     WHERE s.id = due.id
     RETURNING s.*
-  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now]);
+  `, [now, SCHEDULED_SMS_CLAIM_LIMIT, now, now, now]);
 
   return result.rows || [];
 }
@@ -4275,6 +4297,14 @@ function initScheduledJobs() {
             // payment. Persisted at enqueue by the customer-action
             // requeue; automated rows never carry it.
             ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
+            // A voicemail quote-link text queued before this lane's own
+            // window check was removed (owner ruling 2026-09-28) is still
+            // sitting on the rail waiting for 8 AM — this entry point is
+            // used for nothing else, so any row wearing it is by
+            // construction the answer to a prospect's own voicemail. Send
+            // it on the very next replay instead of making it wait out the
+            // window it no longer needs to.
+            ...(claimMeta.entry_point === 'voicemail_lead_sms_deferred' ? { customerInitiated: true } : {}),
             ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
@@ -7479,6 +7509,7 @@ module.exports = {
   holdFinalReviewUncertainty,
   shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
+  claimDueScheduledSms,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,
