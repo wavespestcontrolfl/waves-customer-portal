@@ -567,7 +567,7 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
   // The relay takes the shared VOICE_RELAY_MODEL only as an allowlisted
   // Anthropic id (gate or no gate — collections reads the same env), so the
   // inbound row must not show an OpenAI value as what inbound calls run on.
-  it('an OpenAI VOICE_RELAY_MODEL shows as rejected on voice_relay (runtime falls back) but as-is on collections', () => {
+  it('an OpenAI VOICE_RELAY_MODEL shows as rejected on voice_relay and on collections (both runtimes fall back)', () => {
     const savedGate = process.env.GATE_VOICE_RELAY_OPENAI;
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = 'gpt-6-sol';
@@ -580,7 +580,8 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       expect(inbound.primary.model).toBe(MODELS.VOICE);
       expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
       expect(inbound.primary.dependsOnEnvs).toContain('VOICE_RELAY_MODEL');
-      expect(collections.primary.model).toBe('gpt-6-sol');
+      // collections-conversation.js validates the same chain since #5151.
+      expect(collections.primary.model).toBe(MODELS.VOICE);
     } finally {
       if (savedGate === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedGate;
     }
@@ -589,9 +590,9 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
   // Codex r8 P2: the tab walks the same validated chain the relay does —
   // VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default.
   it.each([
-    ['a rejected VOICE_RELAY_MODEL over a valid MODEL_VOICE shows MODEL_VOICE', { VOICE_RELAY_MODEL: 'gpt-6-sol', MODEL_VOICE: 'claude-haiku-4-5-20251001' }, 'claude-haiku-4-5-20251001', 'gpt-6-sol'],
-    ['a MODEL_VOICE the relay refuses shows the code default', { MODEL_VOICE: 'gpt-6-sol' }, 'CODE_DEFAULT', 'gpt-6-sol'],
-  ])('%s — matching resolveSessionModel', (_label, env, inboundModel, collectionsModel) => {
+    ['a rejected VOICE_RELAY_MODEL over a valid MODEL_VOICE shows MODEL_VOICE', { VOICE_RELAY_MODEL: 'gpt-6-sol', MODEL_VOICE: 'claude-haiku-4-5-20251001' }, 'claude-haiku-4-5-20251001'],
+    ['a MODEL_VOICE the relay refuses shows the code default', { MODEL_VOICE: 'gpt-6-sol' }, 'CODE_DEFAULT'],
+  ])('%s — matching resolveSessionModel', (_label, env, inboundModel) => {
     const saved = { MODEL_VOICE: process.env.MODEL_VOICE };
     Object.assign(process.env, env);
     try {
@@ -602,7 +603,8 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       const expected = inboundModel === 'CODE_DEFAULT' ? require('../config/models').DEFAULTS.VOICE : inboundModel;
       expect(inbound.primary.model).toBe(expected);
       expect(resolveSessionModel({ sandbox: false }).model).toBe(expected);
-      expect(lanes.find((l) => l.id === 'voice_relay_collections').primary.model).toBe(collectionsModel);
+      // Collections walks the same validated chain (collections-conversation.js MODEL).
+      expect(lanes.find((l) => l.id === 'voice_relay_collections').primary.model).toBe(expected);
     } finally {
       if (saved.MODEL_VOICE === undefined) delete process.env.MODEL_VOICE; else process.env.MODEL_VOICE = saved.MODEL_VOICE;
     }

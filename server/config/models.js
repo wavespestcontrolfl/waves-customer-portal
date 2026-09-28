@@ -306,12 +306,12 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.
 const MODEL_CATALOG = {
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Opus 5.5 (see the flip-order note atop this file) — thinking is always
-  // on (anthropicThinkingAlwaysOn / ANTHROPIC_THINKING_FLOOR_RE), so it must
-  // never reach a lane that sends `thinking: { type: 'disabled' }`. The two
-  // voice-relay lanes filter it out of their own model allowlists for that
-  // reason (server/services/voice-agent/relay-conversation.js) — every other
-  // lane may offer it like any other catalog entry.
-  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  // on (anthropicThinkingAlwaysOn), and most direct tier callers size
+  // max_tokens for a no-thinking reply, so like Fable it is offered only to
+  // DEEP / EXTREME selectors (deep.js sizes and strips thinking). `voice`
+  // admits it to the voice relay's sandbox / eval-harness thinking-on path
+  // (relay-conversation.js) — never production inbound or collections.
+  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep', voice: { thinking: 'adaptive' } },
   'claude-opus-4-8': { label: 'Claude Opus 4.8', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy' },
   'claude-sonnet-5': { label: 'Claude Sonnet 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Fable's thinking blocks + refusal semantics are handled only by

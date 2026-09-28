@@ -216,8 +216,9 @@ const OPENAI_VOICE_OVERRIDE_MODEL_IDS = new Set(
     .map(([id]) => id)
 );
 
-// Thinking-always-on Anthropic ids (Opus 5.5+, ANTHROPIC_THINKING_FLOOR_RE)
-// held out of the production allowlist above — reachable ONLY for a sandbox
+// Thinking-always-on Anthropic ids the catalog marks voice-eligible (a
+// `voice` object — Opus 5.5; Fable/Mythos carry none, since only deep.js
+// handles their refusals), held out of the production allowlist above — reachable ONLY for a sandbox
 // test call or the eval/benchmark harness (the same `openaiContext` flag the
 // OpenAI ids use), never production inbound and never the shared
 // VOICE_RELAY_MODEL / MODEL_VOICE chain (SHARED_MODEL_CHAIN below is
@@ -231,7 +232,7 @@ const ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS = new Set(
       && meta.provider === 'anthropic'
       && Array.isArray(meta.caps) && meta.caps.includes('text')
       && meta.status !== 'unavailable'
-      && !meta.requires
+      && meta.voice && typeof meta.voice === 'object'
       && MODELS.anthropicThinkingAlwaysOn(id))
     .map(([id]) => id)
 );
