@@ -3286,6 +3286,29 @@ describe('aeo_question_gap bucket', () => {
     }
   });
 
+  test('an article row whose target went live re-mines as a refresh under the same key, carrying the page', async () => {
+    const article = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+    const refresh = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: `${HUB}/termite/termite-bond/` });
+    expect(refresh.dedupe_key).toBe(article.dedupe_key);
+    const db = require('../models/db');
+    const calls = [];
+    db.mockImplementation(() => ({ whereIn() { return this; }, select: async () => [] }));
+    const trx = () => { const q = { where: () => q, whereIn: () => q, whereNotNull: () => q, forUpdate: () => q, select: async () => [] }; return q; };
+    trx.raw = async (sql, bindings) => { calls.push({ sql, bindings }); return { rowCount: 1 }; };
+    try {
+      const miner = new GscOpportunityMiner();
+      jest.spyOn(miner, '_aeoQuestionPageFence').mockResolvedValue(new Map());
+      expect(await miner.persistAll([refresh], trx)).toBe(1);
+      // The ON CONFLICT update of a mutable (pending / expired) row rewrites
+      // page_url with action_type — never a refresh row with no page.
+      expect(calls[0].sql).toMatch(/action_type = EXCLUDED\.action_type,[\s\S]*page_url = EXCLUDED\.page_url,/);
+      expect(calls[0].bindings[1]).toBe('refresh_existing_page');
+      expect(calls[0].bindings[3]).toBe(`${HUB}/termite/termite-bond/`);
+    } finally {
+      db.mockReset();
+    }
+  });
+
   test('a batch carrying only pinned question articles still takes the page-edit advisory lock', async () => {
     const miner = new GscOpportunityMiner();
     const raws = [];

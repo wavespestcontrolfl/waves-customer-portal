@@ -4985,6 +4985,12 @@ class GscOpportunityMiner {
                query = EXCLUDED.query,
                service = EXCLUDED.service,
                city = EXCLUDED.city,
+               -- page_url too: an aeo_question_gap key is question + target,
+               -- so a pinned article whose target went live re-mines as a
+               -- refresh under the SAME key and must carry the page it
+               -- edits. A no-op elsewhere, since dedupeKey embeds page_url
+               -- whenever a row has one.
+               page_url = EXCLUDED.page_url,
                status = 'pending',
                -- A revived row is pending again — a lingering automatic
                -- retirement reason (family_signal_gone) would read as
