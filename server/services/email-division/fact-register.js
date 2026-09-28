@@ -42,6 +42,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
+const { reentrySafetyClaimFinding } = require('../content/content-guardrails');
 const { FACTS, SOURCE, VERIFIED_ON } = require('./fact-register-data');
 
 const CATEGORY = 'facts';
@@ -164,12 +165,14 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
  */
 function planStraySync(row) {
   if (!row || row.source !== SOURCE) return { action: 'ignore' };
-  if (!row.active) return { action: 'unchanged' };
+  if (row.status === 'archived') return { action: 'unchanged' };
   const meta = parseJson(row.metadata, {}) || {};
   if (meta.register_hash && rowFingerprint(row) !== meta.register_hash) {
     return { action: 'hold', reason: 'edited_by_person', rowHash: rowFingerprint(row), shippedHash: meta.register_hash };
   }
-  return { action: 'retire', reason: 'withdrawn_from_register' };
+  // A withdrawn fact archives even when a person had already set
+  // active=false (shared search reads status); that deactivation is kept.
+  return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: !row.active && !meta.retired_reason };
 }
 
 function rowValues(fact, existingMeta, now) {
@@ -390,7 +393,8 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
 
   if (retireStrays) {
     const strays = await conn('knowledge_base')
-      .where({ source: SOURCE, category: CATEGORY, active: true })
+      .where({ source: SOURCE, category: CATEGORY })
+      .whereNot({ status: 'archived' })
       .whereNotIn('slug', facts.map((fact) => fact.slug))
       .select('id', 'slug');
     for (const stray of strays) {
@@ -657,10 +661,15 @@ function vacuumClaimInSentence(sentence) {
 //
 // AGENTS.md: no pesticide is ever "safe" (incl. "pet-safe"/"family-safe"),
 // and the one allowed idiom — "safe once dry" — must come with the
-// technician confirming the timing. The label's own wording ("Do not permit
-// humans or pets to contact treated surfaces until the spray has dried") is
-// not a safety claim. "safe from" (keeping a family safe FROM mosquitoes)
-// and "safe to say" are not product-safety claims either.
+// technician confirming the timing. The repo-wide compliance predicate
+// (content-guardrails.js reentrySafetyClaimFinding — the same one comms-lint,
+// the voice relay and the lawn customer copy use) is authoritative: whatever
+// it flags, this rule flags. The patterns below are the UNION with it, for
+// the copula, prepositional and bare-adjective forms it lets through ("It
+// is safe for the whole family", "our safe lawn treatment"). The label's
+// own wording ("Do not permit humans or pets to contact treated surfaces
+// until the spray has dried") is not a safety claim; "safe to say", "a safe
+// distance" and "a safe trip" are not product-safety claims either.
 // Hyphenated only: "keep your family safe from mosquitoes" is not a claim.
 const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|people|human|eco|environment(?:ally)?|earth|planet)-safe\b/i;
 // Copula forms ("is safe"), prepositional forms ("safe for / around / once
@@ -672,10 +681,12 @@ const SAFE_IDIOM_NOUN = '(?:from|to\\s+say|bet|distance|place|space|side|harbou?
 const SAFE_CLAIM = new RegExp(
   `\\b(?:is|are|it's|its|be|being|remains?|becomes?|considered|deemed|completely|totally|perfectly|entirely|100%)\\s+(?:\\w+\\s+)?safe\\b(?!\\s+${SAFE_IDIOM_NOUN}\\b)`
   + '|\\bsafe\\s+(?:for|around|near|with|once|when|after|as\\s+soon\\s+as)\\b'
-  + '|\\bsafe\\s+to\\s+(?!say\\b)\\w+'
-  + `|\\bsafe(?:,?\\s+(?:and\\s+)?\\w+)?\\s+${SAFE_PRODUCT_NOUN}\\b`,
+  + '|\\bsafe\\s+to\\s+(?!say\\b)\\w+',
   'i',
 );
+// The bare adjective on a product noun, tested on the whole sentence: "a
+// safe, effective spray" spans the comma a clause split would cut at.
+const SAFE_ADJECTIVE_PRODUCT = new RegExp(`\\bsafe(?:,?\\s+(?:and\\s+)?\\w+)?\\s+${SAFE_PRODUCT_NOUN}\\b`, 'i');
 const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+you\s+know|advise|say|give)|\b(?:confirm|tell|advise|check)\w*[^.]{0,40}\btechnicians?\b/i;
 // The technician idiom exempts ONLY dry-state re-entry guidance: "safe once
 // dry / when it has dried, and your technician confirms the timing". It
@@ -685,12 +696,24 @@ const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|drie
 const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
 const AUDIENCE_ABSOLUTE = /\bsafe\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pets?|kids?|children|babies|dogs?|cats?|people|humans?|(?:whole\s+|entire\s+)?family)\b/i;
 
+// The dry-state + technician exemption is bound to the CLAIM's clause: the
+// dry condition and the technician confirmation must sit in that clause or
+// the one right beside it. "The treatment is safe and works after it dries;
+// your technician confirms timing" is not the idiom — "after it dries"
+// modifies "works", and the technician clause is two clauses away.
 function safetyClaimInSentence(sentence) {
-  if (SAFE_COMPOUND.test(sentence)) return sentence;
-  if (!SAFE_CLAIM.test(sentence)) return null;
-  const dryStateWithTechnician = TECHNICIAN_CONFIRMS.test(sentence) && DRY_STATE.test(sentence)
-    && !FIXED_REENTRY_TIME.test(sentence) && !AUDIENCE_ABSOLUTE.test(sentence);
-  return dryStateWithTechnician ? null : sentence;
+  if (reentrySafetyClaimFinding(sentence)) return sentence;
+  if (SAFE_COMPOUND.test(sentence) || SAFE_ADJECTIVE_PRODUCT.test(sentence)) return sentence;
+  const clauses = splitClauses(sentence);
+  for (let i = 0; i < clauses.length; i += 1) {
+    const clause = clauses[i];
+    if (!SAFE_CLAIM.test(clause)) continue;
+    const beside = [clauses[i - 1], clause, clauses[i + 1]].filter(Boolean).join(' ');
+    const dryStateWithTechnician = DRY_STATE.test(beside) && TECHNICIAN_CONFIRMS.test(beside)
+      && !FIXED_REENTRY_TIME.test(clause) && !AUDIENCE_ABSOLUTE.test(clause);
+    if (!dryStateWithTechnician) return clause;
+  }
+  return null;
 }
 
 // --- fixed_reentry_time ----------------------------------------------------
@@ -709,6 +732,8 @@ const REENTRY_CONTEXT = /\b(?:keep|stay|staying|remain|remaining)\b[^.]{0,40}?\b
 // in one clause and "until the spray has dried" in another is not a fixed
 // drying time.
 function reentryTimeInSentence(sentence) {
+  const canonical = reentrySafetyClaimFinding(sentence);
+  if (canonical && /\b(?:minutes?|mins?|hours?|hrs?)\b/i.test(canonical.message || '')) return sentence;
   for (const clause of splitClauses(sentence)) {
     if (FIXED_REENTRY_TIME.test(clause) && REENTRY_CONTEXT.test(clause)) return clause;
   }

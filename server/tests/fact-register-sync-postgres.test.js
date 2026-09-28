@@ -299,6 +299,23 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect((await rowOf(facts[1].slug)).active).toBe(true);
   });
 
+  test('a withdrawn fact a person had deactivated is archived too, and stays off when the fact returns', async () => {
+    const facts = [fact(1), fact(2)];
+    await sync(facts);
+    await trx('knowledge_base').where({ slug: facts[0].slug }).update({ active: false });
+
+    const r = await sync([fact(2)], { retireStrays: true });
+    expect(r.retired).toContain(facts[0].slug);
+    const archived = await rowOf(facts[0].slug);
+    expect(archived).toMatchObject({ active: false, status: 'archived' });
+    expect(archived.metadata).toMatchObject({ retired_reason: 'withdrawn_from_register', deactivated_by_person: true });
+
+    // The fact comes back into the register: the person's deactivation holds.
+    const back = await sync(facts);
+    expect(back.held).toEqual([{ slug: facts[0].slug, reason: 'deactivated_by_person' }]);
+    expect((await rowOf(facts[0].slug)).active).toBe(false);
+  });
+
   test('a legacy register row (no register_hash, from the pre-fingerprint seeds) is brought under management', async () => {
     const f = fact(1);
     const [legacy] = await trx('knowledge_base').insert({

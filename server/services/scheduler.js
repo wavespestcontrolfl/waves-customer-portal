@@ -3047,7 +3047,9 @@ function initScheduledJobs() {
           logger.warn(`[fact-register] held (edited by a person, not overwritten): ${r.held.map((h) => h.slug).join(', ')}`);
         }
         if (r.errors.length) {
-          logger.warn(`[fact-register] sync errors: ${r.errors.map((e) => `${e.slug}: ${e.error}`).join('; ')}`);
+          // Surface as a job failure (not a warning) so runExclusive's health
+          // record and the ops digest see a partial sync as a failed tick.
+          throw new Error(`fact-register sync: ${r.errors.length} row error(s): ${r.errors.map((e) => `${e.slug}: ${e.error}`).join('; ')}`);
         }
       });
     } catch (err) {

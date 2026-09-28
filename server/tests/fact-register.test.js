@@ -292,15 +292,19 @@ describe('planFactSync (pure)', () => {
 
 describe('planStraySync (pure) — a register row whose slug left the register', () => {
   const fact = FACTS[0];
-  test('ignores rows that are not the register\'s, leaves inactive rows alone', () => {
+  test('ignores rows that are not the register\'s, leaves already-archived rows alone', () => {
     expect(planStraySync(rowFor(fact, { source: 'manual' }))).toEqual({ action: 'ignore' });
-    expect(planStraySync(rowFor(fact, { active: false }))).toEqual({ action: 'unchanged' });
+    expect(planStraySync(rowFor(fact, { active: false, status: 'archived' }))).toEqual({ action: 'unchanged' });
   });
 
   test('retires an untouched or legacy row, holds an edited one', () => {
-    expect(planStraySync(rowFor(fact))).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
-    expect(planStraySync(withMeta(fact, { register_hash: undefined }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register' });
+    expect(planStraySync(rowFor(fact))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
+    expect(planStraySync(withMeta(fact, { register_hash: undefined }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: false });
     expect(planStraySync(rowFor(fact, { content: 'edited by a person' }))).toMatchObject({ action: 'hold', reason: 'edited_by_person' });
+  });
+
+  test('a withdrawn fact a person had deactivated still archives (shared search reads status), keeping the deactivation', () => {
+    expect(planStraySync(rowFor(fact, { active: false }))).toEqual({ action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: true });
   });
 });
 
@@ -585,6 +589,11 @@ describe('findUnverifiedClaims', () => {
       'The treatment is safe after 15 minutes, as your technician will confirm.',
       'Your technician will confirm the product is safe for your family.',
       'The lawn is safe to walk on after 30 minutes; ask your technician.',
+      'The treatment is safe and works after it dries; your technician confirms timing.',
+      'The treatment is safe, your technician confirms timing, once it dries.',
+      // The repo-wide compliance predicate flags these too; its verdict is authoritative here.
+      'Keep your family safe from mosquitoes this summer.',
+      'Once the treated areas have dried they are safe to use again — your technician confirms the timing at the visit.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(true);
     });
@@ -593,15 +602,13 @@ describe('findUnverifiedClaims', () => {
       'Do not permit humans or pets to contact treated surfaces until the spray has dried.',
       'Do not allow people or pets on treated surfaces until spray has dried.',
       'Keep pets off the lawn until it is dry; your technician will confirm when it is safe to let them back out.',
-      'Once the treated areas have dried they are safe to use again — your technician confirms the timing at the visit.',
-      'Keep your family safe from mosquitoes this summer.',
       'It is safe to say termites are active.',
       'Have a safe Labor Day weekend.',
       'The product is highly toxic to bees exposed to direct treatment.',
       'Keep a safe distance from fire ant mounds.',
       'It is a safe bet that lovebugs return in September.',
       'Have a safe trip home for the holidays.',
-    ])('the label\'s wording, "safe from", "safe to say", "safe distance/bet/trip" and the technician-confirms idiom pass: %s', (sentence) => {
+    ])('the label\'s wording, "safe to say", "safe distance/bet/trip" and the technician-confirms idiom pass: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
     });
   });
