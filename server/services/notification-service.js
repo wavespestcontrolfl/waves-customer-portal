@@ -193,7 +193,7 @@ const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
 // re-bells. Deliberately NOT folded into ROUTING_METADATA_KEYS: that list
 // feeds the audience-flip check in mergeRefreshMetadata below, which has
 // nothing to do with these.
-const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys'];
+const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys', 'itemSetHash'];
 
 // Did this emission change anything a standing keyed row shows, routes by,
 // or rings on?

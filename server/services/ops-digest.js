@@ -176,9 +176,20 @@ const MAX_ITEM_KEYS = 500;
 // A sender that REPORTED identity but has none usable (explicit null — its
 // page overflowed — or a set past the cap) clears a stored list, so a later
 // comparison never runs against a stale one. An omitted itemKeys leaves it.
-function itemKeysMetaFor(raw, normalized) {
-  if (normalized) return { itemKeys: normalized };
-  return raw === null || Array.isArray(raw) ? { itemKeys: null } : {};
+//
+// itemSetHash: a SHA-256 of the complete sorted set, stored for every set
+// (any size) — so a set past the cap still proves "a different set at an
+// equal count" (which can only mean something new arrived), without ever
+// ringing a set that merely shrank.
+function itemKeysMetaFor(raw, normalized, itemSetHash) {
+  const hashMeta = { itemSetHash: itemSetHash || null };
+  if (normalized) return { itemKeys: normalized, ...hashMeta };
+  return raw === null || Array.isArray(raw) ? { itemKeys: null, ...hashMeta } : {};
+}
+function itemSetHashFor(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = [...new Set(raw.map((k) => String(k ?? '').trim()).filter(Boolean))].sort();
+  return cleaned.length ? crypto.createHash('sha256').update(cleaned.join('\n')).digest('hex') : null;
 }
 function normalizeItemKeys(raw) {
   if (!Array.isArray(raw)) return null;
@@ -220,8 +231,11 @@ function hasNewItemKeys(currentKeys, priorKeys) {
 // removed (setKeyFor), so a different missed booking or a different set of
 // unreturned calls rings even at the same count (a second d19 gap is still
 // one gap).
-function ringDecision({ newCount, count, priorCount, sameSet = true, itemKeys, priorItemKeys }) {
+function ringDecision({ newCount, count, priorCount, sameSet: sameSetIn = true, itemKeys, priorItemKeys, itemSetHash, priorItemSetHash }) {
   if (hasNewItemKeys(itemKeys, priorItemKeys)) return true;
+  // Both hashes known and different: a different set. Only consulted at an
+  // equal (or unknown) count below — a smaller count still never rings.
+  const sameSet = sameSetIn && !(itemSetHash && priorItemSetHash && itemSetHash !== priorItemSetHash);
   if (Number(newCount) > 0) return true;
   const hasCount = count !== undefined && count !== null;
   const hasPrior = priorCount !== undefined && priorCount !== null;
@@ -303,7 +317,7 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
 // Ring decision for a row about to be INSERTED fresh (no standing dedupe row
 // to refresh) — the comparison point is the most recent matching row found
 // above, not the specific row a dedupeKey would find (there may be none).
-async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = null, count, newCount, itemKeys }) {
+async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = null, count, newCount, itemKeys, itemSetHash }) {
   const prior = await findPriorRungRow(conn, { alertClass, source, key });
   if (!prior) return true;
   const priorMeta = parseMeta(prior.metadata);
@@ -319,6 +333,7 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
   return ringDecision({
     newCount, count, priorCount: metaCount(priorMeta), sameSet,
     itemKeys, priorItemKeys: Array.isArray(priorMeta.itemKeys) ? priorMeta.itemKeys : undefined,
+    itemSetHash, priorItemSetHash: priorMeta.itemSetHash || undefined,
   });
 }
 
@@ -326,12 +341,13 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
 // EXISTING standing row a dedupeKey found, so a refresh only re-bells on
 // genuine new news — a resolved standing row (should not normally happen:
 // resolveOpsDigest drops the dedupeKey on resolve) also rings, for safety.
-function ringOnRefreshFrom({ count, newCount, itemKeys }) {
+function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
   return (existingRow, existingMeta) => {
     if (existingMeta?.resolved === true) return true;
     return ringDecision({
       newCount, count, priorCount: metaCount(existingMeta),
       itemKeys, priorItemKeys: Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : undefined,
+      itemSetHash, priorItemSetHash: existingMeta?.itemSetHash || undefined,
     });
   };
 }
@@ -346,7 +362,7 @@ function ringOnRefreshFrom({ count, newCount, itemKeys }) {
 // sender whose kind flips between runs (gbp-sync-health FIX<->ACT) is always
 // gated by the CURRENT emission's audience, never a cached one. Pulled out
 // to keep deliverOpsDigest's own complexity down.
-function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys }) {
+function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash }) {
   const ownerAudience = resolvedAudience === 'owner';
   if (dedupeKey) {
     return {
@@ -354,12 +370,12 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
-        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys }) } : {}),
+        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) } : {}),
       } : {}),
     };
   }
   if (!ownerAudience) return {};
-  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount, itemKeys }) };
+  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount, itemKeys, itemSetHash }) };
 }
 
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the
@@ -481,7 +497,8 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
   const countMeta = Number.isFinite(Number(count)) ? { count: Number(count) } : {};
   const newCountMeta = Number.isFinite(Number(newCount)) ? { newCount: Number(newCount) } : {};
   const normalizedItemKeys = normalizeItemKeys(itemKeys);
-  const itemKeysMeta = itemKeysMetaFor(itemKeys, normalizedItemKeys);
+  const itemSetHash = itemSetHashFor(itemKeys);
+  const itemKeysMeta = itemKeysMetaFor(itemKeys, normalizedItemKeys, itemSetHash);
   // Ring-only-on-change (owner audience only — see ringOptionsFor). Two
   // different mechanisms, matching the two ways a sender's row reaches the
   // table:
@@ -514,7 +531,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
-      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys }),
+      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys, itemSetHash }),
       metadata: {
         opsKey: key,
         subject,
@@ -672,5 +689,5 @@ module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
-  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys,
+  normalizeItemKeys, hasNewItemKeys, fullSetItemKeys, itemSetHashFor,
 };

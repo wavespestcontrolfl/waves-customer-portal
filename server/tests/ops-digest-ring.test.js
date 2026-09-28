@@ -317,7 +317,17 @@ describe('normalizeItemKeys + hasNewItemKeys', () => {
     expect(normalizeItemKeys([])).toBeNull();
     expect(normalizeItemKeys(['', null])).toBeNull();
   });
-  test('a set past 500 has no identity at all (never a truncated prefix)', () => {
+  test('past the cap, the set hash still proves a swap at an equal count — and never rings a shrink', () => {
+    const { itemSetHashFor } = require('../services/ops-digest');
+    const ids = (from) => Array.from({ length: 600 }, (_, i) => `id-${from + i}`);
+    const prior = itemSetHashFor(ids(0));
+    expect(itemSetHashFor(ids(0).reverse())).toBe(prior); // order-independent
+    expect(ringDecision({ count: 600, priorCount: 600, itemSetHash: itemSetHashFor(ids(1)), priorItemSetHash: prior })).toBe(true);
+    expect(ringDecision({ count: 600, priorCount: 600, itemSetHash: prior, priorItemSetHash: prior })).toBe(false);
+    expect(ringDecision({ count: 599, priorCount: 600, itemSetHash: itemSetHashFor(ids(1).slice(1)), priorItemSetHash: prior })).toBe(false);
+  });
+
+  test('a set past 500 stores no key list (never a truncated prefix)', () => {
     expect(normalizeItemKeys(Array.from({ length: 500 }, (_, i) => `id-${i}`))).toHaveLength(500);
     expect(normalizeItemKeys(Array.from({ length: 501 }, (_, i) => `id-${i}`))).toBeNull();
   });

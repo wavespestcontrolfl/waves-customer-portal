@@ -252,7 +252,7 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet', 'rungAt'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet', 'rungAt', 'itemKeys', 'itemSetHash'];
 
 // Observation time of a finding / clean run: the caller's ISO timestamp when
 // valid and not in the future, else now. Ordering resolves against ingests

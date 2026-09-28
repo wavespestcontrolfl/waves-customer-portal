@@ -3901,8 +3901,9 @@ Activity-only stays there. Only a ring re-surfaces a row as unread. A non-`owner
 this test (`metadata.feed` is already `'activity'` unconditionally for
 those rows). Every ring also stamps `metadata.rungAt` (an ISO timestamp) —
 the 7-day comparison window is measured from a row's own last ring, not
-its `created_at`. `count`, `newCount`, and `rungAt` join the reserved
-metadata keys above.
+its `created_at`. `count`, `newCount`, `rungAt`, `itemKeys`, and
+`itemSetHash` (in-process item identity; this route never accepts them)
+join the reserved metadata keys above.
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports
