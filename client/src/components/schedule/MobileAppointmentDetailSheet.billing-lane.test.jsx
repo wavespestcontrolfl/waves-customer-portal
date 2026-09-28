@@ -356,6 +356,31 @@ describe('MobileAppointmentDetailSheet sibling-covered visit whose sibling invoi
     expect(screen.queryByText(/^Covered by invoice WPC-TEST-0001$/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/Collect on invoice WPC-TEST-0001/i).length).toBeGreaterThan(0);
   });
+
+  // Codex r13 P2: a legacy OPEN invoice attached to this visit's OWN row
+  // used to OR "Review & checkout" back in (hasOpenVisitInvoice) after the
+  // sibling guards had removed it — but the server checks the canonical
+  // sibling verdict before reusing an own invoice and 409s every non-'none'
+  // state, so that CTA only ever led to a blocked checkout.
+  it.each([
+    ['collect_on_combined_invoice', COLLECTIBLE_SIBLING_SERVICE.billingLane.siblingCoverage],
+    ['review', { state: 'review', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: null, reason: 'terminal_invoice' }],
+  ])('an attached open own invoice never restores "Review & checkout" under a %s sibling verdict', (_state, siblingCoverage) => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...COLLECTIBLE_SIBLING_SERVICE,
+          billingLane: { ...COLLECTIBLE_SIBLING_SERVICE.billingLane, siblingCoverage },
+          checkoutInvoiceId: 'inv-own-legacy',
+          checkoutInvoiceNumber: 'WPC-TEST-0099',
+          checkoutInvoiceStatus: 'sent',
+          checkoutInvoiceTotal: 74.7,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+  });
 });
 
 describe('MobileAppointmentDetailSheet monthlyRate fallback', () => {

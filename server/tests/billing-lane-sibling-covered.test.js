@@ -36,7 +36,7 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
 
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
 const {
-  siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, coveringSiblingInvoice, combinedInvoiceVoidedWithoutLiveReplacement,
+  siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, combinedInvoiceVoidedWithoutLiveReplacement,
 } = require('../services/billing-lane');
 
 // Minimal knex-like stand-in. 'scheduled_services' distinguishes the two
@@ -528,11 +528,11 @@ describe('siblingCoverageForSchedule', () => {
 // Codex pre-push P0 (x2): a MINT decision (resolveScheduledServiceCharge,
 // admin-schedule.js) must tell "definitely no relevant sibling invoice"
 // apart from "a lookup failure" and "a terminal/refunded match" — both of
-// which completion's own mint refuses to remint over. siblingCoverageForSchedule's
-// display-safe wrapper (coveringSiblingInvoice) collapses all three
-// non-covered cases to null on purpose (advisory, never toward a false
-// "covered"); the verdict function underneath must NOT collapse them the
-// same way, so a write caller can refuse instead of bill.
+// which completion's own mint refuses to remint over. The verdict function
+// must NOT collapse those non-covered cases to null (Codex r13 P2 removed
+// the display-safe wrapper that did, so no caller can mistake an
+// unresolved invoice for an absent one); a write caller refuses instead of
+// bills.
 describe('siblingInvoiceCoverageVerdict', () => {
   test('covered — a live sibling invoice', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
@@ -646,16 +646,6 @@ describe('siblingInvoiceCoverageVerdict', () => {
   test('none — a null invoice with no canceledSetupFee either', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, fakeDbConn())).toEqual({ status: 'none' });
-  });
-
-  test('coveringSiblingInvoice (the display-safe wrapper) still collapses needs_review/error to null', async () => {
-    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
-      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
-      liveBeside: null,
-    });
-    expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
-    findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
-    expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
   });
 
   // Owner ruling — REFUSE AFTER A VOID: the null-invoice branch's

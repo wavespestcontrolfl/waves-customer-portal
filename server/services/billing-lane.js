@@ -1057,8 +1057,8 @@ async function combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn, { lockRo
 // shared check here, called from both, so they can never drift from each
 // other or from the Charge Now guard's own verdict.
 //
-// Read-only/advisory, like coveringSiblingInvoice above (never a MINT
-// decision) — a lookup FAILURE fails toward null (the caller's ordinary
+// Read-only/advisory (never a MINT decision — see siblingCoverageForSchedule
+// below for the display verdict) — a lookup FAILURE fails toward null (the caller's ordinary
 // prediction stands), never toward inventing a hold; only a mint decision
 // fails closed the other way. Returns the voided invoice row when this
 // exact shape is held, null otherwise (every priced visit, a callback, a
@@ -1163,18 +1163,6 @@ async function siblingInvoiceCoverageVerdict(svc, dbConn, { lockRows = false, no
   }
   if (!inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
   return { status: 'covered', invoice: inv };
-}
-
-// Read-only/advisory shape for the schedule sheet's prediction: a live
-// covering invoice, or null for every other verdict — 'needs_review' and
-// 'error' both fail toward null exactly as before (fail toward the ordinary
-// unbilled-gap verdict, never toward a false "covered"; a terminal/refunded
-// match stays completion's own manual-billing alert, not a quiet "nothing
-// to see"). A MINT decision must NOT use this shape — see
-// siblingInvoiceCoverageVerdict above.
-async function coveringSiblingInvoice(svc, dbConn) {
-  const verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
-  return verdict.status === 'covered' ? verdict.invoice : null;
 }
 
 // The ONE canonical per-visit collection verdict (owner decision — narrow +
@@ -1425,7 +1413,6 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   siblingCoverageForSchedule,
-  coveringSiblingInvoice,
   siblingInvoiceCoverageVerdict,
   combinedInvoiceVoidedWithoutLiveReplacement,
   perApplicationCompletionVoidHold,

@@ -379,7 +379,16 @@ export default function MobileAppointmentDetailSheet({
   const visitInvoice = (service.billedToPayer || attachedInvoice?.payerBilled)
     ? null
     : attachedInvoice;
-  const hasOpenVisitInvoice = !!(
+  // Codex r13 P2: the server evaluates the canonical sibling-coverage
+  // verdict BEFORE reusing a visit's own attached invoice and refuses (409)
+  // every non-'none' verdict — an unpriced sibling-eligible visit with a
+  // legacy open invoice on its own row is still collected on the combined
+  // trip invoice (or held for review), never through this sheet. Without
+  // this, the own-invoice fallback below ORed "Review & checkout" back in
+  // after every sibling guard on hasChargeableAmount had removed it.
+  const siblingCoverageState = service.billingLane?.siblingCoverage?.state || 'none';
+  const siblingCoverageOverridesOwnInvoice = siblingCoverageState !== 'none';
+  const hasOpenVisitInvoice = !siblingCoverageOverridesOwnInvoice && !!(
     visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
   );
   const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
@@ -579,7 +588,7 @@ export default function MobileAppointmentDetailSheet({
           </div>
         )}
         {!coveredByMembership && !isPrepaid && siblingCoverage && !siblingCoverage.collectible && (
-          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 14 }}>
             Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
             {siblingCoveredInvoice.siblingServiceType ? ` on the ${siblingCoveredInvoice.siblingServiceType} visit` : ''} — no charge needed
           </div>
@@ -592,7 +601,7 @@ export default function MobileAppointmentDetailSheet({
             invoice for THIS visit (the kind/verdict stays covered) — it
             just tells staff where to collect instead. */}
         {!coveredByMembership && !isPrepaid && siblingCoverage && siblingCoverage.collectible && (
-          <div className="text-center mt-2" style={{ fontSize: 12, color: '#92400E' }}>
+          <div className="text-center mt-2" style={{ fontSize: 14, color: '#92400E' }}>
             {siblingCoverage.detail}
             {siblingCoverage.invoiceHref && (
               <>
@@ -605,7 +614,7 @@ export default function MobileAppointmentDetailSheet({
           </div>
         )}
         {!coveredByMembership && !isPrepaid && siblingNeedsReview && (
-          <div className="text-center mt-2" style={{ fontSize: 12, color: '#92400E' }}>
+          <div className="text-center mt-2" style={{ fontSize: 14, color: '#92400E' }}>
             Combined-trip invoice needs review — resolve on Customer 360 before charging
           </div>
         )}
@@ -767,13 +776,13 @@ export default function MobileAppointmentDetailSheet({
               {!prepaidCovered && siblingCoverage && (
                 <span
                   className={siblingCoverage.collectible ? 'block' : 'text-ink-secondary block'}
-                  style={{ fontSize: 12, color: siblingCoverage.collectible ? '#92400E' : undefined }}
+                  style={{ fontSize: 14, color: siblingCoverage.collectible ? '#92400E' : undefined }}
                 >
                   {siblingCoverage.short}
                 </span>
               )}
               {!prepaidCovered && siblingNeedsReview && (
-                <span className="block" style={{ fontSize: 12, color: '#92400E' }}>
+                <span className="block" style={{ fontSize: 14, color: '#92400E' }}>
                   Needs review on Customer 360
                 </span>
               )}
