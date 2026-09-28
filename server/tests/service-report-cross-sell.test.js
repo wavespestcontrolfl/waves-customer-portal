@@ -557,7 +557,7 @@ describe('buildReportCrossSell', () => {
     expect(offerFingerprint(base)).toBe(expected);
     expect(offerFingerprint({ ...base, reason: null })).toBe(expected);
     // A reason, when present, still moves the digest.
-    expect(offerFingerprint({ ...base, reason: 'We noted roach activity today.' })).not.toBe(expected);
+    expect(offerFingerprint({ ...base, reason: 'We noted roach activity during this visit.' })).not.toBe(expected);
   });
 
   test('customer with no recurring ownership at all gets the start-relationship copy stance', async () => {

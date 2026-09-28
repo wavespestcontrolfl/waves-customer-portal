@@ -727,7 +727,11 @@ async function buildCockroachFindingsOffer(service, database) {
       // No location claim (removed 2026-09-28): a location word anywhere in
       // the findings text does not prove the SAME roach mention was indoors
       // — the affirmative roach signal alone is what this reason states.
-      reason: 'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+      // "During this visit", never "today" (codex pre-push P1): the report
+      // may be reopened weeks or months later, recomputed from the SAME
+      // visit's saved snapshot — a same-day claim would misdate historical
+      // findings as current.
+      reason: 'We noted roach activity during this visit — our cockroach control program is a focused two-treatment cleanout.',
     };
     return { fullPayload: { ...payload, fingerprint: offerFingerprint(payload) } };
   } catch (err) {
@@ -766,15 +770,19 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
       // next priority rather than dropping the card entirely.
     }
     if (signal.rodentEvidence && notOwned('rodent_bait')) {
+      // "During this visit", never "today" — same reopened-report doctrine
+      // as the cockroach reason above (codex pre-push P1).
       return {
         targetKey: 'rodent_bait',
-        reason: 'We noted signs of rodent activity today — our rodent bait monitoring program keeps stations checked and baited year-round.',
+        reason: 'We noted signs of rodent activity during this visit — our rodent bait monitoring program keeps stations checked and baited year-round.',
       };
     }
     if (signal.termiteActivity && notOwned('termite')) {
+      // "During this visit", never "today" — same reopened-report doctrine
+      // as the cockroach reason above (codex pre-push P1).
       return {
         targetKey: 'termite',
-        reason: 'We noted possible termite activity today — a termite inspection can confirm what’s there and get monitoring in place.',
+        reason: 'We noted possible termite activity during this visit — a termite inspection can confirm what’s there and get monitoring in place.',
       };
     }
     // No findings-based mosquito branch (removed 2026-09-28): a mention
@@ -1304,7 +1312,11 @@ async function buildReportCrossSell(service, database, {
         confidence: option.confidence || null,
       } : null,
       // GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-      // a findings/season-picked target ("We noted roach activity today...").
+      // a findings/season-picked target ("We noted roach activity during
+      // this visit..."). "During this visit", never "today" (codex
+      // pre-push P1): reopening an older report recomputes this offer
+      // from the SAME visit's saved snapshot, so a same-day claim reads
+      // as current activity on a report that may be weeks or months old.
       // Absent for the unchanged ladder pick — the card renders exactly as
       // it does today.
       ...(reportOfferReason ? { reason: reportOfferReason } : {}),

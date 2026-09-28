@@ -238,7 +238,7 @@ describe('buildCockroachFindingsOffer', () => {
     expect(offer.fullPayload.mode).toBe('quote_cta');
     expect(offer.fullPayload.option).toBeNull();
     expect(offer.fullPayload.reason).toBe(
-      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+      'We noted roach activity during this visit — our cockroach control program is a focused two-treatment cleanout.',
     );
     expect(typeof offer.fullPayload.fingerprint).toBe('string');
   });
@@ -570,7 +570,7 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     expect(result.serviceKey).toBe('cockroach_control');
     expect(result.mode).toBe('quote_cta');
     expect(result.reason).toBe(
-      'We noted roach activity today — our cockroach control program is a focused two-treatment cleanout.',
+      'We noted roach activity during this visit — our cockroach control program is a focused two-treatment cleanout.',
     );
     expect(typeof result.fingerprint).toBe('string');
   });
@@ -635,6 +635,43 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
       { propertyLookup: commercialLookup },
     );
     expect(result).toBeNull();
+  });
+});
+
+// ============================================================
+// Codex pre-push P1: reopening an older report recomputes a findings-based
+// reason from the SAME visit's saved snapshot every time — there is no
+// same-day eligibility check, so a "today"/"this morning"/"now" claim would
+// misdate historical findings as current. Every findings reason must read
+// "during this visit" instead, regardless of how long ago the visit itself
+// happened.
+// ============================================================
+describe('findings reason copy never claims "today" on a reopened OLD report', () => {
+  const OLD_SERVICE_DATE = '2020-01-15'; // years before any test run — reopened long after the visit
+
+  test.each([
+    ['roach', { primary: { type: 'pest' }, companions: [{ type: 'cockroach', values: { activity_level: 'Moderate' } }] }],
+    ['rodent', { primary: { type: 'rodent_trapping', values: { captures: 3 } } }],
+    ['termite', { primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } }],
+  ])('%s finding reason omits "today" (and any other same-day claim) even when the visit is long past', async (label, snapshot) => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-11-01'); // outside every season window — isolates the findings branch
+    const service = { ...SERVICE({ service_date: OLD_SERVICE_DATE }), ...withTypedSnapshot(snapshot) };
+    const result = await buildReportCrossSell(
+      service,
+      dbFor({
+        serviceTypes: ['Pest Control'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+        catalogServices: [ACTIVE_COCKROACH_ROW],
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).not.toBeNull();
+    expect(typeof result.reason).toBe('string');
+    const reasonLower = result.reason.toLowerCase();
+    expect(reasonLower).not.toContain('today');
+    expect(reasonLower).not.toContain('this morning');
+    expect(reasonLower).toContain('during this visit');
   });
 });
 

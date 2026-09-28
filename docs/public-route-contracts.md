@@ -525,10 +525,13 @@ On, the payload's existing `crossSell` object may additionally carry
 `reason` — one short, honest, reason-tied FIXED sentence rendered above
 the CTA button, one per branch below, never composed from or naming a
 location or severity the structured field itself doesn't state (roach:
-"We noted roach activity today — our cockroach control program is a
-focused two-treatment cleanout."; rodent: "We noted signs of rodent
-activity today — …"; termite: "We noted possible termite activity
-today — …"; season-mosquito: "Mosquito season is here in SW Florida — …";
+"We noted roach activity during this visit — our cockroach control
+program is a focused two-treatment cleanout."; rodent: "We noted signs of
+rodent activity during this visit — …"; termite: "We noted possible
+termite activity during this visit — …" ("during this visit", never
+"today" — reopening an older report recomputes these reasons from the
+same visit's saved snapshot, so a same-day claim would misdate historical
+findings as current); season-mosquito: "Mosquito season is here in SW Florida — …";
 season-termite: "It's termite swarm season in SW Florida — …") — and
 `serviceKey` may resolve to two targets the ladder itself never picks:
 `rodent_bait` and `mosquito`, priced through the SAME
