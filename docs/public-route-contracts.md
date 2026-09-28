@@ -1458,7 +1458,8 @@ The provider-failure fallback is unchanged (there is no model topic). Gate off:
 prompt, schema and replies are unchanged.
 With `GATE_ASK_WAVES_EMERGENCY_CHECK` on (dark; `askWavesEmergencyCheckLive()`,
 #4899), every turn also runs a second opinion on `TEXT_POLICIES.fastStructured`,
-started alongside the answer: one question, "is anyone in medical danger?",
+started alongside the answer (the answer waits for it at most 1.5 s after it is
+ready, and not at all when it is already the emergency script): one question, "is anyone in medical danger?",
 over the whole visitor side of the conversation (`{ in_danger: boolean }`).
 A yes turns any answer whose intent is not `emergency` (including the
 provider-failure fallback) into the emergency script (`topicEmergencyScript`

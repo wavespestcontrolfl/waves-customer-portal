@@ -2706,6 +2706,43 @@ describe('emergency second opinion (GATE_ASK_WAVES_EMERGENCY_CHECK, #4899)', () 
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
+  test('a check still pending 1.5 s after the answer is ready does not hold the answer', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise(() => {}) : Promise.resolve(chainOk(quoteAnswer))));
+      let done = null;
+      const pending = processIntakeMessage({ message: 'My son swallowed bait' }).then((r) => { done = r; });
+      await jest.advanceTimersByTimeAsync(1400);
+      expect(done).toBeNull();
+      await jest.advanceTimersByTimeAsync(200);
+      await pending;
+      expect(done.reply).toBe(quoteAnswer.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a check that answers yes within the grace window still overrides', async () => {
+    jest.useFakeTimers();
+    try {
+      dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+        ? new Promise((r) => { setTimeout(() => r(chainOk({ in_danger: true })), 1000); }) : Promise.resolve(chainOk(quoteAnswer))));
+      const pending = processIntakeMessage({ message: "No, he can't breathe" });
+      await jest.advanceTimersByTimeAsync(1100);
+      expect((await pending).reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('an answer that is already the emergency script never waits for the check', async () => {
+    const emergencyAnswer = { reply: 'Please call 911 right away.', intent: 'emergency', service_keys: [], ready_for_quote: false };
+    dispatchWithFallback.mockImplementation((policy, req) => (req.laneId === 'ask_waves_emergency_check'
+      ? new Promise(() => {}) : Promise.resolve(chainOk(emergencyAnswer))));
+    expect((await processIntakeMessage({ message: 'My son swallowed bait' })).intent).toBe('emergency');
+  });
+
   test('both calls start before either is awaited, and the check gets the whole visitor side', async () => {
     let started = 0;
     let release;
