@@ -34,16 +34,20 @@ function renderTypedFactsBlock() {
   out.push('`findingsFields` (`project-types.js`) and `REQUIRED_FINDINGS_FIELDS`');
   out.push('(`activity-indicators.js`). Do not edit this block by hand: run');
   out.push('`node server/scripts/generate-visit-facts-doc.js`. Every fact not marked');
-  out.push('internal also renders in the generic typed findings list.');
+  out.push('internal also renders in the generic typed findings list. `applicability`');
+  out.push('`companion` means the field is `companionOnly` in project-types.js — legal');
+  out.push('ONLY when the form runs as a COMPANION section beside a different primary');
+  out.push('type (a primary submission carrying it is rejected as unknown); `both`');
+  out.push('means the field is legal on a primary OR a companion submission.');
   for (const [line, def] of Object.entries(VISIT_FACTS_CONTRACT)) {
     if (!def.typedForm) continue;
     out.push('', `### \`${line}\` — typed \`${def.typedForm}\` form`, '');
-    out.push('| fact | label | type | when missing | also read by name in |');
-    out.push('|---|---|---|---|---|');
+    out.push('| fact | label | type | applicability | when missing | also read by name in |');
+    out.push('|---|---|---|---|---|---|');
     for (const fact of def.facts) {
       if (fact.typedForm !== def.typedForm) continue;
       const internal = fact.readers.some((r) => r.readerSymbol === 'buildTypedReportSnapshot') ? '' : ' (internal)';
-      out.push(`| \`${fact.key}\` | ${cell(fact.label)}${internal} | ${fact.fieldType} | ${fact.whenMissing} | ${cell(namedReaders(fact))} |`);
+      out.push(`| \`${fact.key}\` | ${cell(fact.label)}${internal} | ${fact.fieldType} | ${fact.applicability} | ${fact.whenMissing} | ${cell(namedReaders(fact))} |`);
     }
   }
   out.push('', BLOCK_END);

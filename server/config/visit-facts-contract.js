@@ -123,6 +123,12 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   PROJECT_TYPES key the field comes from.
  * @property {string} [fieldType] - generated typed facts only: the
  *   findingsFields `type` (select / chips / count / …).
+ * @property {'primary'|'companion'|'both'} [applicability] - generated typed
+ *   facts only: 'companion' when the field is `companionOnly` in
+ *   project-types.js (legal ONLY on a companion submission — a primary
+ *   submission carrying it is rejected as unknown, activity-indicators.js
+ *   `validateTypedFindings`); 'both' otherwise (every non-companionOnly field
+ *   is legal on a primary OR a companion submission of the same form).
  * @property {'gap'} [status] - the fact is needed but no report section
  *   reads it (or nothing records it); MUST have `readers: []` and MUST be
  *   named in docs/design/visit-facts-contract.md's "Known gaps" section.
@@ -469,6 +475,35 @@ function genericCompletionFacts(opts = {}) {
 }
 
 /**
+ * Basic-form facts a TYPED completion also writes and the report reads,
+ * regardless of findings type. The Complete Service form (SchedulePage.jsx
+ * CompletionPanel) is the SAME form either way — a typed submission layers
+ * `structuredFindings` on top of it, never replaces it — and
+ * complete-scheduled-service.js freezes these into structured_notes
+ * unconditionally (~5755-5801, ~5854-5874): customerRecap, customerInteraction,
+ * protocolActionsCompleted, recommendations, techTips and technician_notes.
+ * report-data.js reads them the same way for a typed report:
+ * buildProtocolPayload (~1791-1848, actions/recommendations/techTips) and the
+ * visit-summary resolution (~5411-5416, customerRecap falling back to the
+ * screened technicianReportCustomerCopy parse of technician_notes). Sourced
+ * from genericCompletionFacts so a shared wiring change is never hand-copied
+ * onto a typed line.
+ * @returns {VisitFact[]}
+ */
+const TYPED_SHARED_FACT_KEYS = Object.freeze([
+  'customer_recap',
+  'customer_interaction',
+  'protocol_actions_completed',
+  'recommendations',
+  'tech_tips',
+  'technician_notes',
+]);
+
+function typedSharedCompletionFacts() {
+  return genericCompletionFacts().filter((fact) => TYPED_SHARED_FACT_KEYS.includes(fact.key));
+}
+
+/**
  * The pest activity rating (the one activity gauge on untyped pest lines).
  * @returns {VisitFact}
  */
@@ -666,6 +701,7 @@ function typedFormFacts(typedForm, overrides = {}) {
     readers.push(...(extraReaders[field.key] || []));
     const notes = [];
     if (field.internal) notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
+    if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
     if (field.requiredUnless) {
       notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
     }
@@ -675,6 +711,12 @@ function typedFormFacts(typedForm, overrides = {}) {
       label: field.label,
       typedForm,
       fieldType: field.type,
+      // companionOnly fields are legal ONLY on a companion submission
+      // (activity-indicators.js validateTypedFindings rejects one on a
+      // primary submission as unknown); every other field is legal on
+      // either, since a companion submission accepts the whole form
+      // (fields.filter((f) => companion || !f.companionOnly)).
+      applicability: field.companionOnly ? 'companion' : 'both',
       capture: ['voice', 'tap'],
       storage: `service_data.typedReportSnapshot.values.${field.key}`,
       writers: [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')],
@@ -798,13 +840,23 @@ const VISIT_FACTS_CONTRACT = {
       },
       {
         key: 'turf_height_reading',
-        label: 'Turf height-of-cut gauge reading',
-        capture: ['tap', 'photo'],
+        label: 'Turf height-of-cut gauge reading (numeric)',
+        capture: ['voice', 'tap'],
         storage: 'turf_height_readings.manual_height_in',
         writers: [COMPLETE_SERVICE, TURF_HEIGHT_SERVICE],
         readers: [{ file: REPORT_DATA, section: 'Mowing height card' }],
         whenMissing: 'hidden',
-        notes: 'Optional manualHeightIn + gaugePhoto on the completion body; one row per service record.',
+        notes: 'Optional manualHeightIn on the completion body; one row per service record, shared with turf_height_gauge_photo. Either can be present without the other — a photo-only row stores a null reading.',
+      },
+      {
+        key: 'turf_height_gauge_photo',
+        label: 'Turf height-of-cut gauge photo',
+        capture: ['photo'],
+        storage: 'turf_height_readings.gauge_photo_id',
+        writers: [COMPLETE_SERVICE, TURF_HEIGHT_SERVICE],
+        readers: [{ file: REPORT_DATA, section: 'Mowing height card (gauge photo)' }],
+        whenMissing: 'hidden',
+        notes: 'The on-site lawn-length documentation photo (a service_photos id), separate from the numeric reading: complete-scheduled-service.js persists a row whenever EITHER is present, and report-data.js resolves this id onto mowingHeight.photoUrl and drops it from the gallery once surfaced there. Not sent by SchedulePage.jsx today (SchedulePage.lawn-closeout.test.jsx asserts the body carries no gaugePhoto) — registered because complete-scheduled-service.js and turf-height-service.js both persist/read the column.',
       },
     ],
   },
@@ -842,6 +894,7 @@ const VISIT_FACTS_CONTRACT = {
           plant_groups: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result tree & shrub story (buildTodaysResult)' }],
         },
       }),
+      ...typedSharedCompletionFacts(),
       {
         key: 'tree_shrub_assessment_observations',
         label: 'Tree & shrub assessment observations (photo scoring narrative)',
@@ -873,6 +926,7 @@ const VISIT_FACTS_CONTRACT = {
           work_completed: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
       {
@@ -903,6 +957,7 @@ const VISIT_FACTS_CONTRACT = {
           bait_consumption: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots; the termite signal is termite_activity alone.',
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -932,6 +987,7 @@ const VISIT_FACTS_CONTRACT = {
           ],
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -949,6 +1005,7 @@ const VISIT_FACTS_CONTRACT = {
           remaining_concerns: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result rodent exclusion story (buildTodaysResult)' }],
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -965,6 +1022,7 @@ const VISIT_FACTS_CONTRACT = {
           bait_consumption: [{ file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent bait stations)' }],
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -977,6 +1035,8 @@ const VISIT_FACTS_CONTRACT = {
     voiceFill: true,
     facts: [
       ...typedFormFacts('wildlife_trapping'),
+      ...typedSharedCompletionFacts(),
+      ...productFacts(),
       ...photoFacts(),
     ],
   },
@@ -996,6 +1056,7 @@ const VISIT_FACTS_CONTRACT = {
           customer_prep: 'Owner spec: cooperation must be unmistakable.',
         },
       }),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1008,6 +1069,7 @@ const VISIT_FACTS_CONTRACT = {
     voiceFill: true,
     facts: [
       ...typedFormFacts('palm_injection'),
+      ...typedSharedCompletionFacts(),
       ...productFacts(),
       ...photoFacts(),
     ],

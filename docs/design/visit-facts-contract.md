@@ -158,6 +158,14 @@ non-internal field, plus any internal field the completion validator
 requires. Internal optional fields are office-only data, not report facts.
 
 - **Key, label, field type** come from the field.
+- **applicability** is `companion` when the field is `companionOnly` in
+  `project-types.js` — legal ONLY when the form runs as a COMPANION section
+  beside a different primary type (`activity-indicators.js`
+  `validateTypedFindings` rejects it on a primary submission as an unknown
+  field) — and `both` otherwise (every non-`companionOnly` field is legal on
+  a primary OR a companion submission of the same form). Today this is only
+  `companion` on `tree_shrub`'s detail fields (palm/shrub/bed module
+  questions); every other typed form's fields are `both`.
 - **when missing** is `required` exactly when `REQUIRED_FINDINGS_FIELDS`
   (`activity-indicators.js`) lists the key, and `hidden` otherwise. A
   `requiredUnless` field (flea `activity_areas`) stays `hidden` with a note,
@@ -186,6 +194,21 @@ builder in `TYPED_REPORT_BUILDERS` must read exactly its registered keys, and
 every one must be a field of its form. A typed fact written by hand fails.
 Field options, tiers and customer copy are covered in
 [the specialty completion contract](specialty-service-completion-contract.md).
+
+### Shared facts every typed line also carries (`typedSharedCompletionFacts`)
+
+The Complete Service form is the SAME form for a typed or an untyped
+completion — a typed submission layers `structuredFindings` on top of it, it
+never replaces it. `complete-scheduled-service.js` freezes
+`customerRecap`, `customerInteraction`, `protocolActionsCompleted`,
+`recommendations`, `techTips` and the `technician_notes` column into the
+record unconditionally, and `report-data.js` reads them the same way for a
+typed report (`buildProtocolPayload`; the visit-summary resolution that falls
+back from `customerRecap` to the screened `technicianReportCustomerCopy`
+parse of `technician_notes`). Every typed line below adds this subset of
+[the basic form facts](#basic-form-facts-genericcompletionfacts) — sourced
+from `genericCompletionFacts` itself, never hand-copied — beside its
+generated typed facts.
 
 ## Per-line facts
 
@@ -228,7 +251,16 @@ photos, plus:
 | fact | capture | storage | report section | when missing |
 |---|---|---|---|---|
 | `lawn_assessment_observations` | photo, derived | `lawn_assessments.observations` | Lawn diagnosis / insights card | fallback to the AI summary |
-| `turf_height_reading` | tap, photo | `turf_height_readings.manual_height_in` | Mowing height card | hidden |
+| `turf_height_reading` | voice, tap | `turf_height_readings.manual_height_in` | Mowing height card | hidden |
+| `turf_height_gauge_photo` | photo | `turf_height_readings.gauge_photo_id` | Mowing height card (gauge photo) | hidden |
+
+The numeric reading and the gauge photo are separate facts: either can be
+present without the other (a photo-only row stores a null reading), and
+`report-data.js` resolves the photo id onto `mowingHeight.photoUrl`
+independently of the reading. `turf_height_gauge_photo` isn't sent by
+SchedulePage.jsx today — it's registered because
+`complete-scheduled-service.js` and `turf-height-service.js` both persist and
+read the column.
 
 ### Mosquito (`mosquito`)
 Catalog: `mosquito_monthly`, `mosquito_seasonal`. Uses the basic form facts,
@@ -240,15 +272,21 @@ habitat watch has nothing to show.
 ### Typed lines
 
 Each typed line below is one typed form. Its typed facts are listed in the
-generated [Typed form facts](#typed-form-facts-generated) tables; only the
-facts each line adds by hand are named here.
+generated [Typed form facts](#typed-form-facts-generated) tables. Every line
+also adds the [shared facts above](#shared-facts-every-typed-line-also-carries-typedsharedcompletionfacts)
+(`customer_recap`, `customer_interaction`, `protocol_actions_completed`,
+`recommendations`, `tech_tips`, `technician_notes`); only the *other* facts
+each line adds by hand are named here.
 
 - **Tree & shrub** (`tree_shrub`, form `tree_shrub`): `tree_shrub_program`,
   `tree_shrub_6week`, `tree_shrub_quarterly`. Adds
   `tree_shrub_assessment_observations` (`tree_shrub_assessments.observations`,
   read by the tree & shrub findings summary), product facts and photos.
   `completion_photos` is **required** here (`TREE_SHRUB_MIN_CLOSEOUT_PHOTOS`
-  uploads); the caption stays optional.
+  uploads); the caption stays optional. Its palm / shrub / bed module detail
+  fields are `companionOnly` (`applicability: 'companion'` in the generated
+  table) — they only ever populate when tree_shrub runs as a COMPANION
+  section beside a different primary type.
 - **Cockroach** (`cockroach`, form `cockroach`): `cockroach_control`,
   `german_roach`, `german_roach_initial`. Adds product facts, photos and the
   `cockroach_work_from_products` **gap**. The cross-sell V2 roach signal
@@ -276,7 +314,9 @@ facts each line adds by hand are named here.
   `rodent_bait_station`, `20260612000001`): `rodent_bait_quarterly`,
   `rodent_bait_setup`. Adds product facts and photos.
 - **Wildlife** (`wildlife`, form `wildlife_trapping`): `wildlife_trapping`.
-  Adds photos.
+  Adds product facts (the same always-visible Products Applied picker as
+  every other lane; `service_products` rows are never excluded for wildlife)
+  and photos.
 - **Flea** (`flea`, form `flea`): `flea_tick`. Adds product facts and
   photos.
 - **Palm** (`palm`, form `palm_injection`): `palm_injection`,
@@ -315,7 +355,9 @@ reports still render through the same facts as the active keys.
 `pre_treatment_termite_certificate`, the FBC certificate) stay on the
 compliance Projects flow. They never produce a customer Service Report, and
 voice fill does not cover them. The registry lists them in
-`EXCLUDED_SERVICE_LINES`, and the test fails if either one appears as a line.
+`EXCLUDED_SERVICE_LINES`, and the test fails if either one appears as a line
+identifier OR inside any line's `catalogKeys` (the same both-places check the
+retired-key test runs for `RETIRED_CATALOG_KEYS`).
 
 ## How to add a fact
 
@@ -389,152 +431,156 @@ Generated from the registry, which generates these facts from each form's
 `findingsFields` (`project-types.js`) and `REQUIRED_FINDINGS_FIELDS`
 (`activity-indicators.js`). Do not edit this block by hand: run
 `node server/scripts/generate-visit-facts-doc.js`. Every fact not marked
-internal also renders in the generic typed findings list.
+internal also renders in the generic typed findings list. `applicability`
+`companion` means the field is `companionOnly` in project-types.js — legal
+ONLY when the form runs as a COMPANION section beside a different primary
+type (a primary submission carrying it is rejected as unknown); `both`
+means the field is legal on a primary OR a companion submission.
 
 ### `tree_shrub` — typed `tree_shrub` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `areas_treated` | Areas treated | multi_select | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
-| `plant_groups` | Plant groups serviced | multi_select | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
-| `landscape_condition` | Overall landscape condition | select | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
-| `observed_conditions` | Observed plant conditions | multi_select | hidden | — |
-| `treatments_completed` | Treatment completed | multi_select | hidden | — |
-| `palms_serviced` | Palms serviced | count | hidden | — |
-| `palm_condition` | Palm condition | select | hidden | — |
-| `palm_nutrient_stress` | Palm nutrient stress | select | hidden | — |
-| `spear_leaf_condition` | Spear leaf condition | select | hidden | — |
-| `canopy_density` | Canopy density | select | hidden | — |
-| `palm_trunk_concern` | Trunk concern | select | hidden | — |
-| `ganoderma_conk_observed` | Visible Ganoderma conk | select | hidden | — |
-| `injection_recommended` | Injection recommended | select | hidden | — |
-| `pest_pressure` | Pest pressure | select | hidden | — |
-| `disease_pressure` | Disease pressure | select | hidden | — |
-| `deficiency_symptoms` | Deficiency symptoms | select | hidden | — |
-| `new_growth_present` | New growth present | select | hidden | — |
-| `pruning_issue_observed` | Pruning issue observed | select | hidden | — |
-| `irrigation_issue_observed` | Irrigation issue observed | select | hidden | — |
-| `bed_weed_pressure` | Bed weeds present | select | hidden | — |
-| `pre_emergent_applied` | Pre-emergent applied | select | hidden | — |
-| `mulch_depth_concern` | Mulch depth concern | select | hidden | — |
-| `weed_breakthrough_areas` | Weed breakthrough areas | text | hidden | — |
-| `customer_recommendations` | Customer recommendations | multi_select | hidden | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `areas_treated` | Areas treated | multi_select | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `plant_groups` | Plant groups serviced | multi_select | both | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
+| `landscape_condition` | Overall landscape condition | select | both | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
+| `observed_conditions` | Observed plant conditions | multi_select | companion | hidden | — |
+| `treatments_completed` | Treatment completed | multi_select | both | hidden | — |
+| `palms_serviced` | Palms serviced | count | companion | hidden | — |
+| `palm_condition` | Palm condition | select | companion | hidden | — |
+| `palm_nutrient_stress` | Palm nutrient stress | select | companion | hidden | — |
+| `spear_leaf_condition` | Spear leaf condition | select | companion | hidden | — |
+| `canopy_density` | Canopy density | select | companion | hidden | — |
+| `palm_trunk_concern` | Trunk concern | select | companion | hidden | — |
+| `ganoderma_conk_observed` | Visible Ganoderma conk | select | companion | hidden | — |
+| `injection_recommended` | Injection recommended | select | companion | hidden | — |
+| `pest_pressure` | Pest pressure | select | companion | hidden | — |
+| `disease_pressure` | Disease pressure | select | companion | hidden | — |
+| `deficiency_symptoms` | Deficiency symptoms | select | companion | hidden | — |
+| `new_growth_present` | New growth present | select | companion | hidden | — |
+| `pruning_issue_observed` | Pruning issue observed | select | companion | hidden | — |
+| `irrigation_issue_observed` | Irrigation issue observed | select | companion | hidden | — |
+| `bed_weed_pressure` | Bed weeds present | select | companion | hidden | — |
+| `pre_emergent_applied` | Pre-emergent applied | select | companion | hidden | — |
+| `mulch_depth_concern` | Mulch depth concern | select | companion | hidden | — |
+| `weed_breakthrough_areas` | Weed breakthrough areas | text | companion | hidden | — |
+| `customer_recommendations` | Customer recommendations | multi_select | both | hidden | — |
 
 ### `cockroach` — typed `cockroach` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `species` | Species | select | required | Status + status summary; species label; How you can help (cockroach-report-v2.js) |
-| `activity_level` | Activity level | select | required | "Activity today" metric + status (cockroach-report-v2.js) |
-| `activity_locations` | Where activity was noted | chips | hidden | "Areas with activity" metric + status summary (cockroach-report-v2.js) |
-| `evidence_observed` | Evidence observed | chips | hidden | Status reconciliation (resolveCockroachStatus) + status summary + evidence list (cockroach-report-v2.js) |
-| `conducive_conditions` | Conducive conditions | chips | hidden | Conducive conditions list (dashboard conditions) (cockroach-report-v2.js) |
-| `areas_treated` | Areas treated | chips | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
-| `work_completed` | Work completed today | chips | hidden | "What we did" (buildWork) (cockroach-report-v2.js) |
-| `customer_prep` | How the customer can help | chips | hidden | How you can help (buildHelp) (cockroach-report-v2.js) |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `species` | Species | select | both | required | Status + status summary; species label; How you can help (cockroach-report-v2.js) |
+| `activity_level` | Activity level | select | both | required | "Activity today" metric + status (cockroach-report-v2.js) |
+| `activity_locations` | Where activity was noted | chips | both | hidden | "Areas with activity" metric + status summary (cockroach-report-v2.js) |
+| `evidence_observed` | Evidence observed | chips | both | hidden | Status reconciliation (resolveCockroachStatus) + status summary + evidence list (cockroach-report-v2.js) |
+| `conducive_conditions` | Conducive conditions | chips | both | hidden | Conducive conditions list (dashboard conditions) (cockroach-report-v2.js) |
+| `areas_treated` | Areas treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `work_completed` | Work completed today | chips | both | hidden | "What we did" (buildWork) (cockroach-report-v2.js) |
+| `customer_prep` | How the customer can help | chips | both | hidden | How you can help (buildHelp) (cockroach-report-v2.js) |
 
 ### `termite_bait` — typed `termite_bait_station` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `total_stations` | Total stations on property | count | hidden | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
-| `stations_checked` | Stations checked | count | required | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
-| `stations_inaccessible` | Stations inaccessible | count | hidden | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
-| `stations_with_activity` | Stations with termite activity | count | hidden | Activity summary + status resolution (termite-report-v2.js) |
-| `termite_activity` | Termite activity | select | required | Status resolution (termite-report-v2.js); Cross-sell V2 findings signal (termite) (cross-sell.js) |
-| `activity_signs` | Activity signs | chips | hidden | Status resolution (termite-report-v2.js) |
-| `active_station_location` | Active station number / location | text | hidden | Status resolution (active location) (termite-report-v2.js) |
-| `bait_consumption` | Bait consumption | select | required | Status resolution + "bait engaged" activity detail (termite-report-v2.js) |
-| `bait_actions` | Bait service performed | chips | hidden | "Serviced today" claim (termite-report-v2.js) |
-| `bait_issues` | Bait condition issues | chips | hidden | — |
-| `station_issues` | Station condition issues | chips | hidden | — |
-| `station_actions` | Station service performed | chips | hidden | "Serviced today" claim (termite-report-v2.js) |
-| `conducive_conditions` | Conducive conditions | chips | hidden | Primary move (why) (termite-report-v2.js) |
-| `customer_recommendations` | Customer recommendations | chips | hidden | Primary move (termite-report-v2.js) |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `total_stations` | Total stations on property | count | both | hidden | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
+| `stations_checked` | Stations checked | count | both | required | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
+| `stations_inaccessible` | Stations inaccessible | count | both | hidden | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
+| `stations_with_activity` | Stations with termite activity | count | both | hidden | Activity summary + status resolution (termite-report-v2.js) |
+| `termite_activity` | Termite activity | select | both | required | Status resolution (termite-report-v2.js); Cross-sell V2 findings signal (termite) (cross-sell.js) |
+| `activity_signs` | Activity signs | chips | both | hidden | Status resolution (termite-report-v2.js) |
+| `active_station_location` | Active station number / location | text | both | hidden | Status resolution (active location) (termite-report-v2.js) |
+| `bait_consumption` | Bait consumption | select | both | required | Status resolution + "bait engaged" activity detail (termite-report-v2.js) |
+| `bait_actions` | Bait service performed | chips | both | hidden | "Serviced today" claim (termite-report-v2.js) |
+| `bait_issues` | Bait condition issues | chips | both | hidden | — |
+| `station_issues` | Station condition issues | chips | both | hidden | — |
+| `station_actions` | Station service performed | chips | both | hidden | "Serviced today" claim (termite-report-v2.js) |
+| `conducive_conditions` | Conducive conditions | chips | both | hidden | Primary move (why) (termite-report-v2.js) |
+| `customer_recommendations` | Customer recommendations | chips | both | hidden | Primary move (termite-report-v2.js) |
 
 ### `rodent_trapping` — typed `rodent_trapping` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `species` | Species | select | required | Species grounding for the narrative (rodent-report-narrative.js) |
-| `evidence_observed` | Evidence observed | chips | hidden | — |
-| `trap_visit_type` | This visit (internal) | select | required | Today's Result trap-setup wording (isInitialRodentTrapSetup) (activity-indicators.js); Narrative visitStage "initial_trap_setup" (rodent-report-narrative.js) |
-| `traps_checked` | Traps checked | count | hidden | Trap counts (station summary) (report-data.js) |
-| `captures` | Captures | count | hidden | Grounded capture sentence (rodent-report-narrative.js); Cross-sell V2 findings signal (rodent trapping) (cross-sell.js) |
-| `trap_actions` | Trap actions | chips | hidden | — |
-| `trap_activity_locations` | Locations with activity | text | hidden | — |
-| `sanitation_recommendations` | Sanitation recommendations | chips | hidden | — |
-| `exclusion_recommendation` | Exclusion | select | hidden | — |
-| `entry_points_addressed` | Entry points sealed (combo) | chips | hidden | — |
-| `exclusion_materials` | Materials used (combo) | chips | hidden | — |
-| `remaining_concerns` | Remaining access concerns (combo) | chips | hidden | — |
-| `exclusion_followup_needed` | Exclusion follow-up needed | select | hidden | — |
-| `sanitation_areas` | Areas cleaned (combo) | chips | hidden | — |
-| `contamination_level` | Contamination level (combo) | select | hidden | — |
-| `evidence_cleaned` | Evidence removed (combo) | chips | hidden | — |
-| `sanitation_limitations` | Sanitation limitations (combo) | chips | hidden | — |
-| `additional_cleanup_needed` | Additional cleanup needed | select | hidden | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `species` | Species | select | both | required | Species grounding for the narrative (rodent-report-narrative.js) |
+| `evidence_observed` | Evidence observed | chips | both | hidden | — |
+| `trap_visit_type` | This visit (internal) | select | both | required | Today's Result trap-setup wording (isInitialRodentTrapSetup) (activity-indicators.js); Narrative visitStage "initial_trap_setup" (rodent-report-narrative.js) |
+| `traps_checked` | Traps checked | count | both | hidden | Trap counts (station summary) (report-data.js) |
+| `captures` | Captures | count | both | hidden | Grounded capture sentence (rodent-report-narrative.js); Cross-sell V2 findings signal (rodent trapping) (cross-sell.js) |
+| `trap_actions` | Trap actions | chips | both | hidden | — |
+| `trap_activity_locations` | Locations with activity | text | both | hidden | — |
+| `sanitation_recommendations` | Sanitation recommendations | chips | both | hidden | — |
+| `exclusion_recommendation` | Exclusion | select | both | hidden | — |
+| `entry_points_addressed` | Entry points sealed (combo) | chips | both | hidden | — |
+| `exclusion_materials` | Materials used (combo) | chips | both | hidden | — |
+| `remaining_concerns` | Remaining access concerns (combo) | chips | both | hidden | — |
+| `exclusion_followup_needed` | Exclusion follow-up needed | select | both | hidden | — |
+| `sanitation_areas` | Areas cleaned (combo) | chips | both | hidden | — |
+| `contamination_level` | Contamination level (combo) | select | both | hidden | — |
+| `evidence_cleaned` | Evidence removed (combo) | chips | both | hidden | — |
+| `sanitation_limitations` | Sanitation limitations (combo) | chips | both | hidden | — |
+| `additional_cleanup_needed` | Additional cleanup needed | select | both | hidden | — |
 
 ### `rodent_exclusion` — typed `rodent_exclusion` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `entry_points_addressed` | Entry points addressed | chips | required | — |
-| `exclusion_work_completed` | Work completed | chips | required | Today's Result rodent exclusion story (buildTodaysResult) (activity-indicators.js) |
-| `exclusion_materials` | Materials used | chips | required | — |
-| `remaining_concerns` | Remaining concerns | chips | required | Today's Result rodent exclusion story (buildTodaysResult) (activity-indicators.js) |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `entry_points_addressed` | Entry points addressed | chips | both | required | — |
+| `exclusion_work_completed` | Work completed | chips | both | required | Today's Result rodent exclusion story (buildTodaysResult) (activity-indicators.js) |
+| `exclusion_materials` | Materials used | chips | both | required | — |
+| `remaining_concerns` | Remaining concerns | chips | both | required | Today's Result rodent exclusion story (buildTodaysResult) (activity-indicators.js) |
 
 ### `rodent_bait_station` — typed `rodent_bait_station` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `stations_checked` | Stations checked | count | required | — |
-| `stations_inaccessible` | Stations inaccessible | count | hidden | — |
-| `station_actions` | Station service performed | chips | hidden | — |
-| `bait_consumption` | Bait consumption level | select | required | Cross-sell V2 findings signal (rodent bait stations) (cross-sell.js) |
-| `bait_replaced` | Bait replaced | select | hidden | — |
-| `highest_activity_location` | Highest-activity station / location | text | hidden | — |
-| `bait_issues` | Bait / station contents | chips | hidden | — |
-| `evidence_observed` | Rodent evidence nearby | chips | hidden | — |
-| `station_issues` | Station condition issues | chips | hidden | — |
-| `conducive_conditions` | Attractants / harborage | chips | hidden | — |
-| `sanitation_recommendations` | Customer recommendations | chips | hidden | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `stations_checked` | Stations checked | count | both | required | — |
+| `stations_inaccessible` | Stations inaccessible | count | both | hidden | — |
+| `station_actions` | Station service performed | chips | both | hidden | — |
+| `bait_consumption` | Bait consumption level | select | both | required | Cross-sell V2 findings signal (rodent bait stations) (cross-sell.js) |
+| `bait_replaced` | Bait replaced | select | both | hidden | — |
+| `highest_activity_location` | Highest-activity station / location | text | both | hidden | — |
+| `bait_issues` | Bait / station contents | chips | both | hidden | — |
+| `evidence_observed` | Rodent evidence nearby | chips | both | hidden | — |
+| `station_issues` | Station condition issues | chips | both | hidden | — |
+| `conducive_conditions` | Attractants / harborage | chips | both | hidden | — |
+| `sanitation_recommendations` | Customer recommendations | chips | both | hidden | — |
 
 ### `wildlife` — typed `wildlife_trapping` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `target_animal` | Suspected species | select | required | — |
-| `evidence_observed` | Evidence observed | chips | hidden | — |
-| `entry_points` | Entry / access points | chips | hidden | — |
-| `traps_checked` | Traps checked | count | hidden | — |
-| `captures` | Captures | count | hidden | — |
-| `trap_actions` | Trap / device status | chips | hidden | — |
-| `customer_recommendations` | Customer recommendations | chips | hidden | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `target_animal` | Suspected species | select | both | required | — |
+| `evidence_observed` | Evidence observed | chips | both | hidden | — |
+| `entry_points` | Entry / access points | chips | both | hidden | — |
+| `traps_checked` | Traps checked | count | both | hidden | — |
+| `captures` | Captures | count | both | hidden | — |
+| `trap_actions` | Trap / device status | chips | both | hidden | — |
+| `customer_recommendations` | Customer recommendations | chips | both | hidden | — |
 
 ### `flea` — typed `flea` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `evidence_level` | Evidence / activity level | select | required | Flea activity gauge + Today's Result flea story (buildTodaysResult) (activity-indicators.js) |
-| `activity_areas` | Activity areas | chips | hidden | Today's Result flea story (buildTodaysResult) (activity-indicators.js) |
-| `areas_treated` | Areas treated | chips | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
-| `treatment_completed` | Treatment completed | chips | required | — |
-| `contributing_conditions` | Contributing conditions | chips | hidden | — |
-| `customer_prep` | Customer prep / aftercare | chips | required | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `evidence_level` | Evidence / activity level | select | both | required | Flea activity gauge + Today's Result flea story (buildTodaysResult) (activity-indicators.js) |
+| `activity_areas` | Activity areas | chips | both | hidden | Today's Result flea story (buildTodaysResult) (activity-indicators.js) |
+| `areas_treated` | Areas treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `treatment_completed` | Treatment completed | chips | both | required | — |
+| `contributing_conditions` | Contributing conditions | chips | both | hidden | — |
+| `customer_prep` | Customer prep / aftercare | chips | both | required | — |
 
 ### `palm` — typed `palm_injection` form
 
-| fact | label | type | when missing | also read by name in |
-|---|---|---|---|---|
-| `palm_species` | Palm species | text | hidden | — |
-| `palms_serviced` | Palms serviced | count | hidden | — |
-| `areas_treated` | Palms treated | chips | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
-| `palm_condition` | Overall palm condition | select | required | — |
-| `condition_observations` | Canopy & growth observations | chips | hidden | — |
-| `deficiency_signs` | Nutrient observations | chips | hidden | — |
-| `pest_disease_signs` | Pest & disease check | chips | hidden | — |
-| `work_completed` | Work completed today | chips | hidden | — |
-| `customer_recommendations` | Customer recommendations | chips | hidden | — |
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `palm_species` | Palm species | text | both | hidden | — |
+| `palms_serviced` | Palms serviced | count | both | hidden | — |
+| `areas_treated` | Palms treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `palm_condition` | Overall palm condition | select | both | required | — |
+| `condition_observations` | Canopy & growth observations | chips | both | hidden | — |
+| `deficiency_signs` | Nutrient observations | chips | both | hidden | — |
+| `pest_disease_signs` | Pest & disease check | chips | both | hidden | — |
+| `work_completed` | Work completed today | chips | both | hidden | — |
+| `customer_recommendations` | Customer recommendations | chips | both | hidden | — |
 
 <!-- END GENERATED: typed form facts -->

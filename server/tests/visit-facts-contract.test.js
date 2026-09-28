@@ -68,6 +68,14 @@ describe('visit facts contract registry', () => {
     const problems = [];
     for (const [line, def] of Object.entries(VISIT_FACTS_CONTRACT)) {
       if (EXCLUDED_SERVICE_LINES[line]) problems.push(`${line}: excluded line listed in the registry`);
+      // The exclusion also has to be checked against every catalog key a line
+      // lists, not just the line's own identifier — the retired-key check
+      // below does the same for RETIRED_CATALOG_KEYS. Without this, adding
+      // wdo_inspection or termite_slab_pretreat under a differently named
+      // line stays green.
+      for (const key of def.catalogKeys || []) {
+        if (EXCLUDED_SERVICE_LINES[key]) problems.push(`${line}: catalogKeys lists excluded service key ${key}`);
+      }
       if (typeof def.label !== 'string' || !def.label) problems.push(`${line}: label`);
       if (!Array.isArray(def.catalogKeys)) problems.push(`${line}: catalogKeys`);
       if (typeof def.voiceFill !== 'boolean') problems.push(`${line}: voiceFill`);
