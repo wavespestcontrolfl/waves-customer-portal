@@ -532,7 +532,15 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       if (genRef.current !== myGen) return; // sheet closed / another item opened meanwhile
       setResultData(result);
       setResultSource('history');
-      setSelectedType(item.type);
+      // `item.type` is the server ROUTE type ('lawn' | 'tree_shrub' | 'pest')
+      // — palm has no route of its own, so a saved palm workup is always
+      // stored/listed as 'tree_shrub'. A stored workup's own
+      // `v2.subject_type` says which subject it actually was; without this,
+      // a palm history item's retake-and-resubmit (handleRetakePhoto below)
+      // would reopen with tree/shrub questions and submit
+      // `subject: 'tree_shrub'`, silently losing palm-specific chips and
+      // routing (codex round-0 P1).
+      setSelectedType(result?.v2?.subject_type === 'palm' ? 'palm' : item.type);
       setStep('result');
     } catch (err) {
       if (genRef.current !== myGen) return;

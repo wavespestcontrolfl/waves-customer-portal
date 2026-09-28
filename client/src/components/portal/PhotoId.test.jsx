@@ -1463,6 +1463,36 @@ describe('lawn/tree_shrub/palm workup card (renders only when data.v2.kind === "
     expect(screen.getByRole('button', { name: 'Identify' })).toBeInTheDocument();
   });
 
+  it('a palm workup opened from history (stored under the tree_shrub route) restores the palm subject on retake, so resubmitting still sends subject: "palm"', async () => {
+    api.getPhotoIds.mockResolvedValueOnce({
+      items: [{ id: 'pmh1', type: 'tree_shrub', created_at: '2026-09-27T00:00:00Z', headline: workupNamed.answer.headline, next_step_kind: 'specialist' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'pmh1', type: 'tree_shrub', created_at: '2026-09-27T00:00:00Z',
+      result: { plant_groups: [] }, v2: workupNamed,
+      photos: [{ id: 'ph1', url: 'https://example.com/saved.jpg' }],
+    });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(await screen.findByText(workupNamed.answer.headline));
+    await screen.findByRole('button', { name: 'Take this photo' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
+    // Back on the photos step — a history-sourced retake starts with no
+    // photos (openHistoryItem clears live photos), so a new one is added.
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'pm2', type: 'tree_shrub', created_at: '2026-09-28T00:00:00Z', result: {}, next_step: { kind: 'none', title: 'x', body: 'y' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+    const [type, payload] = api.createPhotoId.mock.calls[0];
+    expect(type).toBe('tree_shrub');
+    expect(payload.subject).toBe('palm');
+  });
+
   const workupIdentity = {
     version: 2, kind: 'identity', subject_type: 'palm', tier: 'ai_suggestion',
     answer: { level: 'entry', headline: "We're pretty sure: Queen Palm", subhead: 'Syagrus romanzoffiana', wording: 'pretty_sure' },
