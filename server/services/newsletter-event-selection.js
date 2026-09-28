@@ -421,7 +421,7 @@ async function loadYearIdentityPool(knex, events, reference = new Date()) {
     // event_type / recurrence_type / description to inherit last year's
     // recurring label.
     .select('id', 'title', 'start_at', 'venue_name', 'city', 'merged_into',
-      'event_type', 'recurrence_type', 'description', 'last_featured_occurrence_at')
+      'event_type', 'recurrence_type', 'description', 'last_featured_occurrence_at', 'last_featured_at')
     .where('start_at', '>=', parseETDateTime(`${minYear}-01-01T00:00:00`))
     .where('start_at', '<=', parseETDateTime(`${maxYear}-12-31T23:59:59`));
 }

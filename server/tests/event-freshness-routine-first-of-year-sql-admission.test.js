@@ -263,6 +263,22 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).not.toContain(id);
   });
 
+  test('the real year-pool loader carries legacy featured history: a sibling featured last summer proves continuity', async () => {
+    const title = 'TEST Legacy Continuity Riverside Market';
+    const { laterDay, earlierDay } = sameYearDays();
+    const priorSummer = `${Number(earlierDay.slice(0, 4)) - 1}-07-01`;
+    const candidateId = await insertEvent({ title, start_at: etAt(earlierDay) });
+    // Another row of the same series that a feed already advanced into this
+    // year; it was featured last summer, before last_featured_occurrence_at existed.
+    await insertEvent({
+      title, admin_status: 'approved', start_at: etAt(laterDay),
+      times_featured: 1, last_featured_at: etAt(priorSummer),
+    });
+    const candidates = await db('events_raw').where({ id: candidateId });
+    const rows = await filterRepeatedDateIdentities(candidates, { knex: db, reference: etAt(earlierDay) });
+    expect(rows.map((r) => r.id)).toEqual([candidateId]);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',
