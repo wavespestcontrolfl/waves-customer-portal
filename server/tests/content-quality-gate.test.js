@@ -1550,6 +1550,44 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Organization, ants are common.' }).ok).toBe(false);
   });
 
+  test('comma-grouped and mixed-fraction measurements compare whole (Codex r6 P2)', () => {
+    expect(checkCitabilityConcreteSpecifics({ body: 'Covers 2,000 square feet.' }, {}, { previousVersion: { body: 'Covers 1,000 square feet.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 1/2 inches.' }, {}, { previousVersion: { body: 'Mow at 3 1/2 inches.' } }))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'Covers 1000 square feet; mow at 3 1/2 inches.' },
+      {},
+      { previousVersion: { body: 'Covers 1,000 sq ft; mow at 3 1/2 inches.' } },
+    )).toEqual({ ok: true });
+  });
+
+  test('unquoted attribute values are not rendered measurements (Codex r6 P2)', () => {
+    for (const body of [
+      '<aside aria-label=Recheck-in-14-days>During summer.</aside>',
+      '<aside aria-label="Recheck-in-14-days">During summer.</aside>',
+    ]) {
+      expect(checkCitabilityConcreteSpecifics({ body })).toEqual({ ok: false, reason: 'vague_qualifier_without_measurement:during summer' });
+    }
+  });
+
+  test('how_to_choose accepts noun-phrase conditions ahead of an arrow (Codex r6 P2)', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Active mud tubes → choose liquid\n- Recurring activity → use bait\n- A pending sale -> schedule an inspection` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Inspect the area\n- Apply bait\n- Recheck the trail` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+  });
+
+  test('a refresh reads the frozen live post_type, not the agent frontmatter (Codex r6 P2)', () => {
+    const draft = { title: 'Termite Treatment Costs in Bradenton', frontmatter: {}, body: '## Overview\nText.' };
+    const context = { previousVersion: { body: 'Prior.', frontmatter: { post_type: 'cost' } } };
+    expect(checkCitabilityComparison(draft, {}, context)).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityHowToChoose(draft, {}, context)).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+    const changed = { ...draft, frontmatter: { post_type: 'guide' } };
+    expect(checkCitabilityComparison(changed, {}, context).ok).toBe(false);
+    expect(checkCitabilityComparison(draft, {}, {})).toEqual({ ok: true, reason: 'no_choice_framed' });
+  });
+
   test('choice framing reads rendered heading text only (Codex r4 P2)', () => {
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Related guide](/bait-vs-spray/)\nText.' }))
       .toEqual({ ok: true, reason: 'no_choice_framed' });

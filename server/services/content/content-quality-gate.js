@@ -1119,8 +1119,13 @@ function checkVoiceMatch(draft) {
 // normalization decides the final type — this gate only nudges).
 const CHOICE_POST_TYPES = new Set(['decision', 'comparison', 'cost']);
 
-function draftPostType(draft) {
-  return String(draft?.frontmatter?.post_type ?? draft?.post_type ?? '').trim().toLowerCase();
+// A refresh ships the LIVE page's non-meta frontmatter (publishRefresh
+// freezes it), so the prior version's post_type is what actually publishes
+// (Codex r6 P2); a new post uses the writer's own frontmatter.
+function draftPostType(draft, context) {
+  const frozen = context?.previousVersion?.frontmatter?.post_type;
+  const type = frozen != null && String(frozen).trim() ? frozen : (draft?.frontmatter?.post_type ?? draft?.post_type ?? '');
+  return String(type).trim().toLowerCase();
 }
 
 // Named authorities the evidence rules already point the writer at (UF/IFAS,
@@ -1148,6 +1153,16 @@ function nonBlogTarget(brief) {
   return brief?.target_page_type === 'page';
 }
 
+// Unquoted HTML attribute values (<aside aria-label=Recheck-in-14-days>)
+// are configuration, like quoted ones — blank them in place so the
+// equivalent attribute syntax cannot change a signal (Codex r6 P2).
+function maskUnquotedAttrValues(src) {
+  return String(src || '').replace(/<[A-Za-z][\w.:-]*(?:\s[^<>]*)?>/g, (tag) => tag.replace(
+    /(\s[A-Za-z_:][\w:.-]*\s*=\s*)([^\s"'`{}<>=]+)/g,
+    (_m, lead, value) => lead + ' '.repeat(value.length),
+  ));
+}
+
 // Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
 // Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
 // The shared guardrails blanker preserves line structure but flattens list
@@ -1162,7 +1177,7 @@ function renderedCitabilityBody(body) {
   // finally mask JSX/HTML attribute values, which are configuration rather
   // than reader-visible copy. Keep tag names so visible ComparisonTable
   // components remain detectable.
-  const visible = blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw));
+  const visible = maskUnquotedAttrValues(blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw)));
   const blanked = maskJsxAttrQuotes(blankExpressions(visible));
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
@@ -1265,7 +1280,7 @@ function checkCitabilityNamedSources(draft, brief) {
 // as are bare years and bare counts ("3 ways", "2024") — those are not the
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
-const CONCRETE_SPECIFIC_RE = /(?<![$\d.\/])\d+(?:\.\d+|\/\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+|\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.,\/])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?(?:\s?(?:-|–|to)\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
 const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
 
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
@@ -1289,13 +1304,16 @@ const UNIT_KEYS = [
 // compare equal while "4 inches" never stands in for "10–14 days".
 function measurementKey(match) {
   const m = match.toLowerCase().replace(/\s+/g, ' ').trim();
-  const num = m.match(/^(\d+(?:\.\d+|\/\d+)?)(?:\s?(?:-|–|to)\s?(\d+(?:\.\d+|\/\d+)?))?/);
+  // Whole formatted numbers: "1,000" and "3 1/2" never shrink to a
+  // trailing "000" / "1/2" (Codex r6 P2).
+  const num = m.match(/^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)(?:\s?(?:-|–|to)\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?))?/);
   let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
   unit = unit.replace(/^times? (?:a|per) /, 'times per ');
   const alias = UNIT_KEYS.find(([re]) => re.test(unit));
   if (alias) unit = alias[1];
   else unit = unit.split(' ').map((w) => w.replace(/s$/, '')).join(' ');
-  return `${num[1]}${num[2] ? `-${num[2]}` : ''} ${unit}`;
+  const clean = (v) => v.replace(/,/g, '');
+  return `${clean(num[1])}${num[2] ? `-${clean(num[2])}` : ''} ${unit}`;
 }
 
 function calendarKey(match) {
@@ -1381,8 +1399,8 @@ function headingLines(body) {
   return String(body || '').split(/\r?\n/).filter((l) => /^ {0,3}#{1,3}\s+\S/.test(l));
 }
 
-function postFramesAChoice(draft) {
-  if (CHOICE_POST_TYPES.has(draftPostType(draft))) return true;
+function postFramesAChoice(draft, context) {
+  if (CHOICE_POST_TYPES.has(draftPostType(draft, context))) return true;
   const title = String(draft.title || draft.frontmatter?.title || '');
   if (CHOICE_FRAMING_RE.test(visibleInlineText(title))) return true;
   // Rendered heading text only: a link destination such as
@@ -1391,11 +1409,11 @@ function postFramesAChoice(draft) {
     .some((h) => CHOICE_FRAMING_RE.test(visibleInlineText(h)));
 }
 
-function checkCitabilityComparison(draft, brief) {
+function checkCitabilityComparison(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
   if (hasTable) return { ok: true };
-  if (!postFramesAChoice(draft)) return { ok: true, reason: 'no_choice_framed' };
+  if (!postFramesAChoice(draft, context)) return { ok: true, reason: 'no_choice_framed' };
   return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
 }
 
@@ -1426,7 +1444,10 @@ function howToChooseSectionCriteria(body) {
       const topLevel = topContentColumn === null || indent < topContentColumn;
       if (topLevel) topContentColumn = indent + 1 + m[2].replace(/\t/g, '    ').length;
       const criterion = visibleInlineText(m[3]).trim();
-      const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion);
+      // An observable condition: a conditional lead word, or any noun-phrase
+      // check ahead of an arrow ("Active mud tubes → choose liquid", Codex r6 P2).
+      const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion)
+        || /^[^→]*\w[^→]*\s*(?:→|->)\s*\S/.test(criterion);
       const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
       if (topLevel && hasCondition && namesOption) items += 1;
     }
@@ -1435,10 +1456,10 @@ function howToChooseSectionCriteria(body) {
   return best; // -1 = no H2 found
 }
 
-function checkCitabilityHowToChoose(draft, brief) {
+function checkCitabilityHowToChoose(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = renderedCitabilityBody(draft.body);
-  const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body) || postFramesAChoice(draft);
+  const applies = COMPARISON_TABLE_RE.test(body) || postFramesAChoice(draft, context);
   if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
   const criteria = howToChooseSectionCriteria(body);
   if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
