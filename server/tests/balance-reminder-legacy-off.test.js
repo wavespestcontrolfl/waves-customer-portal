@@ -140,9 +140,15 @@ describe('dailyCheck', () => {
 });
 
 describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-visit equivalent)', () => {
-  // Pinned clock: daysUntil compares scheduled_date against `new Date()`
-  // taken live inside the sweep, so a real clock and a fixed scheduled_date
-  // race by however many ms elapse between test setup and that read.
+  // Clock pinned to ~10 AM ET (14:00Z) — the real 11 AM cron's neighborhood
+  // and, not coincidentally, the exact offset that a naive
+  // `new Date(scheduled_date) - new Date()` millisecond subtraction gets
+  // wrong for a DATE column (Codex P1): a UTC-midnight DATE value minus a
+  // 14:00Z clock floors to -1 for TODAY's visit (skipped) and 0 for
+  // TOMORROW's visit (mislabeled "today"). scheduled_date below is a
+  // DATE-style UTC-midnight value, like the real pg driver returns, not an
+  // instant matching the clock — proving the fix reads calendar dates, not
+  // millisecond offsets.
   beforeEach(() => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
   });
@@ -156,11 +162,7 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
     const service = {
       id: 'ss-1', cust_id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan',
-      // Fixed to the SAME instant the fake clock is set to below — daysUntil
-      // must land exactly on 0, and comparing two independently-taken
-      // `new Date()` calls (test setup vs. the sweep's own clock read) is a
-      // real-clock race that flakes under load (jitter can floor to -1).
-      scheduled_date: new Date('2026-05-26T14:00:00.000Z'), waveguard_tier: 'Gold',
+      scheduled_date: new Date('2026-05-26T00:00:00.000Z'), waveguard_tier: 'Gold',
     };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledServicesChain([service]);
@@ -177,6 +179,37 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
       expect.stringContaining('Taylor Morgan'),
       expect.objectContaining({ messageType: 'internal_alert' }),
     );
+    const [, message] = TwilioService.sendSMS.mock.calls[0];
+    expect(message).toContain('today');
+    expect(message).not.toContain('tomorrow');
+  });
+
+  test('a customer 30+ days overdue with service tomorrow gets the owner alert labeled "tomorrow", not "today"', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    const service = {
+      id: 'ss-2', cust_id: 'cust-2', first_name: 'Jamie', last_name: 'Rivera',
+      scheduled_date: new Date('2026-05-27T00:00:00.000Z'), waveguard_tier: 'Gold',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
+      totalBalance: 90, daysOverdue: 30, invoiceIds: [], oldestInvoiceId: null,
+    });
+
+    await balanceReminder.dailyCheck();
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('Jamie Rivera'),
+      expect.objectContaining({ messageType: 'internal_alert' }),
+    );
+    const [, message] = TwilioService.sendSMS.mock.calls[0];
+    expect(message).toContain('tomorrow');
+    expect(message).not.toContain('today.');
   });
 
   test('a customer under 30 days overdue gets no alert', async () => {
@@ -185,7 +218,7 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
     const service = {
       id: 'ss-1', cust_id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan',
-      scheduled_date: new Date('2026-05-26T14:00:00.000Z'), waveguard_tier: 'Gold',
+      scheduled_date: new Date('2026-05-26T00:00:00.000Z'), waveguard_tier: 'Gold',
     };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledServicesChain([service]);

@@ -197,11 +197,17 @@ class BalanceReminder {
       try {
         const balance = await this.getCustomerBalance(service.cust_id);
         if (!balance || balance.daysOverdue < 30) continue;
+        // scheduled_date is a DATE column — comparing it against `new Date()`
+        // as instants (Codex P1) shifts by TZ: on Railway (TZ=UTC) a DATE
+        // parses to UTC midnight, and this cron runs ~10 AM ET (~14:00 UTC),
+        // so today's visit floors to -1 (skipped) and tomorrow's floors to 0
+        // (mislabeled "today"). Compare calendar dates instead —
+        // dateOnlyString reads the stored date with no TZ shift, same as the
+        // legacy query above that selected this row by scheduled_date.
+        const serviceDateEt = dateOnlyString(service.scheduled_date);
+        if (serviceDateEt !== today && serviceDateEt !== tomorrow) continue;
         if (await customerDunningStopped(balance)) continue;
-        const daysUntil = Math.floor(
-          (new Date(service.scheduled_date) - new Date()) / 86400000,
-        );
-        if (daysUntil !== 0 && daysUntil !== 1) continue;
+        const daysUntil = serviceDateEt === today ? 0 : 1;
         await TwilioService.sendSMS(
           process.env.ADAM_PHONE || "+19415993489",
           `💰 Overdue: ${service.first_name} ${service.last_name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? "today" : "tomorrow"}.`,

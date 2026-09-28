@@ -839,8 +839,16 @@ const LatePaymentService = {
             // shared stamp as the normal path below (dunning unification,
             // owner note: this checker is the only sender left for a 60/90
             // -day invoice with no invoice_followup_sequences row once the
-            // legacy balance-reminder retires).
-            if (tierDays >= 60) await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+            // legacy balance-reminder retires). Run AFTER completePendingEmail
+            // above (the dedupe marker for this episode) and guarded (Codex
+            // P1): a failure here must never cost that marker.
+            if (tierDays >= 60) {
+              try {
+                await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+              } catch (stampErr) {
+                logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+              }
+            }
           } else if (emailResult?.resolved === true
             || (isTerminalEmailRefusal(emailResult)
               && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
@@ -907,16 +915,6 @@ const LatePaymentService = {
           continue;
         }
 
-        // Sequence-less invoice, confirmed delivery this tier (dunning
-        // unification, owner note): once the legacy balance-reminder's
-        // account-level 60/90-day late check retires, this checker is the
-        // only sender left for an invoice with no invoice_followup_sequences
-        // row (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default), so
-        // it now owns the shared at-risk stamp for those same tiers — same
-        // helper invoice-followups.js's fireTouch uses for its Day 60/90
-        // steps, so the two callers can't drift on which fields it stamps.
-        if (tierDays >= 60) await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
-
         const activityInsert = db('activity_log').insert({
           ...(repair?.originalAt ? { created_at: repair.originalAt } : {}),
           customer_id: customer.id,
@@ -935,6 +933,24 @@ const LatePaymentService = {
         });
         if (pendingEmail) await activityInsert;
         else await activityInsert.catch(() => {});
+
+        // Sequence-less invoice, confirmed delivery this tier (dunning
+        // unification, owner note): once the legacy balance-reminder's
+        // account-level 60/90-day late check retires, this checker is the
+        // only sender left for an invoice with no invoice_followup_sequences
+        // row (adoption, GATE_DUNNING_ADOPT_ORPHANS, is dark by default), so
+        // it now owns the shared at-risk stamp for those same tiers — same
+        // helper invoice-followups.js's fireTouch uses for its Day 60/90
+        // steps, so the two callers can't drift on which fields it stamps.
+        // Run AFTER the activity_log dedupe marker above (Codex P1): a
+        // failure here must never cost that marker and risk a re-send.
+        if (tierDays >= 60) {
+          try {
+            await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
+          } catch (stampErr) {
+            logger.warn(`[late-payment] at-risk stamp failed for customer ${customer.id}: ${stampErr.message}`);
+          }
+        }
       } catch (smsErr) {
         logger.error(`[late-payment] SMS failed for customer ${customer.id}: ${smsErr.message}`);
         skipped++;

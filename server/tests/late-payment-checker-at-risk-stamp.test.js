@@ -93,6 +93,10 @@ function invoiceRow({ dueDate }) {
 
 const customer = { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' };
 
+// activity_log is read THREE times per invoice before any write: the
+// dedupe check (`alreadySent`), then — since tierDays !== 7 here — the
+// legacy `|7 DAYS`-keyed fallback lookup, before the final insert/marker.
+
 beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
   jest.clearAllMocks();
@@ -112,7 +116,7 @@ test('a delivered 60-day-overdue invoice with no sequence row stamps at_risk', a
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
-    activity_log: [chain({ first: null }), chain()],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
     customers: [chain({ first: customer })],
   });
 
@@ -131,7 +135,7 @@ test('a delivered 90-day-overdue invoice with no sequence row stamps at_risk', a
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
-    activity_log: [chain({ first: null }), chain()],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
     customers: [chain({ first: customer })],
   });
 
@@ -150,7 +154,7 @@ test('a delivered 14-day-overdue invoice does not stamp at_risk', async () => {
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
-    activity_log: [chain({ first: null }), chain()],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
     customers: [chain({ first: customer })],
   });
 
@@ -174,7 +178,7 @@ test('no channel reached the customer — 60-day tier does not stamp at_risk (re
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
-    activity_log: [chain({ first: null }), chain()],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
     customers: [chain({ first: customer })],
   });
 
