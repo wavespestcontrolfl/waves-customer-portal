@@ -353,13 +353,20 @@ async function fetchOpenTimesBlock(args) {
 // exhausting the revision budget still ungrounded fails the draft closed
 // exactly like an ordinary fact-check miss (no draft, no card), never a
 // silent pass-through.
-function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
-  const violations = [];
-  const list = Array.isArray(offeredTimes) ? offeredTimes : [];
-  const replyText = reply || '';
+// How many times `reply` quotes this exact OPEN TIMES window text. Digit
+// boundaries on both sides so "1:00 PM - 3:00 PM" can never be counted
+// inside "11:00 PM - 3:00 PM" — the window strings share one renderer, so
+// that is the only substring overlap possible between two different ones.
+function countQuotedWindow(reply, window) {
+  if (!reply || !window) return 0;
+  const escaped = window.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?<!\\d)${escaped}(?!\\d)`, 'g');
+  return (reply.match(re) || []).length;
+}
 
+function indexOpenTimesDays(openTimesDays) {
   const validPairs = new Set();
-  const windowsByText = new Map(); // window text -> Set(dates that offer it), for the reverse check below
+  const windowsByText = new Map(); // window text -> Set(dates that offer it)
   for (const d of (openTimesDays || [])) {
     for (const window of (d.windows || [])) {
       validPairs.add(`${d.date}|${window}`);
@@ -367,8 +374,17 @@ function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
       windowsByText.get(window).add(d.date);
     }
   }
+  return { validPairs, windowsByText };
+}
 
-  const declaredWindows = new Set();
+function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
+  const violations = [];
+  const list = Array.isArray(offeredTimes) ? offeredTimes : [];
+  const replyText = reply || '';
+  const { validPairs, windowsByText } = indexOpenTimesDays(openTimesDays);
+
+  // window text -> how many VALID declared entries carry it
+  const declaredCount = new Map();
   for (const entry of list) {
     const date = entry && typeof entry.date === 'string' ? entry.date : '';
     const window = entry && typeof entry.window === 'string' ? entry.window : '';
@@ -380,25 +396,59 @@ function validateOfferedTimes({ offeredTimes, openTimesDays, reply }) {
       violations.push(`offered_times claims "${date}: ${window}" but that is not an OPEN TIMES slot`);
       continue;
     }
-    if (!replyText.includes(window)) {
+    if (!countQuotedWindow(replyText, window)) {
       violations.push(`offered_times lists "${date}: ${window}" but the reply never quotes that time`);
       continue;
     }
-    declaredWindows.add(window);
+    declaredCount.set(window, (declaredCount.get(window) || 0) + 1);
   }
 
-  // Reverse check: every OPEN TIMES window the reply actually quotes must
-  // have a declared offered_times entry — an undeclared quote is exactly
-  // the structural gap the date-parsing heuristics existed to patch, and
-  // this replaces that patch with a draft-time requirement instead.
+  // Reverse check, bound PER OCCURRENCE (pre-push audit P1): every time the
+  // reply quotes an OPEN TIMES window there must be exactly one declared
+  // (date, window) entry for it. A window-text-only check let "Tuesday 9–11
+  // or Wednesday 9–11" pass with only Tuesday declared — Wednesday would
+  // then never be persisted or rechecked at send time. Counting occurrences
+  // needs no prose parsing: the window text is the one thing FACT
+  // DISCIPLINE already makes the model copy verbatim.
   for (const [window, dates] of windowsByText) {
-    if (replyText.includes(window) && !declaredWindows.has(window)) {
+    const quoted = countQuotedWindow(replyText, window);
+    if (!quoted) continue;
+    const declared = declaredCount.get(window) || 0;
+    if (!declared) {
       const dateHint = dates.size === 1 ? ` (offered on ${[...dates][0]})` : '';
       violations.push(`the reply quotes "${window}" from OPEN TIMES${dateHint} but it is not listed in offered_times`);
+    } else if (declared !== quoted) {
+      violations.push(`the reply quotes "${window}" ${quoted} time(s) but offered_times declares it ${declared} time(s) — write the time out once per offered day, with one {date, window} entry each`);
     }
   }
 
   return { ok: violations.length === 0, violations };
+}
+
+// The deterministic inverse of buildFactsBlock's OPEN TIMES section, for a
+// FROZEN facts block (sealed-exam replay — pre-push audit P1): the replay
+// must not fetch today's calendar, but it still has to validate the model's
+// offered_times against the OPEN TIMES the draft actually saw, or every
+// correctly declared offer in a frozen exam would be rejected against an
+// empty list and the exam would grade drift toward deferral. Parses our own
+// rendered "- <date>: <w1>, <w2>" lines only — never model prose.
+const OPEN_TIMES_SECTION_HEADER = 'OPEN TIMES (real, bookable slots, ET';
+function parseOpenTimesDaysFromFactsBlock(factsBlock) {
+  if (!factsBlock) return [];
+  const lines = String(factsBlock).split('\n');
+  const start = lines.findIndex((l) => l.startsWith(OPEN_TIMES_SECTION_HEADER));
+  if (start === -1) return [];
+  const days = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.startsWith('- ')) break;
+    const idx = line.indexOf(': ');
+    if (idx === -1) break;
+    const date = line.slice(2, idx);
+    const windows = line.slice(idx + 2).split(', ').map((w) => w.trim()).filter(Boolean);
+    if (date && windows.length) days.push({ date, windows });
+  }
+  return days;
 }
 
 // The minimum needed to recheck a draft's quoted OPEN TIMES at send time —
@@ -509,7 +559,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
-    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry, and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back, using the EXACT wording from FOLLOW-UP SLA RIGHT NOW in the facts below (never invent your own timing; that fact IS the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
     : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
   const handoffBullet = realAnswersOn
     ? realAnswersHandoffBullets()
@@ -1213,8 +1263,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
+  // A frozen replay validates offered_times against the OPEN TIMES it
+  // actually saw (parsed back out of its own facts block); `block` stays
+  // null there so no send-time snapshot is minted for a draft nothing sends.
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
-    ? { block: null, days: [] }
+    ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId,
     });
@@ -1811,6 +1864,8 @@ module.exports = {
   fetchOpenTimesBlock,
   fetchOpenTimesData,
   validateOfferedTimes,
+  countQuotedWindow,
+  parseOpenTimesDaysFromFactsBlock,
   computeOpenTimesSnapshot,
   openTimesStillOffered,
 };

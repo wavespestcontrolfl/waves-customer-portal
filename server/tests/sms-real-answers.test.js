@@ -1133,3 +1133,87 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers'); // the prompt rewrite still applies; only the section is withheld
   });
 });
+
+describe('validateOfferedTimes — the reverse check binds PER OCCURRENCE (pre-push audit P1: a window offered on two days needs one entry per day)', () => {
+  const { validateOfferedTimes, countQuotedWindow } = require('../services/sms-shadow-drafter');
+  const days = [
+    { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM'] },
+    { date: 'Wednesday, September 30', windows: ['9:00 AM - 11:00 AM'] },
+  ];
+  const reply = 'How about Tuesday 9:00 AM - 11:00 AM or Wednesday 9:00 AM - 11:00 AM?';
+
+  test('same window on two days, quoted twice, BOTH declared → ok', () => {
+    expect(validateOfferedTimes({
+      offeredTimes: [
+        { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+        { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' },
+      ],
+      openTimesDays: days, reply,
+    })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('same window on two days, quoted twice, only Tuesday declared → blocked (Wednesday would otherwise never be persisted or rechecked)', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      openTimesDays: days, reply,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toEqual([
+      'the reply quotes "9:00 AM - 11:00 AM" 2 time(s) but offered_times declares it 1 time(s) — write the time out once per offered day, with one {date, window} entry each',
+    ]);
+  });
+
+  test('the same (date, window) declared twice but quoted once → blocked, not silently deduplicated', () => {
+    const result = validateOfferedTimes({
+      offeredTimes: [
+        { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+        { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+      ],
+      openTimesDays: days,
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatch(/quotes "9:00 AM - 11:00 AM" 1 time\(s\) but offered_times declares it 2 time\(s\)/);
+  });
+
+  test('countQuotedWindow: digit boundaries — a window is never counted inside a longer time string', () => {
+    expect(countQuotedWindow('We have 1:00 PM - 3:00 PM and 1:00 PM - 3:00 PM again.', '1:00 PM - 3:00 PM')).toBe(2);
+    expect(countQuotedWindow('We have 11:00 PM - 3:00 PM.', '1:00 PM - 3:00 PM')).toBe(0);
+    expect(countQuotedWindow('', '1:00 PM - 3:00 PM')).toBe(0);
+    expect(countQuotedWindow('anything', '')).toBe(0);
+  });
+});
+
+describe('parseOpenTimesDaysFromFactsBlock — recovers the FROZEN OPEN TIMES a sealed-exam replay actually saw (pre-push audit P1)', () => {
+  const { parseOpenTimesDaysFromFactsBlock, buildFactsBlock } = require('../services/sms-shadow-drafter');
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+
+  test('round-trips buildFactsBlock\'s own rendering: every day and window comes back structured', () => {
+    const openTimesBlock = '- Tuesday, September 29: 9:00 AM - 11:00 AM, 11:00 AM - 1:00 PM\n- Wednesday, September 30: 2:00 PM - 4:00 PM';
+    const frozen = buildFactsBlock({ summary: 'Dana — Quarterly Pest, Venice', upcomingServices: [] }, { openTimesBlock });
+    expect(parseOpenTimesDaysFromFactsBlock(frozen)).toEqual([
+      { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM', '11:00 AM - 1:00 PM'] },
+      { date: 'Wednesday, September 30', windows: ['2:00 PM - 4:00 PM'] },
+    ]);
+  });
+
+  test('a facts block with no OPEN TIMES section → [] (nothing to validate against, same as a live draft with no fetch)', () => {
+    const frozen = buildFactsBlock({ summary: 'Dana — Quarterly Pest, Venice', upcomingServices: [] });
+    expect(parseOpenTimesDaysFromFactsBlock(frozen)).toEqual([]);
+    expect(parseOpenTimesDaysFromFactsBlock(null)).toEqual([]);
+    expect(parseOpenTimesDaysFromFactsBlock('')).toEqual([]);
+  });
+
+  test('stops at the end of the section — a later "- " line from another section is not read as a day', () => {
+    const block = 'OPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n- Tuesday, September 29: 9:00 AM - 11:00 AM\nBILLING:\n- balance: $0\n';
+    expect(parseOpenTimesDaysFromFactsBlock(block)).toEqual([
+      { date: 'Tuesday, September 29', windows: ['9:00 AM - 11:00 AM'] },
+    ]);
+  });
+});

@@ -229,3 +229,63 @@ describe('generateGroundedDraft — offered_times structural check shares the re
     expect(r.openTimesSnapshot).toBeNull();
   });
 });
+
+// Pre-push audit P1: a sealed-exam replay passes the FROZEN facts block and
+// must never fetch today's calendar — but it still has to validate
+// offered_times against the OPEN TIMES the draft actually saw, or every
+// correctly declared offer in the exam would be rejected against an empty
+// list and the exam would grade drift toward deferral.
+describe('generateGroundedDraft — frozen replay (presetFactsBlock) validates offered_times against the frozen OPEN TIMES, with no availability fetch', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const FROZEN = 'CUSTOMER: Dana — Quarterly Pest, Venice\nOPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n- Tuesday, September 29: 9:00 AM - 11:00 AM\nBILLING:\n- balance: $0\n';
+
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  function setup() {
+    jest.resetModules();
+    const getAvailableSlots = jest.fn(async () => ({ days: [{ fullDate: 'Friday, October 2', slots: [{ startTime24: '13:00' }] }] })); // today's calendar — must NOT be consulted
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    return { drafter, getAvailableSlots };
+  }
+  const args = (client) => ({
+    client, context: CTX, inboundMessage: 'Can we book a visit?', intent: { intent: 'general_customer_sms_needs_review' },
+    schedulingIntent: true, city: 'Venice', factsBlock: FROZEN,
+  });
+
+  test('an offer correctly declared from the FROZEN OPEN TIMES converges; the live calendar is never fetched; no send-time snapshot is minted', async () => {
+    const { drafter, getAvailableSlots } = setup();
+    const client = makeClient([
+      {
+        reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
+        offered_times: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(1);
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(r.factsBlock).toBe(FROZEN);
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+
+  test('an offer from TODAY\'s calendar (not in the frozen OPEN TIMES) is rejected deterministically', async () => {
+    const { drafter, getAvailableSlots } = setup();
+    const bad = {
+      reply: 'How about Friday 1:00 PM - 3:00 PM?', intended_actions: [], missing_info: null,
+      offered_times: [{ date: 'Friday, October 2', window: '1:00 PM - 3:00 PM' }],
+    };
+    const client = makeClient([bad, bad, bad]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(false);
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(client.calls).toHaveLength(3); // never reached the verifier
+  });
+});
