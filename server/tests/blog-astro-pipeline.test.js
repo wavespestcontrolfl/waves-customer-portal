@@ -1687,6 +1687,50 @@ describe('Astro publisher hero image republish', () => {
     }));
   });
 
+  describe('cost-guide price card on the scheduled/admin lane', () => {
+    const costPost = () => ({
+      id: 'post-1',
+      title: 'Termite Treatment Cost in Bradenton',
+      slug: 'termite-treatment-cost-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to understand what shapes termite treatment pricing and what to ask before booking. Learn more here.',
+      keyword: 'termite treatment cost bradenton',
+      category: 'termite',
+      post_type: 'cost',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Termite bait station beside a Bradenton home',
+      content: '## What shapes the price\n\nHome size, construction type, and the treatment approach all shape what termite work costs in Bradenton.',
+    });
+    const livePath = 'src/content/blog/termite-treatment-cost-bradenton.md';
+    const publishAndReadCommitted = async () => {
+      const queries = [chain({ first: jest.fn().mockResolvedValue(costPost()) }), chain()];
+      db.mockImplementation(() => queries.shift() || chain());
+      await AstroPublisher.publishAstro('post-1');
+      const md = gh.putFile.mock.calls.map(([arg]) => arg).find((arg) => arg.path === livePath);
+      return require('../services/content-astro/frontmatter').parse(md.content).data;
+    };
+
+    test('a cost row publishes with the mapped price_range', async () => {
+      expect((await publishAndReadCommitted()).price_range)
+        .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    }, 60000);
+
+    test('a republish keeps the live post\'s owner-set price_range verbatim', async () => {
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === livePath) return { sha: 'live-sha', content: '---\ntitle: Old\nprice_range:\n  - termite_trenching\n---\nold body' };
+        return path.endsWith('/hero.webp') ? { sha: 'existing-hero-sha' } : null;
+      });
+      expect((await publishAndReadCommitted()).price_range).toEqual(['termite_trenching']);
+    }, 60000);
+  });
+
   test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {
     const editorialEvidence = require('../services/content/editorial-evidence');
     const repairedBody = [

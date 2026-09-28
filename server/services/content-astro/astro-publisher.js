@@ -28,7 +28,7 @@ const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
-const { costGuidePriceRange } = require('./price-range');
+const { applyCostGuidePriceRange } = require('./price-range');
 const contentGuardrails = require('../content/content-guardrails');
 const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
@@ -322,6 +322,11 @@ async function buildFrontmatter(post) {
 
   // Drop undefined keys so YAML output stays clean.
   return JSON.parse(JSON.stringify(data));
+}
+
+// The live post's frontmatter, or null when it cannot be parsed.
+function liveFrontmatterOf(file) {
+  try { return fm.parse(String(file?.content || '')).data || null; } catch { return null; }
 }
 
 function safeJson(v, fallback) {
@@ -1521,6 +1526,10 @@ async function publishAstro(postId) {
       await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
     }
     const finalBody = bodyImages.body;
+    // Cost-guide price card (owner D1) — the shared rule (price-range.js),
+    // applied once the live post is known so a republish keeps its list.
+    applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
+    assertValidBlogFrontmatter(data);
     const markdown = fm.stringify(data, finalBody + '\n');
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
@@ -3281,14 +3290,10 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const isLegacyMd = !!existingFile && existingFile.path.endsWith('.md');
   const filePath = existingFile && !isLegacyMd ? existingFile.path : `${ASTRO_BLOG_DIR}/${slug}.mdx`;
 
-  // Cost-guide price card (owner D1): a price_range already on the live post
-  // (owner-set, or an explicit [] clearing it) is kept verbatim — this lane
-  // rebuilds frontmatter from the draft and must never drop it; otherwise a
-  // cost guide gets the deterministic mapped keys (price-range.js).
-  let livePriceRange;
-  try { livePriceRange = existingFile ? fm.parse(existingFile.file.content)?.data?.price_range : undefined; } catch { livePriceRange = undefined; }
-  const priceRange = livePriceRange != null ? livePriceRange : costGuidePriceRange(frontmatter);
-  if (priceRange) frontmatter.price_range = priceRange;
+  // Cost-guide price card (owner D1) — the shared rule (price-range.js): this
+  // lane rebuilds frontmatter from the draft, so the live post's price_range
+  // is passed in to be kept verbatim.
+  applyCostGuidePriceRange(frontmatter, existingFile ? liveFrontmatterOf(existingFile.file) : null);
 
   // LLM fact-check (same gate as the admin publish path) before any branch is
   // cut, so a factual error never opens an orphan PR. The autonomous runner's
@@ -3785,12 +3790,8 @@ async function publishRefresh(draft, brief = {}) {
   if (isBlogTarget(filePath)) {
     backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
     // Cost-guide price card (owner D1): added only when the live post has no
-    // price_range at all — an owner-set list (or an explicit []) stays frozen
-    // with the rest of the live frontmatter.
-    if (nextFrontmatter.price_range == null) {
-      const priceRange = costGuidePriceRange(nextFrontmatter);
-      if (priceRange) nextFrontmatter.price_range = priceRange;
-    }
+    // price_range at all — an owner-set list (or an explicit []) stays frozen.
+    applyCostGuidePriceRange(nextFrontmatter, currentFrontmatter);
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 

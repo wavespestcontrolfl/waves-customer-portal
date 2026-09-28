@@ -5,25 +5,27 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { costGuidePriceRange, SERVICE_PRICE_KEYS } = require('../services/content-astro/price-range');
-const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../services/pricing-engine/public-ranges');
 
 const cost = (overrides = {}) => ({ post_type: 'cost', category: 'pest-control', title: 'What It Costs', ...overrides });
 
 describe('costGuidePriceRange', () => {
   test('every mapped key is published by the portal pricing feed (a renamed key fails here, not in the hub build)', () => {
-    // termite_bond / termite_station_rental publish only behind their purchase
-    // gates; with a gate off the key is dropped at publish time like any other
-    // unpublished key.
-    const gates = ['GATE_TERMITE_BOND_OPTION', 'GATE_TERMITE_STATION_RENTAL'];
-    const prior = gates.map((g) => process.env[g]);
-    gates.forEach((g) => { process.env[g] = 'true'; });
-    try {
-      const published = new Set(computePublicPricingRanges({ refresh: true }).services.map((row) => row.key));
-      const mapped = new Set(SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys));
-      expect([...mapped].filter((key) => !published.has(key))).toEqual([]);
-    } finally {
-      gates.forEach((g, i) => { if (prior[i] === undefined) delete process.env[g]; else process.env[g] = prior[i]; });
-      computePublicPricingRanges({ refresh: true });
+    const published = new Set(computePublicPricingRanges({ refresh: true }).services.map((row) => row.key));
+    const mapped = new Set(SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys));
+    expect([...mapped].filter((key) => !published.has(key))).toEqual([]);
+  });
+
+  test('no mapped key is purchase-gated: a frozen key would outlive the gate (set derived from public-ranges)', () => {
+    const gated = Object.keys(PURCHASE_GATED_ROWS);
+    expect(gated.length).toBeGreaterThan(0);
+    const mapped = new Set(SERVICE_PRICE_KEYS.flatMap((rule) => rule.keys));
+    expect(gated.filter((key) => mapped.has(key))).toEqual([]);
+    // Even a feed that publishes them (gate on) never yields one.
+    const everything = new Set([...mapped, ...gated]);
+    for (const primary_keyword of ['termite bond cost', 'termite bait station rental cost']) {
+      const keys = costGuidePriceRange(cost({ primary_keyword }), { knownKeys: everything });
+      expect(keys.some((key) => gated.includes(key))).toBe(false);
     }
   });
 
@@ -44,6 +46,12 @@ describe('costGuidePriceRange', () => {
     ['pre-slab termite treatment cost', ['pre_slab_termiticide']],
     ['bora-care treatment cost', ['bora_care']],
     ['wdo inspection cost', ['wdo_inspection']],
+    // Gated rows are never mapped: bond guides fall through to the family's
+    // stable rows; tenancy wording is not the rented-station product.
+    ['termite bond cost', TERMITE_ALL],
+    ['termite treatment cost for rental properties', TERMITE_ALL],
+    ['termite treatment cost for a leased home', TERMITE_ALL],
+    ['termite bait station rental cost', ['termite_bait_install', 'termite_bait_monitoring']],
     // rodent
     ['rodent control cost', RODENT_ALL],
     ['how much do rats cost to remove', RODENT_ALL],
@@ -56,6 +64,9 @@ describe('costGuidePriceRange', () => {
     ['trap-only rodent monitoring cost', ['trap_only_retainer']],
     ['rodent wire mesh exclusion cost', ['rodent_wire_mesh']],
     ['roof-entry bird box cost', ['rodent_bird_boxes']],
+    ['palm rat removal cost', RODENT_ALL],
+    ['roof rat removal cost', RODENT_ALL],
+    ['palm rat treatment cost', RODENT_ALL],
     // roaches
     ['german cockroach treatment cost', ['german_roach_cleanout', 'german_roach_initial']],
     ['german roach cleanout cost', ['german_roach_cleanout']],
@@ -84,21 +95,11 @@ describe('costGuidePriceRange', () => {
     ['flea treatment cost', ['flea_elimination']],
     ['wasp nest removal cost', ['wasp_hornet_removal']],
     ['palm tree injection cost', ['palm_injection']],
+    ['palm injection cost', ['palm_injection']],
+    ['palm fertilizer cost', ['palm_injection']],
     ['tree and shrub care cost', ['tree_shrub_care']],
   ])('a cost guide for "%s" gets exactly its named row(s)', (primary_keyword, expected) => {
     expect(costGuidePriceRange(cost({ primary_keyword }))).toEqual(expected);
-  });
-
-  test('gated termite rows: named only while the feed publishes them, else no card', () => {
-    const rental = cost({ primary_keyword: 'termite bait station rental cost' });
-    const bond = cost({ primary_keyword: 'termite bond cost' });
-    expect(costGuidePriceRange(rental, { knownKeys: new Set(['termite_station_rental']) })).toEqual(['termite_station_rental']);
-    expect(costGuidePriceRange(bond, { knownKeys: new Set(['termite_bond']) })).toEqual(['termite_bond']);
-    // Gate off: the feed omits the row and the guide gets no card — never
-    // the bait or trenching rows in its place.
-    const gateOff = new Set(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
-    expect(costGuidePriceRange(rental, { knownKeys: gateOff })).toBeNull();
-    expect(costGuidePriceRange(bond, { knownKeys: gateOff })).toBeNull();
   });
 
   test('the primary keyword decides on its own; the title only when the keyword names no service; the category never', () => {
@@ -115,6 +116,8 @@ describe('costGuidePriceRange', () => {
     expect(costGuidePriceRange(cost({ primary_keyword: 'commercial pest control cost' }))).toBeNull();
     expect(costGuidePriceRange(cost({ primary_keyword: 'restaurant pest control cost' }))).toBeNull();
     expect(costGuidePriceRange(cost({ primary_keyword: 'termite inspection cost', category: 'termite' }))).toBeNull();
+    // Palms and trees without care context: no card (not a care-program guide).
+    expect(costGuidePriceRange(cost({ primary_keyword: 'palm tree removal cost' }))).toBeNull();
     // A no-row keyword stops there — the title does not reopen it.
     expect(costGuidePriceRange(cost({ primary_keyword: 'termite inspection cost', title: 'Termite Treatment Costs' }))).toBeNull();
     expect(costGuidePriceRange(cost({ primary_keyword: 'pest control cost', title: 'Commercial Pest Control Pricing' }))).toBeNull();

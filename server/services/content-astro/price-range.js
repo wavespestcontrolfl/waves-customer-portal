@@ -16,12 +16,13 @@
  *     chooses them, and a model-emitted price_range never reaches the
  *     published frontmatter (the autonomous normalizer whitelists fields);
  *   - every key is checked against the feed's own current key set, and a key
- *     the feed does not publish is dropped. No valid key → no price_range:
- *     fail closed to "no card", never to a broken hub build.
+ *     the feed does not publish — or publishes only behind a purchase gate,
+ *     which a frozen key would outlive — is dropped. No valid key → no
+ *     price_range: fail closed to "no card", never to a broken hub build.
  * The post body stays free of dollar figures (HARDCODED_PRICE is unchanged);
  * the card's numbers come from the feed at Astro build time.
  */
-const { computePublicPricingRanges } = require('../pricing-engine/public-ranges');
+const { computePublicPricingRanges, PURCHASE_GATED_ROWS } = require('../pricing-engine/public-ranges');
 const logger = require('../logger');
 
 // The card prices ONLY the service the post names. The primary keyword is
@@ -47,12 +48,15 @@ const RECURRING = /\b(?:program|plans?|recurring|quarterly|monthly|bi-?monthly|s
 // post naming "rodent exclusion" or "termite trenching" gets only that row —
 // a family's full row set is the fallback for a post naming just the family.
 // keys: [] marks a named service the feed has no honest row for (no card).
+const RODENT_FAMILY = ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion'];
 const VARIANT_RULES = [
   { match: [/\b(?:wdo|wood[- ]destroying)\b/], keys: ['wdo_inspection'] },
   // A standalone termite inspection is not the real-estate WDO report.
   { match: [TERMITE, /\binspections?\b/], keys: [] },
-  { match: [TERMITE, /\bbonds?\b/], keys: ['termite_bond'] },
-  { match: [TERMITE, /\b(?:rent\w*|leas\w*)\b/], keys: ['termite_station_rental'] },
+  // No rule for a purchase-gated row (termite_bond, termite_station_rental —
+  // public-ranges PURCHASE_GATED_ROWS): the key would be frozen into the post
+  // and outlive a gate flip. A bond or rental guide falls through to the
+  // termite family's stable rows.
   { match: [TERMITE, /\bfoam\b/, RECURRING], keys: ['recurring_foam'] },
   { match: [TERMITE, /\bfoam\b/], keys: ['foam_drill'] },
   { match: [/\bpre[- ]?(?:slab|construction)\b/], keys: ['pre_slab_termiticide'] },
@@ -80,12 +84,14 @@ const VARIANT_RULES = [
   { match: [/\btop[- ]?dressing\b/], keys: ['top_dressing'] },
   { match: [LAWN, ONE_TIME], keys: ['one_time_lawn'] },
   { match: [LAWN, RECURRING], keys: ['lawn_care_program'] },
-  { match: [/\bpalms?\b/], keys: ['palm_injection'] },
+  // Palm / roof rats are rodents — classified before the palm-care rule.
+  { match: [/\b(?:palm|roof) rats?\b/], keys: RODENT_FAMILY },
+  { match: [/\bpalms?\b/, /\b(?:inject\w*|nutrition\w*|nutrients?|fertiliz\w*|health\w*|treatments?|care)\b/], keys: ['palm_injection'] },
 ];
 
 const FAMILY_RULES = [
   { match: [TERMITE], keys: ['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching'] },
-  { match: [RODENT], keys: ['rodent_bait_program', 'rodent_trapping', 'rodent_exclusion'] },
+  { match: [RODENT], keys: RODENT_FAMILY },
   { match: [GERMAN_ROACH], keys: ['german_roach_cleanout', 'german_roach_initial'] },
   { match: [/\b(?:(?:cock)?roach(?:es)?|palmetto bugs?)\b/], keys: ['cockroach_treatment'] },
   { match: [/\bbed ?bugs?\b/], keys: ['bed_bug_treatment'] },
@@ -93,7 +99,8 @@ const FAMILY_RULES = [
   { match: [/\b(?:wasps?|hornets?|yellow ?jackets?)\b/], keys: ['wasp_hornet_removal'] },
   { match: [MOSQUITO], keys: ['mosquito_program', 'one_time_mosquito'] },
   { match: [LAWN], keys: ['lawn_care_program', 'one_time_lawn'] },
-  { match: [/\b(?:trees?|shrubs?)\b/], keys: ['tree_shrub_care'] },
+  // Tree & shrub is a care program — a removal or trimming guide gets no card.
+  { match: [/\b(?:trees?|shrubs?)\b/, /\b(?:care|fertiliz\w*|treatments?|programs?|plans?|spray\w*|insects?|diseases?|health\w*|nutrition\w*)\b/], keys: ['tree_shrub_care'] },
   // General pest is the catch-all, so its one-time / plan variants run only
   // after every named service's family: "one-time rat exterminator" is a
   // rodent guide, not a general pest one.
@@ -131,12 +138,31 @@ function costGuidePriceRange(frontmatter = {}, { knownKeys } = {}) {
   const keys = mappedKeys(frontmatter);
   if (!keys.length) return null;
   const known = knownKeys || publishedPriceKeys();
-  const valid = keys.filter((key) => known.has(key));
-  const dropped = keys.filter((key) => !known.has(key));
+  const usable = (key) => known.has(key) && !PURCHASE_GATED_ROWS[key];
+  const valid = keys.filter(usable);
+  const dropped = keys.filter((key) => !usable(key));
   if (dropped.length) {
-    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish: ${dropped.join(', ')}`);
+    logger.warn(`[price-range] dropped price_range keys the public pricing feed does not publish (or publishes only behind a purchase gate): ${dropped.join(', ')}`);
   }
   return valid.length ? valid : null;
 }
 
-module.exports = { costGuidePriceRange, SERVICE_PRICE_KEYS };
+// The ONE place a publish lane sets the card, called by every lane that
+// writes a blog post (scheduled/admin publishAstro, autonomous
+// publishOrUpdatePage, refresh) once it has read the live post. A
+// price_range the live post already carries — owner-set, or an explicit []
+// clearing it — is kept verbatim; otherwise a cost guide gets the mapped
+// keys. Mutates and returns `frontmatter`.
+function applyCostGuidePriceRange(frontmatter, liveFrontmatter = null) {
+  const live = liveFrontmatter?.price_range;
+  if (live != null) {
+    frontmatter.price_range = live;
+    return frontmatter;
+  }
+  delete frontmatter.price_range;
+  const mapped = costGuidePriceRange(frontmatter);
+  if (mapped) frontmatter.price_range = mapped;
+  return frontmatter;
+}
+
+module.exports = { costGuidePriceRange, applyCostGuidePriceRange, SERVICE_PRICE_KEYS };
