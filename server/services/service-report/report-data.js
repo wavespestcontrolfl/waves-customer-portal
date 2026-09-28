@@ -65,6 +65,7 @@ const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/servi
 // customer would call a re-service.
 const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 const { isReService } = require('../re-service');
+const { isActivePlanCustomer } = require('../waveguard-existing-services');
 
 let PhotoService = null;
 try {
@@ -4997,21 +4998,33 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // best-effort under the shared outer catch.
     if (featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
       const yearEt = Number(reportTodayIso.slice(0, 4));
-      const completedRows = await knex('scheduled_services')
-        .where({ customer_id: service.customer_id, status: 'completed' })
-        .andWhere('scheduled_date', '>=', `${yearEt}-01-01`)
-        .andWhere('scheduled_date', '<', `${yearEt + 1}-01-01`)
-        .select('service_key_snapshot', 'service_type')
-        .catch(() => null);
+      // Plan branding (the "Your plan" title, the year counts, "at no
+      // charge") is for active plan members only, by the canonical
+      // membership read, which fails closed to non-member. Everyone else
+      // still sees their upcoming visits, under neutral copy.
+      const member = await isActivePlanCustomer(knex, service.customer_id);
+      const completedRows = member
+        ? await knex('scheduled_services')
+          .where({ customer_id: service.customer_id, status: 'completed' })
+          .andWhere('scheduled_date', '>=', `${yearEt}-01-01`)
+          .andWhere('scheduled_date', '<', `${yearEt + 1}-01-01`)
+          .select('service_key_snapshot', 'service_type', 'is_callback')
+          .catch(() => null)
+        : [];
       if (Array.isArray(completedRows)) {
         const visitsThisYear = completedRows.length;
         const reservicesThisYear = completedRows
-          // A stamped key decides (the two callback keys only). A free-text
-          // booking with no key falls back to the canonical "Re-Service" name
-          // match, which a trapping follow-up's name never meets.
-          .filter((row) => (row?.service_key_snapshot
-            ? PLAN_CALLBACK_RESERVICE_KEYS.has(row.service_key_snapshot)
-            : isReService({ serviceType: row?.service_type })))
+          // The booking's persisted is_callback flag is the canonical callback
+          // fact (record creation copies it to service_records), then a
+          // stamped callback key, then, for a free-text booking with neither,
+          // the canonical "Re-Service" name match. An included trapping
+          // follow-up never counts, whatever its flags say.
+          .filter((row) => {
+            const key = row?.service_key_snapshot || null;
+            if (key === 'rodent_trapping_followup') return false;
+            if (row?.is_callback === true) return true;
+            return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row?.service_type });
+          })
           .length;
         // Same candidate pool as the next-appointment pick above (already
         // customer-scoped, disclosable-status-filtered, excludes this
@@ -5034,8 +5047,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           })
           .filter((row) => row.scheduledDate <= horizonIso)
           .slice(0, 4);
-        if (visitsThisYear > 0 || upcoming.length) {
-          planSummary = { year: yearEt, visitsThisYear, reservicesThisYear, upcoming };
+        if (member && (visitsThisYear > 0 || upcoming.length)) {
+          planSummary = { member: true, year: yearEt, visitsThisYear, reservicesThisYear, upcoming };
+        } else if (!member && upcoming.length) {
+          planSummary = { member: false, upcoming };
         }
       }
     }

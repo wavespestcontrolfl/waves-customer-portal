@@ -1231,6 +1231,26 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     expect(within(section).queryByText('Coming up')).toBeNull();
   });
 
+  it('shows a non-member only their upcoming visits, under neutral copy with no plan wording', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = {
+      member: false,
+      upcoming: [{ serviceName: 'Quarterly Pest Control Service', scheduledDate: '2026-11-18', windowStart: '09:00:00', windowEnd: '13:00:00' }],
+    };
+    const { container } = renderReport(payload);
+
+    const section = await waitFor(() => {
+      const el = container.querySelector('#your-plan');
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(within(section).getByText('Coming up')).toBeInTheDocument();
+    expect(within(section).getByText(/Quarterly Pest Control Service/)).toBeInTheDocument();
+    expect(within(section).queryByText('Your plan')).toBeNull();
+    expect(within(section).queryByText(/This year/)).toBeNull();
+    expect(within(section).queryByText(/re-service/)).toBeNull();
+  });
+
   it('renders nothing when the payload carries no planSummary', async () => {
     const payload = structuredClone(legacyLawnReport);
     delete payload.planSummary;

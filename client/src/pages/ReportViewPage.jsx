@@ -2648,7 +2648,11 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
 function PlanSummaryCard({ data, mode }) {
   const plan = data.planSummary;
   if (mode !== 'live' || !plan) return null;
-  const visits = Number(plan.visitsThisYear) || 0;
+  // Plan branding and the year counts are for active plan members only; a
+  // non-member gets the upcoming list under neutral copy (the server sends
+  // member: false with no counts).
+  const member = plan.member !== false;
+  const visits = member ? Number(plan.visitsThisYear) || 0 : 0;
   const reservices = Number(plan.reservicesThisYear) || 0;
   const upcoming = Array.isArray(plan.upcoming) ? plan.upcoming : [];
   const visitWord = visits === 1 ? 'visit' : 'visits';
@@ -2658,11 +2662,11 @@ function PlanSummaryCard({ data, mode }) {
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">Your plan</div>
+      <div className="section-eyebrow">{member ? 'Your plan' : 'Coming up'}</div>
       {visits > 0 && <p className="map-context-copy">{yearLine}</p>}
       {upcoming.length > 0 && (
         <div className="sr-cell">
-          <div className="sr-cell-label">Coming up</div>
+          {member && <div className="sr-cell-label">Coming up</div>}
           {upcoming.map((visit, index) => (
             <div className="sr-cell-value" key={`${index}-${visit.scheduledDate}`}>
               {formatNextAppointmentLabel({

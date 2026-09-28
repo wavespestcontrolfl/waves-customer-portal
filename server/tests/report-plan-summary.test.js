@@ -87,6 +87,8 @@ function makeKnex(fixtures) {
 }
 
 const BASE_FIXTURES = {
+  // An active plan member by default (isActivePlanCustomer reads the tier).
+  customers: [{ id: 'customer-plan', waveguard_tier: 'Gold', active: true }],
   service_products: [],
   property_geometries: [],
   property_zones: [],
@@ -147,6 +149,11 @@ test('gate on: counts only COMPLETED visits in the current ET calendar year, and
       // this year, completed, an unkeyed trapping follow-up — still not a
       // re-service by name
       { id: 'scheduled-freetext-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-03-22`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: null },
+      // this year, completed, a persisted callback whose key and name no
+      // longer say re-service — the flag counts it
+      { id: 'scheduled-flagged-callback', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-05`, status: 'completed', service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', is_callback: true },
+      // this year, completed, a flagged trapping follow-up — never a re-service
+      { id: 'scheduled-flagged-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-12`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', is_callback: true },
       // this year, but NOT completed — excluded
       { id: 'scheduled-pending', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-01`, status: 'pending', service_type: 'Quarterly Pest Control Service' },
       // last calendar year — excluded even though completed
@@ -156,7 +163,7 @@ test('gate on: counts only COMPLETED visits in the current ET calendar year, and
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, { mode: 'live' });
-  expect(data.planSummary).toMatchObject({ year: YEAR, visitsThisYear: 5, reservicesThisYear: 2 });
+  expect(data.planSummary).toMatchObject({ member: true, year: YEAR, visitsThisYear: 7, reservicesThisYear: 3 });
 });
 
 test('gate on: upcoming visits span every service line, exclude cancelled/rescheduled/completed/skipped, order by date, cap at 4, and drop anything past 120 days', async () => {
@@ -190,6 +197,38 @@ test('gate on: upcoming visits span every service line, exclude cancelled/resche
     { serviceName: 'Quarterly Pest Control Service', scheduledDate: addDays(40), windowStart: null, windowEnd: null },
     { serviceName: 'Quarterly Pest Control Service', scheduledDate: addDays(60), windowStart: null, windowEnd: null },
   ]);
+});
+
+test('a non-member gets only their upcoming visits: member false, no year counts', async () => {
+  const build = requireWithGateOn();
+  const addDays = (n) => { const d = new Date(`${todayIso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    // One-time customer: no tier, no monthly rate.
+    customers: [{ id: 'customer-plan', waveguard_tier: null, monthly_rate: 0, active: true }],
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'One-Time Pest Control' },
+      { id: 'scheduled-next', customer_id: 'customer-plan', scheduled_date: addDays(10), status: 'confirmed', service_type: 'Mosquito Event Spray' },
+    ],
+  });
+  const data = await build(BASE_SERVICE, 'token-plan-nonmember', knex, { mode: 'live' });
+  expect(data.planSummary).toEqual({
+    member: false,
+    upcoming: [{ serviceName: 'Mosquito Event Spray', scheduledDate: addDays(10), windowStart: null, windowEnd: null }],
+  });
+});
+
+test('a non-member with nothing upcoming gets no planSummary at all', async () => {
+  const build = requireWithGateOn();
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    customers: [{ id: 'customer-plan', waveguard_tier: null, monthly_rate: 0, active: true }],
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'One-Time Pest Control' },
+    ],
+  });
+  const data = await build(BASE_SERVICE, 'token-plan-nonmember-empty', knex, { mode: 'live' });
+  expect(data).not.toHaveProperty('planSummary');
 });
 
 test('omitted when there is no customer, or when visitsThisYear is 0 and upcoming is empty', async () => {

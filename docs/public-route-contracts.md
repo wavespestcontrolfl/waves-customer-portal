@@ -71,13 +71,17 @@ unchanged.
 
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
-(`/api/reports/:token/data`) carries an optional `planSummary: { year,
-visitsThisYear, reservicesThisYear, upcoming: [{ serviceName, scheduledDate,
-windowStart, windowEnd }] }` for the token's own customer and no one else:
-completed visits in the current ET calendar year; how many of those were the
-plan's free re-services (`service_key_snapshot` `pest_re_service` /
-`lawn_re_service`, or a "Re-Service" service name when no key was stamped;
-included trapping follow-ups never count); and at most 4 upcoming scheduled
+(`/api/reports/:token/data`) carries an optional `planSummary` for the
+token's own customer and no one else. For an active plan member
+(`isActivePlanCustomer`, fail-closed to non-member) it is `{ member: true,
+year, visitsThisYear, reservicesThisYear, upcoming: [{ serviceName,
+scheduledDate, windowStart, windowEnd }] }`; for anyone else it is `{ member:
+false, upcoming }` only, with no counts and no plan wording on the page.
+`visitsThisYear` counts completed visits in the current ET calendar year;
+`reservicesThisYear` counts how many of those were the plan's free callbacks
+(the persisted `is_callback` flag, a `pest_re_service` / `lawn_re_service`
+key, or a "Re-Service" service name when neither is stamped; included
+trapping follow-ups never count). `upcoming` holds at most 4 upcoming scheduled
 visits across every service line within the next 120 days, drawn from the same
 customer-scoped, disclosable-status candidate pool as `nextAppointment` (the
 report's own visit excluded). Counts and dates only: no price, address,
