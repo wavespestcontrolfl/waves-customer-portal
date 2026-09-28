@@ -83,18 +83,50 @@ describe('buildRainExpectation', () => {
     expect(notLive.lines[0]).not.toMatch(/Heavy rain right after a treatment/);
   });
 
-  it('adds the ants-after-rain line in rainy season (Jun–Oct) regardless of rain amount', () => {
+  // Owner ruling 2026-09-28: never on the calendar month alone — a rain
+  // signal (or the LIVE forecast signal) is required every time.
+  it('does NOT add the ants-after-rain line in rainy season with no rain data and no forecast signal', () => {
     const out = buildRainExpectation({ weekWeather: null, serviceMonth: 7 });
-    expect(out.lines).toHaveLength(1);
-    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors/);
+    expect(out).toBeNull();
   });
 
-  it('adds the ants-after-rain line outside rainy season when the week hit >= 1"', () => {
+  it('rainy season (Jun–Oct): the ants line needs >= 0.5" — under the bar is silent, at/over fires', () => {
+    const under = buildRainExpectation({ weekWeather: { rainInches: 0.4, rainConfidence: null }, serviceMonth: 7 });
+    expect(under.lines).toHaveLength(1); // rain line only — no ants line
+    expect(under.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+
+    const over = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 7 });
+    expect(over.lines).toHaveLength(2);
+    expect(over.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+  });
+
+  it('outside rainy season: the ants line needs >= 1" — 0.5" (the rainy-season bar) is not enough', () => {
+    const halfInch = buildRainExpectation({ weekWeather: { rainInches: 0.5, rainConfidence: null }, serviceMonth: 2 });
+    expect(halfInch.lines).toHaveLength(1);
+    expect(halfInch.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+
     const under = buildRainExpectation({ weekWeather: { rainInches: 0.9, rainConfidence: null }, serviceMonth: 2 });
     expect(under.lines).toHaveLength(1); // rain line only — no ants line
     const over = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: null }, serviceMonth: 2 });
     expect(over.lines).toHaveLength(2);
     expect(over.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+  });
+
+  it('low-confidence (city-collective) rain always uses the higher 1" bar, even in rainy season', () => {
+    // 0.6" is over the 0.5" rainy-season bar but under the 1" low-confidence bar.
+    const hedgedUnder = buildRainExpectation({ weekWeather: { rainInches: 0.6, rainConfidence: 'low' }, serviceMonth: 7 });
+    expect(hedgedUnder.lines).toHaveLength(1);
+    expect(hedgedUnder.lines.join(' ')).not.toMatch(/Heavy rain pushes ants indoors/);
+
+    const hedgedOver = buildRainExpectation({ weekWeather: { rainInches: 1, rainConfidence: 'low' }, serviceMonth: 7 });
+    expect(hedgedOver.lines).toHaveLength(2);
+    expect(hedgedOver.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+  });
+
+  it('the LIVE-only forecast heavy-rain signal alone adds the ants line, even with no rain data', () => {
+    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 2, forecastHeavyRain: true });
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors/);
   });
 
   it('never claims rain can\'t affect the treatment beyond the label facts', () => {
@@ -181,15 +213,27 @@ describe('buildSpiderExpectation', () => {
     expect(buildSpiderExpectation({ actionLabels: ['Treated exterior perimeter band'], applications: [{ targets: ['ants'] }] })).toBeNull();
   });
 
-  it('triggers on a completed eave/web action label', () => {
+  it('triggers on a completed eave/web action label — renders FIXED wording, never the raw label', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Swept eaves, window frames, door frames, and lanai'],
       applications: [],
     });
     expect(out.headline).toBe('Spiders');
-    expect(out.whatWeDid).toMatch(/Swept eaves/);
+    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    // The raw protocol-action label text never leaks into the customer copy
+    // (owner ruling 2026-09-28 — it can carry internal wording/product hints).
+    expect(out.whatWeDid).not.toMatch(/Swept eaves, window frames, door frames, and lanai/);
     expect(out.expectation).toMatch(/thin out over about two weeks/);
     expect(out.nextStep).toBeTruthy();
+  });
+
+  it('a differently-worded eave/web action label still renders the SAME fixed sentence, not its own text', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: ['Internal SKU-4471 cobweb removal — do not quote to customer'],
+      applications: [],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.whatWeDid).not.toMatch(/SKU-4471/);
   });
 
   it('triggers on a spider-targeted product with no matching action label', () => {
@@ -197,7 +241,7 @@ describe('buildSpiderExpectation', () => {
       actionLabels: ['Treated exterior perimeter band'],
       applications: [{ targets: ['spiders'] }],
     });
-    expect(out.whatWeDid).toMatch(/residual treatment labeled for spiders/);
+    expect(out.whatWeDid).toBe('We applied a residual treatment labeled for spiders during this visit.');
   });
 
   it('never guarantees a result', () => {

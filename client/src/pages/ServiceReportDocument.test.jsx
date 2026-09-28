@@ -1621,9 +1621,12 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
       pestReportV2: {
         expectations: {
           rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
+          // whatWeDid is server-fixed wording (never a raw protocol-action
+          // label — owner ruling 2026-09-28); this matches the actual
+          // server output.
           spiders: {
             headline: 'Spiders',
-            whatWeDid: 'This visit: Swept eaves, window frames, door frames, and lanai.',
+            whatWeDid: 'We knocked down webs and treated the eaves and entry points where spiders build.',
             expectation: 'Webbing should noticeably thin out over about two weeks.',
             nextStep: 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.',
           },
@@ -1634,7 +1637,7 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
     expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
     expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
     expect(screen.getByText('Spiders')).toBeInTheDocument();
-    expect(screen.getByText(/Swept eaves/)).toBeInTheDocument();
+    expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
     expect(screen.getByText('What to expect')).toBeInTheDocument();
     expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
   });

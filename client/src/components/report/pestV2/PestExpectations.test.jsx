@@ -33,9 +33,11 @@ describe('PestRainExpectation', () => {
 describe('PestSpiderExpectation', () => {
   afterEach(cleanup);
 
+  // whatWeDid is server-fixed wording (never a raw protocol-action label —
+  // owner ruling 2026-09-28); this fixture matches the actual server output.
   const SPIDERS = {
     headline: 'Spiders',
-    whatWeDid: 'This visit: Swept eaves, window frames, door frames, and lanai.',
+    whatWeDid: 'We knocked down webs and treated the eaves and entry points where spiders build.',
     expectation: 'New webs can appear within days as new spiders arrive from outside.',
     nextStep: 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.',
   };
@@ -43,7 +45,7 @@ describe('PestSpiderExpectation', () => {
   it('renders headline, what-we-did, expectation, and next step', () => {
     render(<PestSpiderExpectation spiders={SPIDERS} />);
     expect(screen.getByText('Spiders')).toBeTruthy();
-    expect(screen.getByText(/Swept eaves/)).toBeTruthy();
+    expect(screen.getByText(/knocked down webs/)).toBeTruthy();
     expect(screen.getByText(/New webs can appear/)).toBeTruthy();
     expect(screen.getByText(/come take another look/)).toBeTruthy();
   });

@@ -5,6 +5,22 @@
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+// weekWeather is a real network call (application-conditions.js) — mocked so
+// the geocoded-customer test controls the rain reading without hitting the
+// network; the null-geocode tests never call it at all (this mock just makes
+// that assertable / never a surprise live fetch in CI).
+// Default: no rain reading (report-copy-context.js's OWN finiteOrNull has
+// the same Number(null)===0 footgun pest-report-expectations.js had, so a
+// null-lat/lng customer still computes lat=0/lng=0 and calls this — the real
+// fetchServiceWeekWeather short-circuits 0,0 to an empty result; this mock's
+// default mirrors that so a test that doesn't care about weather doesn't
+// have to stub it).
+const EMPTY_WEEK_WEATHER = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null, windowClosed: true };
+const mockFetchServiceWeekWeather = jest.fn().mockResolvedValue(EMPTY_WEEK_WEATHER);
+jest.mock('../services/service-report/application-conditions', () => ({
+  ...jest.requireActual('../services/service-report/application-conditions'),
+  fetchServiceWeekWeather: (...args) => mockFetchServiceWeekWeather(...args),
+}));
 
 const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
 
@@ -41,6 +57,9 @@ function makeKnexStub({ customers = [], catalogProducts = [] } = {}) {
 // only fetches when lat/lng are present) — the rainy-season calendar signal still
 // fires on its own, which is exactly what's under test without a network call.
 const CUSTOMER = { id: 'c1', first_name: 'Pat', last_name: 'Pest', city: 'Bradenton', state: 'FL', latitude: null, longitude: null };
+// Geocoded — buildReportCopyContext fetches weekWeather for this one
+// (mockFetchServiceWeekWeather controls the reading per test).
+const GEOCODED_CUSTOMER = { ...CUSTOMER, id: 'c2', latitude: 27.5, longitude: -82.5 };
 
 const FIPRONIL_PRODUCT = {
   id: 'p1', name: 'Termidor SC', category: 'insecticide', product_type: 'pesticide',
@@ -50,25 +69,47 @@ const FIPRONIL_PRODUCT = {
 
 describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
-  afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
+  beforeEach(() => { mockFetchServiceWeekWeather.mockResolvedValue(EMPTY_WEEK_WEATHER); });
+  afterEach(() => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL;
+    mockFetchServiceWeekWeather.mockClear();
+  });
 
-  it('includes an EXPECTATIONS section with the rainy-season line and the product-class line', async () => {
+  it('includes an EXPECTATIONS section with the product-class line; no ants line with no rain data (no geocode)', async () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [FIPRONIL_PRODUCT] });
     const { contextText } = await buildReportCopyContext({
       customerId: 'c1',
       serviceType: 'Pest Control Service',
       serviceLine: 'pest',
-      serviceDate: '2026-07-15', // July — rainy season
+      serviceDate: '2026-07-15', // July — rainy season, but no rain reading
       products: [{ productId: 'p1', name: 'Termidor SC' }],
       knex,
     });
     expect(contextText).toMatch(/EXPECTATIONS/);
-    expect(contextText).toMatch(/Heavy rain pushes ants indoors/);
     expect(contextText).toMatch(/Non-repellent products/);
+    // Owner ruling 2026-09-28: rainy season alone (no rain reading, no live
+    // forecast signal) never adds the ants line.
+    expect(contextText).not.toMatch(/Heavy rain pushes ants indoors/);
     // No rain reading (no geocode in this stub) — a null rainInches must
     // never render as "0 inches" (Number(null) === 0 footgun).
     expect(contextText).not.toMatch(/rained about/);
+  });
+
+  it('rainy season + a real >= 0.5" rain reading adds the ants line', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    mockFetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.6, rainConfidence: null, et0Inches: null, dailyRain: null, rainSource: null, windowClosed: true });
+    const knex = makeKnexStub({ customers: [GEOCODED_CUSTOMER], catalogProducts: [] });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c2',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [],
+      knex,
+    });
+    expect(contextText).toMatch(/rained about 0\.6"/);
+    expect(contextText).toMatch(/Heavy rain pushes ants indoors/);
   });
 
   it('omits the EXPECTATIONS section outside rainy season with no classifiable product and no rain data', async () => {

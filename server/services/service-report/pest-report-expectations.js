@@ -63,6 +63,16 @@ function formatInches(value) {
   return String(rounded);
 }
 
+// Minimum rain (inches) required to add the ants-after-rain line, given a
+// resolved rainConfidence and whether the service month is rainy season.
+// Extracted from buildRainExpectation so the two independent decisions (the
+// rain-fact sentence vs. the ants signal) don't compound into one function's
+// branch count.
+function antsRainThresholdInches(rainConfidence, rainySeason) {
+  if (rainConfidence === 'low') return 1; // hedged number — always the higher bar
+  return rainySeason ? 0.5 : 1;
+}
+
 // ── Rain and your treatment ──────────────────────────────────────────────
 // weekWeather: { rainInches, rainConfidence } from application-conditions.js
 //   fetchServiceWeekWeather (7-day trailing window ending on the service date).
@@ -111,12 +121,16 @@ function buildRainExpectation({
     lines.push(sentence);
   }
 
-  // Ants-after-rain expectation — rainy season (Jun–Oct) or a genuinely wet
-  // week (>= 1"), per owner ruling. Calendar-based, so it can stand even
-  // without a resolved rain reading.
+  // Ants-after-rain expectation — owner ruling 2026-09-28: NEVER on the
+  // calendar month alone. Requires an actual rain signal: >= 0.5" during
+  // rainy season (Jun–Oct), >= 1" otherwise — and a low-confidence
+  // (city-collective fallback) reading always uses the higher 1" bar,
+  // season or not, since that number is itself hedged. OR the LIVE-only
+  // forecast heavy-rain signal. No rain data and no forecast signal =>
+  // no ants line, regardless of month.
   const rainySeason = Number.isInteger(serviceMonth) && RAINY_SEASON_MONTHS.has(serviceMonth);
-  const heavyWeek = rainInches != null && rainInches >= 1;
-  if (rainySeason || heavyWeek) {
+  const heavyWeek = rainInches != null && rainInches >= antsRainThresholdInches(rainConfidence, rainySeason);
+  if (heavyWeek || forecastHeavyRain) {
     lines.push('Heavy rain pushes ants indoors; trails over the next few days usually mean the colony is moving through the treated band.');
   }
 
@@ -135,21 +149,23 @@ function buildRainExpectation({
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
 
+// Fixed customer wording only — owner ruling 2026-09-28: a raw completed
+// protocol-action label is NEVER rendered here. Labels are tech/protocol
+// vocabulary (can carry internal wording or a product hint) and are used
+// ONLY to decide which of these two fixed sentences applies, never quoted.
+const ACTION_MATCH_TEXT = 'We knocked down webs and treated the eaves and entry points where spiders build.';
+const TARGET_ONLY_TEXT = 'We applied a residual treatment labeled for spiders during this visit.';
+
 function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
-  const matchedLabels = [...new Set(
-    (actionLabels || []).map(cleanText).filter((label) => label && SPIDER_ACTION_RE.test(label)),
-  )];
+  const actionHit = (actionLabels || []).some(
+    (label) => SPIDER_ACTION_RE.test(cleanText(label)),
+  );
   const targetHit = (applications || []).some(
     (app) => Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t))),
   );
-  if (!matchedLabels.length && !targetHit) return null;
+  if (!actionHit && !targetHit) return null;
 
-  const whatWeDidCandidate = matchedLabels.length
-    ? `This visit: ${matchedLabels.join('; ')}.`
-    : 'We applied a residual treatment labeled for spiders during this visit.';
-  const whatWeDid = validateCustomerCopy(whatWeDidCandidate)
-    ? whatWeDidCandidate
-    : 'We applied a residual treatment labeled for spiders during this visit.';
+  const whatWeDid = actionHit ? ACTION_MATCH_TEXT : TARGET_ONLY_TEXT;
 
   const expectation = 'New webs can appear within days as new spiders arrive from outside — that\'s normal. '
     + 'The residual we applied kills spiders that land on treated eaves and entry points, so webbing should '
