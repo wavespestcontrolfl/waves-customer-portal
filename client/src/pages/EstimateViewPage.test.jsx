@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, ContactGapFields, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -1476,6 +1476,150 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('ContactGapFields — missing-contact capture on accept', () => {
+  const noop = () => {};
+
+  it('renders nothing when there are no gaps', () => {
+    const { container } = render(<ContactGapFields gaps={null} />);
+    expect(container.textContent).toBe('');
+  });
+
+  it('renders nothing when both gaps are false', () => {
+    const { container } = render(<ContactGapFields gaps={{ lastName: false, email: false }} />);
+    expect(container.textContent).toBe('');
+  });
+
+  it('shows only the last name field when only that gap is present', () => {
+    render(<ContactGapFields gaps={{ lastName: true, email: false }} lastName="" onLastNameChange={noop} />);
+    expect(screen.getByText('Last name')).toBeInTheDocument();
+    expect(screen.queryByText('Email (for your service reports and receipts)')).not.toBeInTheDocument();
+  });
+
+  it('shows only the email field when only that gap is present', () => {
+    render(<ContactGapFields gaps={{ lastName: false, email: true }} email="" onEmailChange={noop} />);
+    expect(screen.getByText('Email (for your service reports and receipts)')).toBeInTheDocument();
+    expect(screen.queryByText('Last name')).not.toBeInTheDocument();
+  });
+
+  it('shows both fields when both gaps are present', () => {
+    render(<ContactGapFields gaps={{ lastName: true, email: true }} lastName="" onLastNameChange={noop} email="" onEmailChange={noop} />);
+    expect(screen.getByText('Last name')).toBeInTheDocument();
+    expect(screen.getByText('Email (for your service reports and receipts)')).toBeInTheDocument();
+  });
+
+  it('shows no inline error for a blank last name before it has been touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName=""
+        onLastNameChange={noop}
+        lastNameTouched={false}
+      />,
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows the inline required error for a blank last name once touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName=""
+        onLastNameChange={noop}
+        lastNameTouched
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('Please enter your last name.');
+  });
+
+  it('does not show the required error once a last name is typed, even if touched', () => {
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: false }}
+        lastName="Sample"
+        onLastNameChange={noop}
+        lastNameTouched
+      />,
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('email field is never marked required and carries no inline error state', () => {
+    render(<ContactGapFields gaps={{ lastName: false, email: true }} email="" onEmailChange={noop} />);
+    const emailInput = screen.getByPlaceholderText('you@example.com (optional)');
+    expect(emailInput).not.toHaveAttribute('aria-required');
+    expect(emailInput).toHaveAttribute('type', 'email');
+    expect(emailInput).toHaveAttribute('autoComplete', 'email');
+  });
+
+  it('calls onLastNameChange / onEmailChange as the customer types', () => {
+    const onLastNameChange = vi.fn();
+    const onEmailChange = vi.fn();
+    render(
+      <ContactGapFields
+        gaps={{ lastName: true, email: true }}
+        lastName=""
+        onLastNameChange={onLastNameChange}
+        email=""
+        onEmailChange={onEmailChange}
+      />,
+    );
+    fireEvent.change(screen.getByPlaceholderText('Last name'), { target: { value: 'Sample' } });
+    fireEvent.change(screen.getByPlaceholderText('you@example.com (optional)'), { target: { value: 'sample@example.com' } });
+    expect(onLastNameChange).toHaveBeenCalledWith('Sample');
+    expect(onEmailChange).toHaveBeenCalledWith('sample@example.com');
+  });
+  it('renders a required first-name field only when the first-name gap is set', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ firstName: false, lastName: true, email: false }} lastName="" onLastNameChange={noop} />);
+    expect(screen.queryByPlaceholderText('First name')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ firstName: true, lastName: true, email: false }} firstName="" onFirstNameChange={noop} lastName="" onLastNameChange={noop} />);
+    const input = screen.getByPlaceholderText('First name');
+    expect(input).toHaveAttribute('aria-required', 'true');
+    expect(input).toHaveAttribute('autoComplete', 'given-name');
+  });
+
+  it('shows the email format error only when the caller flags it invalid', () => {
+    const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: true }} email="sample@" onEmailChange={noop} emailInvalid />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Please check your email address, or leave it blank.');
+    expect(screen.getByPlaceholderText('you@example.com (optional)')).toHaveAttribute('aria-invalid', 'true');
+  });
+});
+
+describe('ReviewPhase — missing-contact capture wiring', () => {
+  const noop = () => {};
+  const baseProps = {
+    slotId: 'slot-1',
+    existingAppointment: null,
+    paymentPreference: 'pay_at_visit',
+    secondsRemaining: 600,
+    onConfirm: noop,
+    onCancel: noop,
+    serviceMode: 'recurring',
+    depositNote: null,
+  };
+
+  it('renders contactSlot right above the confirm button when supplied', () => {
+    render(
+      <ReviewPhase
+        {...baseProps}
+        contactSlot={<div data-testid="contact-gap-fields">contact fields</div>}
+      />,
+    );
+    expect(screen.getByTestId('contact-gap-fields')).toBeInTheDocument();
+  });
+
+  it('renders nothing extra when contactSlot is absent (byte-identical to before this lane)', () => {
+    render(<ReviewPhase {...baseProps} />);
+    expect(screen.queryByTestId('contact-gap-fields')).not.toBeInTheDocument();
+  });
+
+  it('disables Confirm via confirmDisabled the same way an existing disabling condition does', () => {
+    render(<ReviewPhase {...baseProps} confirmDisabled />);
+    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
   });
 });
 

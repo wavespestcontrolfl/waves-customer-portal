@@ -356,6 +356,60 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Missing-contact capture (owner ruling 2026-09-27). GET
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+booleans only — while the estimate is accept-active (never on
+accepted/declined/expired/off-surface estimates or the PDF render pass).
+`lastName` is true when the estimate's `customer_name` has fewer than two
+name tokens AND the linked customer (if any) has no real last name (blank or
+the `'Customer'` placeholder); `email` is true when neither the estimate nor
+the linked customer has an email. The linked customer's name/email are never
+returned. The page renders "Last name" (required client-side) and "Email (for
+your service reports and receipts)" (optional) above Accept for whichever is
+true, and blocks Accept on a typed-but-malformed email.
+`firstName` is true only when there is no name at all (blank estimate name and
+no linked first name), or the estimate name is exactly the linked profile's
+surname while its first name is blank; the page then also asks for "First
+name" (required). Name gaps are judged from structure, not by guessing which
+stored words are placeholders (owner ruling 2026-09-28): the only exceptions
+are the literal `undefined` / `null` tokens of the old concatenation bug and
+the `Customer` surname the accept itself used to stamp. Names are normalized
+with `normalizeContactName` (proper case) and capped by whole code points.
+Without a usable first name the surname is not applied, so the accept never
+creates a placeholder first name. The explicitly linked profile
+(`estimates.customer_id`) with a blank first name takes the collected first
+name through `propagateCustomerNameChange`; phone-matched or sibling profiles
+never do.
+`PUT /api/estimates/:token/accept` accepts optional `contactFirstName`, `contactLastName`
+(trimmed, whitespace-collapsed, ≤50 chars — the customers.last_name width) and `contactEmail` (lowercased,
+≤150 chars — the customers.email width — `EMAIL_RE`). A malformed non-empty value answers 400
+`{ error, code: 'CONTACT_FIRST_NAME_INVALID' | 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
+any mutation; a blank or absent value is never an error (a tab loaded before
+this shipped still accepts). Values fill GAPS only and never overwrite: the
+gap verdict is recomputed and the estimate row written inside the acceptance
+transaction on the locked row, after the eligibility checks, so a rejected
+accept changes nothing and a failed check fails the accept (retryable) rather
+than dropping the input. Customer resolution (phone match) runs on the
+pre-fill identity, so a submitted email never steers which profile the accept
+lands on; an authored proposal's `preparedFor` that matched the old name moves
+with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
+new customer is created with the supplied values; an EXISTING matched, linked
+or grouped-sibling profile is filled only when the estimate's own first name
+matches the profile's (an estimate addressed to a tenant under a landlord's
+record keeps the values on the estimate only), and then `last_name` only when
+blank or `'Customer'` and `email` only when blank (whitespace-only counts as
+blank). Each existing-profile fill stamps `customers.updated_at`, and a surname
+fill runs `propagateCustomerNameChange` in the same transaction. Only fields the
+server's own `contactGaps` verdict flags are ever written — a value for a field
+the page never offered is ignored. The customer email fill runs through the
+shared email-claim guard (`backfillCustomerEmailInTrx`: row lock, then the
+`customer-email:` advisory lock, then the undone-merge holder recheck) in a
+savepoint, so a guard failure drops only the email fill, not the accept. An
+accept-active estimate with a contact gap always gets the React view: the
+`/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
+the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
+because of these fields.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
