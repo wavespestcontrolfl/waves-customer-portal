@@ -49,7 +49,7 @@ Discounts in the same `stack_group` compete — only the highest-priority one wi
 
 **promo group** — New Customer Special. Non-stackable within its group.
 
-**Stackable discounts** (combine with tier): Military (5%), Multi-Home (10%), Prepayment (5%), Senior (5%), Referral ($25 — aligned to the $25/$25 referral program 2026-07-11), WaveGuard Member WDO (100% on WDO only), Custom % and Custom $.
+**Stackable discounts** (combine with tier): Military (5%), Multi-Home (10%), Prepayment (5%), Senior (5%), Referral ($25 — aligned to the $25/$25 referral program 2026-07-11), WaveGuard Member Free Annual Termite Inspection (100% on the standalone Termite Inspection Service only — never WDO), Custom % and Custom $.
 
 ### When to Use `waveguard_member` vs Tier Discounts
 
