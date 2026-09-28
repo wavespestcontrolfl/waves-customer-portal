@@ -172,9 +172,12 @@ function validateDigest(body) {
 // back to the first integer anywhere in the subject as a generic `count`
 // (never a `newCount`: a bare number's meaning isn't safely guessable for an
 // unconverted check, so an unmatched check simply never reports newCount).
+// Only a LEADING number is a count ("42 scheduled-visit pair(s) overlap");
+// a number further in is usually a date or time ("… — Mon 09-28 10:00"),
+// which would compare two different findings as the same count.
 function firstIntegerInSubject(subject) {
-  const m = /\d+/.exec(String(subject || ''));
-  return m ? Number(m[0]) : null;
+  const m = /^\s*(\d+)\b/.exec(String(subject || ''));
+  return m ? Number(m[1]) : null;
 }
 function resolveCounts({ count, newCount, subject, route }) {
   if (count !== null && count !== undefined) return { count, newCount: newCount ?? null };
@@ -322,7 +325,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       // standing row yet for this dedupeKey); a REFRESH of an existing row
       // is decided by ringOnRefresh below, against that row's own content.
       const quiet = resolvedAudience === 'owner'
-        ? !(await decideRingForNewRow(trx, { alertClass, source: SOURCE, key: null, count: resolvedCount, newCount: resolvedNewCount }))
+        ? !(await decideRingForNewRow(trx, { alertClass, source: SOURCE, key: null, opsKey: key, count: resolvedCount, newCount: resolvedNewCount }))
         : false;
       // A later run's recurrence changes dedupeVersion and refreshes the
       // standing row. A repeat of the same observation remains deduped.

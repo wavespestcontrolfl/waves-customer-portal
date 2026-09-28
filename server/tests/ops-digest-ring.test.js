@@ -200,3 +200,53 @@ describe('ringOnRefreshFrom (notifyAdmin\'s ringOnRefresh contract)', () => {
     expect(gate({}, {})).toBe(true);
   });
 });
+
+// Distinct items sharing one ops-crons alert class (review on #5236's
+// stacked PR 2): a different missed booking, or a different set of
+// unreturned calls, is new news even at the same count.
+describe('setKeyFor + the item-set comparison', () => {
+  const { setKeyFor } = require('../services/ops-digest');
+
+  test('drops run dates, keeps what identifies the items', () => {
+    expect(setKeyFor('d15-voicemail-callbacks:unreturned-2026-09-24-86e082f1cd22')).toBe('d15-voicemail-callbacks:unreturned-86e082f1cd22');
+    expect(setKeyFor('d19-committed-bookings:gap-17ed9362')).toBe('d19-committed-bookings:gap-17ed9362');
+    expect(setKeyFor('c32-gate-drift:drift-GATE_SCHEDULING_CAPACITY-2026-09-26')).toBe('c32-gate-drift:drift-GATE_SCHEDULING_CAPACITY');
+    // Same items on two different days -> same set key.
+    expect(setKeyFor('d15-voicemail-callbacks:unreturned-2026-09-18-6eca2bf6686d'))
+      .toBe(setKeyFor('d15-voicemail-callbacks:unreturned-2026-09-19-6eca2bf6686d'));
+  });
+
+  test('ringDecision: equal or unknown counts ring only for a different set; a smaller count never rings', () => {
+    expect(ringDecision({ count: 1, priorCount: 1, sameSet: true })).toBe(false);
+    expect(ringDecision({ count: 1, priorCount: 1, sameSet: false })).toBe(true);
+    expect(ringDecision({ count: null, priorCount: null, sameSet: true })).toBe(false);
+    expect(ringDecision({ count: null, priorCount: null, sameSet: false })).toBe(true);
+    expect(ringDecision({ count: 2, priorCount: 4, sameSet: false })).toBe(false);
+    expect(ringDecision({ count: 5, priorCount: 4, sameSet: true })).toBe(true);
+  });
+
+  test('a second, different d19 gap in the same week rings; the same gap re-posted stays quiet', async () => {
+    const prior = makeConn({ metadata: { opsKey: 'd19-committed-bookings:gap-17ed9362' } });
+    await expect(decideRingForNewRow(prior, {
+      alertClass: 'd19-committed-bookings:gap', source: 'ops-crons', key: null,
+      opsKey: 'd19-committed-bookings:gap-6fee5f34', count: null, newCount: null,
+    })).resolves.toBe(true);
+    const same = makeConn({ metadata: { opsKey: 'd19-committed-bookings:gap-17ed9362' } });
+    await expect(decideRingForNewRow(same, {
+      alertClass: 'd19-committed-bookings:gap', source: 'ops-crons', key: null,
+      opsKey: 'd19-committed-bookings:gap-17ed9362', count: null, newCount: null,
+    })).resolves.toBe(false);
+  });
+
+  test('d15: the same unreturned set on the next day is quiet; a new set at the same count rings', async () => {
+    const prior = () => makeConn({ metadata: { opsKey: 'd15-voicemail-callbacks:unreturned-2026-09-18-6eca2bf6686d', count: 1 } });
+    await expect(decideRingForNewRow(prior(), {
+      alertClass: 'd15-voicemail-callbacks:unreturned', source: 'ops-crons', key: null,
+      opsKey: 'd15-voicemail-callbacks:unreturned-2026-09-19-6eca2bf6686d', count: 1, newCount: null,
+    })).resolves.toBe(false);
+    await expect(decideRingForNewRow(prior(), {
+      alertClass: 'd15-voicemail-callbacks:unreturned', source: 'ops-crons', key: null,
+      opsKey: 'd15-voicemail-callbacks:unreturned-2026-09-23-86e082f1cd22', count: 1, newCount: null,
+    })).resolves.toBe(true);
+  });
+});

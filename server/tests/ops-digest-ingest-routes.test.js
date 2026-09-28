@@ -380,6 +380,16 @@ describe('the check -> destination map fills in what the caller did not send', (
   });
 });
 
+describe('count fallback: only a LEADING number is a count', () => {
+  const { firstIntegerInSubject } = router._private;
+  test('a leading count is read; a date or time further in is not', () => {
+    expect(firstIntegerInSubject('42 scheduled-visit pair(s) overlap')).toBe(42);
+    expect(firstIntegerInSubject('promised on a call, NOT on the calendar — Mon 09-28 10:00 (…2108)')).toBeNull();
+    expect(firstIntegerInSubject('Drafts/call pipelines quiet: 47 stale draft(s)')).toBeNull();
+    expect(firstIntegerInSubject('')).toBeNull();
+  });
+});
+
 describe('bell write', () => {
   test('201: one ops_digest row, bell:true, opsKey/subject/kind/audience/source metadata, rolling-day dedupe', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n1', deduped: false });
@@ -424,11 +434,10 @@ describe('bell write', () => {
         source: 'ops-crons',
         observedAt: expect.any(String),
         // admin-alerts-ring scope: the check id survives, its generated
-        // hash/date suffix is trimmed; no caller count, so the subject's
-        // own first integer ("3 overlapping visits") is the fallback; this
-        // first-ever row for the class has no prior row to compare — rings.
+        // hash/date suffix is trimmed. No caller count, and this subject
+        // doesn't LEAD with a number, so no count is stored; this first-ever
+        // row for the class has no prior row to compare — rings.
         alertClass: 'e22-schedule-integrity:overlaps',
-        count: 3,
         quiet: false,
       },
     });
@@ -549,7 +558,6 @@ describe('bell write', () => {
       source: 'ops-crons',
       observedAt: expect.any(String),
       alertClass: 'e22-schedule-integrity:overlaps',
-      count: 3,
       quiet: false,
     });
     expect(opts.metadata.resolved).toBeUndefined();

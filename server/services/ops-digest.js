@@ -142,14 +142,36 @@ function alertClassFor(key, source) {
   return k.slice(0, i + 1) + trimVariableTail(k.slice(i + 1));
 }
 
-// The new-news test (owner audience only): ring when the caller reports
-// newCount>0, or its count is higher than the comparison point's — or that
-// point has no count at all (a sender that only started reporting counts
-// after PR 2, or a comparison row from before it).
-function ringDecision({ newCount, count, priorCount }) {
+// The new-news test (owner audience only). Ring when the caller reports
+// newCount>0; when its count is higher than the comparison point's; when it
+// has a count and that point has none (a row from before PR 2); or, with the
+// counts equal or unknown, when the finding is about a DIFFERENT set of items
+// (`sameSet` false). A smaller count never rings — the list only shrank.
+// `sameSet` is always true for an in-process sender (one class, one list)
+// and for a refresh of the same dedupe row; for ops-crons it compares the
+// two keys with their dates removed (setKeyFor), so a different missed
+// booking or a different set of unreturned calls rings even at the same
+// count (a second d19 gap is still one gap).
+function ringDecision({ newCount, count, priorCount, sameSet = true }) {
   if (Number(newCount) > 0) return true;
-  if (count === undefined || count === null) return false;
-  return priorCount === undefined || priorCount === null || Number(count) > Number(priorCount);
+  const hasCount = count !== undefined && count !== null;
+  const hasPrior = priorCount !== undefined && priorCount !== null;
+  if (hasCount && hasPrior) {
+    if (Number(count) > Number(priorCount)) return true;
+    if (Number(count) < Number(priorCount)) return false;
+    return !sameSet;
+  }
+  if (hasCount) return true;
+  return !sameSet;
+}
+
+// An ops-crons key with its run dates removed: what's left (check id, finding
+// class, the item-set hash or id list) identifies WHICH items a finding is
+// about, so two keys with the same set key describe the same items on
+// different days.
+const DATE_TOKEN_RE = /(^|[-_.:])\d{4}-\d{2}-\d{2}(?=$|[-_.])/g;
+function setKeyFor(key) {
+  return String(key || '').replace(DATE_TOKEN_RE, '$1').replace(/([-_.])[-_.]+/g, '$1').replace(/[-_.]+$/, '');
 }
 
 function parseMeta(raw) {
@@ -195,10 +217,16 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
 // Ring decision for a row about to be INSERTED fresh (no standing dedupe row
 // to refresh) — the comparison point is the most recent matching row found
 // above, not the specific row a dedupeKey would find (there may be none).
-async function decideRingForNewRow(conn, { alertClass, source, key, count, newCount }) {
+async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = null, count, newCount }) {
   const prior = await findPriorRungRow(conn, { alertClass, source, key });
   if (!prior) return true;
-  return ringDecision({ newCount, count, priorCount: metaCount(parseMeta(prior.metadata)) });
+  const priorMeta = parseMeta(prior.metadata);
+  // Ops-crons: same items only when the date-stripped keys match. In-process
+  // senders pass no opsKey — one class is one list.
+  // A prior row with no stored key (not a real ops-crons shape) can't prove a
+  // different set, so it falls back to the counts alone.
+  const sameSet = !opsKey || !priorMeta.opsKey || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
+  return ringDecision({ newCount, count, priorCount: metaCount(priorMeta), sameSet });
 }
 
 // notifyAdmin's `ringOnRefresh` contract (PR 2): evaluated against the
@@ -536,5 +564,5 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
 module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
-  alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom,
+  alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
 };
