@@ -284,9 +284,20 @@ const INTENDED_ACTION_LABELS = {
   send_portal_link: "send portal link",
   send_estimate_link: "send estimate link",
 };
+// An escalation's note names the actual work the outgoing copy promises, so
+// the reviewer sees it (Codex r7): known notes get their own instruction,
+// any other note is shown as written.
+const INTENDED_ACTION_NOTE_LABELS = {
+  send_reservice_link: "text their free re-service booking link",
+  cancel_request: "process the cancellation request",
+  followup_promised: "own the promised follow-up",
+};
 function intendedActionLabel(action) {
   const type = typeof action === "string" ? action : action?.type;
-  return INTENDED_ACTION_LABELS[type] || type;
+  const note = typeof action === "string" ? "" : String(action?.note || "").trim();
+  const base = INTENDED_ACTION_LABELS[type] || type;
+  if (!note) return base;
+  return `${base}: ${INTENDED_ACTION_NOTE_LABELS[note] || note}`;
 }
 
 // ── V2 helpers ────────────────────────────────────────────────

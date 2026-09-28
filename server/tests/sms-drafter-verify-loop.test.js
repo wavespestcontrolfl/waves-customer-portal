@@ -404,7 +404,10 @@ describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false)
     schedulingIntent: true, city: 'Venice',
   });
 
-  test('a correctly declared offer → converged, one call, snapshot persisted', async () => {
+  // Codex r7 (structural): real answers require the verifier. With the kill
+  // switch off, even a perfectly declared real-answers draft stays shadow —
+  // never converged, never snapshotted, so nothing publishes or sends it.
+  test('even a correctly declared offer is NOT converged with the verifier off — real answers require the verifier', async () => {
     const drafter = setup();
     const client = makeClient([{
       reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
@@ -412,8 +415,19 @@ describe('generateGroundedDraft — single-pass mode (SHADOW_DRAFT_VERIFY=false)
     }]);
     const r = await drafter.generateGroundedDraft(args(client));
     expect(client.calls).toHaveLength(1);
+    expect(r.converged).toBe(false);
+    expect(r.openTimesSnapshot).toBeNull();
+    expect(r.parsed.reply).toMatch(/9:00 AM - 11:00 AM/); // still returned, so the judge can grade the shadow row
+  });
+
+  test('gate OFF with the verifier off: single-pass behaves exactly as before (converged)', async () => {
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    const drafter = setup();
+    const client = makeClient([{ reply: 'Thanks so much — we appreciate you!', intended_actions: [], missing_info: null }]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(client.calls).toHaveLength(1);
     expect(r.converged).toBe(true);
-    expect(r.openTimesSnapshot?.quotedWindows).toEqual([{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }]);
+    expect(r.promptVersion).toBe('house_voice_v11');
   });
 
   test('a quoted slot with NO declaration → NOT converged (consumers refuse it), no snapshot, still one call', async () => {
@@ -533,5 +547,48 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     expect(r.passes).toBe(2);
     expect(client.calls).toHaveLength(3); // draft + revise + verify — the first failure never reached the verifier
     expect(r.parsed.reply).not.toMatch(/free/i);
+  });
+});
+
+
+// Codex r7 P1: with a category gate on the model answers chemical questions
+// itself, so compliance copy is enforced at publication, not by the prompt.
+describe('generateGroundedDraft — banned compliance copy never converges', () => {
+  const prior = { ra: process.env.GATE_SMS_REAL_ANSWERS, cm: process.env.GATE_SMS_AGENT_CHEMICAL_MEDICAL };
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.GATE_SMS_AGENT_CHEMICAL_MEDICAL = 'true'; });
+  afterEach(() => {
+    for (const [k, v] of [['GATE_SMS_REAL_ANSWERS', prior.ra], ['GATE_SMS_AGENT_CHEMICAL_MEDICAL', prior.cm]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    jest.resetModules();
+  });
+  const args = (client) => ({
+    client, context: CTX, inboundMessage: 'Is the spray safe for my dog?',
+    intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+  });
+
+  test('"pet-safe" is caught deterministically (no verifier call) and a compliant revision converges', async () => {
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = makeClient([
+      { reply: 'Yes — the treatment is totally pet-safe once we leave.', intended_actions: [], missing_info: null },
+      { reply: 'Keep pets off treated areas until they are dry — it is safe once dry, and your technician will confirm the timing at the visit.', intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(client.calls).toHaveLength(3);
+    expect(r.parsed.reply).not.toMatch(/pet-safe/i);
+  });
+
+  test('banned copy on every attempt → never converged, the verifier is never reached', async () => {
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    const bad = { reply: 'It is EPA-approved and dries in 30 minutes.', intended_actions: [], missing_info: null };
+    const client = makeClient([bad, bad, bad]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.converged).toBe(false);
+    expect(client.calls).toHaveLength(3);
   });
 });

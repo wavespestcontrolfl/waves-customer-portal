@@ -1737,3 +1737,43 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: notEligible }).ok).toBe(true);
   });
 });
+
+
+describe('round-7 deterministic guards (gate on)', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+  });
+  const drafter = require('../services/sms-shadow-drafter');
+
+  test('validateComplianceCopy: banned claims are violations; the sanctioned idiom with technician-confirms-timing is not; gate off does not run', () => {
+    for (const reply of ['The product is pet-safe.', 'It is EPA-approved.', 'You can re-enter after 30 minutes.', 'It is completely safe.']) {
+      expect(drafter.validateComplianceCopy({ reply }).ok).toBe(false);
+    }
+    expect(drafter.validateComplianceCopy({ reply: 'It is safe once dry, and your technician will confirm the timing.' }).ok).toBe(true);
+    expect(drafter.validateComplianceCopy({ reply: 'Thanks for reaching out — a manager will follow up within the hour.' }).ok).toBe(true);
+    expect(drafter.validateComplianceCopy({ reply: '' }).ok).toBe(true);
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    expect(drafter.validateComplianceCopy({ reply: 'The product is pet-safe.' }).ok).toBe(true);
+  });
+
+  test('validateReserviceOffer is per service line: a pest-only customer is not offered a free LAWN re-service', () => {
+    const pestOnly = `X\n${drafter.reserviceFactLine(['pest'])}\nBILLING:`;
+    const both = `X\n${drafter.reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: pestOnly }).ok).toBe(false);
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free pest re-service.', factsBlock: pestOnly }).ok).toBe(true);
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: pestOnly }).ok).toBe(true); // no line named
+    expect(drafter.validateReserviceOffer({ reply: 'We can come back for a free lawn re-service.', factsBlock: both }).ok).toBe(true);
+  });
+
+  test('replyQuotesUngroundedAmount: a FAILED or pending payment does not back "your payment went through"', () => {
+    const failed = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'failed' }] } };
+    const pending = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'pending' }] } };
+    const paid = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95, status: 'paid' }] } };
+    expect(drafter.replyQuotesUngroundedAmount('Your $95 payment went through — thank you!', failed)).toBe(true);
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', pending)).toBe(true);
+    expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', paid)).toBe(false);
+  });
+});

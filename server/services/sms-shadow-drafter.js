@@ -387,15 +387,65 @@ function factsSayReserviceEligible(factsBlock) {
   return String(factsBlock || '').split('\n').some((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible`));
 }
 
+// The shared compliance predicate (AGENTS.md "Compliance language on any
+// customer surface"): banned customer-copy claims ("pet-safe",
+// "EPA-approved", fixed re-entry/drying times). Fail CLOSED: if the guard
+// can't load, every text reads as banned.
+// The ONE sanctioned safety idiom (Codex r9+r10): "safe once dry" counts
+// only when the SAME text also carries the technician-confirms-timing
+// clause — the complete prescribed answer. The sanctioned sentence is
+// stripped before screening so any OTHER claim in the text still drops it.
+const SANCTIONED_SAFE_RE = /\bsafe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/i;
+const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+function hasBannedCustomerCopy(text) {
+  let bannedCopyGuard = null;
+  try {
+    ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
+  } catch { bannedCopyGuard = null; }
+  if (!bannedCopyGuard) return true;
+  let t = String(text || '');
+  if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
+    t = t.replace(SANCTIONED_SAFE_RE, '');
+  }
+  return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
+}
+
+// Publication guard (Codex r7 P1): with a category gate on, the model
+// answers chemical and medical questions itself, so the compliance rule can
+// no longer rest on the prompt. A real-answers reply carrying banned copy is
+// a violation, fed into the same revise/verify loop; exhausting the budget
+// leaves the draft unconverged, which nothing publishes or sends.
+function validateComplianceCopy({ reply }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  if (!reply || !hasBannedCustomerCopy(reply)) return { ok: true, violations: [] };
+  return { ok: false, violations: ['the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
+}
+
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
 const FREE_RESERVICE_OFFER_RE = /\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b[^.?!\n]{0,60}\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|service|callback|come back|return)\b|\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|callback|come back|return)\b[^.?!\n]{0,60}\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b/i;
+function eligibleReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible for `));
+  if (!line) return [];
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
+}
 function validateReserviceOffer({ reply, factsBlock }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
-  if (!FREE_RESERVICE_OFFER_RE.test(String(reply || ''))) return { ok: true, violations: [] };
-  if (factsSayReserviceEligible(factsBlock)) return { ok: true, violations: [] };
-  return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
+  const text = String(reply || '');
+  if (!FREE_RESERVICE_OFFER_RE.test(text)) return { ok: true, violations: [] };
+  const lanes = eligibleReserviceLanes(factsBlock);
+  if (!lanes.length) {
+    return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
+  }
+  // Codex r7: eligibility is per service line — a pest-only customer must
+  // not be offered a free LAWN re-service (or the reverse).
+  const named = [['pest', /\bpest\b/i], ['lawn', /\b(?:lawn|turf|grass)\b/i]].filter(([, rx]) => rx.test(text)).map(([lane]) => lane);
+  const wrong = named.filter((lane) => !lanes.includes(lane));
+  if (wrong.length) {
+    return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
+  }
+  return { ok: true, violations: [] };
 }
 
 // The service a live (non-estimate) scheduling reply is about: the next
@@ -796,6 +846,7 @@ function offerSpanInText(text, day, window) {
 // block did not authorize, or price grammar the extractor cannot verify.
 // Language that states what is OWED or charged on an ongoing basis.
 const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(?:ed|ing)?|dues|membership|plan|monthly|per month|a month|each month|\/\s?mo(?:nth)?|fee|charge[sd]?|total|amount)\b|\/mo\b/i;
+const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 function replyQuotesUngroundedAmount(reply, context) {
@@ -810,7 +861,13 @@ function replyQuotesUngroundedAmount(reply, context) {
     ...require('./context-aggregator').authorizedDuesCents(context),
   ]));
   // What was PAID: payment history.
-  const paidCents = new Set(finite((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))));
+  // Gate on: only payments that actually went through (Codex r7 —
+  // recentPayments is attempted history and carries failed / pending /
+  // overdue rows too, none of which back "your payment went through").
+  const realAnswers = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const paidCents = new Set(finite((context.billing?.recentPayments || [])
+    .filter((p) => !realAnswers || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
+    .map((p) => (p?.amount != null ? centsOf(p.amount) : null))));
   // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
   // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
   // unit-less numerals stay out of the deterministic guard (dates, house
@@ -833,7 +890,7 @@ function replyQuotesUngroundedAmount(reply, context) {
 
   // Gate OFF: the original pooled allowlist — any authoritative figure
   // passes — so live behavior is unchanged by PR #5119.
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
+  if (!realAnswers) {
     return replyAmounts.some((a) => !owedCents.has(a) && !paidCents.has(a));
   }
 
@@ -1164,24 +1221,9 @@ function buildFactsBlock(context, extras = {}) {
   // grounding from ANY untrusted text — property notes, call summaries, and
   // transcripts alike. Fail CLOSED: if the guard can't load, treat every
   // candidate line as banned.
-  let bannedCopyGuard = null;
-  try {
-    ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
-  } catch { bannedCopyGuard = null; }
-  // The ONE sanctioned safety idiom (Codex r9+r10): "safe once dry" counts
-  // only when the SAME text also carries the technician-confirms-timing
-  // clause — the complete prescribed answer. The sanctioned sentence is
-  // stripped before screening so any OTHER claim in the text still drops it.
-  const SANCTIONED_SAFE_RE = /\bsafe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/i;
-  const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
-  const hasBannedCopy = (text) => {
-    if (!bannedCopyGuard) return true;
-    let t = String(text || '');
-    if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
-      t = t.replace(SANCTIONED_SAFE_RE, '');
-    }
-    return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
-  };
+  // (the predicate itself is module-level — hasBannedCustomerCopy — since
+  // Codex r7, shared with the publication guard validateComplianceCopy)
+  const hasBannedCopy = hasBannedCustomerCopy;
 
   const conversation = (context.smsHistory || [])
     .slice(0, 10)
@@ -1747,6 +1789,22 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // wrong send-time snapshot. It fails closed the same way an exhausted
   // revise loop does — converged:false, which every consumer already
   // refuses to publish or send.
+  if (!VERIFY_ENABLED && realAnswersApplied) {
+    // STRUCTURAL (Codex r7, after seven rounds whose findings mostly shared
+    // one premise — real answers ON with the verifier OFF): a real-answers
+    // draft states appointment times, amounts, eligibility and category
+    // answers, and the LLM verifier is the grounding check for all of it.
+    // Deterministic checks cannot stand in for it (each round found another
+    // paraphrase they miss), so with the verifier disabled a real-answers
+    // draft is NEVER converged: it stays a shadow row the judge still
+    // covers, and nothing publishes or sends it. The kill switch therefore
+    // also switches real answers off at the delivery boundary.
+    logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
+    return {
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      openTimesSnapshot: null,
+    };
+  }
   if (!VERIFY_ENABLED) {
     // No facts block here on purpose (Codex r3): the grounded-elsewhere
     // allowance exists so the LLM verifier can judge a confirmation of a
@@ -1793,9 +1851,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
-    if (!reserviceCheck.ok) {
-      timesCheck.ok = false;
-      timesCheck.violations.push(...reserviceCheck.violations);
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
+    for (const check of [reserviceCheck, complianceCheck]) {
+      if (!check.ok) {
+        timesCheck.ok = false;
+        timesCheck.violations.push(...check.violations);
+      }
     }
 
     let verdict;
@@ -2304,4 +2365,6 @@ module.exports = {
   fetchReserviceLanes,
   reserviceFactLine,
   validateReserviceOffer,
+  validateComplianceCopy,
+  hasBannedCustomerCopy,
 };
