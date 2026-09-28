@@ -827,6 +827,10 @@ function plantCandidatesBlockFor(candidates, currentMonth) {
       scientific_name: approved ? (c.entry.scientific_name || null) : null,
       strength: c.confidence >= LINEAGE_CLIMB_MIN ? 'strong' : 'possible',
       local,
+      // A named alternative carries its catalog warning too — "Other
+      // possibilities" must not name sago palm without its pet-poisoning line
+      // (Codex #5250 r6 P2). A masked (unapproved) row names nothing to warn about.
+      safety_line: approved ? (c.entry.safety_line || null) : null,
     });
     if (rows.length >= 3) break;
   }

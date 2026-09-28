@@ -716,7 +716,9 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
         ...v2Entry,
         candidates: [
           { slug: 'tropical-fire-ant', common_name: 'Top Species', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
-          { slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now' },
+          {
+            slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now', safety_line: 'Toxic to pets if chewed.',
+          },
           { slug: 'alt-2', common_name: 'Alt Two', strength: 'possible', difference_from_top: 'Solid black body.', local: 'uncommon_here' },
         ],
       },
@@ -731,6 +733,8 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
 
     expect(screen.getByText('Alt One')).toBeInTheDocument();
     expect(screen.getByText('Bigger, squarish head.')).toBeInTheDocument();
+    // A named alternative keeps its catalog warning (Codex #5250 r6).
+    expect(screen.getByText('Toxic to pets if chewed.')).toBeInTheDocument();
     expect(screen.getByText('Alt Two')).toBeInTheDocument();
     expect(screen.getByText('Solid black body.')).toBeInTheDocument();
     const strengthChips = screen.getAllByText('Possible match');

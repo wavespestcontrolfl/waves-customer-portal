@@ -1289,9 +1289,16 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       const draftB = cand('fixture-zoysia-draft', 0.4, { confidence: 0.4 });
       const rows = engine._test.plantCandidatesBlockFor([draftA, draftB, cand('fixture-bahia', 0.3)], 6);
       expect(rows).toEqual([
-        { slug: null, common_name: 'a turfgrass', scientific_name: null, strength: 'possible', local: null },
-        { slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', strength: 'possible', local: 'common_here_now' },
+        {
+          slug: null, common_name: 'a turfgrass', scientific_name: null, strength: 'possible', local: null, safety_line: null,
+        },
+        {
+          slug: 'fixture-bahia', common_name: 'Fixture Bahia', scientific_name: 'Paspalum fixturicus', strength: 'possible', local: 'common_here_now', safety_line: null,
+        },
       ]);
+      // A named alternative carries its catalog warning (Codex #5250 r6): sago palm as a runner-up keeps its pet line.
+      const withSago = engine._test.plantCandidatesBlockFor([cand('fixture-citrus', 0.8), cand('fixture-sago-palm', 0.3)], 6);
+      expect(withSago[1]).toMatchObject({ slug: 'fixture-sago-palm', safety_line: 'Toxic to pets.' });
     });
 
     test('finding 4: a usable photo read of multiple_subjects still blocks naming (symptom / unknown, needs_more_evidence) while the workup keeps its possibilities', () => {
