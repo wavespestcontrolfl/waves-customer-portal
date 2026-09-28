@@ -260,24 +260,35 @@ const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ i
 // fallback that happens to carry the same id.
 function inboundOverrideParse(raw) {
   const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
-  return isAllowedOverrideModel(raw) ? raw : null;
+  // { inboundOpenaiContext: true } — the SAME flag resolveSessionModel passes
+  // for an ordinary production inbound session (never sandbox/eval): an
+  // OpenAI id parses here only while GATE_VOICE_RELAY_OPENAI_INBOUND is
+  // live, so the card is truthful about what production inbound actually
+  // resolves whether the gate is on or off. GATE_VOICE_RELAY_OPENAI (the
+  // sandbox/eval gate) has no effect on this row either way.
+  return isAllowedOverrideModel(raw, { inboundOpenaiContext: true }) ? raw : null;
 }
 // The shared chain under the inbound pin — VOICE_RELAY_MODEL, then the VOICE
 // tier: the relay takes each only as an allowlisted Anthropic id
 // (resolveSessionModel — collections reads the same env and speaks only
 // Anthropic), falling to the next link and finally MODELS.DEFAULTS.VOICE, so
 // a refused value shows as rejected here rather than as what inbound runs on.
+// Deliberately NOT passed inboundOpenaiContext — the shared chain stays
+// Anthropic-only regardless of GATE_VOICE_RELAY_OPENAI_INBOUND (relay-
+// conversation.js's resolveSessionModel validates it against
+// ALLOWED_OVERRIDE_MODEL_IDS alone, never the gated allowlist).
 function inboundSharedModelParse(raw) {
   const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
   return ALLOWED_OVERRIDE_MODEL_IDS.has(raw) ? raw : null;
 }
 function inboundOverrideAllowed() {
-  // The production inbound allowlist — Anthropic-only even with
-  // GATE_VOICE_RELAY_OPENAI live, since OpenAI candidates resolve only in
-  // sandbox / eval-harness sessions — so the tab's displayed allowlist never
+  // The production inbound allowlist — Anthropic-only unless
+  // GATE_VOICE_RELAY_OPENAI_INBOUND is live (a SEPARATE gate from
+  // GATE_VOICE_RELAY_OPENAI, which only ever widens the sandbox/eval
+  // allowlist, never this row) — so the tab's displayed allowlist never
   // goes stale relative to what resolveSessionModel accepts for this row.
   const { allowedOverrideModelIds } = require('./voice-agent/relay-conversation');
-  return [...allowedOverrideModelIds()];
+  return [...allowedOverrideModelIds({ inboundOpenaiContext: true })];
 }
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
@@ -398,7 +409,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids, PLUS any voice-eligible OpenAI id while GATE_VOICE_RELAY_OPENAI_INBOUND is exactly "true" (dark by default; owner ruling 2026-09-28, GPT-6 Luna); an OpenAI round that fails for a provider reason falls back to the shared Anthropic chain once, mid-call, and stays there for the rest of that call' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), null, { note: 'shares VOICE_RELAY_MODEL with inbound and the same allowlist walk (VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default); VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
