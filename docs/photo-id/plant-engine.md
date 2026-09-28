@@ -335,6 +335,24 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
   the draft, so it stays hidden), never a retake prompt, and the tier stays
   `needs_more_evidence`.
 
+## Photo-eval follow-ups (2026-09-28)
+
+A 27-photo labeled eval (openly licensed photos, production models) named
+18 of 27 exactly and listed 3 more correctly; the weak spot was lawn grass.
+A textbook bahiagrass photo (Y-shaped seed heads) read "Likely:
+Bermudagrass" with bahia as the runner-up, and no second opinion ran
+because Gemini was confident. With the second opinion forced on, it read
+bahiagrass.
+
+- **Close calls escalate** (`close_call`): when an identity slot's top two
+  catalog candidates share a group (two grasses, two palms, two broadleaf
+  weeds) and the runner-up reads >= 0.20, the slot gets the OpenAI second
+  opinion even at high confidence. An agreement keeps the name; a
+  disagreement drops to the shared group ("Looks like a lawn grass") rather
+  than a confident wrong name.
+- **Output budget 4096**: Gemini's reasoning shares the output budget with
+  the JSON answer, and at 2048 one lawn read came back cut off (a miss).
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

@@ -1088,7 +1088,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
           MISS,
         );
         const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
-        expect(result.internal.escalation_reasons).toEqual(['self_contradiction']);
+        // The flipped pair are two grasses, so the read is a close call as well.
+        expect(result.internal.escalation_reasons).toEqual(['close_call', 'self_contradiction']);
       });
 
       test('a turf/weed confidence swap is not a contradiction', async () => {
@@ -1599,7 +1600,8 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         escalationLeg(),
       );
       const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn' });
-      expect(result.internal.identity.trigger_reasons).toEqual(['self_contradiction']);
+      // The flipped pair are two grasses, so the read is a close call as well.
+      expect(result.internal.identity.trigger_reasons).toEqual(['close_call', 'self_contradiction']);
       expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-bahia', wording: 'likely' });
     });
 
@@ -1720,6 +1722,53 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(built.next_photo).toEqual({ ask: NO_PHOTO_CONFIRMS.ask, why: NO_PHOTO_CONFIRMS.why, photo_can_confirm: false });
       expect(built.tier).toBe('needs_more_evidence');
       expect(JSON.stringify(built)).not.toContain('Draft-only');
+    });
+  });
+
+  describe('photo eval 2026-09-28 follow-ups', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const idItem = (slug, confidence) => ({
+      slug, off_catalog_name: '', group_id: null, confidence,
+    });
+    const verified = (slug, confidence) => ({
+      slug, entry: catalog.getEntry(slug), confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: catalog.getEntry(slug).group,
+    });
+    const triggersFor = (turf) => engine._test.identitySlotTriggers({
+      candidatesJson: {}, slots: { turf, weeds: [], host: [] }, verifyMissedSlots: { turf: false, weeds: false, host: false }, flippedSlots: { turf: false, weeds: false, host: false },
+    }, { subject: 'lawn', mode: 'workup' }).turf;
+
+    test('a confident read with a same-group runner-up is a close call that gets the second opinion', () => {
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.30)])).toEqual(['close_call']);
+      // A runner-up of another group, or one too weak to be a real contender, is not a close call.
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-nutsedge', 0.40)])).toEqual([]);
+      expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.10)])).toEqual([]);
+      expect(triggersFor([verified('fixture-st-augustine', 0.95)])).toEqual([]);
+    });
+
+    test('identify mode: a close call between two grasses runs the escalation, and a disagreement names neither', async () => {
+      const candidatesLeg = { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [idItem('fixture-st-augustine', 0.95), idItem('fixture-bahia', 0.30)], weeds: [], host: [] } };
+      const verifyLeg = {
+        ok: true,
+        json: {
+          candidates: [
+            { slug: 'fixture-st-augustine', confidence: 0.95, cues_visible: [1], cues_not_visible: [] },
+            { slug: 'fixture-bahia', confidence: 0.30, cues_visible: [1], cues_not_visible: [] },
+          ],
+        },
+      };
+      const escalationLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, escalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.escalation_reasons).toEqual(['close_call']);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
     });
   });
 });
