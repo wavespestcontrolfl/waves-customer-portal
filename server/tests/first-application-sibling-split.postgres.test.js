@@ -540,10 +540,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
   // invoices.scheduled_service_id) — Codex round 7 P1 on the prior
   // structural-guessing design: the stamp is never rewritten (owner ruling:
   // accept-time-only), so once the stamped invoice goes terminal,
-  // evaluateEstimateCandidates must resolve the current LIVE, RECOGNIZED
-  // replacement as the GOVERNING invoice instead of letting the dead
-  // stamped row keep clearing (or hiding) the alert while the replacement
-  // still charges both programs.
+  // evaluateEstimateCandidates must resolve the current LIVE replacement as
+  // the GOVERNING invoice instead of letting the dead stamped row keep
+  // clearing (or hiding) the alert while the replacement still charges both
+  // programs. Codex round-9 P1: governance is durable-evidence-only (the
+  // scheduled_service_id linkage) — NO title/notes text recognition any
+  // more, since InvoiceService.update lets a live replacement's title/notes
+  // be renamed on an unpaid invoice, and this alert is advisory: the office
+  // needs to look regardless of what the anchor's live invoice actually is.
   // ---------------------------------------------------------------------
   describe('voided stamped invoice with a live replacement on the anchor', () => {
     // Mints a live invoice recognized as a first-application invoice,
@@ -588,6 +592,11 @@ suite('first-application-sibling-split — periodic sweep', () => {
       // invoice, never the dead voided stamped row — this is what
       // loadCandidates' own alert-recovery EXISTS reads back too.
       expect(metadata.invoiceId).toBe(replacementId);
+      // The STAMPED (voided) invoice's own id is written alongside it (P2)
+      // so a LATER hand-off — this replacement itself later going
+      // terminal — can still recover the alert.
+      expect(metadata.stampedInvoiceId).toBe(ids.invoiceId);
+      expect(bell.body).toMatch(/charge now sits on invoice/i);
     }));
 
     test('void + replacement while ALIGNED → no alert; group re-enters discovery with no standing alert once it later diverges', () => rollbackTest(async (trx) => {
@@ -628,7 +637,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(cleared.read_at).not.toBeNull();
     }));
 
-    test('void + an UNRECOGNIZED live anchor invoice (an unrelated hand invoice) → never governs, clears exactly like no replacement', () => rollbackTest(async (trx) => {
+    test('void + an unrecognized-looking live anchor invoice (an unrelated hand invoice) → STILL governs and alerts (Codex round-9 P1: no text recognition)', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await sweepOnce(trx, ids.estimateId);
@@ -636,11 +645,15 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
       await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
-      // A live invoice sharing the anchor's scheduled_service_id, but with
-      // no first-application recognition at all — a repair or one-off
-      // charge that happens to reuse the same row. Must never govern.
+      // A live invoice sharing the anchor's scheduled_service_id, with no
+      // first-application recognition at all — a repair or one-off charge
+      // that happens to reuse the same row. This now governs anyway: the
+      // pair is still genuinely diverged, and this advisory alert must
+      // point staff at whatever invoice actually sits on the anchor rather
+      // than clear silently.
+      const handInvoiceId = randomUUID();
       await trx('invoices').insert({
-        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        id: handInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
         token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
         status: 'sent', title: 'Sprinkler head repair', notes: 'One-off hand invoice, unrelated to the estimate.',
         line_items: JSON.stringify([{ description: 'Repair', quantity: 1, unit_price: 45, amount: 45 }]),
@@ -648,10 +661,17 @@ suite('first-application-sibling-split — periodic sweep', () => {
       });
 
       const [result] = await sweepOnce(trx, ids.estimateId);
-      expect(result.action).toBe('cleared');
-      expect(result.reason).toBe('invoice_settled');
-      const cleared = await readBell(trx, dedupeKey);
-      expect(cleared.read_at).not.toBeNull();
+      expect(result.action).toBe('alerted');
+      expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+      const bell = await readBell(trx, dedupeKey);
+      expect(bell.read_at).toBeNull();
+      expect(bell.link).toBe(`/admin/invoices?invoice=${handInvoiceId}`);
+      const metadata = typeof bell.metadata === 'string' ? JSON.parse(bell.metadata) : bell.metadata;
+      expect(metadata.invoiceId).toBe(handInvoiceId);
+      // The stamped (voided) invoice's own id is preserved separately so a
+      // LATER governing-invoice change can still recover this alert (P2).
+      expect(metadata.stampedInvoiceId).toBe(ids.invoiceId);
+      expect(bell.body).toMatch(/charge now sits on invoice/i);
     }));
 
     test('a dismissed alert reopens once the split invoice is voided and a recognized replacement is reissued', () => rollbackTest(async (trx) => {
@@ -699,6 +719,48 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(result.action).toBe('cleared');
       expect(result.reason).toBe('invoice_settled');
       expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+    }));
+
+    // Codex round-9 P2: raiseDivergenceAlert stores the GOVERNING invoice's
+    // id in metadata.invoiceId, and loadCandidates' alert-recovery EXISTS
+    // matched only that field — so once a GOVERNING REPLACEMENT itself also
+    // goes terminal (void/refunded/cancelled), with no further live invoice
+    // on the anchor, neither that recovery clause (invoiceId is the dead
+    // replacement's id, not the stamped invoice's) nor the live-replacement
+    // clause (nothing live left) could find the group on any future sweep
+    // — the standing alert stayed open forever with no way to ever
+    // re-evaluate or clear it. Fix: metadata.stampedInvoiceId (the fixed,
+    // never-rewritten stamped id) is always ALSO written, and the recovery
+    // clause matches on it too.
+    test('replacement itself later voided too → next sweep still finds the group (stampedInvoiceId recovery) and clears it', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await sweepOnce(trx, ids.estimateId);
+      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
+      const replacementId = await mintRecognizedReplacement(trx, { anchorId: ids.pestId, customerId: ids.customerId });
+      const [alerted] = await sweepOnce(trx, ids.estimateId);
+      expect(alerted.action).toBe('alerted');
+      const alertedBell = await readBell(trx, dedupeKey);
+      const alertedMeta = typeof alertedBell.metadata === 'string' ? JSON.parse(alertedBell.metadata) : alertedBell.metadata;
+      expect(alertedMeta.invoiceId).toBe(replacementId);
+      expect(alertedMeta.stampedInvoiceId).toBe(ids.invoiceId);
+
+      // The replacement now ALSO goes void — no live invoice left on the
+      // anchor at all.
+      await trx('invoices').where({ id: replacementId }).update({ status: 'void' });
+      const candidates = await loadCandidates(trx);
+      expect(candidates.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(true);
+
+      const [result] = await sweepOnce(trx, ids.estimateId);
+      expect(result.action).toBe('cleared');
+      expect(result.reason).toBe('invoice_settled');
+      const cleared = await readBell(trx, dedupeKey);
+      expect(cleared.id).toBe(alertedBell.id);
+      expect(cleared.read_at).not.toBeNull();
+      const clearedMeta = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
+      expect(clearedMeta.autoCleared).toBe(true);
     }));
   });
 
@@ -1553,5 +1615,177 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(result.scanned).toBeGreaterThanOrEqual(1);
       expect(result.stamped).toBeGreaterThanOrEqual(2);
     }));
+
+    // -----------------------------------------------------------------
+    // Codex round-9 P1: the original rule above required the sibling's
+    // CURRENT scheduled_date to still match the anchor's — so a pair that
+    // had ALREADY diverged before this migration ever ran (the exact state
+    // this feature exists to surface) was never stamped. Widened to accept
+    // ACCEPTANCE-TIME evidence instead: a shared created_at instant (both
+    // rows inserted by the same converter run), or reschedule_log proof
+    // the sibling once sat on the anchor's date.
+    // -----------------------------------------------------------------
+    describe('widened acceptance-time eligibility', () => {
+      async function seedAcceptanceEvidencePair(trx, {
+        anchorCreatedAt = new Date('2026-08-01T10:00:00Z'),
+        siblingCreatedAt = new Date('2026-08-01T10:00:00Z'),
+        siblingScheduledDate = '2026-09-15',
+        siblingEstimatedPrice = null,
+        siblingOwnLiveInvoice = false,
+        rescheduleLogOriginalDate = null,
+      } = {}) {
+        const customerId = randomUUID();
+        const estimateId = randomUUID();
+        const anchorId = randomUUID();
+        const siblingId = randomUUID();
+        await trx('customers').insert({
+          id: customerId, first_name: 'Synthetic backfill acceptance-evidence fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+        });
+        await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+        await trx('scheduled_services').insert([
+          {
+            id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+            service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 200,
+            created_at: anchorCreatedAt,
+          },
+          {
+            id: siblingId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: siblingScheduledDate,
+            service_type: 'Lawn Care', status: 'confirmed', is_recurring: true,
+            estimated_price: siblingEstimatedPrice,
+            created_at: siblingCreatedAt,
+          },
+        ]);
+        const invoiceId = randomUUID();
+        await trx('invoices').insert({
+          id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+          token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+          status: 'sent', title: 'First Service Application',
+          notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+          line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+          subtotal: 200, total: 200,
+        });
+        if (siblingOwnLiveInvoice) {
+          await trx('invoices').insert({
+            id: randomUUID(), customer_id: customerId, scheduled_service_id: siblingId,
+            token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+            status: 'sent', title: 'Lawn Care', notes: 'Hand-split lawn invoice',
+            line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+            subtotal: 60, total: 60,
+          });
+        }
+        if (rescheduleLogOriginalDate) {
+          await trx('reschedule_log').insert({
+            id: randomUUID(), scheduled_service_id: siblingId, customer_id: customerId,
+            original_date: rescheduleLogOriginalDate, new_date: siblingScheduledDate,
+            reason_code: 'customer_request', initiated_by: 'admin',
+          });
+        }
+        return {
+          customerId, estimateId, anchorId, siblingId, invoiceId,
+        };
+      }
+
+      test('an already-diverged pair created in the SAME accept (shared created_at, different current dates) IS stamped', () => rollbackTest(async (trx) => {
+        const sharedInstant = new Date('2026-08-01T10:00:03Z'); // within 120s of the anchor's
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: sharedInstant,
+          siblingScheduledDate: '2026-11-20', // long since moved off the anchor's date
+        });
+        const result = await backfillFirstApplicationInvoiceStamps(trx);
+        expect(result.stamped).toBeGreaterThanOrEqual(2);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+      }));
+
+      test('a sibling whose reschedule_log history shows it once sat on the anchor\'s date IS stamped, even with no shared created_at instant', () => rollbackTest(async (trx) => {
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: new Date('2026-08-01T10:45:00Z'), // 45 minutes later — not within the 120s window
+          siblingScheduledDate: '2026-11-20',
+          rescheduleLogOriginalDate: SAME_DATE, // once sat on the anchor's own date
+        });
+        const result = await backfillFirstApplicationInvoiceStamps(trx);
+        expect(result.stamped).toBeGreaterThanOrEqual(2);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+      }));
+
+      test('a same-estimate program from a genuinely SEPARATE, later accept (different day, no shared instant, no reschedule history) is NOT stamped', () => rollbackTest(async (trx) => {
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: new Date('2026-09-10T14:00:00Z'), // a much later, independent accept
+          siblingScheduledDate: '2026-11-20',
+        });
+        await backfillFirstApplicationInvoiceStamps(trx);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        // Single-program-equivalent: the sole other row never qualifies as
+        // the sibling that justifies a pair, so the anchor is left
+        // unstamped too, exactly like the plain "skips a single-program
+        // invoice" case above.
+        expect(anchor.first_application_invoice_id).toBeNull();
+        expect(sibling.first_application_invoice_id).toBeNull();
+      }));
+
+      test('a same-estimate program from a separate accept that already picked up its OWN price is NOT stamped', () => rollbackTest(async (trx) => {
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: new Date('2026-08-01T10:00:03Z'), // even within the shared-instant window
+          siblingScheduledDate: SAME_DATE, // even still on the anchor's own current date
+          siblingEstimatedPrice: 60, // already priced — hand-split, never re-absorbed
+        });
+        await backfillFirstApplicationInvoiceStamps(trx);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        expect(anchor.first_application_invoice_id).toBeNull();
+        expect(sibling.first_application_invoice_id).toBeNull();
+      }));
+
+      test('a same-estimate program that already has its OWN live invoice is NOT stamped, even with a shared created_at instant', () => rollbackTest(async (trx) => {
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: new Date('2026-08-01T10:00:03Z'),
+          siblingScheduledDate: '2026-11-20',
+          siblingOwnLiveInvoice: true,
+        });
+        await backfillFirstApplicationInvoiceStamps(trx);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        expect(anchor.first_application_invoice_id).toBeNull();
+        expect(sibling.first_application_invoice_id).toBeNull();
+      }));
+
+      test('rerun is idempotent for an already-diverged, shared-instant pair', () => rollbackTest(async (trx) => {
+        const ids = await seedAcceptanceEvidencePair(trx, {
+          anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
+          siblingCreatedAt: new Date('2026-08-01T10:00:03Z'),
+          siblingScheduledDate: '2026-11-20',
+        });
+        const first = await backfillFirstApplicationInvoiceStamps(trx);
+        const second = await backfillFirstApplicationInvoiceStamps(trx);
+        expect(second.stamped).toBe(first.stamped);
+        const [anchor, sibling] = await Promise.all([
+          trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+          trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+        ]);
+        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+      }));
+    });
   });
 });

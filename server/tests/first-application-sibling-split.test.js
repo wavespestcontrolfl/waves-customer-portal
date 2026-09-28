@@ -314,59 +314,68 @@ describe('divergenceStateFingerprint', () => {
 // live invoice already found on the anchor's own scheduled_service_id
 // (newest-first — see evaluateEstimateCandidates). Owner ruling 2026-09-27
 // / Codex round 7 P1: the stamp is never rewritten, so once the stamped
-// invoice goes terminal a live, RECOGNIZED replacement must take over
-// governance instead of letting the dead stamped row keep clearing the
-// alert.
+// invoice goes terminal a live replacement must take over governance
+// instead of letting the dead stamped row keep clearing the alert. Codex
+// round-9 P1: governance is durable-evidence-only (the scheduled_service_id
+// linkage) with NO title/notes text recognition — InvoiceService.update
+// lets a live replacement's title/notes be edited on an unpaid invoice, so
+// text recognition let a renamed replacement fall back to the dead stamped
+// invoice and silently clear a still-diverged, still-charging pair. This
+// alert is advisory: the office needs to look regardless of what the
+// anchor's live invoice turns out to be, so ANY live invoice on the anchor
+// governs — even one that looks completely unrelated.
 describe('resolveGoverningInvoice', () => {
-  const recognized = (over = {}) => ({
+  const liveInvoice = (over = {}) => ({
     id: 'replacement-1',
     status: 'sent',
     title: 'First Service Application',
     notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — first application only.',
     ...over,
   });
-  const unrecognized = (over = {}) => ({
+  const handInvoice = (over = {}) => ({
     id: 'hand-invoice-1', status: 'sent', title: 'Repair charge', notes: 'A one-off hand invoice for a broken sprinkler head.', ...over,
   });
 
-  test('an OPEN stamped invoice always governs itself — never looks at replacements', () => {
+  test('an OPEN stamped invoice always governs itself — never looks at any live invoice on the anchor', () => {
     const stamped = { id: 'stamped-1', status: 'sent' };
-    expect(resolveGoverningInvoice(stamped, [recognized()])).toBe(stamped);
+    expect(resolveGoverningInvoice(stamped, [liveInvoice()])).toBe(stamped);
   });
 
-  test('a terminal (void) stamped invoice with a recognized live replacement → the replacement governs', () => {
+  test('a terminal (void) stamped invoice with a live invoice on the anchor → that invoice governs', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
-    const replacement = recognized();
+    const replacement = liveInvoice();
     expect(resolveGoverningInvoice(stamped, [replacement])).toBe(replacement);
   });
 
-  test.each(['void', 'refunded', 'canceled', 'cancelled'])('every terminal status (%s) looks for a replacement', (status) => {
+  test.each(['void', 'refunded', 'canceled', 'cancelled'])('every terminal status (%s) looks for a live invoice on the anchor', (status) => {
     const stamped = { id: 'stamped-1', status };
-    const replacement = recognized();
+    const replacement = liveInvoice();
     expect(resolveGoverningInvoice(stamped, [replacement])).toBe(replacement);
   });
 
-  test('a terminal stamped invoice with NO live replacement → governs itself (today\'s behavior)', () => {
+  test('a terminal stamped invoice with NO live invoice on the anchor → governs itself (today\'s behavior)', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
     expect(resolveGoverningInvoice(stamped, [])).toBe(stamped);
     expect(resolveGoverningInvoice(stamped, null)).toBe(stamped);
   });
 
-  test('a live anchor invoice that is NOT recognized as first-application never governs — could be an unrelated hand invoice', () => {
+  // Flipped by Codex round-9 P1: a live anchor invoice that would NOT have
+  // been recognized as a first-application invoice by title/notes text
+  // (an unrelated hand invoice — a repair, a one-off charge) now STILL
+  // governs — no text recognition at all any more. Failing toward
+  // alerting (the office looks at an invoice that turns out unrelated)
+  // beats failing toward silence (a renamed or truly unrelated live
+  // invoice letting a genuinely diverged, still-charging pair go quiet).
+  test('an unrecognized-looking live invoice on the anchor (e.g. an unrelated hand invoice) still governs — durable evidence only', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
-    expect(resolveGoverningInvoice(stamped, [unrecognized()])).toBe(stamped);
+    const hand = handInvoice();
+    expect(resolveGoverningInvoice(stamped, [hand])).toBe(hand);
   });
 
-  test('an unrecognized live invoice beside a recognized one — the recognized one still governs', () => {
+  test('newest-first ordering — the FIRST live invoice wins when more than one sits on the anchor', () => {
     const stamped = { id: 'stamped-1', status: 'void' };
-    const replacement = recognized();
-    expect(resolveGoverningInvoice(stamped, [unrecognized(), replacement])).toBe(replacement);
-  });
-
-  test('newest-first ordering — the FIRST recognized entry wins when more than one live replacement exists', () => {
-    const stamped = { id: 'stamped-1', status: 'void' };
-    const newer = recognized({ id: 'replacement-newer' });
-    const older = recognized({ id: 'replacement-older' });
+    const newer = liveInvoice({ id: 'replacement-newer' });
+    const older = liveInvoice({ id: 'replacement-older' });
     expect(resolveGoverningInvoice(stamped, [newer, older])).toBe(newer);
   });
 });
