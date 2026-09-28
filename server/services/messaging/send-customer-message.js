@@ -1304,14 +1304,19 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
   // window (codex P1, PR #4403 round 15).
   const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
     ? sendInput.metadata?.series_move_id || null : null;
-  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
-  if (!knownSlot && !seriesMoveId) return;
+  // A notice that quoted no window (promisedWindowUnknown — a windowless
+  // reschedule) records an UNKNOWN-window promise: its renderedSlotMs only
+  // guarded the send, and skipping it would leave the visit on its older
+  // window.
+  const windowUnknown = sendInput.promisedWindowUnknown === true;
+  const knownSlot = !windowUnknown && sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId && !windowUnknown) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null, windowUnknown,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -1403,6 +1408,7 @@ module.exports = {
   // Exposed for tests
   _internals: {
     validateContract,
+    recordPromiseEvidenceFallback,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

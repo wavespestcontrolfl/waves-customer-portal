@@ -59,7 +59,9 @@ async function convertHeicToJpeg(buffer) {
   if (buffer.length === 0) throw new Error('HEIC input is empty');
   if (buffer.length > MAX_HEIC_BYTES) throw new Error('HEIC input exceeds the size limit');
   if (activeConversions >= MAX_CONCURRENT_CONVERSIONS) {
-    throw new Error('HEIC conversion capacity is unavailable');
+    // Typed so a caller can tell transient saturation (retry shortly) from a
+    // genuine decode failure — visit-prep.js maps this to a retryable 503.
+    throw Object.assign(new Error('HEIC conversion capacity is unavailable'), { code: 'HEIC_CAPACITY' });
   }
 
   activeConversions += 1;
