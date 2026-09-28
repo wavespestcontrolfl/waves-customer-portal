@@ -9898,6 +9898,7 @@ function useCustomerProfileNavigation({
   isAdmin,
   editOpen,
   onClose,
+  onSelectCustomer,
   loading,
   data,
   reloadCustomer,
@@ -9943,6 +9944,15 @@ function useCustomerProfileNavigation({
     () => !draftActiveRef.current || confirmDiscardDraft(),
     [],
   );
+  // The two controls that unmount this profile from OUTSIDE its own tab
+  // navigation: closing it, and switching to a different customer via the
+  // account-properties / "others at this address" links. Built here, next
+  // to guardNavigateAway, rather than in the (already complexity-capped)
+  // outer component body.
+  const guardedClose = () => { if (guardNavigateAway()) onClose?.(); };
+  const guardedSelectCustomer = onSelectCustomer
+    ? (id) => { if (guardNavigateAway()) onSelectCustomer(id); }
+    : undefined;
   const requestTabChange = (next) => {
     if (next !== activeTab && !guardNavigateAway()) return false;
     setActiveTab(next);
@@ -10069,7 +10079,8 @@ function useCustomerProfileNavigation({
     cancelPlanOpen,
     refundPayment,
     handleDraftActiveChange,
-    guardNavigateAway,
+    guardedClose,
+    guardedSelectCustomer,
   };
 }
 
@@ -10411,7 +10422,8 @@ export default function Customer360ProfileV2({
     cancelPlanOpen,
     refundPayment,
     handleDraftActiveChange,
-    guardNavigateAway,
+    guardedClose,
+    guardedSelectCustomer,
   } = useCustomerProfileNavigation({
     profileReloadKey,
     initialTab,
@@ -10419,20 +10431,13 @@ export default function Customer360ProfileV2({
     isAdmin,
     editOpen,
     onClose,
+    onSelectCustomer,
     loading,
     data,
     reloadCustomer,
     customerId,
     onDraftActiveChange,
   });
-  // Shared choke point for the controls INSIDE this profile that would
-  // otherwise unmount the address-review panel with no warning: the
-  // close button/backdrop/mobile-back (all "onClose"), and the account
-  // properties / "others at this address" customer-switch links.
-  const guardedClose = () => { if (guardNavigateAway()) onClose?.(); };
-  const guardedSelectCustomer = onSelectCustomer
-    ? (id) => { if (guardNavigateAway()) onSelectCustomer(id); }
-    : undefined;
   const [historySearch, setHistorySearch] = useState("");
   useEffect(() => {
     const timer = setTimeout(() => setHistorySearch(timelineSearch.trim()), 250);

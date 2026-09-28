@@ -465,8 +465,11 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
           <div role="alert" className="text-14 text-alert-fg">{panelError}</div>
           <Button
             variant="secondary"
-            disabled={profileRefreshPending && retryingProfileRefresh}
-            loading={profileRefreshPending && retryingProfileRefresh}
+            // retryingProfileRefresh is only ever set while profileRefreshPending
+            // is also true (it's set inside the branch below that requires it) —
+            // no need to re-check that here.
+            disabled={retryingProfileRefresh}
+            loading={retryingProfileRefresh}
             onClick={async () => {
               // A pending profile refresh has nothing to do with the geocode
               // queue itself — retry the failed profile reload so the warning
