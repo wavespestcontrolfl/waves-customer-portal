@@ -454,7 +454,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
       });
 
       expect(result.statusCode).toBe(403);
-      expect(result.body).toEqual({ error: 'Only the owner account can assign this email address.' });
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
       expect(tx.remaining()).toHaveLength(0);
     });
 
@@ -473,7 +473,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
       });
 
       expect(result.statusCode).toBe(403);
-      expect(result.body).toEqual({ error: 'Only the owner account can assign this email address.' });
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
       expect(tx.remaining()).toHaveLength(0);
     });
 
@@ -512,7 +512,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
       });
 
       expect(result.statusCode).toBe(403);
-      expect(result.body).toEqual({ error: 'Only the owner account can assign this email address.' });
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
       expect(tx.remaining()).toHaveLength(0);
       expect(target.update).not.toHaveBeenCalled();
     });
@@ -570,6 +570,57 @@ describe('admin timetracking technician data/auth boundaries', () => {
       expect(result.statusCode).toBe(200);
       expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
         email: 'contact@wavespestcontrol.com',
+      }));
+    });
+
+    // P2 (stripping direction): a non-owner admin must not be able to move
+    // a row's CURRENT full-access email to anything else either — that
+    // would permanently strip the owner's own access with no in-product
+    // way to reassign it back (unset technicians.email is a dead end; the
+    // only writer of that column that a non-owner can still reach after
+    // this PR is this same guarded endpoint).
+    test('a non-owner admin cannot move the owner row’s CURRENT full-access email to an ordinary address', async () => {
+      const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const target = makeChain({ first: ownerRow });
+      const noConflict = makeChain({ first: undefined });
+      const tx = installTransaction([target, noConflict]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'someone-else@example.test' },
+        technician: { id: 'admin-2', role: 'admin', email: 'virginia@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-2',
+      });
+
+      expect(result.statusCode).toBe(403);
+      expect(result.body).toEqual({ error: 'Only the owner account can change this email address.' });
+      expect(tx.remaining()).toHaveLength(0);
+      expect(target.update).not.toHaveBeenCalled();
+      expect(PushService.deactivateStaffUser).not.toHaveBeenCalled();
+      expect(disconnectStaffSockets).not.toHaveBeenCalled();
+    });
+
+    test('the full-access owner CAN move their own row’s email to an ordinary address', async () => {
+      const ownerRow = { ...rawTechnician, id: 'owner-row', email: 'contact@wavespestcontrol.com' };
+      const target = makeChain({ first: ownerRow });
+      const noConflict = makeChain({ first: undefined });
+      const write = makeChain();
+      const reread = makeChain({ first: { ...ownerRow, email: 'newcontact@example.test', auth_token_version: 9 } });
+      installTransaction([target, noConflict, write, reread]);
+
+      const result = await invoke(updateTechnician, {
+        params: { id: 'owner-row' },
+        body: { email: 'newcontact@example.test' },
+        technician: { id: 'admin-1', role: 'admin', email: 'contact@wavespestcontrol.com' },
+        techRole: 'admin',
+        technicianId: 'admin-1',
+      });
+
+      expect(result.statusCode).toBe(200);
+      expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+        email: 'newcontact@example.test',
+        auth_token_version: 9,
       }));
     });
 

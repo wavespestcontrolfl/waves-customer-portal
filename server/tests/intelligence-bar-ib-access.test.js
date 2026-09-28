@@ -5,7 +5,7 @@
  * login, and every technician login, does not.
  */
 
-const { ibFullAccess, fullAccessAllowlist } = require('../services/intelligence-bar/ib-access');
+const { ibFullAccess, fullAccessAllowlist, assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
 
 describe('ibFullAccess', () => {
   const ORIGINAL_ENV = process.env.IB_FULL_ACCESS_EMAILS;
@@ -96,5 +96,84 @@ describe('ibFullAccess', () => {
       expect(ibFullAccess(undefined)).toBe(false);
       expect(ibFullAccess({})).toBe(false);
     });
+  });
+});
+
+describe('assertMayChangeFullAccessEmail', () => {
+  const ORIGINAL_ENV = process.env.IB_FULL_ACCESS_EMAILS;
+  const nonOwner = { techRole: 'admin', technician: { email: 'virginia@wavespestcontrol.com' } };
+  const owner = { techRole: 'admin', technician: { email: 'contact@wavespestcontrol.com' } };
+
+  afterEach(() => {
+    if (ORIGINAL_ENV === undefined) delete process.env.IB_FULL_ACCESS_EMAILS;
+    else process.env.IB_FULL_ACCESS_EMAILS = ORIGINAL_ENV;
+  });
+
+  beforeEach(() => {
+    delete process.env.IB_FULL_ACCESS_EMAILS;
+  });
+
+  describe('assignment (creation / an ordinary row picking up the owner email)', () => {
+    test('a non-owner admin cannot assign the full-access email (fromEmail null = a new row)', () => {
+      const result = assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: 'contact@wavespestcontrol.com' });
+      expect(result).toEqual({ error: 'Only the owner account can change this email address.' });
+    });
+
+    test('the full-access owner may assign it', () => {
+      expect(assertMayChangeFullAccessEmail(owner, { fromEmail: null, toEmail: 'contact@wavespestcontrol.com' })).toBeNull();
+    });
+
+    test('a mixed-case/whitespace variant is still caught', () => {
+      const result = assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: '  Contact@WavesPestControl.COM  ' });
+      expect(result).toEqual({ error: 'Only the owner account can change this email address.' });
+    });
+
+    test('assigning an ordinary email is never blocked, whoever the requester is', () => {
+      expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: 'newtech@example.test' })).toBeNull();
+    });
+  });
+
+  describe('stripping (moving a row’s CURRENT full-access email away)', () => {
+    test('a non-owner admin cannot move the owner row’s email to an ordinary address', () => {
+      const result = assertMayChangeFullAccessEmail(nonOwner, { fromEmail: 'contact@wavespestcontrol.com', toEmail: 'someone-else@example.test' });
+      expect(result).toEqual({ error: 'Only the owner account can change this email address.' });
+    });
+
+    test('the full-access owner may move their own row’s email', () => {
+      expect(assertMayChangeFullAccessEmail(owner, { fromEmail: 'contact@wavespestcontrol.com', toEmail: 'newcontact@example.test' })).toBeNull();
+    });
+
+    test('moving an ordinary row’s ordinary email is never blocked', () => {
+      expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: 'oldtech@example.test', toEmail: 'newtech@example.test' })).toBeNull();
+    });
+  });
+
+  describe('unchanged email — never blocked, whatever the value', () => {
+    test('resending the current full-access email unchanged is allowed for a non-owner', () => {
+      expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: 'contact@wavespestcontrol.com', toEmail: 'contact@wavespestcontrol.com' })).toBeNull();
+    });
+
+    test('unchanged is recognized case/whitespace-insensitively', () => {
+      expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: 'contact@wavespestcontrol.com', toEmail: '  Contact@WavesPestControl.COM  ' })).toBeNull();
+    });
+
+    test('both null (no email either side) is a no-op', () => {
+      expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: null })).toBeNull();
+    });
+  });
+
+  test('IB_FULL_ACCESS_EMAILS override protects the NEW email and stops protecting the old default', () => {
+    process.env.IB_FULL_ACCESS_EMAILS = 'owner@example.test';
+    // The old default is now an ordinary address — assigning it is fine.
+    expect(assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: 'contact@wavespestcontrol.com' })).toBeNull();
+    // The new allow-listed email is what a non-owner is refused now.
+    const result = assertMayChangeFullAccessEmail(nonOwner, { fromEmail: null, toEmail: 'owner@example.test' });
+    expect(result).toEqual({ error: 'Only the owner account can change this email address.' });
+  });
+
+  test('a technician requester is refused in both directions, even with the owner email on their own request context', () => {
+    const tech = { techRole: 'technician', technician: { email: 'contact@wavespestcontrol.com' } };
+    expect(assertMayChangeFullAccessEmail(tech, { fromEmail: null, toEmail: 'contact@wavespestcontrol.com' }))
+      .toEqual({ error: 'Only the owner account can change this email address.' });
   });
 });
