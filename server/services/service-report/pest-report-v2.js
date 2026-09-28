@@ -337,7 +337,10 @@ function buildPestReportV2({
     weatherCall: premiumExperience.weatherCall || null,
     aiSummary,
     forecast: forecastCard,
-    expectations,
+    // Omitted entirely when dark or empty (codex P0 #5137 r6): the public
+    // contract promises the gate-off payload has no `expectations` key at
+    // all — unlike the always-present-but-nullable siblings above.
+    ...(expectations ? { expectations } : {}),
   };
 }
 

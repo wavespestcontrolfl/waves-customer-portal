@@ -76,10 +76,11 @@ call time, no redeploy to flip): on the pest-line service-report payload
 `reports-public.js`'s pest V2 composition), gate on adds an optional
 `data.pestReportV2.expectations` object with up to three keys — `rain`,
 `spiders`, `whatToExpect` — each present only when that block has something
-to say; gate off, or nothing to say, omits the whole `expectations` key
-(same always-present-but-nullable convention `defense` / `aiSummary` /
-`forecast` already use on `pestReportV2`; server/services/service-report/
-pest-report-expectations.js is the pure builder). `pest-report-v2.js` now
+to say; gate off, or nothing to say, omits the whole `expectations` key —
+unlike the always-present-but-nullable `defense` / `aiSummary` / `forecast`
+siblings on `pestReportV2`, no `expectations: null` and no null child key
+is ever serialized (codex P0 #5137 round 6); server/services/service-report/
+pest-report-expectations.js is the pure builder. `pest-report-v2.js` now
 builds `expectations` BEFORE its own emptiness predicate and counts a
 non-null result among the fields that keep the section alive (codex P2
 2026-09-29 round 3): a sparse callback report — `suppressDefense`, with no

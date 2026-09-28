@@ -320,7 +320,10 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       weekWeather: { rainInches: 2, rainConfidence: null },
       serviceMonth: 7,
     });
-    expect(out.expectations).toBeNull();
+    // codex P0 #5137 r6: the key is ABSENT, never a serialized null — the
+    // gate-off payload must be byte-identical to a build without this feature.
+    expect(out).not.toHaveProperty('expectations');
+    expect(JSON.stringify(out)).not.toContain('expectations');
   });
 
   it('gate on: composes rain, spiders, and what-to-expect from the passed-in facts', () => {
@@ -337,10 +340,25 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     expect(out.expectations.whatToExpect.lines[0]).toMatch(/Non-repellent/);
   });
 
-  it('gate on but no relevant facts: expectations is null (no data → no block)', () => {
+  it('gate on but no relevant facts: the expectations key is omitted (no data → no block)', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const out = buildPestReportV2({ premiumExperience: premium() });
-    expect(out.expectations).toBeNull();
+    expect(out).not.toHaveProperty('expectations');
+  });
+
+  it('gate on with only one block: the other child keys are omitted, never null (codex P0 #5137 r6)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      applications: APPLICATIONS,
+      actionLabels: [],
+      weekWeather: null,
+      serviceMonth: 7,
+    });
+    expect(out.expectations.whatToExpect.lines.length).toBeGreaterThan(0);
+    expect(out.expectations).not.toHaveProperty('rain');
+    expect(out.expectations).not.toHaveProperty('spiders');
+    expect(Object.keys(out.expectations)).toEqual(['whatToExpect']);
   });
 
   // codex P2 2026-09-29 round 3: a sparse callback report (suppressDefense,

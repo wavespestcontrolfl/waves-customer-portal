@@ -853,3 +853,15 @@ describe('buildPestExpectations — composition', () => {
     expect(out.whatToExpect.lines[0]).toMatch(/Non-repellent/);
   });
 });
+
+describe('buildPestExpectations — child keys present only with content (codex P0 #5137 r6)', () => {
+  it('only rain → only the rain key', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const out = buildPestExpectations({ weekWeather: { rainInches: 0.1, rainConfidence: null, windowClosed: true }, applications: [], serviceMonth: 3 });
+    expect(Object.keys(out)).toEqual(['rain']);
+  });
+
+  it('nothing → null, never an object of nulls', () => {
+    expect(buildPestExpectations({ weekWeather: null, applications: [], serviceMonth: 3 })).toBeNull();
+  });
+});

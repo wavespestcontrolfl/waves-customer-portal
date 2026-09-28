@@ -566,7 +566,13 @@ function buildPestExpectations({
   const spiders = buildSpiderExpectation({ actionLabels, actionEntries, applications });
   const whatToExpect = buildWhatToExpect({ products: flatProducts });
   if (!rain && !spiders && !whatToExpect) return null;
-  return { rain, spiders, whatToExpect };
+  // Each child key is present only when that block has something to say
+  // (codex P0 #5137 r6 — the public contract; never a serialized null).
+  return {
+    ...(rain ? { rain } : {}),
+    ...(spiders ? { spiders } : {}),
+    ...(whatToExpect ? { whatToExpect } : {}),
+  };
 }
 
 module.exports = {
