@@ -35,9 +35,17 @@
 //      as a "pest sighting".
 //
 // GEOGRAPHY: county only, for Sarasota / Manatee / Charlotte (the three
-// counties named in the work order). County is resolved from the
-// customer's ZIP first, using the SAME canonical zip->county lists the
-// watering-restriction resolver and property lookup use
+// counties named in the work order). County is resolved from the VISIT'S
+// OWN saved service address first (`scheduled_services.service_address_zip`
+// / `_city` — the per-visit property, set for multi-property customers and
+// for a customer who has moved since), falling back to the customer's own
+// zip/city only for legacy rows with no stamped service address — the same
+// `COALESCE(ss.service_address_zip, c.zip)` pattern
+// `serviceLocationSelects` uses in server/services/scheduling/day-stops.js,
+// so a visit at a second property or a former address is never misattributed
+// to the customer's CURRENT home county. That zip is matched using the SAME
+// canonical zip->county lists the watering-restriction resolver and
+// property lookup use
 // (server/config/county-zips.js SERVICE_AREA_COUNTY_ZIPS) — never a
 // separately hand-copied zip list. A ZIP that set lists under MORE THAN ONE
 // county (e.g. 34228 Longboat Key straddles Manatee/Sarasota) is NOT
@@ -45,10 +53,10 @@
 // approach, it falls through to a small whole-city fallback for cities that
 // sit entirely inside one of the three counties, and otherwise the visit is
 // EXCLUDED from the county breakdown (counted in `unresolvedGeography`
-// instead of attributed to a county — fail closed, never guessed). A
-// customer whose county cannot be established this way (out of the three
-// counties, e.g. Lee/Collier, or an unresolved straddling ZIP with no
-// whole-county city) is also excluded from the by-county tables.
+// instead of attributed to a county — fail closed, never guessed). A visit
+// whose service address's county cannot be established this way (out of
+// the three counties, e.g. Lee/Collier, or an unresolved straddling ZIP
+// with no whole-county city) is also excluded from the by-county tables.
 //
 // CATEGORY: `scheduled_services.service_category_snapshot` when present
 // (a stamped copy of the `services` catalog's `category` column — see
@@ -319,6 +327,26 @@ function formatMarkdown(summary, { from, to } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
+// Exported as a constant (rather than inlined in fetchRows) so
+// field-report.test.js can pin the service-address-first COALESCE without
+// needing a live database: a visit at a second property, or a customer who
+// has since moved, must be counted at the VISIT's own saved address, never
+// silently re-attributed to the customer's current home county. Matches
+// serviceLocationSelects in server/services/scheduling/day-stops.js.
+const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS service_month,
+              ss.service_type,
+              ss.service_category_snapshot,
+              COALESCE(ss.service_address_zip, c.zip) AS zip,
+              COALESCE(ss.service_address_city, c.city) AS city,
+              c.id AS customer_id,
+              c.first_name,
+              c.last_name
+         FROM scheduled_services ss
+         JOIN customers c ON c.id = ss.customer_id
+        WHERE ss.status = 'completed'
+          AND ss.scheduled_date >= $1::date
+          AND ss.scheduled_date < $2::date`;
+
 async function fetchRows({ fromStr, toStr }) {
   const conn = process.env.DATABASE_PUBLIC_URL;
   if (!conn) {
@@ -330,22 +358,7 @@ async function fetchRows({ fromStr, toStr }) {
   await client.connect();
   try {
     await client.query('SET default_transaction_read_only = on');
-    const { rows } = await client.query(
-      `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS service_month,
-              ss.service_type,
-              ss.service_category_snapshot,
-              c.zip,
-              c.city,
-              c.id AS customer_id,
-              c.first_name,
-              c.last_name
-         FROM scheduled_services ss
-         JOIN customers c ON c.id = ss.customer_id
-        WHERE ss.status = 'completed'
-          AND ss.scheduled_date >= $1::date
-          AND ss.scheduled_date < $2::date`,
-      [fromStr, toStr],
-    );
+    const { rows } = await client.query(FIELD_REPORT_QUERY, [fromStr, toStr]);
     return rows.map((r) => ({
       serviceMonth: r.service_month,
       serviceType: r.service_type,
@@ -391,4 +404,5 @@ module.exports = {
   resolveWindow,
   CANONICAL_CATEGORIES,
   REPORT_COUNTIES,
+  FIELD_REPORT_QUERY,
 };

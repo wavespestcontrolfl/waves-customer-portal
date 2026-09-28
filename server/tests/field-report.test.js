@@ -6,6 +6,7 @@ const {
   resolveCounty,
   resolveWindow,
   REPORT_COUNTIES,
+  FIELD_REPORT_QUERY,
 } = require('../../ops/agents/field-report');
 const { INTERNAL_TEST_CUSTOMERS, INTERNAL_TEST_CUSTOMER_IDS } = require('../../server/services/internal-test-customers');
 
@@ -105,6 +106,28 @@ describe('field-report parseArgs', () => {
       to: '2026-07-01',
       json: true,
     });
+  });
+
+  test('parses --key value (space-separated) form too', () => {
+    expect(parseArgs(['--from', '2026-04-01', '--to', '2026-07-01'])).toEqual({
+      from: '2026-04-01',
+      to: '2026-07-01',
+    });
+  });
+});
+
+describe('field-report SQL — service-address-first geography (no live DB in this sandbox)', () => {
+  // A visit's OWN saved service address must win over the customer's
+  // current home address (second property, or a customer who moved since
+  // the visit) — codex pre-push r2 caught this defaulting to c.zip/c.city
+  // alone, matching serviceLocationSelects in
+  // server/services/scheduling/day-stops.js. No dev DB is available in this
+  // sandbox to run the real query (waves-db skill §5: report blocked rather
+  // than fake it), so this pins the query text itself; a real run should
+  // re-verify against a preview/dev Postgres branch when one is available.
+  test('selects COALESCE(service_address_*, customer_*) for both zip and city', () => {
+    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(ss\.service_address_zip,\s*c\.zip\)\s+AS\s+zip/i);
+    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(ss\.service_address_city,\s*c\.city\)\s+AS\s+city/i);
   });
 });
 
