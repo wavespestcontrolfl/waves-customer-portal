@@ -434,6 +434,67 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
+  // Codex on head f0212d669f: staff dismiss the alert BEFORE completing the
+  // split (read_at set, autoCleared never stamped — the sweep hasn't yet
+  // confirmed resolution). They then complete the split (price + invoice
+  // the sibling), which makes the estimate drop out of structural
+  // discovery entirely (neither member has an uncovered sibling any more)
+  // — the exact gap where the FIRST established-anchor fix (bounded to
+  // unread-or-structurally-current) never got a chance to run the sweep
+  // for this estimate at all, so autoCleared was never actually stamped.
+  // Later, staff VOID the split invoice (undoing it) — a genuinely NEW
+  // recurrence of the SAME divergence. The sweep must reopen it, not
+  // silently leave it dismissed forever.
+  test('dismiss → complete the split → sweep → void the split invoice → sweep reopens the recurrence', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const firstBell = await readBell(trx, dedupeKey);
+    expect(firstBell.read_at).toBeNull();
+
+    // Staff dismiss it by hand WHILE it is still genuinely diverging.
+    await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
+
+    // THEN they complete the instructed split: lawn gets its own price and
+    // its own live invoice. The estimate now satisfies structural
+    // discovery for NEITHER member — pest's only sibling (lawn) is fully
+    // covered by its own invoice, and lawn's only sibling (pest) already
+    // has its own (the shared) invoice too.
+    const lawnInvoiceId = randomUUID();
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 42 });
+    await trx('invoices').insert({
+      id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+
+    // The sweep must still find this dismissed-but-unconfirmed alert and
+    // actually stamp autoCleared — the one piece of state a later genuine
+    // recurrence needs to be recognized as new information.
+    const [afterSplit] = await sweepOnce(trx, ids.estimateId);
+    expect(afterSplit.action).toBe('cleared');
+    expect(afterSplit.reason).toBe('split_completed');
+    const confirmedClear = await readBell(trx, dedupeKey);
+    expect(confirmedClear.id).toBe(firstBell.id);
+    const clearMeta = typeof confirmedClear.metadata === 'string' ? JSON.parse(confirmedClear.metadata) : confirmedClear.metadata;
+    expect(clearMeta.autoCleared).toBe(true);
+
+    // Staff void the split invoice — the SAME divergence genuinely recurs
+    // (lawn is still on 2026-10-02, still diverging from pest, and no
+    // longer has a live invoice of its own).
+    await trx('invoices').where({ id: lawnInvoiceId }).update({ status: 'void' });
+    const [afterVoid] = await sweepOnce(trx, ids.estimateId);
+    expect(afterVoid.action).toBe('alerted');
+    expect(afterVoid.divergingSiblingIds).toEqual([ids.lawnId]);
+
+    const reopened = await readBell(trx, dedupeKey);
+    expect(reopened.id).toBe(firstBell.id);
+    expect(reopened.read_at).toBeNull();
+  }));
+
   // Codex round-2 P1 on the pre-push fix: a PLAIN human dismissal (read_at
   // set, no autoCleared) followed by a GENUINE realignment must still
   // record the resolution (clearStandingAlerts previously skipped an

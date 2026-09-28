@@ -346,28 +346,44 @@ function groupCandidatesByEstimate(candidates) {
 // true combined invoice, reissued" apart from "a split-off sibling's own
 // separate invoice" once a split exists (see the module header).
 //
-// Deliberately NOT scoped to ONLY whereNull('read_at') (Codex P1 on this
-// fix): scoping to unread alerts alone made the estimate FORGET its own
-// established anchor the instant the group genuinely resolved and the
-// alert was marked read/autoCleared — exactly the moment a later, still-
-// structurally-qualifying tick (an unrelated sibling can remain
-// permanently unpriced with no real billing problem, e.g. one perfectly
-// aligned with the true anchor) most needed the durable reference frame,
-// resurrecting the same ambiguity as a "forgotten" identity. So this reads
-// TWO bounded sources, unioned: every currently-UNREAD alert (regardless
-// of `estimateIds` — a SETTLED invoice deliberately drops out of the
-// structural scan below, which is exactly the transition an unread alert
-// must still be re-derived and reported for), PLUS any alert, read or not,
-// for an estimate the structural scan ALSO currently found (`estimateIds`
-// — already "bounded by currently non-settled — operationally small").
-// Neither source scans notification history beyond these two small sets,
-// and neither grows with total invoice history.
+// Deliberately NOT scoped to ONLY whereNull('read_at') (Codex P1, two
+// rounds on this fix): scoping to unread alerts alone made the estimate
+// FORGET its own established anchor the instant the group genuinely
+// resolved and the alert was marked read/autoCleared — resurrecting the
+// same ambiguity later (an unrelated sibling can remain permanently
+// unpriced with no real billing problem, e.g. one perfectly aligned with
+// the true anchor, keeping the estimate structurally "in play" forever).
+// The FIRST fix widened the bound to "unread OR structurally current" —
+// but a PLAIN human dismissal (read_at set, autoCleared never stamped
+// true) whose estimate ALSO happens to drop out of structural discovery
+// at that exact moment (both siblings get their own invoice, satisfying
+// each other) matched NEITHER branch: the sweep never got a chance to run
+// evaluateEstimateCandidates for it at all, so it could never stamp
+// autoCleared — the ONE piece of state raiseDivergenceAlert's
+// wasAutoCleared check needs to recognize a LATER, genuinely NEW
+// recurrence (e.g. the completed split invoice gets voided again) as new
+// information rather than "unchanged, stays dismissed".
+//
+// So the real bound is not read_at at all — it's whether the sweep has
+// ever CONFIRMED resolution: metadata.autoCleared is 'true' only when
+// clearStandingAlerts has actually run for this exact dedupeKey (raising
+// or refreshing an alert always stamps autoCleared:false in the same
+// write — see raiseDivergenceAlert). "Not yet confirmed resolved" is a
+// STRICT SUPERSET of "unread" (it also covers a plain dismissal the sweep
+// hasn't reconciled yet) while remaining just as bounded and self-
+// draining: every alert in it leaves the moment a sweep actually runs
+// evaluateEstimateCandidates for its estimate and settles the question
+// either way. Unioned, as before, with any alert (any state at all) for an
+// estimate the structural scan ALSO currently finds (`estimateIds` —
+// already "bounded by currently non-settled — operationally small") so a
+// fully-confirmed-resolved identity is still remembered for as long as the
+// estimate stays structurally relevant for an unrelated reason.
 async function loadEstablishedAnchorsByEstimate(conn, estimateIds) {
   const alerts = await conn('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE 'first_application_sibling_divergence:%'")
     .where((scope) => {
-      scope.whereNull('read_at');
+      scope.whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'");
       if (estimateIds.length) scope.orWhereIn(conn.raw("metadata->>'estimateId'"), estimateIds);
     })
     .select('metadata');
