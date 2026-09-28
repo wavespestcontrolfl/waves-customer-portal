@@ -485,7 +485,7 @@ async function activate(itemId, overrides = {}) {
     const itemId = await connect();
     // setup: the feed must start after the statement series' last day
     await expect(activate(itemId, { 'acc-card': { accountLabel: 'capone-card', syncFrom: '2026-09-10' } }))
-      .rejects.toThrow(/statement rows through 2026-09-10 — start the feed on 2026-09-11/);
+      .rejects.toThrow(/through 2026-09-10 — start the feed on 2026-09-11/);
     await activate(itemId, { 'acc-card': { accountLabel: 'capone-card', syncFrom: '2026-09-11' } });
 
     // upload: statement rows on/after the feed's start are skipped + reported
@@ -530,6 +530,46 @@ async function activate(itemId, overrides = {}) {
       server.close();
       delete process.env.GATE_BANK_IMPORT;
     }
+  });
+
+  test('a re-issued account id pauses the connection for confirmation instead of skipping its transactions', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-new-acct', 'acc-card-v2', 9, '2026-09-05'), txn('t-chk', 'acc-chk', 4, '2026-09-05'),
+    ], [], [], 'cursor-1'));
+    plaid.getAccounts.mockResolvedValueOnce({ accounts: [...ACCOUNTS, { account_id: 'acc-card-v2', name: 'Spark Card', mask: '1234', type: 'credit', subtype: 'credit card' }] });
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'new_accounts' });
+    const item = await mockPg('plaid_items').where({ id: itemId }).first();
+    expect(item).toMatchObject({ status: 'setup', sync_cursor: null });
+    expect(item.last_error).toMatch(/new or re-issued account/);
+    expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
+    const added = await mockPg('plaid_accounts').where({ account_id: 'acc-card-v2' }).first();
+    expect(added).toMatchObject({ enabled: false, plaid_item_id: itemId });
+    expect(added.account_label).not.toBe('capital-one-card-1234'); // no clash with the old account's label
+
+    // operator retires the old card and feeds the re-issued one under the old label
+    await activate(itemId, { 'acc-card': { enabled: false }, 'acc-card-v2': { enabled: true, accountLabel: 'capital-one-card-1234' } });
+    plaid.transactionsSync.mockResolvedValueOnce(page([
+      txn('t-new-acct', 'acc-card-v2', 9, '2026-09-05'), txn('t-chk', 'acc-chk', 4, '2026-09-05'),
+    ], [], [], 'cursor-1'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 2 });
+  });
+
+  test('a replacement connection cannot re-import days an earlier feed of the label already covered', async () => {
+    const first = await connect();
+    await activate(first);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-old', 'acc-card', 5, '2026-09-08')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(first);
+    await plaidSync.disconnectItem(first);
+
+    const second = await connect('-new');
+    await expect(activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-01' } }))
+      .rejects.toThrow(/earlier feed through 2026-09-08 — start the feed on 2026-09-09/);
+    await activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-09' } });
+    // the feed's OWN earlier rows never block its own start date
+    await mockPg('bank_transactions').where({ plaid_transaction_id: 't-old' }).update({ plaid_account_id: 'acc-card-new' });
+    await activate(second, { 'acc-card-new': { accountLabel: 'capital-one-card-1234', syncFrom: '2026-09-02' } });
   });
 
   test('bank login errors park the item; the hourly run skips it until re-login', async () => {

@@ -142,6 +142,7 @@ function mapTransaction(txn, account, { correction = false } = {}) {
       source_file: null,
       row_hash: plaidRowHash(txn.transaction_id),
       plaid_transaction_id: txn.transaction_id,
+      plaid_account_id: txn.account_id || null,
     },
   };
 }
@@ -417,6 +418,7 @@ async function setupItem(itemId, input) {
     const otherLabels = new Set(others.map(o => String(o.account_label).trim().toUpperCase()));
     let resetCursor = false;
     for (const a of cleaned) {
+      const prev = byId.get(a.id);
       if (a.enabled && otherLabels.has(a.label.toUpperCase())) {
         throw badRequest(`"${a.label}" is already fed by another bank connection`);
       }
@@ -428,20 +430,23 @@ async function setupItem(itemId, input) {
           const asWhat = existing.account_type === 'bank' ? 'a bank account' : 'a credit card';
           throw badRequest(`"${a.label}" is already imported as ${asWhat} — keep that type, or use a different label`);
         }
-        // CSV and feed rows hash differently and can't be deduped against
-        // each other, so the feed must start AFTER the statement series'
-        // last day (checked under the label lock the CSV upload also takes)
-        const csv = await trx('bank_transactions')
+        // Rows from another source for this label — a CSV statement, or an
+        // EARLIER feed of the same bank account (a replacement connection
+        // gets new transaction ids) — can't be deduped against this feed,
+        // so it must start AFTER the last day they cover. This account's
+        // own rows are excluded: re-syncing them is idempotent by id.
+        // Checked under the label lock the CSV upload also takes.
+        const prior = await trx('bank_transactions')
           .whereRaw('upper(trim(account_label)) = upper(?)', [a.label])
-          .where({ source: 'csv' })
+          .where(q => q.where({ source: 'csv' })
+            .orWhere(q2 => q2.where({ source: 'plaid' }).whereRaw('plaid_account_id is distinct from ?', [prev.account_id])))
           .max('txn_date as last_date')
           .first();
-        const lastCsv = toDateOnly(csv && csv.last_date);
-        if (lastCsv && a.syncFrom <= lastCsv) {
-          throw badRequest(`"${a.label}" already has statement rows through ${lastCsv} — start the feed on ${addDaysStr(lastCsv, 1)} or later`);
+        const lastPrior = toDateOnly(prior && prior.last_date);
+        if (lastPrior && a.syncFrom <= lastPrior) {
+          throw badRequest(`"${a.label}" already has rows from a statement or an earlier feed through ${lastPrior} — start the feed on ${addDaysStr(lastPrior, 1)} or later`);
         }
       }
-      const prev = byId.get(a.id);
       const prevFrom = toDateOnly(prev.sync_from);
       if (a.enabled && (!prev.enabled || a.syncFrom < prevFrom)) resetCursor = true;
       await trx('plaid_accounts').where({ id: a.id }).update({
@@ -671,6 +676,7 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
     source_file: old.source_file,
     row_hash: old.row_hash,
     plaid_transaction_id: old.plaid_transaction_id,
+    plaid_account_id: old.plaid_account_id,
     txn_date: values.txn_date,
     amount: values.amount,
     direction: values.direction,
@@ -678,6 +684,40 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
     suggestion: Object.keys(carried).length ? carried : null,
   }).returning(['id']);
   return row.id;
+}
+
+async function registerNewAccounts(item, accessToken, unknownIds) {
+  const { accounts } = await plaid.getAccounts(accessToken);
+  const existing = await db('plaid_accounts').where({ plaid_item_id: item.id }).select('account_label');
+  const used = new Set(existing.map(r => String(r.account_label).trim().toUpperCase()));
+  const rows = [];
+  for (const a of accounts.filter(x => unknownIds.includes(x.account_id))) {
+    let label = defaultLabel(item.institution_name, a);
+    for (let n = 2; used.has(label.toUpperCase()); n++) label = `${defaultLabel(item.institution_name, a).slice(0, 95)}-${n}`;
+    used.add(label.toUpperCase());
+    rows.push({
+      plaid_item_id: item.id,
+      account_id: a.account_id,
+      name: String(a.name || a.official_name || 'Account').slice(0, 200),
+      mask: a.mask ? String(a.mask).slice(0, 10) : null,
+      plaid_type: a.type ? String(a.type).slice(0, 30) : null,
+      plaid_subtype: a.subtype ? String(a.subtype).slice(0, 50) : null,
+      account_label: label,
+      account_type: defaultAccountType(a),
+      sync_from: await defaultSyncFrom(label),
+      enabled: false,
+    });
+  }
+  await db.transaction(async (trx) => {
+    if (rows.length) await trx('plaid_accounts').insert(rows).onConflict('account_id').ignore();
+    await trx('plaid_items').where({ id: item.id }).whereNot({ status: 'removed' }).update({
+      status: 'setup',
+      last_error: rows.length
+        ? 'The bank reported a new or re-issued account — confirm the accounts below to resume syncing'
+        : `The bank sent transactions for an account it does not list (${unknownIds.join(', ').slice(0, 200)}) — reconnect this bank`,
+      updated_at: trx.fn.now(),
+    });
+  });
 }
 
 // Conditioned on the item row as this sync observed it (row_version): a
@@ -716,6 +756,17 @@ async function syncItem(itemId, { runMatching = true } = {}) {
     if (!accessToken) throw new Error('stored bank token cannot be read — disconnect and connect again');
     const startCursor = item.sync_cursor || null;
     const changes = await fetchAllChanges(accessToken, startCursor);
+    // Plaid can re-issue an account under a NEW account_id (e.g. after a
+    // rename it can't reconcile). Its transactions would skip as
+    // unknown_account while the cursor moved past them — so the run stops
+    // here, before anything is applied, registers the account(s) (off by
+    // default) and puts the connection back in setup for the operator.
+    const known = new Set((await db('plaid_accounts').where({ plaid_item_id: itemId }).select('account_id')).map(r => r.account_id));
+    const unknownIds = [...new Set(changes.upserts.map(t => t.account_id).filter(id => id && !known.has(id)))];
+    if (unknownIds.length) {
+      await registerNewAccounts(item, accessToken, unknownIds);
+      return { itemId, skipped: 'new_accounts' };
+    }
     result = await db.transaction(async (trx) => {
       await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [`plaid-item:${itemId}`]);
       // compare-and-swap on the cursor: a concurrent run that already

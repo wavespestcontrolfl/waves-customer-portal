@@ -15,6 +15,7 @@
  * bank_transactions.plaid_transaction_id — Plaid's stable id for a POSTED
  * transaction; the row identity for source='plaid' rows (partial unique
  * index). CSV rows keep their content hash and leave this NULL.
+ * bank_transactions.plaid_account_id — the Plaid account that fed the row.
  */
 
 exports.up = async function up(knex) {
@@ -65,6 +66,10 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasColumn('bank_transactions', 'plaid_transaction_id'))) {
     await knex.schema.alterTable('bank_transactions', t => {
       t.string('plaid_transaction_id', 100);
+      // which Plaid account fed the row: a replacement connection for the
+      // same bank account gets NEW transaction ids, so overlap with an
+      // earlier feed is judged by account, not by id
+      t.string('plaid_account_id', 100);
     });
   }
   await knex.raw(`
@@ -78,6 +83,7 @@ exports.down = async function down(knex) {
   if (await knex.schema.hasColumn('bank_transactions', 'plaid_transaction_id')) {
     await knex.schema.alterTable('bank_transactions', t => {
       t.dropColumn('plaid_transaction_id');
+      t.dropColumn('plaid_account_id');
     });
   }
   await knex.schema.dropTableIfExists('plaid_accounts');
