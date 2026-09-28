@@ -112,6 +112,10 @@ describe('decideRecoveryAction', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, ownedByOther: false, addressOnFile: false, min: 'high' }))
       .toEqual({ action: 'skip', status: 'address_no_longer_on_file' });
   });
+  test('skips a never-replay billing email (owner ruling 2026-09-27)', () => {
+    expect(recovery.decideRecoveryAction({ candidate: { confidence: 'high' }, suppressed: false, senderRendered: true, min: 'high' }))
+      .toEqual({ action: 'skip', status: 'sender_rendered_not_replayed' });
+  });
   test('medium threshold accepts medium candidates', () => {
     expect(recovery.decideRecoveryAction({ candidate: { confidence: 'medium' }, suppressed: false, min: 'medium' }))
       .toEqual({ action: 'send', status: 'resent' });
@@ -286,6 +290,26 @@ describe('attemptRecovery codex-fix behaviors', () => {
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     }
   });
+
+  test.each(['billing_late_payment_30_day', 'invoice.followup_14_day', 'payment.microdeposit_verification', 'billing.previsit_balance'])(
+    'a bounced %s email is not re-sent; staff get the suggested address', async (templateKey) => {
+      const mockDb = orderedDb({
+        first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+        returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
+      });
+      db.mockImplementation(mockDb);
+      const res = await recovery.attemptRecovery(
+        { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] },
+        { event: 'bounce', type: 'bounce' },
+      );
+      expect(res).toEqual({ skipped: 'sender_rendered_not_replayed' });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data)).toBe(false);
+      expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data)
+        .toMatchObject({ status: 'sender_rendered_not_replayed', corrected_email: 'jane@gmail.com' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.stringContaining('Suggested correction: jane@gmail.com'),
+        expect.objectContaining({ metadata: expect.objectContaining({ status: 'sender_rendered_not_replayed' }) }));
+    });
 
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);

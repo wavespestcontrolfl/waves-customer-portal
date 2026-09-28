@@ -63,15 +63,17 @@ describe('transactional email provider retry classification', () => {
     expect(retry.isTransactionalRetryEligible(message({ subject_snapshot: null }))).toBe(false);
   });
 
-  // Owner ruling 2026-09-27: a late-payment or invoice follow-up email the
-  // provider blocks is never re-sent from its stored copy; the sender's next
-  // stage renders fresh.
+  // Owner ruling 2026-09-27: a late-payment, invoice follow-up, micro-deposit
+  // or legacy pre-visit balance email the provider blocks is never re-sent
+  // from its stored copy.
   const senderRendered = [
     'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
     'billing_late_payment_60_day', 'billing_late_payment_90_day',
     'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
     // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
     'invoice.followup_60_day', 'invoice.followup_90_day',
+    // Micro-deposit verification and the legacy pre-visit balance email.
+    'payment.microdeposit_verification', 'billing.previsit_balance',
   ];
 
   test.each(senderRendered)('a blocked %s email records the rejection but schedules no retry', (templateKey) => {

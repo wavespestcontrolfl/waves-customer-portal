@@ -6,6 +6,7 @@ const emailTemplates = require('./email-template-library');
 const NotificationService = require('./notification-service');
 const billingReplay = require('./billing-email-provider-replay');
 const billingReservation = require('./billing-email-reservation');
+const { isSenderRenderedEmail } = require('./billing-email-no-replay');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -30,23 +31,6 @@ function isProviderBlockedEvent(ev) {
   const event = String(ev?.event || '').trim().toLowerCase();
   const type = String(ev?.type || '').trim().toLowerCase();
   return event === 'blocked' || (event === 'bounce' && type === 'blocked');
-}
-
-// A late-payment or invoice follow-up email the provider blocks is never
-// re-sent from its stored copy (owner ruling 2026-09-27): the amount, due
-// date and dunning state it froze can all change before a retry, and each
-// one would have to be re-proven at the provider boundary. It settles as
-// not sent; the sender's next stage renders fresh from live data.
-const SENDER_RENDERED_TEMPLATES = new Set([
-  'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
-  'billing_late_payment_60_day', 'billing_late_payment_90_day',
-  'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
-  // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
-  'invoice.followup_60_day', 'invoice.followup_90_day',
-]);
-
-function isSenderRenderedEmail(message) {
-  return SENDER_RENDERED_TEMPLATES.has(String(message?.template_key || '').trim());
 }
 
 function isTransactionalRetryEligible(message) {
