@@ -171,9 +171,10 @@ describe('get_report_engagement', () => {
     // value.
     const expectedCutoff = etDateString(addETDays(new Date(), -15));
     // The performed-visit rule's outcomes lead (pest-pressure/first-visit.js).
-    // Candidate window first (from, to, cutoff), then the performed-visit
-    // outcomes (pest-pressure/first-visit.js), then the visit period.
-    expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, 'inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
+    // Candidate window, then the legacy (unlinked-record) window, both
+    // (from, to, cutoff); then the performed-visit outcomes
+    // (pest-pressure/first-visit.js), then the visit period.
+    expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, '2026-08-01', '2026-08-31', expectedCutoff, 'inspection_only', 'customer_declined', 'incomplete', '2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
     // Both sides of the window use the canonical record's frozen service_date,
     // and each re-service is attributed to one nearest earlier visit.
     expect(rawCalls[1].sql).toMatch(/r\.service_date > pv\.service_date/);

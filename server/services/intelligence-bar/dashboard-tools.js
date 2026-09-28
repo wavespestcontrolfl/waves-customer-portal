@@ -927,7 +927,8 @@ const REPORT_ACTION_EVENTS = [
 // customer, same service line, 1-14 days after a performed visit.
 //
 // The unit is the VISIT (scheduled_services), and ONE canonical completion
-// record speaks for it — CANONICAL_SIBLING from completion-record-invariants
+// record speaks for it (a record from before the booking back-link existed
+// is its own visit) — CANONICAL_SIBLING from completion-record-invariants
 // (the record pinned by the newest succeeded completion attempt, else the
 // newest sibling, any status), exactly as closeout-status.js resolves it:
 // service_records.scheduled_service_id is one-to-many, and siblings can
@@ -955,6 +956,20 @@ const REPORT_ACTION_EVENTS = [
 // at all.
 const RESERVICE_LINES = ['pest', 'lawn'];
 
+// One classification of a completion record, shared by the linked
+// (canonical) and legacy (unlinked) branches of the query below.
+const recordFields = (alias) => `
+             ${alias}.service_date,
+             ${alias}.status AS record_status,
+             NULLIF(${alias}.service_line, '') AS record_line,
+             ${alias}.service_data->>'completedServiceKey' AS frozen_key,
+             -- COALESCE both sides: a record with no frozen key must read
+             -- false here, never NULL (NOT NULL would drop the visit).
+             (COALESCE(${alias}.is_callback, false) = true
+              OR COALESCE(${alias}.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
+             COALESCE(${alias}.structured_notes->>'visitOutcome', '') AS visit_outcome,
+             (${customerVisibleServiceRecordPredicate(alias)}) AS customer_visible`;
+
 async function getReserviceWithin14Days(from, to, cutoff) {
   // Every date that can matter: visits in [from, LEAST(to, cutoff)] and the
   // re-services (and nearer later visits) up to 14 days past that end.
@@ -970,21 +985,21 @@ async function getReserviceWithin14Days(from, to, cutoff) {
         AND s.service_date >= ?::date AND s.service_date <= LEAST(?::date, ?::date) + 14
     ),
     completed AS (
-      SELECT ss.id, ss.customer_id, srec.service_date,
-             srec.status AS record_status,
-             NULLIF(srec.service_line, '') AS record_line,
-             srec.service_data->>'completedServiceKey' AS frozen_key,
-             -- COALESCE both sides: a record with no frozen key must read
-             -- false here, never NULL (NOT NULL would drop the visit).
-             (COALESCE(srec.is_callback, false) = true
-              OR COALESCE(srec.service_data->>'completedServiceKey', '') IN ('pest_re_service', 'lawn_re_service')) AS is_reservice,
-             COALESCE(srec.structured_notes->>'visitOutcome', '') AS visit_outcome,
-             (${customerVisibleServiceRecordPredicate('srec')}) AS customer_visible
+      SELECT ss.id, ss.customer_id, ${recordFields('srec')}
       FROM candidates c
       JOIN scheduled_services ss ON ss.id = c.id
       CROSS JOIN LATERAL (${CANONICAL_SIBLING}) canonical
       JOIN service_records srec ON srec.id = canonical.id
       WHERE ss.status = 'completed'
+      UNION ALL
+      -- Legacy records predating the booking back-link (migration
+      -- 20260427000007 left them NULL, no backfill; their callback flag and
+      -- line were backfilled since): each is its own visit, classified by
+      -- the same fields.
+      SELECT legacy.id, legacy.customer_id, ${recordFields('legacy')}
+      FROM service_records legacy
+      WHERE legacy.scheduled_service_id IS NULL
+        AND legacy.service_date >= ?::date AND legacy.service_date <= LEAST(?::date, ?::date) + 14
     ),
     performed AS (
       -- Every performed treatment, visible or not: the nearest-visit choice
@@ -1033,7 +1048,7 @@ async function getReserviceWithin14Days(from, to, cutoff) {
     LEFT JOIN attributed att ON att.visit_id = v.id
     WHERE v.service_line IN (${RESERVICE_LINES.map(() => '?').join(', ')})
     GROUP BY v.service_line
-  `, [from, to, cutoff, ...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
+  `, [from, to, cutoff, from, to, cutoff, ...NON_PERFORMED_VISIT_OUTCOMES, from, to, cutoff, ...RESERVICE_LINES]);
 
   const byLine = {};
   for (const row of rows) {

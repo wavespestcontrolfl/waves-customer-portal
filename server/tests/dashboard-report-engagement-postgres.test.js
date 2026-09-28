@@ -274,6 +274,19 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate_pct: 0 });
   });
 
+  test('records from before the booking back-link (no scheduled_service_id) still count, each as its own visit', async () => {
+    const cust = await customer();
+    const legacyRecord = (date, extra = {}) => trx('service_records').insert({
+      customer_id: cust, service_date: date, service_type: 'Test Visit', status: 'completed',
+      scheduled_service_id: null, service_line: 'pest', service_data: JSON.stringify({}), structured_notes: JSON.stringify({}),
+      ...extra,
+    });
+    await legacyRecord('2026-08-04');
+    await legacyRecord('2026-08-10', { is_callback: true });
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
+  });
+
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
     const cust = await customer();
     // Visit A: 5 days ago — its 14-day follow-up window hasn't closed yet,
