@@ -2004,14 +2004,14 @@ router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, 
       || !['debit', 'credit'].includes(m.direction) || typeof m.description !== 'string') {
       return res.status(400).json({ error: 'expected correction is malformed' });
     }
-    const changed = await sameVersion(db('bank_transactions').where({ id: row.id, status: 'unmatched' })).update({
-      txn_date: m.txn_date,
-      amount: m.amount,
-      direction: m.direction,
-      description: m.description.slice(0, 500),
-      suggestion: bankImport.suggestionMerge({}, ['plaidModified']),
-      updated_at: new Date(),
+    // replaced, not edited in place (see plaidSync.supersedeUnmatchedRow):
+    // under the row lock, re-check status + the exact version shown
+    const replaced = await db.transaction(async (trx) => {
+      const locked = await sameVersion(trx('bank_transactions').where({ id: row.id, status: 'unmatched' })).forUpdate().first('id');
+      if (!locked) return null;
+      return plaidSync.supersedeUnmatchedRow(trx, row.id, m);
     });
+    const changed = !!replaced;
     if (!changed) return stale();
     res.json({ success: true });
   } catch (err) { plaidRouteError(res, next, err); }

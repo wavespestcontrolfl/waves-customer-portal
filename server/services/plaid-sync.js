@@ -325,7 +325,9 @@ async function setupItem(itemId, input) {
     if (!label || label.length > 100) throw badRequest('account label is required (max 100 chars)');
     if (!['bank', 'card'].includes(a.accountType)) throw badRequest("account type must be 'bank' or 'card'");
     if (!isDateStr(a.syncFrom)) throw badRequest('start date must be YYYY-MM-DD');
-    if (a.syncFrom > today) throw badRequest('start date cannot be in the future');
+    // the day after today is the cutoff for a CSV series imported through
+    // today (defaultSyncFrom = last row + 1) — anything later is refused
+    if (a.syncFrom > addDaysStr(today, 1)) throw badRequest('start date can be at most tomorrow');
     return { id: a.id, label, accountType: a.accountType, syncFrom: a.syncFrom, enabled: a.enabled === true };
   });
   const enabledLabels = cleaned.filter(a => a.enabled).map(a => a.label.toUpperCase());
@@ -482,14 +484,10 @@ async function applyChanges(trx, accountsById, changes) {
     const r = m.row;
     if (!existing) { toInsert.push(r); continue; }
     if (existing.status === 'unmatched') {
-      // the bank's newest values win, and any correction still parked from
-      // when the row was reviewed is superseded — "Apply" must never be able
-      // to restore older values over these
-      await trx('bank_transactions').where({ id: existing.id }).update({
-        txn_date: r.txn_date, description: r.description, amount: r.amount, direction: r.direction,
-        suggestion: trx.raw("coalesce(suggestion, '{}'::jsonb) - 'plaidModified'"),
-        updated_at: trx.fn.now(),
-      });
+      // the bank's newest values win (superseding any correction parked
+      // while the row was reviewed) — by REPLACING the row, never editing
+      // its money fields in place; see supersedeUnmatchedRow
+      await supersedeUnmatchedRow(trx, existing.id, r);
       counts.updated++;
     } else {
       // a reviewed row is never rewritten under the operator — the change
@@ -529,6 +527,39 @@ async function applyChanges(trx, accountsById, changes) {
       });
   }
   return counts;
+}
+
+// Staged rows' money fields (date / amount / direction / description) are
+// never edited in place: every claim path (matcher, create-expense, link,
+// refund) reads a row and then claims it with a status-only CAS, so an
+// in-place edit between its read and its claim would book the OLD values.
+// A correction instead deletes the unmatched row and inserts a fresh one
+// with the same Plaid identity — a racing claim then finds its row gone,
+// its CAS affects nothing, and it rolls back as it already does for a lost
+// race. Caller holds the row lock (FOR UPDATE) inside `trx`. The review
+// history in `suggestion` (human rejections, last unlink) carries over so
+// the matcher can't re-propose a link the operator already turned down;
+// the parked correction itself is dropped.
+async function supersedeUnmatchedRow(trx, rowId, values) {
+  const old = await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).first('*');
+  if (!old) return null;
+  const carried = { ...(old.suggestion || {}) };
+  delete carried.plaidModified;
+  await trx('bank_transactions').where({ id: rowId, status: 'unmatched' }).del();
+  const [row] = await trx('bank_transactions').insert({
+    account_label: old.account_label,
+    account_type: old.account_type,
+    source: old.source,
+    source_file: old.source_file,
+    row_hash: old.row_hash,
+    plaid_transaction_id: old.plaid_transaction_id,
+    txn_date: values.txn_date,
+    amount: values.amount,
+    direction: values.direction,
+    description: String(values.description).slice(0, 500),
+    suggestion: Object.keys(carried).length ? carried : null,
+  }).returning(['id']);
+  return row.id;
 }
 
 async function recordFailure(itemId, err) {
@@ -628,5 +659,6 @@ module.exports = {
   plaidRowHash,
   isLoginRequired,
   toDateOnly,
+  supersedeUnmatchedRow,
   _private: { applyChanges, fetchAllChanges, decryptToken, defaultSyncFrom, existingLabels },
 };

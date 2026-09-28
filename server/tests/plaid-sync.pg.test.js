@@ -174,7 +174,7 @@ async function activate(itemId, overrides = {}) {
       .rejects.toThrow(/already imported as a bank account/);
     await expect(activate(itemId, { 'acc-card': { accountLabel: 'same' }, 'acc-chk': { accountLabel: 'same' } }))
       .rejects.toThrow(/cannot share a label/);
-    await expect(activate(itemId, { 'acc-card': { syncFrom: '2999-01-01' } })).rejects.toThrow(/future/);
+    await expect(activate(itemId, { 'acc-card': { syncFrom: '2999-01-01' } })).rejects.toThrow(/at most tomorrow/);
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('setup');
     await activate(itemId, { 'acc-chk': { accountLabel: 'capone-checking' } });
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('active');
@@ -264,7 +264,7 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ updated: 1, flagged: 0 }); // correction B applies
     const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
     expect(Number(row.amount)).toBe(12);
-    expect(row.suggestion.plaidModified).toBeUndefined(); // A can no longer be re-applied
+    expect(row.suggestion?.plaidModified).toBeUndefined(); // A can no longer be re-applied
   });
 
   test('a correction to a staged row applies even before the start date or after the feed is switched off', async () => {
@@ -301,6 +301,37 @@ async function activate(itemId, overrides = {}) {
     expect(row.status).toBe('matched_expense');
     expect(Number(row.amount)).toBe(10);
     expect(row.suggestion.plaidModified).toMatchObject({ amount: 11 });
+  });
+
+  test('a correction replaces the unmatched row: a racing status-CAS claim misses; review history carries over', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    const before = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    await mockPg('bank_transactions').where({ id: before.id }).update({ suggestion: { rejectedExpenseIds: ['x'], categoryId: 'c1' } });
+    // create-expense has READ the row at $10 (unlocked) and is about to claim it
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 25, '2026-09-05')], [], 'cursor-2'));
+    await plaidSync.syncItem(itemId);
+    const [exp] = await mockPg('expenses').insert({}).returning(['id']);
+    const claimed = await mockPg('bank_transactions')
+      .where({ id: before.id, status: 'unmatched' })
+      .update({ status: 'created_expense', matched_expense_id: exp.id });
+    expect(claimed).toBe(0); // the stale claim loses — its $10 expense rolls back
+    const now = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
+    expect(now.id).not.toBe(before.id);
+    expect(Number(now.amount)).toBe(25);
+    expect(now.row_hash).toBe(before.row_hash);
+    expect(now.suggestion).toEqual({ rejectedExpenseIds: ['x'], categoryId: 'c1' });
+  });
+
+  test('setup accepts tomorrow as the start date (CSV already covers today)', async () => {
+    const itemId = await connect();
+    const etToday = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const next = new Date(`${etToday}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
+    await activate(itemId, { 'acc-card': { syncFrom: next.toISOString().slice(0, 10) } });
+    const next2 = new Date(next); next2.setUTCDate(next2.getUTCDate() + 1);
+    await expect(activate(itemId, { 'acc-card': { syncFrom: next2.toISOString().slice(0, 10) } })).rejects.toThrow(/at most tomorrow/);
   });
 
   test('a concurrent run that already moved the cursor wins', async () => {
@@ -377,9 +408,10 @@ async function activate(itemId, overrides = {}) {
       expect((await post(`/plaid/rows/${mRow.id}/bank-change`, { action: 'dismiss', expected: shown })).status).toBe(409);
       const latest = await mockPg('bank_transactions').where({ id: mRow.id }).first();
       expect((await post(`/plaid/rows/${mRow.id}/bank-change`, { action: 'apply', expected: seen(latest) })).status).toBe(200);
-      const applied = await mockPg('bank_transactions').where({ id: mRow.id }).first();
+      expect(await mockPg('bank_transactions').where({ id: mRow.id }).first()).toBeUndefined(); // replaced, not edited
+      const applied = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-m' }).first();
       expect([Number(applied.amount), plaidSync.toDateOnly(applied.txn_date), applied.description]).toEqual([99, '2026-09-06', 'FIXED']);
-      expect(applied.suggestion.plaidModified).toBeUndefined();
+      expect(applied.suggestion?.plaidModified).toBeUndefined();
 
       expect((await post(`/plaid/rows/${rRow.id}/bank-change`, { action: 'dismiss', expected: seen(rRow) })).status).toBe(200);
       const dismissed = await mockPg('bank_transactions').where({ id: rRow.id }).first();

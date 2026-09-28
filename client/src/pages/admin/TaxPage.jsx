@@ -4880,7 +4880,8 @@ function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
     item.accounts.map((a) => ({ ...a })),
   );
   const listId = `plaid-labels-${item.id}`;
-  const today = etDateString(new Date());
+  const tomorrow = nextDay(etDateString(new Date()));
+  const a0SyncFrom = (id) => draft.find((r) => r.id === id)?.syncFrom;
   const patch = (id, change) =>
     setDraft((rows) => rows.map((r) => (r.id === id ? { ...r, ...change } : r)));
   const onLabel = (id, value) => {
@@ -4895,10 +4896,8 @@ function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
         ? {
             accountLabel: value,
             accountType: known.accountType,
-            syncFrom:
-              known.lastDate && known.lastDate < today
-                ? nextDay(known.lastDate)
-                : today,
+            // may be tomorrow when the CSV already covers today
+            syncFrom: known.lastDate ? nextDay(known.lastDate) : a0SyncFrom(id),
           }
         : { accountLabel: value },
     );
@@ -4975,7 +4974,7 @@ function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
                   <Input
                     type="date"
                     value={a.syncFrom}
-                    max={today}
+                    max={tomorrow}
                     onChange={(e) => patch(a.id, { syncFrom: e.target.value })}
                     disabled={busy || !a.enabled}
                     title="Transactions before this date are not imported — set it after the last statement you uploaded by CSV"
