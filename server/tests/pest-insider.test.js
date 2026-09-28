@@ -67,6 +67,15 @@ describe('pest-insider buildPestInsiderSystemPrompt', () => {
     expect(FLAGSHIP_SEASONAL_CONTEXT).not.toMatch(/\d+\s*(?:–|-|to)\s*\d+\s*days|\d+\s*days?\b|\d+\s*°|\bUF\b|\bCDC\b|IFAS|EPA|\d+\s*ft\b|\bJune\s+\d|\bSept\.?\s+\d/);
   });
 
+  test('no rotation entry states a storm-to-pest causal claim the register does not carry (codex round 19 P2)', () => {
+    const STORM_CLAIM = /storm-damaged|wet wood|displaced\s+rodents?|storms?\s+(?:drive|push|displace|bring)\w*/i;
+    for (const [month, slate] of Object.entries(PEST_INSIDER_ROTATION)) {
+      for (const [field, text] of Object.entries(slate)) {
+        expect({ month, field, claim: STORM_CLAIM.test(text) }).toEqual({ month, field, claim: false });
+      }
+    }
+  });
+
   test('no rotation entry carries a figure, a duration, a temperature or a named-source number', () => {
     const FIGURE = /\d+\s*(?:–|-|to)\s*\d+\s*days|\d+\s*°|\d+\s*days?\b|[½¼¾]|\d/;
     const SOURCE_CITATION = /\b(?:UF|CDC|IFAS|EPA)\b|\bper\s+UF\b/;

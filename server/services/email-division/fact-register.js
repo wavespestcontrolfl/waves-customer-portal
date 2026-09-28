@@ -542,8 +542,15 @@ function normaliseText(text) {
     .trim();
 }
 
+// A single capital initial before a lowercase word is an abbreviated
+// binomial ("R. flavipes", "C. formosanus"), never a sentence end: a new
+// sentence starts with a capital (codex round 19).
+const BINOMIAL_INITIAL = /\b([A-Z])\.(?=\s?[a-z])/g;
+
 function splitSentences(text) {
-  const shielded = text.replace(ABBREVIATION, (abbr) => abbr.slice(0, -1) + PROTECTED_DOT);
+  const shielded = text
+    .replace(ABBREVIATION, (abbr) => abbr.slice(0, -1) + PROTECTED_DOT)
+    .replace(BINOMIAL_INITIAL, `$1${PROTECTED_DOT}`);
   return shielded
     .split(/(?<=[.!?])\s+/)
     .map((sentence) => sentence.replace(new RegExp(PROTECTED_DOT, 'g'), '.').trim())
@@ -595,7 +602,22 @@ function previousClauseIsMythLabel(clauses, index) {
 // before ("... native subterranean termites fly in spring. They swarm again
 // after storms.") — the NEAREST termite mention decides, so a contrastive
 // "drywood" earlier in the text does not shield the subterranean claim.
-const TERMITE_MENTION = /\b((?:[\w'-]+\s+){0,3}?)termites?\b/gi;
+// A termite is named by the common word OR by the scientific names the
+// register itself supplies (codex round 19 P1): any "-termes" genus, with or
+// without its epithet ("Reticulitermes flavipes"), and the abbreviated
+// binomial for a termite epithet ("R. flavipes", "C. formosanus") — never a
+// bare initial on its own ("R. zeae" is the large-patch fungus). The drywood
+// genera and epithets (Kalotermitidae) name drywood termites, like the word
+// "drywood" before "termites".
+const DRYWOOD_GENERA = '(?:crypto|incisi|kalo|neo)termes';
+const DRYWOOD_EPITHETS = '(?:brevis|cavifrons|snyderi|minor|schwarzi)';
+const SUBTERRANEAN_EPITHETS = '(?:flavipes|virginicus|hageni|formosanus|gestroi|tibialis)';
+const TERMITE_MENTION = new RegExp(
+  `\\b((?:[\\w'-]+\\s+){0,3}?)termites?\\b`
+  + `|\\b([a-z]+termes(?:\\s+[a-z]+)?|[a-z]\\.\\s?(?:${DRYWOOD_EPITHETS}|${SUBTERRANEAN_EPITHETS}))\\b`,
+  'gi',
+);
+const DRYWOOD_SCIENTIFIC = new RegExp(`^(?:${DRYWOOD_GENERA}\\b|[a-z]\\.\\s?${DRYWOOD_EPITHETS}$)`, 'i');
 const PRONOUN_SUBJECT = /\b(?:they|them|these\s+(?:insects|pests|bugs|termites)|the\s+colony|colonies|the\s+swarmers?|swarmers|alates)\b/i;
 // A clause that names another pest as its own subject ("..., and fire ants
 // swarm again after storms") is about that pest, not the termites named
@@ -620,7 +642,7 @@ const SWARM_RECEDES = /\b(?:gone|over|done|ends?|ended|finished|past|behind\s+us
 function lastTermiteKind(text) {
   let kind = null;
   for (const match of text.matchAll(TERMITE_MENTION)) {
-    kind = /\bdrywood\b/i.test(match[1]) ? 'drywood' : 'other';
+    kind = (match[2] !== undefined ? DRYWOOD_SCIENTIFIC.test(match[2]) : /\bdrywood\b/i.test(match[1])) ? 'drywood' : 'other';
   }
   return kind;
 }

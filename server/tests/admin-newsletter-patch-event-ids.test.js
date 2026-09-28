@@ -228,6 +228,26 @@ describe('PATCH /sends/:id correct-and-resume for a partially delivered campaign
     expect(update.mock.calls[0][0].status).toBeUndefined();
   });
 
+  test('a correction is bound to the inspected row version: a Resume that re-finalized the row in between makes the save a 409, not an archive rewrite (codex round 19 P2)', async () => {
+    const inspectedAt = new Date('2026-09-28T17:00:00Z');
+    const send = { ...failedInsider, status: 'sent', updated_at: inspectedAt };
+    const { update } = mockTables({ send, deliveryRow: { id: 'd-1' } });
+    const wheres = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = base(table);
+      const where = q.where;
+      q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+      return q;
+    });
+    update.mockResolvedValueOnce(0); // the row moved on: same status, later updated_at
+    await withServer(async (baseUrl) => {
+      const res = await patchSend(baseUrl, { htmlBody: '<p>Corrected</p>', textBody: 'Corrected' });
+      expect(res.status).toBe(409);
+    });
+    expect(wheres).toContainEqual(['updated_at', '<', new Date(inspectedAt.getTime() + 1)]);
+  });
+
   test('a correction that still carries a blocked claim is refused with the validation errors — the web version never shows it (pre-push audit P1)', async () => {
     const { update } = mockTables({ send: failedInsider, deliveryRow: { id: 'd-1' } });
     await withServer(async (baseUrl) => {

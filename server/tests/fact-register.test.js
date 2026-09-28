@@ -401,6 +401,13 @@ describe('findUnverifiedClaims', () => {
       'Subterranean termites take flight in October.',
       'Termites swarm in September after the rains.',
       'Formosan termites also fly in November.',
+      // the register's own scientific names, full and abbreviated (codex round 19 P1)
+      'Reticulitermes flavipes swarms again after summer storms.',
+      'R. flavipes swarms again after storms.',
+      'Reticulitermes swarm again after hurricanes.',
+      'Coptotermes formosanus takes flight again after storms.',
+      'C. formosanus flies in October.',
+      'R. flavipes swarms in spring. They swarm again after storms.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(true);
     });
@@ -415,6 +422,12 @@ describe('findUnverifiedClaims', () => {
       'Termite swarm season is over by June.',
       'Subterranean termites do not fly in the fall.',
       'Termite swarmers in October are almost always drywood termites.',
+      // drywood genera and epithets are drywood; a bare initial is not a termite (codex round 19)
+      'Cryptotermes brevis flies in the fall.',
+      'Incisitermes minor swarms in the fall.',
+      'C. brevis swarms again after storms.',
+      'Reticulitermes flavipes does not swarm again after storms.',
+      'R. zeae thrives in summer heat.',
     ])('does NOT flag the verified swarm-season facts: %s', (sentence) => {
       expect(rule(sentence, 'termite_second_swarm')).toBe(false);
     });

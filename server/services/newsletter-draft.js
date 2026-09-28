@@ -264,9 +264,9 @@ const PEST_INSIDER_ROTATION = {
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
-    service: 'termite & WDO inspection (storm-damaged, wet wood is what termites find; drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
+    service: 'termite & WDO inspection (drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
     lawn: 'fall fertilization window opens as the summer restrictions end (dates only as the verified facts state them)',
-    beats: 'hurricane peak; post-storm yard checklist (standing water, debris piles, displaced rodents); drywood termite flights in fall — never a "second subterranean swarm after storms"',
+    beats: 'hurricane peak; post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris) — say only what the register supports about pests after storms; drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
     service: 'rodent exclusion (roof rat access and exclusion, from the verified facts — the source gives no rodent season)',

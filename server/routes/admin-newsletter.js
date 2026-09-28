@@ -812,9 +812,19 @@ router.patch('/sends/:id', async (req, res, next) => {
       }
     }
 
-    const updatedCount = await db('newsletter_sends')
+    const saveQuery = db('newsletter_sends')
       .where({ id: req.params.id })
-      .whereIn('status', correctingDelivered ? [send.status] : ['draft', 'scheduled'])
+      .whereIn('status', correctingDelivered ? [send.status] : ['draft', 'scheduled']);
+    // A correction is bound to the exact row version inspected above (codex
+    // round 19 P2): a Resume that claimed, mailed and re-finalized the
+    // campaign in between leaves the same status but a later updated_at, so
+    // the save finds nothing (409) instead of rewriting the archive of a
+    // campaign with nobody left to receive the correction. The +1 ms absorbs
+    // sub-millisecond precision the driver drops on read.
+    if (correctingDelivered && send.updated_at) {
+      saveQuery.where('updated_at', '<', new Date(new Date(send.updated_at).getTime() + 1));
+    }
+    const updatedCount = await saveQuery
       .update({
       subject: subject ?? send.subject,
       subject_b: subjectB !== undefined ? subjectB : send.subject_b,
