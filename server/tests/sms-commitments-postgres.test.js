@@ -2773,7 +2773,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at, ...extra }).returning('id'))[0];
   const outboundCall = async (created_at, extra = {}) => (await mockPg('call_log').insert({ customer_id: message.customer_id,
     direction: 'outbound', from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed',
-    duration_seconds: 120, transcription: 'Talked it through with the customer.', created_at, ...extra }).returning('id'))[0];
+    duration_seconds: 120, transcription: 'Talked it through with the customer.', v2_extraction_status: 'valid',
+    ai_extraction_enriched: { meta: { is_voicemail: false } }, created_at, ...extra }).returning('id'))[0];
 
   test('owner ruling 2026-09-28 (reverses R3): the split-billing ask "separate the charges" closes on the person\'s "Done" reply, with no model call and no bell', async () => {
     const after = await generalAsk('Can you separate the charges under two payment methods?', null);
@@ -2821,15 +2822,20 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
-  test('owner ruling 2026-09-28: a call back a person placed closes a general ask; a collections robocall or a short call never does', async () => {
+  test('owner ruling 2026-09-28: a call back that reached the customer closes a general ask; a robocall, a short call, voicemail, an unprocessed call or an unanswered card call never does', async () => {
     const after = await generalAsk('Do you want to assess or should I contact a rodent specialist?');
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const now = new Date(after.getTime() + 10000);
-    await outboundCall(after, { source: 'collections_voice' });
-    await outboundCall(new Date(after.getTime() + 1000), { source: 'tech-click', duration_seconds: 30 });
+    const at = (seconds) => new Date(after.getTime() + seconds * 1000);
+    await outboundCall(at(0), { source: 'collections_voice' });
+    await outboundCall(at(1), { source: 'tech-click', duration_seconds: 30 });
+    // Codex #5220 r1 P1: the staff leg ran 60 s or more, but the customer never talked.
+    await outboundCall(at(2), { source: 'admin-click', ai_extraction_enriched: { meta: { is_voicemail: true } } });
+    await outboundCall(at(3), { source: 'admin-click', v2_extraction_status: null, ai_extraction_enriched: null });
+    await outboundCall(at(4), { source: 'admin-callback', metadata: { customer_leg: { status: 'no-answer', duration_seconds: 0 } } });
     expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    const staffCall = await outboundCall(new Date(after.getTime() + 2000), { source: 'admin-callback' });
+    const staffCall = await outboundCall(at(5), { source: 'admin-callback', metadata: { customer_leg: { status: 'completed', duration_seconds: 90 } } });
     expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
     expect((await mockPg('call_commitments').first()).fulfillment).toMatchObject({ basis: 'person_reply', record_type: 'call', record_id: staffCall.id });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);

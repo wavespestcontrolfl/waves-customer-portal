@@ -143,6 +143,19 @@ const writtenAfterAsk = (record, commitment) => !record.scheduled_at
 // calls log other sources ('collections_voice'), so the list is an allowlist
 // (Codex #5169 r1 P1: a completed call alone proves no person).
 const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click'];
+// A call back that reached the customer: placed through the staff bridge,
+// and the recording's reviewed extraction heard a live conversation, not
+// voicemail — the bar call-commitments.js sets for a returned callback. The
+// stored status and duration are the staff leg's, so they alone never show
+// the customer answered (Codex #5220 r1 P1): a call that rang out left no
+// recording. A callback-card call records its customer leg, which must have
+// completed too (>= 60 s).
+function personCallBack(record) {
+  if (!STAFF_CALL_SOURCES.includes(record.source)) return false;
+  if (record.v2_extraction_status !== 'valid' || record.is_voicemail !== 'false') return false;
+  return record.customer_leg_status == null
+    || (record.customer_leg_status === 'completed' && Number(record.customer_leg_seconds) >= 60);
+}
 
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
@@ -266,8 +279,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
-      // source: who placed the call (STAFF_CALL_SOURCES).
-      .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', 'source'),
+      // Who placed the call and whether it reached the customer (personCallBack).
+      .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', 'source', 'v2_extraction_status',
+        conn.raw("ai_extraction_enriched->'meta'->>'is_voicemail' as is_voicemail"),
+        conn.raw("metadata->'customer_leg'->>'status' as customer_leg_status"),
+        conn.raw("metadata->'customer_leg'->>'duration_seconds' as customer_leg_seconds")),
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
@@ -689,8 +705,8 @@ function admissibleWitness(record, commitment, records = []) {
       // A general ask takes only a reply a person wrote after it, never an automated notice.
       && (commitment.kind !== 'other' || (operatorReply(record) && writtenAfterAsk(record, commitment))),
     call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60
-      // A general ask takes only a call a person placed.
-      && (commitment.kind !== 'other' || STAFF_CALL_SOURCES.includes(record.source)),
+      // A general ask takes only a call back that reached the customer.
+      && (commitment.kind !== 'other' || personCallBack(record)),
     // The SendGrid writer records an open or click as a timestamp without
     // moving status past 'sent'; engagement proves receipt even when the
     // delivery event was lost.
@@ -736,7 +752,7 @@ function witnessTypes(commitment) {
   // Owner ruling 2026-09-28 (reversing R3, 2026-09-24): a general `other` ask
   // is answered by any text a person from Waves sends after it (operatorReply
   // in witnesses.sms — never an automated notice, never a bare 'manual'
-  // type) or a call back a person placed (STAFF_CALL_SOURCES), which close
+  // type) or a call back that reached the customer (personCallBack), which close
   // it without the model (replyFulfillment), as well as by a visit event
   // (R1) or money landing (R2), which the model still judges.
   if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) return ['visit', 'payment', 'sms', 'call'];
@@ -844,8 +860,8 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
 }
 
 // Owner ruling 2026-09-28: a general (`other`) ask is handled once a person
-// from Waves responds — any text a person sent, or a call back a person
-// placed, after it (witnessAllowed) — whatever was said, so no model judges
+// from Waves responds — any text a person sent, or a call back that
+// reached the customer, after it (witnessAllowed) — whatever was said, so no model judges
 // whether it was enough: the bell means nobody responded. The earliest
 // response loaded is the witness. Source failures cannot hide it: the loaded
 // response happened whatever a failed or truncated channel held. Inside an

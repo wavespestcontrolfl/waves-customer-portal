@@ -1041,7 +1041,8 @@ describe('fulfillment proof', () => {
   test('owner ruling 2026-09-28 (reverses R3): an "other" ask admits any text a person sent and a call back a person placed, never an automated text or call', () => {
     const other = { kind: 'other' };
     const personSms = { type: 'sms', status: 'delivered', message_type: 'manual', operator_sent: true };
-    const staffCall = { type: 'call', status: 'completed', duration_seconds: 90, source: 'admin-click' };
+    const staffCall = { type: 'call', status: 'completed', duration_seconds: 90, source: 'admin-click',
+      v2_extraction_status: 'valid', is_voicemail: 'false' };
     // The R3 "separate the charges" case: a person's "Done" now answers it.
     expect(admissibleWitness(personSms, other)).toBe(true);
     // Staff draft-approval sends carry their own provenance type.
@@ -1054,10 +1055,18 @@ describe('fulfillment proof', () => {
     const asked = { kind: 'other', sms_context: { source_at: '2040-03-10T15:00:00Z' } };
     expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T14:00:00Z' }, asked)).toBe(false);
     expect(admissibleWitness({ ...personSms, scheduled_at: '2040-03-10T15:30:00Z' }, asked)).toBe(true);
-    // A call back counts only through the staff bridge, never a robocall or an unsourced row.
+    // A call back counts only through the staff bridge, never a robocall or an unsourced row,
+    // and only once it reached the customer (Codex #5220 r1 P1): the recording's reviewed
+    // extraction heard a live conversation, and a card call's own customer leg completed.
     for (const source of ['admin-click', 'admin-callback', 'tech-click']) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(true);
     for (const source of ['collections_voice', 'status_callback', null]) expect(admissibleWitness({ ...staffCall, source }, other)).toBe(false);
     expect(admissibleWitness({ ...staffCall, duration_seconds: 30 }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: 'true' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, is_voicemail: null }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, v2_extraction_status: 'schema_failed' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'no-answer', customer_leg_seconds: '0' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '45' }, other)).toBe(false);
+    expect(admissibleWitness({ ...staffCall, customer_leg_status: 'completed', customer_leg_seconds: '75' }, other)).toBe(true);
     // An ask naming an address still takes a person's reply (Codex #5169 r1
     // P2); an email delivery is still no `other` witness.
     const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
@@ -1465,7 +1474,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       .toMatchObject({ verdict: 'fulfilled', record_id: 'ok' });
     // A call back through the staff bridge, earlier than any text.
     const call = { id: 'call-1', ref: 'call:call-1', type: 'call', status: 'completed', duration_seconds: 300, source: 'tech-click',
-      created_at: '2040-03-11T14:00:00Z', text: '' };
+      v2_extraction_status: 'valid', is_voicemail: 'false', created_at: '2040-03-11T14:00:00Z', text: '' };
     expect(await verifySmsFulfillment(ask, { records: [first, call], failures: [] }))
       .toMatchObject({ verdict: 'fulfilled', record_type: 'call', record_id: 'call-1' });
     // A failed or truncated channel cannot hide a response that was loaded.
