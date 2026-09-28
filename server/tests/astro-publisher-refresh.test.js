@@ -307,7 +307,9 @@ describe('publishRefresh blog-schema validation gate', () => {
   });
 
   test('a cost-guide refresh adds the mapped price_range only when the live post has none', async () => {
-    const liveCost = VALID_BLOG.replace('post_type: "diagnostic"', 'post_type: "cost"');
+    const liveCost = VALID_BLOG
+      .replace('post_type: "diagnostic"', 'post_type: "cost"')
+      .replace('primary_keyword: "drywood termite signs"', 'primary_keyword: "termite treatment cost sarasota"');
     gh.getFile.mockResolvedValue({ content: liveCost, sha: 'blog-sha' });
     await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
     expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.price_range)
@@ -326,7 +328,9 @@ describe('publishRefresh blog-schema validation gate', () => {
   });
 
   test('a title/meta rewrite of a cost guide adds the mapped price_range only when the live post has none', async () => {
-    const liveCost = VALID_BLOG.replace('post_type: "diagnostic"', 'post_type: "cost"');
+    const liveCost = VALID_BLOG
+      .replace('post_type: "diagnostic"', 'post_type: "cost"')
+      .replace('primary_keyword: "drywood termite signs"', 'primary_keyword: "termite treatment cost sarasota"');
     const rewrite = () => pub.publishMetadataRewrite({
       type: 'metadata',
       file_path: BLOG_FILE_PATH,
