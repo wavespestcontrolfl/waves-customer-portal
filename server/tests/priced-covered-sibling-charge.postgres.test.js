@@ -133,6 +133,9 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
       reason: 'sibling_invoice_covered',
       message: expect.stringMatching(/combined trip invoice/i),
     });
+    // Codex r5 P2: a PAID combined invoice is never "collect on that invoice".
+    expect(result.message).toMatch(/already paid — do not collect again/);
+    expect(result.message).not.toMatch(/collect on that invoice/);
   }));
 
   test('...and Charge Now refuses the same way for a still-OPEN (sent) combined invoice', () => rollbackTest(async (trx) => {
@@ -140,6 +143,7 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
     const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
     const result = await chargeNow(lawn, trx);
     expect(result).toMatchObject({ refused: true, reason: 'sibling_invoice_covered' });
+    expect(result.message).toMatch(/collect on that invoice/);
   }));
 
   test('...and Charge Now refuses with REFUSE AFTER A VOID when the combined invoice is void with no live replacement', () => rollbackTest(async (trx) => {
@@ -156,8 +160,10 @@ suite('priced covered-member sibling — no double charge (Codex r21 P1, PR #502
   // endpoint to "split it off" — that endpoint only links via
   // serviceRecordId, which a pre-completion visit has none of yet, so the
   // instruction was a dead end that would just 409 on the next Charge Now.
+  // A still-collectible (sent) combined invoice: the only state whose copy
+  // says to collect on it (Codex r5 P2 — a paid one says "already paid").
   test('the priced covered refusal copy never offers "set a price" or the dead-end "Invoices page" split, and stays honest', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx, { invoiceStatus: 'paid' });
+    const ids = await fixture(trx, { invoiceStatus: 'sent' });
     const lawn = await trx('scheduled_services').where({ id: ids.lawnId }).first();
     const result = await chargeNow(lawn, trx);
     expect(result.message).not.toMatch(/set a price/i);

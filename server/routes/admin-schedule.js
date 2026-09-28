@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown, collectionStateForCoveredInvoice } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15948,6 +15948,29 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // hasOwnPrice (#5237 review P2): a priced visit reaches this only as a
 // stamped covered member, where setting a price is not an escape hatch — the
 // copy must not send staff round the same 409.
+// The 'covered' copy follows the combined invoice's collection state (Codex
+// r5 P2 on #5237) — the schedule sheet's own classifier
+// (collectionStateForCoveredInvoice), never a second one. "Collect on that
+// invoice" only when it is actually collectible from this customer.
+function coveredRefusalMessage(invoice, { hasOwnPrice = false } = {}) {
+  const tail = hasOwnPrice ? ' Completing the visit will not create a new charge.' : '';
+  const state = invoice
+    ? collectionStateForCoveredInvoice(invoice, invoiceAmountDue(invoice))
+    : { state: 'collect_on_combined_invoice', reason: null };
+  if (state.state === 'settled') {
+    if (state.reason === 'invoice_processing') {
+      return `This visit is billed on the combined trip invoice, whose payment is still processing — do not collect again; verify it settles.${tail}`;
+    }
+    if (state.reason === 'payer_billed' || state.reason === 'withdrawn_from_customer') {
+      return `This visit is billed on the combined trip invoice, which is billed to a third-party payer — do not collect from the customer.${tail}`;
+    }
+    return `This visit is billed on the combined trip invoice, which is already paid — do not collect again.${tail}`;
+  }
+  return hasOwnPrice
+    ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
+    : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.';
+}
+
 function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
   if (verdict.status === 'none') return null;
   if (verdict.status === 'covered') {
@@ -15962,9 +15985,7 @@ function siblingCoverageRefusal(verdict, { hasOwnPrice = false } = {}) {
       // member today; the honest instructions are collect on the combined
       // invoice (completing the visit reuses it too — never a second
       // charge) or have the office adjust the combined invoice by hand.
-      message: hasOwnPrice
-        ? 'This visit is billed on the combined trip invoice — collect on that invoice. Completing the visit will not create a new charge; to bill it separately, ask the office to adjust the combined invoice.'
-        : 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.',
+      message: coveredRefusalMessage(verdict.invoice, { hasOwnPrice }),
     };
   }
   if (verdict.status === 'needs_review') {
@@ -25374,6 +25395,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  siblingCoverageRefusal,
   copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a

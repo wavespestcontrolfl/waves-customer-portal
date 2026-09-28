@@ -1536,6 +1536,7 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   siblingCoverageForSchedule,
+  collectionStateForCoveredInvoice,
   siblingInvoiceCoverageVerdict,
   combinedInvoiceVoidedWithoutLiveReplacement,
   perApplicationCompletionVoidHold,

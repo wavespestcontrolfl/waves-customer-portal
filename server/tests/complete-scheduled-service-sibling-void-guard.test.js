@@ -83,14 +83,19 @@ describe('complete-scheduled-service.js — in-lock covered-member mint guard', 
     expect(source.match(/recheckInTrx: coveredMemberMintGuard,/g)).toHaveLength(2);
   });
 
-  test('a covered-member refusal neither releases for resume nor rings the manual-billing bell', () => {
+  test('a covered-member refusal releases for resume (the retry reuses the combined invoice) and never rings the manual-billing bell', () => {
     expect(source).toContain("const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;");
     expect(source).toContain('if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {');
     const branchAt = source.indexOf('if (coveredByCombined) {');
     const bellAt = source.indexOf("logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);");
     expect(branchAt).toBeGreaterThan(-1);
     expect(bellAt).toBeGreaterThan(branchAt);
-    expect(source.slice(branchAt, bellAt)).toContain('} else {');
+    const branch = source.slice(branchAt, bellAt);
+    expect(branch).toContain('} else {');
+    // Codex r5 P1: never a quiet finalize without the combined invoice.
+    expect(branch).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
+    expect(branch).toContain("code: 'first_application_coverage_changed',");
+    expect(branch).toMatch(/return \(\{ status: 503,/);
   });
 
   test('createFromService runs recheckInTrx on every linked mint, taking the visit lock chain first on non-replay lanes', () => {

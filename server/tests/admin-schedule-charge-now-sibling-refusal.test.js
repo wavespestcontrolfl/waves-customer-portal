@@ -988,3 +988,33 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     expect(mockMint).not.toHaveBeenCalled();
   });
 });
+
+// Codex r5 P2 on #5237: the 'covered' copy follows the combined invoice's
+// collection state (collectionStateForCoveredInvoice) — "collect on that
+// invoice" only when it is collectible from this customer.
+describe('siblingCoverageRefusal — covered copy follows the combined invoice state', () => {
+  const { siblingCoverageRefusal } = require('../routes/admin-schedule')._test;
+  const base = { id: 'inv-1', invoice_number: 'WPC-1', total: 153.6, amount_paid: 0 };
+  const msg = (invoice, hasOwnPrice = true) => siblingCoverageRefusal({ status: 'covered', invoice }, { hasOwnPrice }).message;
+
+  test.each([
+    ['paid', { status: 'paid' }, /already paid — do not collect again/],
+    ['prepaid', { status: 'prepaid' }, /already paid — do not collect again/],
+    ['processing', { status: 'processing' }, /still processing — do not collect again/],
+    ['payer-billed', { status: 'sent', payer_id: 'payer-1' }, /third-party payer — do not collect from the customer/],
+    ['open (sent)', { status: 'sent' }, /collect on that invoice/],
+  ])('%s combined invoice', (_label, fields, expected) => {
+    const message = msg({ ...base, ...fields });
+    expect(message).toMatch(/combined trip invoice/);
+    expect(message).toMatch(expected);
+    if (fields.status !== 'sent' || fields.payer_id) expect(message).not.toMatch(/collect on that invoice/);
+  });
+
+  test('a settled invoice never suggests setting a price on an unpriced visit', () => {
+    expect(msg({ ...base, status: 'paid' }, false)).not.toMatch(/set a price/);
+  });
+
+  test('the refusal reason code is unchanged', () => {
+    expect(siblingCoverageRefusal({ status: 'covered', invoice: { ...base, status: 'paid' } }).reason).toBe('sibling_invoice_covered');
+  });
+});

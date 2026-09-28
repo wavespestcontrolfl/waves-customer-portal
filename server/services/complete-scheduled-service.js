@@ -10690,8 +10690,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // recomputation from the by-now-mutable billing profile.
         // Refused under the visit lock because the trip's combined
         // first-application invoice now covers this visit (Codex r4 P1 on
-        // #5237, refuseCoveredMemberMintInTrx): that invoice bills it, so
-        // there is nothing to retry and nothing for the office to bill.
+        // #5237, refuseCoveredMemberMintInTrx): handled by its own
+        // release-for-resume below, never the manual-billing bell.
         const coveredByCombined = invErr?.code === 'FIRST_APPLICATION_COVERED' && !invoice?.id;
         if (!coveredByCombined && backfillReviewMintRequired && !invoice?.id) {
           logger.error(`[dispatch] REQUIRED completion-invoice mint FAILED for ${svc.id} (${isBackfillCompletion ? 'backfill review' : 'live typed one-time'}) — closeout NOT finalized: ${invErr.message}`);
@@ -10798,7 +10798,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } });
         }
         if (coveredByCombined) {
-          logger.warn(`[dispatch] visit ${svc.id}: mint refused under the visit lock — the trip's combined first-application invoice now covers it (stamped since the pre-lock lookup); no separate invoice, no manual-billing bell`);
+          // Retryable, never a quiet finalize (Codex r5 P1 on #5237): the
+          // pre-lock lookups ran before the stamp, so this run has no
+          // invoice for the pay link, autopay or completion text. Release
+          // for resume on EVERY lane: the retry's lookup reads the stamp
+          // and reuses the combined invoice through the ordinary path.
+          logger.warn(`[dispatch] visit ${svc.id}: mint refused under the visit lock — the trip's combined first-application invoice now covers it (stamped since the pre-lock lookup); releasing for resume to reuse that invoice`);
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);
+          if (!released) {
+            logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+          }
+          return ({ status: 503, body: {
+            error: released
+              ? 'This visit is billed on its trip\'s combined invoice, which changed while completing — the closeout is saved but NOT finalized. Retry the closeout; it will use the combined invoice.'
+              : `This visit is billed on its trip's combined invoice, which changed while completing — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'first_application_coverage_changed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
         } else {
           logger.error(`[dispatch] Auto-invoice failed (non-blocking): ${invErr.message}`);
           // Exception-based (CLAUDE.md rule 14): a LIVE mint failure used to
