@@ -499,6 +499,15 @@ async function techStopMemberIds(svc, conn) {
   return [svc.id, ...others.map((r) => r.id)];
 }
 
+// Re-resolves the stop AFTER the read/signing work and returns the member
+// ids still on it (Codex #5239 r2 P1). A sibling reassigned or moved while
+// the notes were read or the URLs signed drops out here, so neither read
+// returns data from a row that left this technician's stop mid-request;
+// the routes then recheck the requested row itself, as before.
+async function stillOnTechStop(svc, conn) {
+  return new Set((await techStopMemberIds(svc, conn)).map(String));
+}
+
 // Short-lived signed VIEW urls for every photo on the stop's CURRENT
 // membership — same TTL as the technician's own service photos
 // (GET /api/tech/services/:id/photos, tech-track.js: getSignedUrl(...,
@@ -518,12 +527,17 @@ async function stopPhotoViewUrls(svc, conn = db) {
     .whereIn('scheduled_service_id', ids)
     .orderBy('submission_id', 'asc')
     .orderBy('photo_index', 'asc')
-    .select('id', 'submission_id', 's3_key');
-  return Promise.all(photos.map(async (p) => ({
+    .select('id', 'submission_id', 'scheduled_service_id', 's3_key');
+  const signed = await Promise.all(photos.map(async (p) => ({
+    scheduledServiceId: p.scheduled_service_id,
     id: p.id,
     submissionId: p.submission_id,
     url: await PhotoService.getViewUrl(p.s3_key, TECH_PHOTO_VIEW_TTL_SECONDS),
   })));
+  const current = await stillOnTechStop(svc, conn);
+  return signed
+    .filter((p) => current.has(String(p.scheduledServiceId)))
+    .map(({ scheduledServiceId, ...photo }) => photo);
 }
 
 // Deterministic-facts entry point for `facts.customerFlagged`
@@ -541,7 +555,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'asc')
-    .select('id', 'created_at', 'topic', 'location_on_property', 'note');
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note');
   if (submissions.length === 0) return null;
   const photos = await conn('visit_prep_photos')
     .whereIn('submission_id', submissions.map((s) => s.id))
@@ -552,7 +566,10 @@ async function customerFlaggedFacts(svc, conn = db) {
     if (!photoIdsBySubmission.has(p.submission_id)) photoIdsBySubmission.set(p.submission_id, []);
     photoIdsBySubmission.get(p.submission_id).push(p.id);
   }
-  return submissions.map((s) => ({
+  const current = await stillOnTechStop(svc, conn);
+  const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
+  if (kept.length === 0) return null;
+  return kept.map((s) => ({
     id: s.id,
     sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
     topic: s.topic || null,

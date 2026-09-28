@@ -180,6 +180,48 @@ describe('techStopMemberIds (Codex #5239 r1 P1)', () => {
   });
 });
 
+describe('members re-resolved after the read (Codex #5239 r2 P1)', () => {
+  // svc-B is on the stop when the member list is first read, then dispatch
+  // reassigns it to another technician while the notes are read / the URLs
+  // are signed. The second (post-work) membership read no longer includes
+  // it, so its note and photo must not come back.
+  function reassignedMidRead() {
+    const before = [
+      { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+      { id: 'svc-B', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02' },
+    ];
+    const after = [before[0], { ...before[1], technician_id: 'tech-2' }];
+    const base = fakeConn({
+      scheduled_services: before,
+      visit_prep_submissions: [
+        { id: 'sub-A', scheduled_service_id: 'svc-A', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'pest', location_on_property: null, note: 'mine' },
+        { id: 'sub-B', scheduled_service_id: 'svc-B', created_at: new Date('2026-09-30T11:00:00Z'), topic: 'lawn', location_on_property: null, note: 'reassigned away' },
+      ],
+      visit_prep_photos: [
+        { id: 'photo-A', submission_id: 'sub-A', scheduled_service_id: 'svc-A', photo_index: 0, s3_key: 'visitprep/A.jpg' },
+        { id: 'photo-B', submission_id: 'sub-B', scheduled_service_id: 'svc-B', photo_index: 0, s3_key: 'visitprep/B.jpg' },
+      ],
+    });
+    let memberReads = 0;
+    return (table) => {
+      if (table !== 'scheduled_services') return base(table);
+      memberReads += 1;
+      return fakeConn({ scheduled_services: memberReads === 1 ? before : after })(table);
+    };
+  }
+
+  test('customerFlaggedFacts drops a sibling reassigned mid-read', async () => {
+    const facts = await customerFlaggedFacts({ id: 'svc-A', visit_id: 'visit-9' }, reassignedMidRead());
+    expect(facts.map((f) => f.id)).toEqual(['sub-A']);
+  });
+
+  test('stopPhotoViewUrls drops a sibling reassigned while URLs were signed, and never returns the internal row id', async () => {
+    const photos = await stopPhotoViewUrls({ id: 'svc-A', visit_id: 'visit-9' }, reassignedMidRead());
+    expect(photos.map((p) => p.id)).toEqual(['photo-A']);
+    expect(Object.keys(photos[0]).sort()).toEqual(['id', 'submissionId', 'url']);
+  });
+});
+
 describe('stopPhotoViewUrls', () => {
   beforeEach(() => jest.clearAllMocks());
 
