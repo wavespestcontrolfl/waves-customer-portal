@@ -119,6 +119,22 @@ async function fetchPestRainForecastHeavySafe(service) {
   }
 }
 
+// A PDF/static render must never bake an UNSETTLED trailing 7-day window
+// into a permanently cached document (owner ruling 2026-09-28): the window
+// ending on the service date is still accumulating (application-conditions.js's
+// own `windowClosed` — the same open/closed distinction its 30-min vs 6h
+// cache TTL already encodes, and the one the lawn report's weekly water
+// balance keys its own freeze/uncacheable state off). The live page may
+// still show an unsettled reading; a non-live render gets NO weekWeather at
+// all in that case, so the rain block (and its ants-after-rain line) is
+// simply absent rather than freezing a number that later changes — nothing
+// rain-derived reaches the cached bytes, so there is nothing stale to carry
+// forward once the window closes.
+function settledWeekWeatherForRender(weekWeather, mode) {
+  if (mode === 'live') return weekWeather;
+  return weekWeather?.windowClosed === true ? weekWeather : null;
+}
+
 function monthFromDate(dateStr) {
   const d = new Date(dateStr);
   return Number.isNaN(d.getTime()) ? null : d.getUTCMonth() + 1;
@@ -542,12 +558,16 @@ async function buildServiceReportV1ResponseData(service, token, {
       // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
       // mutable-content rule): a non-live render always passes false.
       const expectationsGateOn = pestReportExpectationsGateOn();
-      const [weekWeather, forecastHeavyRain] = expectationsGateOn
+      const [fetchedWeekWeather, forecastHeavyRain] = expectationsGateOn
         ? await Promise.all([
           fetchPestWeekWeatherSafe(service),
           mode === 'live' ? fetchPestRainForecastHeavySafe(service) : Promise.resolve(false),
         ])
         : [null, false];
+      // PDF/static: an unsettled (still-accumulating) week never reaches the
+      // rain block — see settledWeekWeatherForRender. Live keeps whatever
+      // fetchPestWeekWeatherSafe returned, settled or not.
+      const weekWeather = settledWeekWeatherForRender(fetchedWeekWeather, mode);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -2612,3 +2632,4 @@ module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
+module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;

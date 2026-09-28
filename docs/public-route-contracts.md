@@ -99,7 +99,13 @@ sourced from the NWS forecast (`weather-forecast.js`
 signal only when `mode === 'live'` and always passes `false` for the PDF and
 any other static render, so the PDF/static payload's `rain.lines` can only
 ever be the trailing-week fact + optional rainfast clause, never the
-forecast sentence; a second line may add an ants-after-rain expectation, but
+forecast sentence — and a PDF/static render carries the trailing-week fact
+ONLY once that 7-day window has closed (`application-conditions.js` stamps
+each result with `windowClosed`; `reports-public.js`
+`settledWeekWeatherForRender` drops an open, still-accumulating week from
+every non-live render so no mid-window rain total is ever baked into a
+cached document — the rain block is simply absent until the window closes,
+while the live page may show the current reading); a second line may add an ants-after-rain expectation, but
 ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
 rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
