@@ -10994,6 +10994,9 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+// The receipt SMS leg's phone-less App admission — shared with the IB closeout
+// repair card so it describes the same reach sendReceipt has.
+module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;

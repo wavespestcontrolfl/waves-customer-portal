@@ -14,6 +14,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
 }));
 jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
+jest.mock('../services/invoice', () => ({ explicitBillingAppSelected: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -21,6 +22,7 @@ const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueueReceiptDelivery, receiptEmailOptOutState } = require('../services/receipt-delivery-queue');
 const { resolveReceiptEmailRecipient } = require('../services/invoice-email');
+const { explicitBillingAppSelected } = require('../services/invoice');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -343,7 +345,7 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
     const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
     expect(contract.notifies_customer).toBe(true);
     expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({
-      kind: 'comms', label: expect.stringMatching(/email to b\*\*\*@example\.com; may also text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
+      kind: 'comms', label: expect.stringMatching(/email to b\*\*\*@example\.com; may also send text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
     })]));
   });
 
@@ -353,7 +355,19 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
     resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'ap@builder.example' }, customer: { phone: '9415550100' } });
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     expect(preview.steps[0]).toEqual(expect.objectContaining({ recipients: ['a***@builder.example'], text_to: null, payer_billed: true }));
-    expect(preview.steps[0].effect).toMatch(/payer's billing inbox — no text/);
+    expect(preview.steps[0].effect).toMatch(/payer's billing inbox — a payer-billed receipt is never texted/);
+    expect(explicitBillingAppSelected).not.toHaveBeenCalled();
+  });
+
+  test('a phone-less customer who chose App for receipts is still reachable, and the card says so (GH Codex P1)', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], customers: [{ ...CUSTOMER, phone: null }] }));
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, error: 'Receipt email is not selected', code: 'billing_email_not_selected' });
+    explicitBillingAppSelected.mockResolvedValueOnce(true);
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(explicitBillingAppSelected).toHaveBeenCalledWith('cust-1', 'payment_receipt');
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ step: 'queue_receipt', recipients: [], text_to: null, app: true }));
+    expect(preview.steps[0].effect).toMatch(/may also send a Waves app notification/);
   });
 
   test('opted out, unreadable settings, no recipient, or an existing job → manual, never planned', async () => {

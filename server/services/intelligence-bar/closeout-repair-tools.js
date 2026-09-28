@@ -142,9 +142,11 @@ function maskPhone(phone) {
 // Who the receipt worker would reach — through its OWN resolvers, so the card
 // never names a different inbox than the send: the opt-out/kill-switch check,
 // then resolveReceiptEmailRecipient (payer AP inbox for payer-billed invoices,
-// the billing-email authority otherwise). The text leg is decided at send by
-// the messaging pipeline (consent, channel choice, STOP), so the card states
-// it as conditional; payer-billed receipts never text the homeowner.
+// the billing-email authority otherwise). The text/App leg is decided at send
+// by the messaging pipeline (consent, channel choice, STOP), so the card
+// states it as conditional; payer-billed receipts never reach the homeowner.
+// A phone-less customer is still reachable when they chose App for payment
+// receipts (sendReceipt's own explicitBillingAppSelected admission).
 async function receiptRecipients(invoiceId, knex) {
   const invoice = await knex('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { blocker: 'invoice not found' };
@@ -160,8 +162,18 @@ async function receiptRecipients(invoiceId, knex) {
   const payerBilled = Boolean(invoice.payer_id);
   const phone = payerBilled ? null
     : (resolved.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
-  if (!email && !phone) return { blocker: resolved.ok ? 'no receipt recipient on file' : String(resolved.error).replace(/\.$/, '') };
-  return { email, phone, payerBilled };
+  const app = !payerBilled && await require('../invoice').explicitBillingAppSelected(invoice.customer_id, 'payment_receipt');
+  if (!email && !phone && !app) return { blocker: resolved.ok ? 'no receipt recipient on file' : String(resolved.error).replace(/\.$/, '') };
+  return { email, phone, app, payerBilled };
+}
+
+// The card's plain-words description of where a queued receipt can go.
+function receiptReach(s) {
+  const email = `email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}`;
+  if (s.payer_billed) return `${email} (the payer's billing inbox — a payer-billed receipt is never texted)`;
+  const legs = [s.text_to && `text ${s.text_to}`, s.app && 'a Waves app notification'].filter(Boolean);
+  if (!legs.length) return `${email}; no text (no phone on file)`;
+  return `${email}; may also send ${legs.join(' or ')}, per the customer's receipt settings (texts wait for 8 AM–8 PM)`;
 }
 
 function maskEmail(address) {
@@ -249,9 +261,10 @@ async function planReceiptStep(status, knex) {
       invoice_id: invDelivery.invoiceId,
       recipients: who.email ? [maskEmail(who.email)] : [],
       text_to: maskPhone(who.phone),
+      app: who.app === true,
       payer_billed: who.payerBilled,
-      // Binds the FULL email + phone (masks can collide).
-      recipients_key: crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone])).digest('hex').slice(0, 16),
+      // Binds the FULL email + phone + App choice (masks can collide).
+      recipients_key: crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone, who.app === true])).digest('hex').slice(0, 16),
     },
   };
 }
@@ -374,7 +387,7 @@ function previewFromPlan(serviceId, status, plan) {
     steps: plan.steps.map((s) => ({
       ...s,
       effect: s.step === 'queue_receipt'
-        ? `${STEP_EFFECTS[s.step].label}: email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}${s.payer_billed ? ' (the payer\'s billing inbox — no text for a payer-billed receipt)' : (s.text_to ? `; may also text ${s.text_to}, per the customer's receipt settings (texts wait for 8 AM–8 PM)` : '; no text (no phone on file)')}`
+        ? `${STEP_EFFECTS[s.step].label}: ${receiptReach(s)}`
         : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,
