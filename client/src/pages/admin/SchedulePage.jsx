@@ -15298,9 +15298,13 @@ export function CompletionPanel({
       setTypedActivityScore(restoredActivity.score);
       setTypedActivityTouched(restoredActivity.touched);
       // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
-      // a pre-retirement draft's typedNextStepChips is dropped silently here;
-      // it was never a required field's worth of alarm and Recommendations
-      // (below) is now the single tech-advice field.
+      // a pre-retirement draft's typedNextStepChips is dropped here, and
+      // Recommendations (below) is now the single tech-advice field. Copy
+      // generated from those chips ("Next steps selected" in the old prompt)
+      // is stale, so dropped chips count as a pruned input (Codex r1 #5116).
+      if (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length) {
+        restorePruned = true;
+      }
       setTypedRecommendations(savedDraft.typedRecommendations || "");
     } else {
       // The profile untyped since this draft was saved (bed_bug,
@@ -15351,6 +15355,9 @@ export function CompletionPanel({
           const prePruneCompanion = JSON.stringify(preValues);
           const values = pruneRestoredFindingsValues(preValues, schema.fields || [], schema.type);
           if (JSON.stringify(values) !== prePruneCompanion) restorePruned = true;
+          // Retired companion Next steps chips — same stale-copy rule as the
+          // primary (Codex r1 #5116).
+          if (Array.isArray(saved.chips) && saved.chips.length) restorePruned = true;
           return [
             schema.type,
             {

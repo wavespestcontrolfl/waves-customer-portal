@@ -230,7 +230,7 @@ describe('typed snapshot — technician report body in the generic tail composit
     // branches joined the technician-report lane (owner 2026-08-11 — the
     // cockroach report dropped the generated copy). v4 added rodent
     // trapping + the declared setup/re-check composition (#3159).
-    expect(snapshot.summaryTemplateVersion).toBe(6);
+    expect(snapshot.summaryTemplateVersion).toBe(7);
   });
 
   test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {

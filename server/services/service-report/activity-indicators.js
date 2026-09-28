@@ -47,7 +47,9 @@ const COPY_MAP_VERSION = 3;
 // lines append, and the contradiction rules choose between AI and
 // deterministic copy — snapshots frozen by this generator must be
 // distinguishable from v5's (codex r79).
-const SUMMARY_TEMPLATE_VERSION = 6;
+// v7: the Next steps chips were retired (owner ruling 2026-09-27) — new
+// snapshots carry no chip-derived next-step sentence (Codex r1 #5116).
+const SUMMARY_TEMPLATE_VERSION = 7;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.

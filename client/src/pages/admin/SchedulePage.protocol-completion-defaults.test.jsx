@@ -201,6 +201,34 @@ it('does NOT seed on top of a restored draft’s own products', async () => {
   expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
 });
 
+it('a restored pre-retirement draft with Next steps chips drops its stale generated report (Codex r1 #5116)', async () => {
+  const visit = cockroachService();
+  const report = 'WHAT WE DID:\nPlaced gel bait in the kitchen.\nWHAT WE FOUND:\nRoach activity under the sink.';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report,
+    generatedReportText: report,
+    aiReportUsed: true,
+    // Retired field: copy generated while these were selected fed the old
+    // "Next steps selected" prompt line, so the report must not survive.
+    typedNextStepChips: ['Monitor activity'],
+  }));
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy());
+});
+
 it('clears the seeded rows on customer_declined, then reseeds once the outcome returns to completed (pre-push audit P1, PR #5049 r1)', async () => {
   // cockroach has no specialtyCompletionFor preset, so the submit-time
   // noApplicationOutcomeConflict guard never runs for it — a seeded
