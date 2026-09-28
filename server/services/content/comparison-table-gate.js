@@ -1450,7 +1450,7 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
-      return curatedNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+      return windowNamesAny(window, curatedNames);
     };
     const p0Re = new RegExp(`${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b`, 'gi');
     let am;
@@ -1560,7 +1560,9 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   // competitor still routes to named-competitor review even though the
   // blanked URL is not a prose mention.
   const linkedDisabledNames = new Set();
+  const linkedNames = new Set();
   for (const lk of linkedCompetitorMentions(scanText)) {
+    linkedNames.add(lk.name);
     if (lk.inAllowlist) {
       // Link-only allowlisted competitor: named-competitor usage. With the
       // feature gate off this must surface, not silently pass (Codex r6 —
@@ -1608,7 +1610,18 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   }
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
-  return { pass, findings, requiresHumanReview };
+  return {
+    pass, findings, requiresHumanReview,
+    namedCompetitors: sortedNames(known, unknown, linkedNames),
+  };
+}
+
+// Every competitor the draft names (prose, table, title/meta, or link
+// destination), de-duplicated and sorted — persisted with the verdict so
+// namedCompetitorListVerdict can hold unattended publishing to the owner
+// list at run time AND at merge time.
+function sortedNames(...sets) {
+  return [...new Set(sets.flatMap((set) => [...set]))].sort();
 }
 
 // URL boundary shared by every URL-aware name-scan transform. The class
@@ -1641,6 +1654,8 @@ function competitorHostIndex() {
   if (COMPETITOR_HOST_INDEX) return COMPETITOR_HOST_INDEX;
   COMPETITOR_HOST_INDEX = new Map();
   for (const c of (Array.isArray(competitorFacts.COMPETITORS) ? competitorFacts.COMPETITORS : [])) {
+    // A record's declared official domains (`hosts`) count too.
+    for (const h of (Array.isArray(c?.hosts) ? c.hosts : [])) COMPETITOR_HOST_INDEX.set(String(h).toLowerCase().replace(/^www\./, ''), c);
     for (const attr of Object.values(c?.attributes || {})) {
       const src = attr?.source;
       if (!src) continue;
@@ -1680,14 +1695,24 @@ function linkedCompetitorMentions(text) {
     // kept, deduped by name, so an uncurated brand can't hide behind a
     // curated one in the same URL.
     const hits = new Map();
+    let tokenSource = url;
     try {
-      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+      const parsed = new URL(url);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
       const idx = competitorHostIndex();
+      let curatedHost = false;
       for (const [h, c] of idx) {
-        if (host === h || host.endsWith(`.${h}`)) { hits.set(c.name, { name: c.name, inAllowlist: true }); break; }
+        if (host === h || host.endsWith(`.${h}`)) { hits.set(c.name, { name: c.name, inAllowlist: true }); curatedHost = true; break; }
+      }
+      // A domain whose name IS a competitor alias but is not one of that
+      // competitor's curated hosts belongs to someone else (aptive.com is a
+      // software company, not Aptive Environmental): scan its path only.
+      const label = host.split('.').slice(-2)[0] || '';
+      if (!curatedHost && label && competitorFacts.findCompetitor(label)) {
+        tokenSource = `${parsed.pathname} ${parsed.search}`;
       }
     } catch { /* unparseable URL — token scan below still runs */ }
-    for (const hit of competitorFacts.findBusinessMentions(url.replace(/[^a-z0-9]+/gi, ' '))) {
+    for (const hit of competitorFacts.findBusinessMentions(tokenSource.replace(/[^a-z0-9]+/gi, ' '), { url: true })) {
       if (!hits.has(hit.name)) hits.set(hit.name, { name: hit.name, inAllowlist: hit.inAllowlist });
     }
     if (hits.size === 0) continue;
@@ -1703,6 +1728,29 @@ function linkedCompetitorMentions(text) {
 
 // Escape a detected business name for use inside a regex, tolerating the
 // collapsed whitespace stripQuotesForNames leaves behind.
+// Every surface form a detected name can take in the text: a curated
+// record's canonical name AND its aliases ("Massey" for "Massey Services",
+// "HomeTeam" / "TAEXX" for "HomeTeam Pest Defense", "Aptive" for "Aptive
+// Environmental"). Proximity scans matched only the canonical string, so an
+// alias-only mention ("Massey is dishonest…") escaped the disparagement /
+// reliability checks (#5146 owner-list review). Matched on word boundaries
+// so a short alias never fires inside another word ("adaptive").
+function windowNamesAny(window, names) {
+  const forms = new Set();
+  for (const n of names) {
+    forms.add(String(n));
+    const rec = competitorFacts.findCompetitor(n);
+    if (rec) [rec.name, ...(rec.aliases || []), ...(rec.aliasesCS || [])].forEach((f) => forms.add(f));
+  }
+  for (const f of forms) {
+    const norm = String(f).toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!norm) continue;
+    const re = new RegExp(`(?:^|[^a-z0-9])${norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|[^a-z0-9])`);
+    if (re.test(window)) return true;
+  }
+  return false;
+}
+
 function escapeForNameRe(name) {
   return String(name || '')
     .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -1725,7 +1773,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // Empty body alone doesn't skip the scan — a metadata-only draft can
   // still carry a disparaging title/meta (draftScanTexts covers both the
   // top-level and frontmatter shapes).
-  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false };
+  if (!body && !draftScanTexts(draft, '').trim()) return { pass: true, findings, requiresHumanReview: false, namedCompetitors: [] };
   if (blocks.length === 0) return evaluateProse(draft, body, { operatorBriefText, namedCompetitorEnabled });
 
   // Same collector as draftScanTexts: the prose-only competitor check below
@@ -1821,7 +1869,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
       .toLowerCase()
       .replace(/\s+/g, ' ');
-    return targetNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+    return windowNamesAny(window, targetNames);
   };
 
   // ── Whole-text + prose tone scans (body + title/meta) ──
@@ -2076,7 +2124,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       while ((mnum = metaNumRe.exec(metaText)) !== null) {
         if (sentenceHasNegator(metaText, mnum.index, mnum[0].length)) continue;
         const mtail = metaText.slice(mnum.index, mnum.index + 60);
-        const hasName = targetNames.some((n) => metaText.toLowerCase().includes(n.toLowerCase()));
+        const hasName = windowNamesAny(metaText.toLowerCase().replace(/\s+/g, ' '), targetNames);
         if (numAdjacentProviderRe.test(mtail) || hasName) { rank = mnum; break; }
       }
     }
@@ -2131,7 +2179,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
-      return competitorNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+      return windowNamesAny(window, competitorNames);
     };
     // Disparaging adjective near a competitor name → P0. Denial-guarded:
     // "No shady billing from Orkin" keeps at most the competitor-in-prose
@@ -2413,11 +2461,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
-  return { pass, findings, requiresHumanReview };
+  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown) };
 }
 
 // Clean autonomous blogs need no human sign-off. The content gate and
 // explicit autopublish kill switch still apply at drafting and merge time.
+// This is the LANE check (action + both gates); every caller holding a
+// comparison verdict also requires namedCompetitorListVerdict(verdict).ok.
 function namedCompetitorAutopublishEligible(brief) {
   try {
     // Only the fully-automatable blog action qualifies (PR #3508 r6 P1):
@@ -2433,10 +2483,46 @@ function namedCompetitorAutopublishEligible(brief) {
   } catch (_) { return false; }
 }
 
+// Owner rulings 2026-09-27 (D2) + 2026-09-28: a competitor blog publishes
+// unattended only when EVERY competitor it names is on
+// competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS — including names an
+// operator brief authorized. (The owner's fact rules for those posts ship
+// separately.) Reads the
+// PERSISTED evaluate() result plus the whole-draft company extraction the
+// runner / remediation stored on it (`companyExtraction`), so the runner's
+// decision and the poller's merge-time recheck judge the same thing. A
+// verdict without `namedCompetitors` (written before this check existed, or
+// unparseable) or without a successful extraction fails closed.
+//   → { ok: true, approved }                                  publish
+//   → { ok: false, reason: 'named_competitor_off_list', offList, approved }
+//   → { ok: false, reason: 'named_competitor_unverified_names', approved }
+function namedCompetitorListVerdict(comparisonResult, { requireExtraction = true } = {}) {
+  let names = comparisonResult && Array.isArray(comparisonResult.namedCompetitors)
+    ? comparisonResult.namedCompetitors : null;
+  if (!names) return { ok: false, reason: 'named_competitor_off_list', offList: ['(names not recorded)'], approved: [] };
+  // Every company the whole-draft extraction (business-name-confirmer.js)
+  // found joins the deterministic names; a missing or failed extraction
+  // fails closed. `requireExtraction: false` is ONLY the runner's early,
+  // pre-publish look at the deterministic names (the publisher's commit
+  // chokepoint then applies the full verdict on the final text).
+  const extraction = comparisonResult.companyExtraction;
+  if (requireExtraction && (!extraction || extraction.ok !== true || !Array.isArray(extraction.companies))) {
+    return { ok: false, reason: 'named_competitor_unverified_names', approved: [] };
+  }
+  if (extraction && extraction.ok === true && Array.isArray(extraction.companies)) {
+    names = sortedNames(new Set(names), new Set(extraction.companies));
+  }
+  const approved = names.filter((n) => competitorFacts.isOwnerApprovedForAutopublish(n));
+  const offList = names.filter((n) => !competitorFacts.isOwnerApprovedForAutopublish(n));
+  if (offList.length) return { ok: false, reason: 'named_competitor_off_list', offList, approved };
+  return { ok: true, approved };
+}
+
 module.exports = {
   evaluate,
   evaluateProse,
   namedCompetitorAutopublishEligible,
+  namedCompetitorListVerdict,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

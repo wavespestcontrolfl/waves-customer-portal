@@ -296,7 +296,7 @@ const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue'
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
-  answerServiceReportQuestion,
+  routeServiceReportQuestion,
 } = require('../services/service-report/report-assistant');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -429,6 +429,11 @@ const ALLOWED_REPORT_EVENTS = new Set([
   'referral_cta_clicked',
 ]);
 const ALLOWED_REPORT_EVENT_CHANNELS = new Set(['public_report', 'portal', 'email', 'sms', 'wallet']);
+// Events only the server writes. The /ask route records report_question_asked
+// with the topic its own routing produced, and get_report_engagement counts
+// those rows as real questions, so the public events POST must not mint them
+// (codex P2 on #5167). recordServiceReportEvent still accepts them.
+const SERVER_ONLY_REPORT_EVENTS = new Set(['report_question_asked']);
 
 async function trackServiceReportView(service) {
   if (!service?.id || service.report_viewed_at) return;
@@ -500,6 +505,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // included) GATE_REPORT_UPCOMING_VISITS guards. report-assistant.js
   // (the Q&A endpoint) never reads the field.
   upcomingVisitsCard = false,
+  // OPT-IN likewise for the lawn "Near you" line (GATE_REPORT_NEAR_YOU):
+  // only the /data render shows it, so only it pays for the city-wide
+  // lawn-findings read.
+  nearYou = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -517,6 +526,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
+    nearYou,
     // pest week-weather is opt-in (codex P2 round 4): this builder renders
     // the expectations block (live /data + the direct PDF route), so it pays.
     pestWeekWeather: true,
@@ -1325,7 +1335,7 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
 
     const eventName = normalizedEventName(req);
     const channel = String(req.body?.channel || 'public_report').trim();
-    if (!ALLOWED_REPORT_EVENTS.has(eventName)) {
+    if (!ALLOWED_REPORT_EVENTS.has(eventName) || SERVER_ONLY_REPORT_EVENTS.has(eventName)) {
       return res.status(400).json({ error: 'Unknown report event' });
     }
     // Cross-sell events exist only while the feature does (codex #3367 r4:
@@ -2000,14 +2010,23 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const answer = answerServiceReportQuestion({
+    const { answer, topic } = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
-    await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
-      question_length: question.length,
-    });
+    // The question's text is never stored — only its length and the topic
+    // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
+    // the engagement stats can say what customers ask about per report type.
+    // A staff QA question (the report page sends the portal JWT, as on the
+    // /data read) is answered but never recorded as customer engagement
+    // (codex P2 on #5167).
+    if (!(await staffCanViewSuppressed(req))) {
+      await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
+        question_length: question.length,
+        topic,
+      });
+    }
     return res.json({ answer });
   } catch (err) { next(err); }
 });
@@ -2546,7 +2565,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

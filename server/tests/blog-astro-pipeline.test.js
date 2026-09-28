@@ -68,6 +68,13 @@ function grantTopicMergeLock(locked = true) {
   db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked }] }) }));
 }
 beforeEach(() => grantTopicMergeLock(true));
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these posts name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
+beforeEach(() => {
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
+});
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -595,12 +602,14 @@ describe('blog Astro frontmatter validation', () => {
       {
         type: 'draft',
         frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
-        body: 'Waves Pest Control guidance. [Turner](https://www.turnerpest.com/ants) lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+        // Neutral anchor text: naming the competitor in prose is the owner-list
+        // check's business (#5146); this test is about the link.
+        body: 'Waves Pest Control guidance. [One local guide](https://www.turnerpest.com/ants) lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
       },
       { action_type: 'new_supporting_blog' }
     );
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain('Turner lists ant tips');
+    expect(written).toContain('One local guide lists ant tips');
     expect(written).not.toMatch(/turnerpest\.com/);
     expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*turnerpest\.com\/ants/);
@@ -624,13 +633,13 @@ describe('blog Astro frontmatter validation', () => {
       {
         type: 'draft',
         frontmatter: validFrontmatter({ slug: '/ant-trails-bradenton/' }),
-        body: 'Waves Pest Control guidance. Turner lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
-        competitor_links_unlinked: [{ url: 'https://www.turnerpest.com/ants', text: 'Turner' }],
+        body: 'Waves Pest Control guidance. One local guide lists ant tips; so does [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+        competitor_links_unlinked: [{ url: 'https://www.turnerpest.com/ants', text: 'One local guide' }],
       },
       { action_type: 'new_supporting_blog' }
     );
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain('Turner lists ant tips');
+    expect(written).toContain('One local guide lists ant tips');
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*turnerpest\.com\/ants/);
   });
 
@@ -729,7 +738,10 @@ describe('blog Astro frontmatter validation', () => {
         },
         body: 'A comparison for Southwest Florida homeowners choosing between a national pest brand and local service.',
       },
-      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }
+      // Operator-authorized Orkin (the publisher's final-text comparison
+      // gate evaluates exactly like the runner's, operator brief included).
+      { action_type: 'new_supporting_blog', service: 'pest', target_keyword: 'orkin vs local pest control', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'],
+        gsc_signal: { bucket: 'operator_intercept' }, voice_constraints: { operator_brief: { working_title: 'Orkin vs. a Local SWFL Pest Control Company' } } }
     );
 
     const fmModule = require('../services/content-astro/frontmatter');
@@ -2279,6 +2291,45 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       astro_status: 'pr_open',
       astro_requires_human_merge: true,
     }));
+  });
+
+  // The scheduler's publish auto-merges through pages-poll, so it goes
+  // through the same owner-list chokepoint on its final text (Codex r6).
+  test('a scheduled post naming an off-list company is refused before any branch', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const read = chain({ first: jest.fn().mockResolvedValue({ ...plainPost(), content: '## Choosing a provider\n\nBug Out competes with local providers in Bradenton.' }) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(update.update).not.toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open' }));
+  });
+
+  test('a scheduled post naming only owner-list competitors keeps the human-merge stamp; an admin publish skips the check and is stamped for an admin merge', async () => {
+    businessNameConfirmer.extractCompanyNames.mockResolvedValue({ ok: true, key: 'k', companies: ['Orkin'] });
+    let read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    let update = chain();
+    let queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
+
+    businessNameConfirmer.extractCompanyNames.mockClear();
+    read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    update = chain();
+    queries = [read, update];
+    await AstroPublisher.publishAstro('post-1', { humanApproved: true });
+    expect(businessNameConfirmer.extractCompanyNames).not.toHaveBeenCalled();
+    // The skipped check is backed by an enforced manual merge (pages-poll
+    // withholds auto-merge on this stamp).
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'pr_open', astro_requires_human_merge: true }));
   });
 
   test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {
@@ -4607,6 +4658,35 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       expect(altPass).toBeTruthy();
       expect(altPass[0].body).toContain('Generated alt two');
     } finally { spy.mockRestore(); }
+  });
+
+  // The owner-list chokepoint runs on the FINAL committed text: a company
+  // named only in a REUSED live image alt is caught there (Codex r5 on #5146).
+  test('update run: an off-list company only in a publisher-reused image alt blocks the commit', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Bug Out technician checking pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+      return null;
+    });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const d = draft();
+    expect(d.body).not.toMatch(/Bug Out/);
+
+    await expect(AstroPublisher.publishOrUpdatePage(d, { action_type: 'new_supporting_blog' }))
+      .rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED', reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('![Bug Out technician checking pellets]');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
   test('update run: intro-slot reuse compares against the LIVE title — a retitled article does not inherit its old intro illustration (GH r2)', async () => {

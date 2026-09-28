@@ -91,6 +91,10 @@ function fakeTrx(locked) {
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
 const EDITORIAL_BASE_PROOF = { baseSha: 'editorial-base-sha', baseRef: 'main' };
 
+// A competitor-free blog verdict as the runner now stores it: the company
+// extraction ran and found nothing (a NULL / pre-check verdict is withheld).
+const CLEAN_BLOG_VERDICT = { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: [] } };
+
 function makeRun(overrides = {}) {
   return {
     id: 'run-1',
@@ -203,7 +207,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
             : Array.isArray(runFirst) ? runFirst[Math.min(runFirstRead++, runFirst.length - 1)]
               : runFirst;
           return Promise.resolve(runFirst !== undefined ? configured : {
-            comparison_table_result: null,
+            comparison_table_result: CLEAN_BLOG_VERDICT,
             draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }),
             trust_build_approved_at: null,
             brief_id: null,
@@ -1556,7 +1560,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const briefs = [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }];
     setupDb({
       pending: [run], briefs,
-      runFirst: governedRun({ pin: publisherPin, approvedAt: run.trust_build_approved_at, approvedSha, verdict: null, briefId: 'brief-r' }),
+      runFirst: governedRun({ pin: publisherPin, approvedAt: run.trust_build_approved_at, approvedSha, verdict: CLEAN_BLOG_VERDICT, briefId: 'brief-r' }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1691,7 +1695,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   // human approved (trust_build_approved_head_sha) — any foreign push waits
   // for a human. Intercept-class runs additionally re-check the scoped
   // eligibility (raw brief marker + both gates) at the last instant.
-  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true }, briefId = 'brief-1' } = {}) {
+  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'], companyExtraction: { ok: true, key: 'k', companies: ['Orkin'] } }, briefId = 'brief-1' } = {}) {
     return {
       comparison_table_result: verdict,
       draft_payload: JSON.stringify({
@@ -1728,13 +1732,57 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     });
   });
 
+  // Owner rulings 2026-09-27 (D2) + 2026-09-28: the merge-time recheck
+  // holds the persisted verdict to the owner list too — an off-list name or
+  // a verdict recorded before names were persisted leaves the PR for a human.
+  test.each([
+    ['names a competitor off the owner list', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin', 'Hughes Exterminators'], companyExtraction: { ok: true, key: 'k', companies: [] } }],
+    ['has no recorded names (pre-list verdict)', { pass: true, findings: [], requiresHumanReview: true }],
+    ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
+    ['is an unflagged blog verdict recorded before the company check (no extraction)', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }],
+    ['is a stored NULL blog verdict (pre-check PR)', null],
+    ['is unflagged but records a deterministic name from the final text, with the kill switch now off', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: ['Orkin'], companyExtraction: { ok: true, key: 'k', companies: [] }, killSwitchOff: true }],
+    ['is unflagged but its stored extraction found an off-list company', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: ['Bug Out'] } }],
+  ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const fgMod = require('../config/feature-gates');
+    const realGate = fgMod.isEnabled;
+    const killed = Boolean(verdict && verdict.killSwitchOff);
+    await (killed
+      ? (async (fn) => { jest.spyOn(fgMod, 'isEnabled').mockImplementation((g) => (g === 'namedCompetitorAutopublish' ? false : realGate(g))); try { await fn(); } finally { fgMod.isEnabled.mockRestore(); } })
+      : withGatesOn)(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ verdict }) });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(gh.mergePr).not.toHaveBeenCalled();
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+    });
+  });
+
+  test('an unflagged blog whose stored extraction found no company auto-merges', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS,
+      runFirst: governedRun({ verdict: { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: [] } } }) });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
   test('a verified evidence-only descendant of the publisher pin auto-merges without repinning the run', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const pinnedSha = '1'.repeat(40);
     const headSha = '2'.repeat(40);
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1789,7 +1837,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const headSha = '2'.repeat(40);
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, approvedAt: null, approvedSha: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
@@ -1834,7 +1882,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test.each([
-    ['publisher pin', () => governedRun({ pin: '3'.repeat(40), verdict: null, briefId: null })],
+    ['publisher pin', () => governedRun({ pin: '3'.repeat(40), verdict: CLEAN_BLOG_VERDICT, briefId: null })],
     ['full comparison verdict', (pin) => governedRun({ pin, verdict: { pass: true, findings: [{ code: 'changed' }], requiresHumanReview: false }, briefId: null })],
   ])('an evidence proof cannot authorize the head after its persisted %s changes', async (_field, changedContext) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
@@ -1843,7 +1891,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({
       pending: [makeRun()],
       runFirst: [
-        governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+        governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
         changedContext(pinnedSha),
       ],
     });
@@ -1867,7 +1915,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const parked = { id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null };
     setupDb({
       pending: [makeRun()],
-      runFirst: governedRun({ pin: pinnedSha, verdict: null, briefId: null }),
+      runFirst: governedRun({ pin: pinnedSha, verdict: CLEAN_BLOG_VERDICT, briefId: null }),
       queueFirst: (read) => read === 0 ? parked : { ...parked, status: 'queued' },
     });
     gh.getPr.mockResolvedValue({ ...openPr(), head: { ref: 'content/autonomous-test', sha: headSha } });
@@ -1961,7 +2009,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({
       pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
       briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
-      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
+      runFirst: { comparison_table_result: CLEAN_BLOG_VERDICT, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
     });
     greenMergePath();
     gh.mergePr.mockResolvedValue({ merged: true });
@@ -1973,11 +2021,29 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
+  // Refreshes auto-merge too, and commit only through the publisher's
+  // owner-list chokepoint: a refresh verdict WITHOUT its extraction (opened
+  // before the chokepoint shipped) waits for a human (Codex r5 on #5146).
+  test('a refresh PR whose verdict has no company extraction is withheld', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
+      briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
+    });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+  });
+
   test('a competitor-free run whose head is NOT the pinned commit is withheld — the pin is universal on these lanes (PR r14 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({
       pending: [makeRun()],
-      runFirst: { comparison_table_result: null, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
+      runFirst: { comparison_table_result: CLEAN_BLOG_VERDICT, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
     });
     greenMergePath();
 

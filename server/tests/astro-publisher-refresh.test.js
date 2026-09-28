@@ -58,8 +58,13 @@ function refreshDraft(overrides = {}) {
 }
 const BRIEF = { action_type: 'refresh_existing_page', target_url: '/pest-control-sarasota-fl/', city: 'Sarasota', service: 'pest' };
 
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these pages name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
 beforeEach(() => {
   db.mockReset();
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
 });
 
 function registryQuery(row, seen = []) {
@@ -102,6 +107,23 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.createIssueComment.mockResolvedValue({});
   });
 
+  // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
+  // refreshed text (Codex r5 on #5146).
+  test('a refresh naming an off-list company is refused before any branch is cut, and the check saw the final text', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const draft = refreshDraft({ body: 'Bug Out competes with local providers in Sarasota for recurring plans.' });
+
+    await expect(pub.publishRefresh(draft, BRIEF)).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][1]).toMatchObject({ final: true });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(draft.company_extraction).toMatchObject({ companies: ['Bug Out'] });
+  });
+
   test('preserves protected frontmatter and changes only meta + body + modified', async () => {
     const res = await pub.publishRefresh(refreshDraft(), BRIEF);
     expect(res.status).toBe('pr_open');
@@ -135,26 +157,26 @@ describe('publishRefresh frontmatter freeze', () => {
     // refresh unlinks exactly like a blog one, and the PR notes list each
     // removal so it is never silent.
     const res = await pub.publishRefresh(refreshDraft({
-      body: 'Fresh Sarasota guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+      body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
     }), BRIEF);
     expect(res.status).toBe('pr_open');
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain("Per Orkin's terms plans renew yearly");
+    expect(written).toContain('Per the published terms plans renew yearly');
     expect(written).not.toMatch(/orkin\.com/);
     expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
   test('commit-time removals are stamped on the draft the runner persists, next to capture-time ones (Codex r3)', async () => {
-    const draft = { ...refreshDraft({ body: 'Fresh Sarasota guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly.' }),
+    const draft = { ...refreshDraft({ body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly.' }),
       competitor_links_unlinked: [{ url: 'https://www.terminix.com/fees', text: 'fees' }] };
     expect((await pub.publishRefresh(draft, BRIEF)).status).toBe('pr_open');
     expect(draft.competitor_links_unlinked.map((u) => u.url)).toEqual(['https://www.terminix.com/fees', 'https://www.orkin.com/terms']);
   });
 
   test('the PR notes also list links the capture step already removed (refresh + metadata lanes)', async () => {
-    const captured = [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }];
-    const res = await pub.publishRefresh({ ...refreshDraft({ body: "Fresh Sarasota guidance. Per Orkin's terms, plans renew yearly." }), competitor_links_unlinked: captured }, BRIEF);
+    const captured = [{ url: 'https://www.orkin.com/terms', text: 'the published terms' }];
+    const res = await pub.publishRefresh({ ...refreshDraft({ body: 'Fresh Sarasota guidance. Per the published terms, plans renew yearly.' }), competitor_links_unlinked: captured }, BRIEF);
     expect(res.status).toBe('pr_open');
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
 
@@ -405,11 +427,11 @@ describe('publishRefresh blog-schema validation gate', () => {
 
   test('a competitor link IS still unlinked on a blog-target refresh (Codex r1 P2)', async () => {
     const res = await pub.publishRefresh(blogRefreshDraft({
-      body: 'Refreshed guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+      body: 'Refreshed guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
     }), BLOG_BRIEF);
     expect(res.status).toBe('pr_open');
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain("Per Orkin's terms plans renew yearly");
+    expect(written).toContain('Per the published terms plans renew yearly');
     expect(written).not.toMatch(/orkin\.com/);
     expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);

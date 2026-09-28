@@ -33,6 +33,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
+const { assertOwnerListForCommit } = require('../content/business-name-confirmer');
 const factCheckGate = require('../content/fact-check-gate');
 const editorialEvidence = require('../content/editorial-evidence');
 const complianceGate = require('../content/compliance-gate');
@@ -71,7 +72,9 @@ function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
   }
   const unlinked = [...b.unlinked, ...f.unlinked];
   if (unlinked.length) logger.info(`[astro-publisher] unlinked ${unlinked.length} competitor link(s) before commit`);
-  return { markdown, unlinked };
+  // The committed frontmatter and body too, so the owner-list check judges
+  // exactly the text that ships.
+  return { markdown, unlinked, frontmatter: f.value, body: b.text };
 }
 
 // The generated PR's own description lists what was unlinked.
@@ -1229,7 +1232,7 @@ async function assertComplianceClear({ title, body, meta = [], city, keyword, ta
   }
 }
 
-async function publishAstro(postId) {
+async function publishAstro(postId, { humanApproved = false } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.title) throw new Error('post missing title');
@@ -1598,7 +1601,14 @@ async function publishAstro(postId) {
     // applied once the live post is known so a republish keeps its list.
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
-    const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
+    const { markdown, unlinked: competitorUnlinked, frontmatter: committedData, body: committedBody } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
+    // Owner competitor list on the FINAL committed text (Codex r6 on #5146),
+    // after the competitor-link pass: the scheduler's publish auto-merges
+    // through pages-poll, so an off-list company is refused before any
+    // branch; competitor content naming only owner-list competitors keeps the
+    // human-merge stamp. An admin publish (humanApproved) is a human
+    // decision: the check stamps its PR for an admin merge.
+    const ownerList = await assertOwnerListForCommit({ draft: null, brief: {}, frontmatter: committedData, body: committedBody, humanApproved, humanMergeFallback: true });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath,
       evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(null, [...earlyUnlinked, ...competitorUnlinked]) });
 
@@ -1675,7 +1685,7 @@ async function publishAstro(postId) {
       // (GATE_NAMED_COMPETITOR_AUTOPUBLISH deliberately does NOT reach this
       // lane: publishAstro serves manual/calendar posts with no
       // operator-intercept provenance, so the human merge stays.)
-      astro_requires_human_merge: comparison.requiresHumanReview === true,
+      astro_requires_human_merge: comparison.requiresHumanReview === true || ownerList.requiresHumanMerge === true,
       updated_at: new Date(),
     });
 
@@ -3256,7 +3266,7 @@ async function dropUnreferencedBranch(branch, why) {
   }
 }
 
-async function publishOrUpdatePage(draft, brief = {}) {
+async function publishOrUpdatePage(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -3453,13 +3463,17 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter });
+  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter, body: committedBody } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter });
   // emit_draft already unlinked competitor links at capture (brief-driven-
   // tools.js) — this commit-time pass on the captured draft normally finds
   // nothing left, so competitorUnlinked alone would under-report what
   // actually changed. Merge in the capture-time removals so the PR notes
   // show the whole story.
   const allUnlinked = recordUnlinks(draft, competitorUnlinked);
+  // Owner competitor list on the FINAL committed text — hero / body-image
+  // alts included (Codex r5 on #5146), after the competitor-link pass.
+  // Throws before any branch exists.
+  await assertOwnerListForCommit({ draft, brief, frontmatter: committedFrontmatter, body: committedBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
     evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
 
@@ -3736,7 +3750,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
 // programmatically, only when the body actually changed.
 const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
-async function publishRefresh(draft, brief = {}) {
+async function publishRefresh(draft, brief = {}, { humanApproved = false } = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -3942,8 +3956,12 @@ async function publishRefresh(draft, brief = {}) {
     }
   }
   const finalBody = refreshImages.body;
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
+  const { markdown, unlinked: competitorUnlinked, frontmatter: committedFrontmatter, body: committedBody } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
   recordUnlinks(draft, competitorUnlinked);
+  // Same owner-list chokepoint as the new-post lane, on the committed text:
+  // refreshes auto-merge under AUTONOMOUS_BLOG_AUTO_MERGE too (Codex r5 on
+  // #5146).
+  await assertOwnerListForCommit({ draft, brief, frontmatter: committedFrontmatter, body: committedBody, humanApproved });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
     evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft) });
 

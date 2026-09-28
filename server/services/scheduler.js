@@ -1023,6 +1023,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Plaid bank feed → Bank Import staging (GATE_PLAID_SYNC + GATE_BANK_IMPORT,
+  // read at call time). Staging only — nothing reaches the P&L until an
+  // exact match or the operator links it. Items waiting on a re-login skip.
+  cron.schedule('33 * * * *', async () => {
+    if (!gateEnvValue('GATE_BANK_IMPORT') || !gateEnvValue('GATE_PLAID_SYNC')) return;
+    try {
+      await runExclusive('plaid-bank-sync', async () => {
+        const out = await require('./plaid-sync').syncAllItems();
+        const failed = (out.results || []).filter(r => r.error);
+        if (failed.length) logger.warn(`[plaid-sync] hourly sync: ${failed.length}/${out.items} connection(s) failed`);
+      });
+    } catch (err) {
+      logger.error(`[plaid-sync] hourly sync failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
@@ -1737,7 +1753,10 @@ function initScheduledJobs() {
   // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
   // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
   cron.schedule('0 */5 * * * *', async () => {
-    if (!isEnabled('callBookingLinkText')) return;
+    // codex round-3 P2: no top-level gate return here — sweep() itself
+    // still runs (and still gates staging/dispatch internally) with the
+    // gate off, because it also owns the manual-send consultation-link
+    // attempt row housekeeping, which must not depend on this gate.
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const result = await runExclusive('call-booking-link-text', () => callBookingLinkText.sweep());
@@ -3366,6 +3385,51 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Storm watch sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Same-trip first-application billing-alert sweep. A
+  // reserved-accept slot that sells 2+ recurring programs mints ONE
+  // combined first-application invoice, linked to the reserved (priced)
+  // visit; the same-trip sibling is left unpriced on purpose (covered by
+  // that invoice while both share a date). If a later reschedule pulls the
+  // sibling onto a different day, the invoice still charges for both. This
+  // sweep re-derives every OPEN (non-settled) first-application invoice's
+  // estimate group fresh and opens/refreshes or clears ONE durable admin
+  // billing alert per estimate, telling the office to split it by hand —
+  // it never touches the invoice or any visit row, and never holds
+  // collection (owner ruling, 2026-09-27 redesign of #5021 — see
+  // first-application-sibling-split.js; supersedes the per-writer
+  // in-transaction alert that design used through round 9). No dedicated
+  // gate: same always-on shape as tech-late-detector/unassigned-overdue-
+  // detector above (an internal, idempotent, dedupe-keyed alert, no
+  // customer-facing side effect). runExclusive lives INSIDE
+  // runFirstApplicationSiblingSplitSweep itself, and this tick runs as a
+  // SCHEDULED tick (registered through utils/scheduled-cron, not node-cron
+  // directly), so runExclusive always takes runScheduled's waitForSlot
+  // path here — never the fire-and-forget request path. On a genuine
+  // 'no_connection' skip, runScheduled's own "no lock slot within
+  // SLOT_WAIT_MAX_MS" branch has ALREADY called recordMissedTick before
+  // returning (cron-lock.js) — a second recordJobStart/recordJobEnd pair
+  // here recorded the SAME missed tick twice (Codex P2: the adjacent
+  // followup-sla-watcher.js and call-commitments-watchdog.js cron entries
+  // carry this identical extra write and are not a correct model to copy;
+  // left as-is here since fixing shared cron-lock plumbing or those other
+  // jobs' entries is outside this module). This tick only throws, so the
+  // skip is still logged and the tick still counts as failed to whatever
+  // is watching this promise — job_health itself is left to the
+  // cron-lock wrapper alone.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runFirstApplicationSiblingSplitSweep } = require('./first-application-sibling-split');
+      const result = await runFirstApplicationSiblingSplitSweep();
+      if (result?.skipped && result.reason !== 'lease_held') {
+        throw new Error(`First-application sibling-split sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[first-application-sibling-split] sweep tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

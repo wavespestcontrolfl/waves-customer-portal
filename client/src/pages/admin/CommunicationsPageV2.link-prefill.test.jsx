@@ -25,7 +25,7 @@ describe("buildReschedulePrefill", () => {
         url: URL,
       }),
     ).toBe(
-      `Hi PersonA, it's Waves Pest Control. Reschedule your Mon, Aug 10 Quarterly Pest Control Service visit here: ${URL}`,
+      `Hi PersonA, it's Waves. Reschedule your Mon, Aug 10 Quarterly Pest Control Service visit here: ${URL}`,
     );
   });
 
@@ -38,7 +38,20 @@ describe("buildReschedulePrefill", () => {
         url: URL,
       }),
     ).toBe(
-      `Hi PersonA, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`,
+      `Hi PersonA, it's Waves. Reschedule your Mon, Aug 10 visit here: ${URL}`,
+    );
+  });
+
+  it("says Waves once when the service name already starts with the brand", () => {
+    expect(
+      buildReschedulePrefill({
+        firstName: "PersonA",
+        day: "Mon, Aug 10",
+        serviceType: "Waves Assessment",
+        url: URL,
+      }),
+    ).toBe(
+      `Hi PersonA, it's Waves. Reschedule your Mon, Aug 10 Assessment visit here: ${URL}`,
     );
   });
 
@@ -76,7 +89,7 @@ describe("buildReschedulePrefill", () => {
         serviceType: null,
         url: URL,
       }),
-    ).toBe(`Hi Personé, it's Waves Pest Control. Reschedule your Mon, Aug 10 visit here: ${URL}`);
+    ).toBe(`Hi Personé, it's Waves. Reschedule your Mon, Aug 10 visit here: ${URL}`);
   });
 });
 
@@ -85,7 +98,7 @@ describe("buildReservicePrefill", () => {
     expect(
       buildReservicePrefill({ firstName: "PersonA", laneLabel: "pest", url: URL }),
     ).toBe(
-      `Hi PersonA, it's Waves Pest Control. Book your free pest re-service here: ${URL}`,
+      `Hi PersonA, it's Waves. Book your free pest re-service here: ${URL}`,
     );
   });
 
@@ -93,7 +106,7 @@ describe("buildReservicePrefill", () => {
     expect(
       buildReservicePrefill({ firstName: "PersonA", laneLabel: null, url: URL }),
     ).toBe(
-      `Hi PersonA, it's Waves Pest Control. Book your free re-service here: ${URL}`,
+      `Hi PersonA, it's Waves. Book your free re-service here: ${URL}`,
     );
   });
 
@@ -146,7 +159,13 @@ describe("buildCustomerLinkPrefill", () => {
   it("greets the recipient ahead of the server clause", () => {
     expect(
       buildCustomerLinkPrefill({ firstName: "PersonA", clause: `You can view your estimate here: ${URL}` }),
-    ).toBe(`Hi PersonA, it's Waves Pest Control. You can view your estimate here: ${URL}`);
+    ).toBe(`Hi PersonA, it's Waves. You can view your estimate here: ${URL}`);
+  });
+
+  it("skips the brand intro when the clause already names Waves (referral link)", () => {
+    expect(
+      buildCustomerLinkPrefill({ firstName: "PersonA", clause: `Know someone who needs pest control? Share Waves here: ${URL}` }),
+    ).toBe(`Hi PersonA! Know someone who needs pest control? Share Waves here: ${URL}`);
   });
 
   it("returns null without a first name or clause — caller falls back to the bare clause", () => {

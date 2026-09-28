@@ -77,6 +77,7 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
+ *   GATE_REPORT_NEAR_YOU=true  ("Near you" line on the LIVE LAWN report only: the lawn pest most often found among other lawn customers in the same city over the last 30 ET days, shown only at/above the NEAR_YOU_MIN_CUSTOMERS distinct-customer floor — owner ruling 2026-09-28, "lawn only"; live view only, stripped from PDF/static like planSummary; dark = report payload carries no nearYou)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
@@ -116,6 +117,7 @@
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking or reschedule of a visit starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
+ *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). Requires GATE_APPOINTMENT_PAGE ALSO on — this rides that router. Off = the SAME generic 404 the token/gate guard already gives, before the new route's own limiter runs, and the GET payload carries no prepPhotos key. Sends nothing to anyone; no client/technician surface yet.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -164,6 +166,10 @@ const gates = {
   // gateEnvValue here and in the sweep, so startup logging can never report this
   // safety gate as disabled while it is actually open ('1' / 'on').
   lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
+  // Visit prep photos (dark server foundation). Registered for
+  // logGateStatus only; the route and service read visitPrepPhotosLive()
+  // at call time below so a flip needs no redeploy.
+  visitPrepPhotos: process.env.GATE_VISIT_PREP_PHOTOS === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -497,6 +503,17 @@ const gates = {
   // any non-'true' value.
   reportPlanSummary: process.env.GATE_REPORT_PLAN_SUMMARY === 'true',
 
+  // "Near you" line on the LIVE lawn report ONLY (owner ask 2026-09-28,
+  // "lawn only"): one fixed-copy sentence naming the lawn pest most often
+  // found among other lawn customers in the same city over the last 30 ET
+  // days, shown only once at least NEAR_YOU_MIN_CUSTOMERS distinct
+  // customers had it (report-data.js) — never a count, name, or address.
+  // Additive and read-only; off = report payloads carry no nearYou key,
+  // byte-identical to today. Live view only, like planSummary above — PDF/
+  // static/sms_preview never carry it at any setting. Kill switch: unset or
+  // any non-'true' value.
+  reportNearYou: process.env.GATE_REPORT_NEAR_YOU === 'true',
+
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is
   // ready … Invoice for today's visit: {pay_url}") has been unreachable since
@@ -802,6 +819,15 @@ const gates = {
   // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
   // itself stays live either way (old links, fallback for unknown locations).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
+
+  // Day-0 review-ask contextual topic (recurring customers only): stores a
+  // grounded service topic (review-ask-topic.js) on review_sequences.ask_context
+  // for a later PR's wording to read. This PR only WRITES the
+  // topic — nothing customer-facing reads it yet. Customer-facing generated
+  // text still needs its own opt-in when that lane ships; this gate exists
+  // so the storage half ships dark first. Off = enrollPostService makes no
+  // extra DB read and no model call.
+  reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
 
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
@@ -1903,6 +1929,9 @@ const gates = {
 
   // Owner-authorized unattended blog publishing. Explicit false disables
   // competitor autopublishing; comparison/content checks remain mandatory.
+  // On, a blog still publishes only when every named competitor is on the
+  // owner list (competitor-facts OWNER_APPROVED_AUTOPUBLISH_IDS, rulings
+  // 2026-09-27 D2 + 2026-09-28).
   namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
@@ -2757,6 +2786,13 @@ const gates = {
   // disagree with request-time enforcement ('1'/'on' variants included).
   bankImport: gateEnvValue('GATE_BANK_IMPORT'),
 
+  // Plaid bank sync (2026-09-28): live Capital One checking/card feed into
+  // the Bank Import staging table (read-only Transactions product — no money
+  // movement). Nested under GATE_BANK_IMPORT; also needs PLAID_CLIENT_ID /
+  // PLAID_SECRET / PLAID_ENV and a token key (PLAID_TOKEN_KEY, falls back to
+  // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
+  plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -3208,6 +3244,27 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
+  // Retire the legacy account-level late-payment checker (dunning
+  // unification, PR 3a): with the Day 90 ladder owning every overdue
+  // invoice through its final notice, the Mon–Fri 10:10 checker is
+  // redundant with, and can double-nag alongside, the per-invoice ladder.
+  // Ships DARK: off unless exactly 'true', and only honoured while
+  // GATE_DUNNING_LADDER_90 is also live (off, the ladder ends at Day 30 and
+  // the checker is the only 60/90-day sender). This entry is for
+  // logGateStatus only: services/late-payment-checker.js reads it at call
+  // time in checkAndNotify(), and services/invoice-followups.js in
+  // latePaymentCheckerRetiredLive() (reopened-invoice revival).
+  latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
+
+  // Orphan-invoice adoption sweep (dunning unification, PR 3b): invoices sent
+  // outside the direct-send path never got an invoice_followup_sequences row.
+  // Ships DARK: off unless exactly 'true', and only runs while
+  // GATE_LATE_PAYMENT_CHECKER_OFF is honoured (the sweep never adopts beside
+  // a running checker, nor an invoice the checker ever contacted). This
+  // entry is for logGateStatus only: services/invoice-followups.js reads
+  // GATE_DUNNING_ADOPT_ORPHANS at call time inside runPending().
+  dunningAdoptOrphans: process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true',
+
   // Pre-visit balance reminder window widens from 3 to 5 days before the
   // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead
   // of the 72-hour appointment reminder. Ships DARK: off unless exactly
@@ -3425,6 +3482,16 @@ function askWavesEmergencyCheckLive() {
   return process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true';
 }
 
+// GATE_VISIT_PREP_PHOTOS read at CALL time — strict `=== 'true'`, same
+// convention as estimateConsultationOfferLive(). The one canonical reader
+// for every entry point (appointment-public.js's new POST + the GET's
+// additive prepPhotos summary, and services/visit-prep.js's eligibility
+// check) so a flip or an unset kill needs no restart. The `visitPrepPhotos`
+// gates-map entry above is for logGateStatus only.
+function visitPrepPhotosLive() {
+  return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -3441,5 +3508,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive };
 // gates 1775330914

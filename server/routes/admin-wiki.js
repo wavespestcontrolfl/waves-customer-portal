@@ -147,8 +147,7 @@ router.post('/update/:slug(*)', requireAdmin, async (req, res, next) => {
       const productName = page.title.replace(/^Product:\s*/i, '');
       updated = await wiki.updateProductPage(productName);
     } else if (page.category === 'track') {
-      const trackId = page.slug.replace('track/', '');
-      updated = await wiki.updateTrackPage(trackId);
+      updated = await wiki.updateTrackPage(wiki.trackIdFromPage(page));
     } else if (page.category === 'condition') {
       const conditionName = page.title.replace(/^Condition:\s*/i, '');
       updated = await wiki.updateConditionPage(conditionName);

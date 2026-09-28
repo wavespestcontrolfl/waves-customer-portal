@@ -1318,6 +1318,40 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
     }
+    // The publisher's owner-list chokepoint on the FIXED file — a fix commit
+    // bypasses the publisher, so the same full check runs here on the
+    // committed text (pre-push r16): the final-text comparison gate over the
+    // body AND every frontmatter text field (a rewritten hero alt), the
+    // whole-draft company extraction (the run's stored result reused when
+    // the text is unchanged), and the owner-list verdict. A check outage is
+    // transient (Codex r6): the caller retries it on the remediation's
+    // bounded transient-round budget instead of parking.
+    const stored = parseJsonMaybe(run.comparison_table_result);
+    const confirmer = deps.businessNameConfirmer || require('./business-name-confirmer');
+    const chokepointDraft = { company_extraction: stored && stored.companyExtraction };
+    try {
+      await confirmer.assertOwnerListForCommit({
+        draft: chokepointDraft, brief, frontmatter: draft.frontmatter || {}, body: draft.body,
+      });
+    } catch (err) {
+      if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
+        return { ok: false, transient: err.retryable === true, reason: `company-name check unavailable for the fix (${err.message})` };
+      }
+      if (err.code === 'BLOG_OWNER_LIST_BLOCKED') {
+        return { ok: false, reason: `fix breaks the named-competitor owner list (${err.reason}${err.offList && err.offList.length ? `: ${err.offList.join(', ')}` : ''})` };
+      }
+      throw err;
+    }
+    // Persisted with the head pin: the fixed text's extraction, its
+    // deterministic names, and the names the list cleared.
+    comparisonResult.companyExtraction = chokepointDraft.company_extraction;
+    comparisonResult.namedCompetitors = [...new Set([
+      ...(Array.isArray(comparisonResult.namedCompetitors) ? comparisonResult.namedCompetitors : []),
+      ...(Array.isArray(chokepointDraft.final_named_competitors) ? chokepointDraft.final_named_competitors : []),
+    ])].sort();
+    if (Array.isArray(chokepointDraft.competitors_approved_by_list)) {
+      comparisonResult.competitors_approved_by_list = chokepointDraft.competitors_approved_by_list;
+    }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless
     //    explicitly disabled). Corpus load is required — fail closed.
@@ -1655,7 +1689,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the caller's parent check must not have its unrelated changes blessed
     // by the post-fix re-pin (PR r16 P1).
     expectedParentSha = null,
-    onPark = null, revalidateFix = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
+    onPark = null, revalidateFix = null, revalidateOwnerList = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
@@ -1960,11 +1994,25 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
   // SEO-completion / visibility on the rewritten body). Fail or throw → park.
-  if (typeof revalidateFix === 'function') {
+  // Lane gate re-runs on the rewritten body — revalidateFix (autonomous
+  // lane: uniqueness / quality / SEO / visibility / owner list) and
+  // revalidateOwnerList (scheduler lane: the owner competitor list on the
+  // fixed text, Codex r7 on #5146). A transient failure (provider outage)
+  // spends a round on the bounded transient budget; anything else parks.
+  for (const [hook, label] of [[revalidateFix, 'lane gates'], [revalidateOwnerList, 'owner competitor list']]) {
+    if (typeof hook !== 'function') continue;
     let recheck;
-    try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    try { recheck = await hook(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    if (recheck && recheck.transient === true) {
+      // Same bounded transient-round budget as the content-gate outage above.
+      const attempt = (state.rounds || 0) + 1;
+      await saveState(db, prNumber, { branch, status: 'active', rounds: attempt });
+      const reason = `fix ${label} temporarily unavailable: ${recheck.reason}`;
+      if (atRoundLimit(attempt)) return park(db, prNumber, `${reason} (exhausted ${MAX_ROUNDS} remediation rounds)`, onPark, headSha, PARK_PRE_PUSH);
+      return { skipped: true, transient: true, reason: `${reason} (will retry)` };
+    }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
+      return park(db, prNumber, `fix failed ${label}: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
   // Body-image contract on the fixed body (scheduler lane — the autonomous
@@ -2285,6 +2333,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
   // and the content gates need.
   const row = await db('blog_posts').where({ id: post.id }).first();
   if (!row) return { skipped: true, reason: 'post gone' };
+  // Set by revalidateOwnerList for the candidate being pushed; persisted by
+  // onRemediated only after the push succeeds.
+  let fixRequiresHumanMerge = false;
   return runRemediationForPr({
     prNumber: row.astro_pr_number,
     branch: row.astro_branch_name,
@@ -2310,6 +2361,31 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // Rendered as the scheduler's file renders: publishAstro writes a flat
     // `.md` (scheduledBlogFilePathForPost), whose raw HTML blocks hide the
     // Markdown inside them — same flavour pages-poll's HEAD check applies.
+    // The owner competitor list on the FIXED text, same chokepoint as
+    // publishAstro (Codex r7 on #5146): pages-poll auto-merges this PR
+    // unless astro_requires_human_merge, so an off-list company refuses the
+    // fix, competitor content naming only the approved list stamps the row
+    // for a human merge with the pushed fix (onRemediated — sticky,
+    // claim-guarded), and a check outage is transient.
+    revalidateOwnerList: async (fixedMarkdown) => {
+      let parsed;
+      try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
+      const confirmer = deps.businessNameConfirmer || require('./business-name-confirmer');
+      let verdict;
+      try {
+        verdict = await confirmer.assertOwnerListForCommit({
+          draft: null, brief: {}, frontmatter: (parsed && parsed.data) || {}, body: String((parsed && parsed.content) || ''), humanMergeFallback: true,
+        });
+      } catch (err) {
+        if (err.code === 'BLOG_OWNER_LIST_UNVERIFIED') return { ok: false, transient: err.retryable === true, reason: err.message };
+        return { ok: false, reason: err.message };
+      }
+      // Carried with this candidate and persisted by onRemediated with the
+      // pushed fix, never before it: a candidate a later step rejects must
+      // not leave the row stamped (Codex r12 on #5146).
+      fixRequiresHumanMerge = Boolean(verdict && verdict.requiresHumanMerge);
+      return { ok: true };
+    },
     revalidateBodyImages: async (fixedMarkdown) => {
       const schedPath = String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '');
       return revalidateBodyImagesForMarkdown(fixedMarkdown, {
@@ -2339,6 +2415,9 @@ async function maybeRemediateBlogPost(post, deps = {}) {
       const pub = deps.astroPublisher || require('../content-astro/astro-publisher');
       const mirrored = typeof pub.stripManagedBodyImagesForPost === 'function' ? pub.stripManagedBodyImagesForPost(body, row) : body;
       const patch = { content: mirrored, updated_at: new Date() };
+      // Competitor content naming only the approved list waits for a human
+      // merge (sticky once stamped — revalidateOwnerList above).
+      if (fixRequiresHumanMerge) patch.astro_requires_human_merge = true;
       // Whitelisted frontmatter fixes mirror into their row columns for the
       // same reason the body does: publishAstro rebuilds frontmatter from
       // blog_posts on a republish, so an unmirrored meta_description /

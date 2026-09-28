@@ -82,7 +82,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -154,6 +154,7 @@ const CONFIRMED_ENDPOINT_WRITES = [
   'approve_seo_action',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
 ];
 
 // ── FROZEN ── by-name snapshot taken 2026-06-11 (issue #1568). Writes whose
@@ -253,7 +254,7 @@ const READ_ONLY = [
   'get_inbox_summary', 'search_emails', 'get_email_thread', 'draft_email_reply',
   'get_vendor_invoices', 'get_email_stats', 'get_blocked_senders',
   'get_stripe_balance', 'get_payout_history', 'get_payout_details', 'get_cash_flow',
-  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
+  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts', 'list_pending_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'get_estimate_detail', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_neighborhood_grass_profile',
@@ -684,6 +685,7 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
   const ENDPOINT_CALLS = [
     ['banking-tools', 'executeBankingTool', 'request_instant_payout', { amount: 50 }, { isAdmin: true }],
     ['banking-tools', 'executeBankingTool', 'request_standard_payout', { amount: 50 }, { isAdmin: true }],
+    ['banking-tools', 'executeBankingTool', 'cancel_pending_payout', { payout_id: 'po_test_synthetic' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'approve_seo_action', { action_id: '00000000-0000-0000-0000-000000000001' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'run_seo_pipeline', {}, { isAdmin: true }],
   ];
