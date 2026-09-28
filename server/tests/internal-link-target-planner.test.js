@@ -33,7 +33,7 @@ test('keeps fetching past deleted pages until the cap is filled', async () => {
   const valid = [{ page_url: 'https://www.wavespestcontrol.com/termite-control-bradenton-fl/', impressions: 100, position: 11 }];
   jest.doMock('../models/db', () => {
     const q = {};
-    for (const m of ['where', 'whereNot', 'groupBy', 'havingRaw', 'orderByRaw', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereNot', 'whereRaw', 'groupBy', 'groupByRaw', 'havingRaw', 'orderByRaw', 'limit']) q[m] = jest.fn(() => q);
     q.offset = jest.fn((o) => { q.at = o; return q; });
     q.select = jest.fn(async () => (q.at === 0 ? deleted : valid));
     const db = jest.fn(() => q);

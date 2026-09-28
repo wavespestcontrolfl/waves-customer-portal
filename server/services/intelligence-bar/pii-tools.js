@@ -22,6 +22,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   'update_property_access',
   // cancel_plan previews/results echo the customer's name and free-text note.
   'cancel_plan',
+  // repair_closeout previews name the customer and masked recipients.
+  'repair_closeout',
   'get_stop_details',
   'get_recent_completions',
   'get_unanswered_threads',
