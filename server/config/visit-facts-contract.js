@@ -208,6 +208,8 @@ const METRICS_BAND = 'server/services/service-report/metrics-band.js';
 const TREE_SHRUB_CLOSEOUT = 'server/services/tree-shrub-closeout.js';
 const ADMIN_DISPATCH = 'server/routes/admin-dispatch.js';
 const INTERIOR_REENTRY_BACKFILL = 'server/scripts/backfill-interior-reentry-advisory.js';
+const TRACE_ELIGIBILITY = 'server/services/service-report/trace-eligibility.js';
+const VISIT_TIMELINE = 'server/services/service-report/visit-timeline.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -496,6 +498,7 @@ function genericCompletionFacts(opts = {}) {
       writers: [COMPLETE_SERVICE, SCHEDULE_PAGE, INTERIOR_REENTRY_BACKFILL],
       readers: withExtra('protocol_action_scopes_completed', [
         { file: REPORT_DATA, section: 'Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (structuredActionScope / treatmentScope / normalizeAdvisoryForTreatmentScope)' },
+        { file: TRACE_ELIGIBILITY, section: 'Satellite trace / photo-mark eligibility: exterior-treatment evidence for a conditionally eligible visit' },
       ]),
       whenMissing: 'fallback',
       notes: 'Derived companion to protocol_actions_completed: each entry pairs a completed action\'s label with its scope (interior/exterior)/treatmentApplied/dryDown metadata (from the protocol definition, mirrored client-side). Never itself a rendered report line — report-data.js\'s structuredActionScope/treatmentScope is the authoritative signal that decides whether interior/exterior treatment occurred and whether the re-entry countdown is retained or zeroed. Falls back to area-text and product-based scope classification when absent.',
@@ -558,6 +561,7 @@ function genericCompletionFacts(opts = {}) {
         { file: METRICS_BAND, section: 'computeOnSiteMin (customer-visible on-site duration, primary source)' },
         { file: REPORT_DATA, section: 'visitTiming.onSiteMinutes' },
         { file: REPORT_VIEW_PAGE, section: '"Time on site" line (non-WaveGuard reports with duration display enabled)', readerSymbol: 'onSiteMinutes' },
+        { file: VISIT_TIMELINE, section: 'Visit timeline: whether a backfilled "Service completed" event shows an exact time or stays day-only' },
       ]),
       whenMissing: 'fallback',
       notes: 'Customer-visible on a non-WaveGuard report when the admin "Show duration when reliable" setting is on (ReportViewPage.jsx suppresses it entirely for WaveGuard members). SchedulePage.jsx sends the running-timer/admin-typed minutes; complete-scheduled-service.js otherwise sets it from the packet duration allocation. computeOnSiteMin (metrics-band.js) prefers this value, then visit_duration_allocation, then the raw started_at/ended_at span.',
@@ -900,7 +904,7 @@ function typedFormFacts(typedForm, overrides = {}) {
  * once any pesticide product is recorded. */
 const PESTICIDE_COMPLIANCE_CONDITIONS = Object.freeze({
   pollinator_status: 'required when an insect-family product (insecticide, miticide, IGR) is recorded (hasInsectProduct)',
-  irac_frac_logged: 'required when any insecticide, fungicide or herbicide, or a product with an IRAC/FRAC/HRAC group, is recorded (productNeedsIracFracLog)',
+  irac_frac_logged: 'required when any insecticide, fungicide or herbicide, or a product with an IRAC/FRAC/HRAC group, is recorded (needsIracFracLog)',
 });
 
 /** Every reader edge for one typed field: the generic findings list, the

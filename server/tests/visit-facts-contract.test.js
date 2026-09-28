@@ -523,17 +523,25 @@ describe('visit facts contract registry', () => {
     expect(problems).toEqual([]);
   });
 
-  test('each pesticideOnly compliance fact names its own server condition, and that predicate exists', () => {
+  test('each pesticideOnly compliance fact names the predicate its own validation branch uses', () => {
     const closeout = readRepoFile('server/services/tree-shrub-closeout.js') || '';
+    const PREDICATES = ['hasInsectProduct', 'needsIracFracLog'];
     const problems = [];
     for (const [line, def] of typedLines) {
       const cfg = PROJECT_TYPES[def.typedForm];
       for (const field of (cfg?.findingsFields || []).filter((f) => f.pesticideOnly)) {
         const fact = def.facts.find((f) => f.key === field.key);
         const reader = fact?.readers.find((r) => r.file === 'server/services/tree-shrub-closeout.js');
-        const predicate = reader && (reader.section.match(/\((hasInsectProduct|productNeedsIracFracLog)\)/) || [])[1];
-        if (!predicate) problems.push(`${line}.${field.key}: server reader does not name its own condition`);
-        else if (!closeout.includes(predicate)) problems.push(`${line}.${field.key}: ${predicate} not found in tree-shrub-closeout.js`);
+        const named = reader && (reader.section.match(new RegExp(`\\((${PREDICATES.join('|')})\\)`)) || [])[1];
+        // The validation branch that blocks on this field: the blank-line
+        // separated block holding its first pushBlock(..., '<field>').
+        const at = closeout.search(new RegExp(`pushBlock\\([^;]*'${field.key}'\\)`));
+        const branch = at < 0 ? '' : closeout.slice(closeout.lastIndexOf('\n\n', at), at);
+        const used = PREDICATES.filter((p) => new RegExp(`\\b${p}\\b`).test(branch));
+        if (!named) problems.push(`${line}.${field.key}: server reader does not name its condition`);
+        else if (used.length !== 1 || used[0] !== named) {
+          problems.push(`${line}.${field.key}: registry names ${named}, validation branch uses ${used.join(', ') || 'none'}`);
+        }
       }
     }
     expect(problems).toEqual([]);
