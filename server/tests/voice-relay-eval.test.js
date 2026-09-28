@@ -6860,6 +6860,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. El técnico debe llegar después del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. El técnico tendrá que venir después de la cena. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. La visita necesita comenzar al amanecer. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico ha de llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico habrá de llegar después del almuerzo. La oficina le llamará.',
     ]) {
       const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, qualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -6887,6 +6889,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. El técnico no tiene que llegar tras el almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. El técnico no debe llegar después del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Su solicitud tendrá que estar registrada después del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico no ha de llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Su solicitud habrá de estar registrada después del almuerzo. La oficina le llamará.',
     ]) {
       const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -7558,12 +7562,27 @@ describe('voice relay eval — named spoken checks', () => {
       'El mejorado cuesta ciento diecinueve por aplicación además del premium noventa y nueve.',
       'El mejorado cuesta ciento diecinueve por aplicación + el premium noventa y nueve.',
       'El mejorado cuesta ciento diecinueve por aplicación & el premium noventa y nueve.',
+      'El mejorado cuesta 119 por aplicación; el premium 99.',
+      'El mejorado cuesta 119 por aplicación;el premium 99.',
+      'El mejorado cuesta 119 por aplicación: el premium 99.',
     ]) {
       const coordinatedPrice = replay._internals.evaluateChecks(scenario, record({ order: [
         pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text, turn: 2 },
       ] }));
       expect([text, coordinatedPrice.find((c) => c.check === 'amount_requires_unit')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
       expect([text, replay._internals.scenarioStatus({ checks: coordinatedPrice })]).toEqual([text, 'fail']);
+    }
+    for (const text of [
+      'El mejorado cuesta 119 por aplicación: la oficina abre a las 10:30.',
+      'El mejorado cuesta 119 por aplicación: hoy es 27 de septiembre de 2026.',
+      'El mejorado cuesta 119 por aplicación: la dirección es 119 Palm Harbor Drive.',
+      'El mejorado cuesta 119 por aplicación: el código postal es 34285.',
+      'El mejorado cuesta 119 por aplicación: la oficina recibió veinte llamadas.',
+    ]) {
+      const unrelatedNumber = replay._internals.evaluateChecks(scenario, record({ order: [
+        pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text, turn: 2 },
+      ] }));
+      expect([text, unrelatedNumber.find((c) => c.check === 'amount_requires_unit')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
     }
     for (const text of [
       'El programa mejorado cuesta 119 por cada aplicación y una llamada de la oficina confirmará los detalles.',
@@ -7717,12 +7736,19 @@ describe('voice relay eval — named spoken checks', () => {
       '¿Puede aclarar eso?',
       '¿Puede explicar eso?',
       '¿Me aclara lo que dijo?',
+      '¿Me puede detallar eso?',
       '¿Me podría aclarar lo que dijo?',
       '¿Qué quiere decir?',
       '¿Qué significa eso?',
       '¿A qué se refiere?',
       'Necesito que aclare eso.',
       'Por favor, aclare lo que quiso decir.',
+      '¿Podría ser más específica?',
+      '¿Puede ser un poco más claro?',
+      '¿Podrías ser más precisa?',
+      'Por favor, sea más específico.',
+      'Necesito que sea algo más clara.',
+      'Explíquese con más detalle, por favor.',
     ]) {
       const clarification = replay._internals.evaluateChecks(scenario, record({ order: [
         { kind: 'agent', text, turn: 2 },
@@ -7740,6 +7766,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Entendido, entiendo lo que quiere decir.',
       'Entendido, sé a qué se refiere.',
       'Entendido, ya sé qué significa eso.',
+      'Entendido, puedo ser más específica si lo necesita.',
+      'Entendido, seré más clara al explicar el siguiente paso.',
+      'Entendido, fue muy específico, gracias.',
     ]) {
       const acknowledgment = replay._internals.evaluateChecks(scenario, record({ order: [
         { kind: 'agent', text, turn: 2 },

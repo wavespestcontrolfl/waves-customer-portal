@@ -3267,9 +3267,11 @@
        "\\bdecir(?:me|nos)?\\s+(?:eso|otra\\s+vez|de\\s+nuevo)\\b",
        "\u00bf\\s*(?:c[o\u00f3]mo|qu[e\u00e9])\\s+(?:dijo|dice)\\s*\\?",
        "\u00bf\\s*perd[o\u00f3]n\\s*\\?",
-       "\\b(?:(?:me\\s+)?(?:puede|podr[i\u00ed]a)\\s+(?:aclarar|explicar)(?:me|nos|lo|la)?|me\\s+(?:aclara|explica))(?:\\s+(?:eso|lo\\s+que\\s+(?:dijo|quiso\\s+decir)))?\\b",
-       "(?:^|[\u00bf.!]\\s*|\\b(?:(?<!no\\s)necesito\\s+que\\s+|por\\s+favor,?\\s+))(?:me\\s+)?(?:aclare|explique)(?:me|nos|lo|la)?\\b",
-       "(?:^|[\u00bf.!]\\s*)(?:qu[e\u00e9]\\s+(?:quiere\\s+decir|significa)(?:\\s+(?:eso|con\\s+eso))?|a\\s+qu[e\u00e9]\\s+se\\s+refiere)\\b"
+       "\\b(?:(?:me\\s+)?(?:puede|podr[i\u00ed]a)\\s+(?:aclarar|explicar|detallar)(?:me|nos|lo|la)?|me\\s+(?:aclara|explica|detalla))(?:\\s+(?:eso|lo\\s+que\\s+(?:dijo|quiso\\s+decir)))?\\b",
+       "(?:^|[\u00bf.!]\\s*|\\b(?:(?<!no\\s)necesito\\s+que\\s+|por\\s+favor,?\\s+))(?:me\\s+)?(?:acl[a\u00e1]re|expl[i\u00ed]que)(?:me|nos|lo|la|se)?\\b",
+       "(?:^|[\u00bf.!]\\s*)(?:qu[e\u00e9]\\s+(?:quiere\\s+decir|significa)(?:\\s+(?:eso|con\\s+eso))?|a\\s+qu[e\u00e9]\\s+se\\s+refiere)\\b",
+       "\\b(?:puede|podr[i\u00ed]a|puedes|podr[i\u00ed]as)\\s+(?:(?:ser|hablar)\\s+(?:(?:un\\s+poco|algo)\\s+)?m[a\u00e1]s\\s+(?:espec[i\u00ed]fic[oa]|clar[oa]|precis[oa])s?|(?:especificar|precisar)(?:me|nos|lo|la)?|dar(?:me|nos)?\\s+m[a\u00e1]s\\s+detalles)\\b",
+       "(?:^|[\u00bf.!]\\s*|\\b(?:(?<!no\\s)necesito\\s+que\\s+|por\\s+favor,?\\s+))(?:sea|s[e\u00e9])\\s+(?:(?:un\\s+poco|algo)\\s+)?m[a\u00e1]s\\s+(?:espec[i\u00ed]fic[oa]|clar[oa]|precis[oa])s?\\b"
       ],
       "onTurn": 2
      },
