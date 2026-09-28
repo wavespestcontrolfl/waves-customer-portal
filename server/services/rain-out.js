@@ -138,13 +138,14 @@ function customLinkClause(rescheduleUrl) {
 // ("Hey Sam the tech is out…"; the name must end at a space, punctuation or
 // the end, so "Hey Sam's gate…" is a sentence, not a greeting).
 // One final check covers both forms: when what is left starts the way a
-// salutation continues ("and Pat, …", "& Pat …", "Pat, and Alex, …"), the
+// salutation continues ("and Pat, …", "& Pat …", "Pat, and Alex, …",
+// "Pat, Alex, …" — a name followed by a list, not "Thanks, we moved…"), the
 // greeting addresses more than the customer and the note is sent exactly as
 // typed rather than cut mid-address. A note that was only a greeting falls
 // back to the default line.
 const NOTE_GREETING_WORD = '(?:[Hh]i|[Hh]ello|[Hh]ey|[Gg]ood (?:[Mm]orning|[Aa]fternoon|[Ee]vening))';
 const NOTE_LEADING_GREETING_RE = new RegExp(`^${NOTE_GREETING_WORD}(?:\\s+(?:there|\\p{Lu}[\\p{L}'.-]*)){0,3}\\s*[,!.:\u2013\u2014-]+(?:\\s+|$)`, 'u');
-const NOTE_CONTINUED_SALUTATION_RE = /^(?:(?:and|or|&|\+)(?![\p{L}\p{N}])|\p{Lu}[\p{L}'.-]*\s*(?:[,&+]|(?:and|or)(?![\p{L}\p{N}])))/u;
+const NOTE_CONTINUED_SALUTATION_RE = /^(?:(?:and|or|&|\+)(?![\p{L}\p{N}])|\p{Lu}[\p{L}'.-]*(?:\s*,\s*(?:(?:and|or|&)(?![\p{L}\p{N}])|\p{Lu})|\s*[&+]|\s+(?:and|or)(?![\p{L}\p{N}])))/u;
 function withoutLeadingGreeting(note, firstName) {
   const text = String(note || '');
   let stripped = text.replace(NOTE_LEADING_GREETING_RE, '');

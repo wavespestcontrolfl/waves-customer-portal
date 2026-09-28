@@ -3773,6 +3773,8 @@ describe('custom rung: the dispatcher note never re-greets the customer (owner 2
     ['Good morning Mrs. Lee - the gate was locked.', 'the gate was locked.'],
     ['Hey Sam the tech is out sick today.', 'the tech is out sick today.'],
     ['Hi Sam, Thursday works better for the crew.', 'Thursday works better for the crew.'],
+    ['Hi Sam, Thanks, we moved this appointment.', 'Thanks, we moved this appointment.'],
+    ['Hey Sam, Also, the gate code changed.', 'Also, the gate code changed.'],
   ])('drops the leading greeting: %s', async (typed, sent) => {
     expect(await noteAsSent(typed)).toBe(sent);
   });
