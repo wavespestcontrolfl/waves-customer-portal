@@ -12,7 +12,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
-import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
+import { WAVES_FDACS_LICENSE_NUMBER, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
 
 /**
@@ -807,6 +807,19 @@ export default function ProjectReportViewPage() {
                 {applicatorLine}
               </div>
             )}
+            {/* Owner ask 2026-09-27: every report links out to the public
+                Products & Safety page alongside the label-derived facts
+                above. Shared constant only. */}
+            <div style={{ fontSize: 14, lineHeight: 1.5, marginTop: 8 }}>
+              <a
+                href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: ESTIMATE_TEXT, fontWeight: 700 }}
+              >
+                See every product we use and our safety protocol
+              </a>
+            </div>
           </div>
         )}
 

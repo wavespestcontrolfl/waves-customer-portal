@@ -62,6 +62,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -3483,6 +3484,25 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
   return actions.slice(0, 3);
 }
 
+// Owner ask 2026-09-27: every service report links out to the public
+// Products & Safety page (what we apply, EPA facts, re-entry guidance)
+// alongside the per-product label facts already on the report. Shared
+// constant only — never a new hard-coded URL.
+function ProductsSafetyLink() {
+  return (
+    <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5 }}>
+      <a
+        href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{ color: B.glassNavy, fontWeight: 700 }}
+      >
+        See every product we use and our safety protocol
+      </a>
+    </p>
+  );
+}
+
 function AppliedProductsSection({ data, mode = 'live' }) {
   // Shared product-identity rule (lib/product-application.js) on EVERY
   // line, matching the PDF document and the header count: termite / rodent
@@ -3503,6 +3523,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
         <h2>Poison Control</h2>
         <PoisonControlNote data={data} titled showApplicator={data.applicationMade === true} />
+        <ProductsSafetyLink />
       </section>
     );
   }
@@ -3644,6 +3665,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           when something was actually applied, so WDO, assessment and
           monitoring-only visits never carry it (owner 2026-09-26). */}
       <PoisonControlNote data={data} listsProducts showApplicator />
+      <ProductsSafetyLink />
     </section>
   );
 }

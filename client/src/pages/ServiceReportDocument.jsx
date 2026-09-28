@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
@@ -1277,6 +1277,15 @@ export default function ServiceReportDocument({ data, token }) {
                 product prints Poison Control. The tel: link stays tappable
                 in the PDF. */}
             <DocPoisonControl data={data} listsProducts showApplicator />
+            {/* Owner ask 2026-09-27: every record of service links out to the
+                public Products & Safety page alongside the label facts
+                above. Shared constant only — a real <a> for the PDF link
+                annotation, same as the interactive-report URL below. */}
+            <p style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5, marginTop: 6 }}>
+              <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: NAVY, textDecoration: 'underline' }}>
+                See every product we use and our safety protocol
+              </a>
+            </p>
           </div>
         )}
 

@@ -65,6 +65,16 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('10 g/gal')).toBeInTheDocument();
   });
 
+  // Owner ask 2026-09-27: every service report links out to the public
+  // Products & Safety page alongside the label-derived facts.
+  it('links to the public Products & Safety page beside the label-safety facts', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const link = screen.getByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');
