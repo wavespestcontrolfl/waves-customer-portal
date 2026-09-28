@@ -143,6 +143,7 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'repair_closeout',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -570,6 +571,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         autopay_enabled: true, next_charge_date: null, termite_stations_rented: false,
       }],
     }],
+    // repair_closeout plans from getCloseoutStatus (spied below — its ~20
+    // probes are covered by closeout-status.test.js); the seeded record has
+    // no report link, so the plan has a publish step and reaches the gate.
+    ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
+      service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
+    }],
   ];
 
   test('harness sanity: the recording db actually records mutations', async () => {
@@ -603,9 +610,21 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // controlled prerequisite here; the real-DB estimate suite tests outages.
     const pricingSync = toolName === 'save_customer_estimate'
       ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
+    const closeoutStatus = toolName === 'repair_closeout'
+      ? jest.spyOn(require('../services/closeout-status'), 'getCloseoutStatus').mockResolvedValue({
+        found: true, packet: null, visit: { customerId: 'cust-1', technicianId: 'tech-1' },
+        record: { id: 'rec-closeout' },
+        summary: { closedOut: false },
+        facts: {
+          completion: { state: 'done', reason: 'record_completed' },
+          report: { state: 'pending', reason: 'no_report_artifact', posture: 'internal_only' },
+          reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
+        },
+      }) : null;
     let result;
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
+      closeoutStatus?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     }
 

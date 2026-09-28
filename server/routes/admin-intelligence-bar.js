@@ -59,6 +59,7 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
+const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
@@ -104,6 +105,7 @@ const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
 const CLOSEOUT_TOOL_NAMES = new Set(CLOSEOUT_TOOLS.map(t => t.name));
+const CLOSEOUT_REPAIR_TOOL_NAMES = new Set(CLOSEOUT_REPAIR_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
@@ -184,6 +186,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  // Closeout repair queues customer report emails / receipts — admin only,
+  // like the closeout reads it builds on.
+  ...CLOSEOUT_REPAIR_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -2001,11 +2006,12 @@ function toolsForContextUngated(context, isAdmin = false) {
   // — and only while GATE_IB_THREADS is on (the tool refuses at execution
   // time too, so a forced call fails closed with the rest of threads).
   const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
+  const closeoutRepair = isAdmin ? CLOSEOUT_REPAIR_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
     return [...base, ...SEO_QUERY_TOOLS, ...infra];
@@ -2090,6 +2096,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (CLOSEOUT_TOOL_NAMES.has(toolName)) {
     return executeCloseoutTool(toolName, input);
+  }
+  if (CLOSEOUT_REPAIR_TOOL_NAMES.has(toolName)) {
+    return executeCloseoutRepairTool(toolName, input, actionContext);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input, actionContext);
