@@ -116,9 +116,12 @@ const SPANISH_CONFIRM_CALLBACK_RE = /\bconfirm[a-záéíóúñü]*/i;
 const SPANISH_BOOKING_CONFIRM_CONTEXT_RE = /\bconfirm[a-záéíóúñü]*\s+(?:(?:la|el|su)\s+)?(?:cita|visita|solicitud|reserva|fecha|hora|horario|turno)\b|\bconfirm[a-záéíóúñü]*\s+con\s+(?:usted|el\s+cliente)\b/i;
 const SPANISH_EXPLICIT_PERSON_DESTINATION_RE = new RegExp(`\\b(?:(?:a|para|con)\\s+(?:(?:él|ella|ellos|ellas)|(?:(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR}))|al\\s+${SPANISH_PERSON_DESCRIPTOR})\\b`, 'i');
 const SPANISH_CALLER_DESTINATION_RE = /\b(?:(?:a|para|con)\s+(?:ti|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)|al\s+cliente)\b/i;
-const SPANISH_HONORIFIC_DESTINATION_RE = /\b(?:a|para|con)\s+(?:(?:el|la)\s+)?señor(?:a)?\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)|\bal\s+señor(?:a)?\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
+const SPANISH_TITLED_DESTINATION_RE = /\b(?:a|para|con)\s+(?:el|la)\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)|\bal\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
+const SPANISH_NONPERSON_TITLE_HEAD_RE = /^(?:correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|servicio|mensajería|mañana|tarde|noche|mediodía|medianoche)$/i;
 const SPANISH_POSSESSIVE_DESTINATION_RE = /\b(?:a|para|con)\s+(?:mi|tu|su|nuestro|nuestra)\s+[a-záéíóúñü]+\b/i;
 const SPANISH_BARE_DESTINATION_RE = /\b(?:a|para|con)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con|y)\b|[.,;!?]|$)/i;
+const SPANISH_COORDINATED_RECIPIENT_RE = /^\s*y\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
+const SPANISH_COORDINATED_DESCRIBED_RECIPIENT_RE = new RegExp(`\\by\\s+((?:(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR})|(?:usted(?:es)?|vosotr[oa]s?))\\b`, 'i');
 const SPANISH_NONPERSON_DESTINATION_RE = /\b(?:a|para|con)\s+(?:(?:mi|tu|su|nuestro|nuestra)\s+)?(?:que|correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|(?:el\s+)?servicio|mensajería|(?:confirm|coordin|inform|revis|comprob|habl|pon|envi|mand|entreg|llam|contact|comunic|escrib|dar|devolv|recib|hac|lleg)[a-záéíóúñü]*)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const SPANISH_RECEIVE_RE = /(?<![a-záéíóúñü])(?:recib(?:ir[a-záéíóúñü]*|id[oa]s?|ió|ieron|ía(?:s|mos|n)?|e|es|imos|en)|va(?:mos|n)?\s+a\s+recibir)(?![a-záéíóúñü])/i;
@@ -151,26 +154,48 @@ const SPANISH_ESTIMATE_ARRIVAL = 'lleg[a-záéíóúñü]*';
 const SPANISH_DELIVERY_PREDICATE_RE = new RegExp(`(?:${SPANISH_SEND_ACTION}|${SPANISH_RECEIVE_RE.source}|${SPANISH_ESTIMATE_ARRIVAL})`, 'gi');
 const SPANISH_ROLE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/gi;
 const SPANISH_CLOCK_RANGE_RE = /\b(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)(?::00)?\b[^.!?;,]{0,45}\b(?:tres|3)(?::00)?\b/i;
-const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])\b[^.!?;,]{0,35}\bt[eé]cnico)\b/i;
-const SPANISH_EXPLICIT_VISIT_OWNER_RE = /\b(?:visita|cita)\s+(?:de|del|para)\s+([^.!?;,]+?)\s+(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá](?:\s+programada)?|queda|va)\b/i;
+const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])(?![a-záéíóúñü])[^.!?;,]{0,35}\bt[eé]cnico)(?![a-záéíóúñü])/i;
+const SPANISH_EXPLICIT_VISIT_OWNER_RE = /\b(?:ventana\s+de\s+(?:llegada|la\s+visita)|visita|cita|llegada|ventana(?!\s+de\s+(?:llegada|la\s+visita)\b)|t[eé]cnico)\s+(?:de|del|para)\s+([^.!?;,]+?)\s+(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá](?:\s+programad[oa])?|queda|va|llega|viene|estar[aá])(?![a-záéíóúñü])/i;
+const SPANISH_REVERSE_TECHNICIAN_OWNER_RE = /\b(?:llega|viene|estar[aá])\s+(?:(?:el|la|su)\s+)?t[eé]cnic[oa]\s+(?:de|del|para)\s+([^.!?;,]+?)(?=\s+(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)\b)/i;
 const SPANISH_TEMPORAL_VISIT_OWNER_RE = /^(?:hoy|mañana|pasado\s+mañana|(?:el\s+)?(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)|(?:el\s+)?\d{1,2}\s+de\s+[a-záéíóúñü]+)$/i;
 const SPANISH_COORDINATED_NAMED_SUBJECT_RE = /^\s*(.+?)\s+(?=(?:(?:le|les|lo|la|los|las|te|nos|se)\s+)?[a-záéíóúñü]+(?:ar|er|ir)[aá](?![a-záéíóúñü]))/i;
+const SPANISH_COORDINATED_PREDICATE_STEM = '(?:revis|confirm|avis|prepar|verific|comprob|actualiz|registr|proces|consult|organiz|valid|anot|recopil|mir|chec|recib|atend|gestion|program|agend|solicit|envi|mand|llam|contact|comunic|escrib|inform)';
+const SPANISH_COORDINATED_PREDICATE_ENDING = '(?:o|as|a|amos|áis|an|e|es|emos|éis|en|é|aste|ó|aron|í|iste|ió|imos|ieron|aba|abas|ábamos|aban|ía|ías|íamos|ían|aré|arás|ará|aremos|aréis|arán|eré|erás|erá|eremos|eréis|erán|iré|irás|irá|iremos|iréis|irán)';
+const SPANISH_COORDINATED_STAFF_PREDICATE_RE = new RegExp(`^(?:(?:va(?:n|mos)?\\s+a\\s+${SPANISH_COORDINATED_PREDICATE_STEM}(?:ar|er|ir))|${SPANISH_COORDINATED_PREDICATE_STEM}${SPANISH_COORDINATED_PREDICATE_ENDING}|(?:hago|hace(?:mos|n)?|hizo|hicieron|tengo|tiene(?:n)?|estoy|est[aá](?:n|bamos)?|qued[oó]|queda(?:n)?|pongo|pone(?:mos|n)?|doy|da(?:mos|n)?|pido|pide(?:n)?|pidi[oó]|pidieron))(?![a-záéíóúñü])`, 'i');
+
+function spanishStaffPrefix(actor) {
+  const phrase = String(actor || '').trim();
+  const prefix = new RegExp(`^${SPANISH_STAFF_ACTOR}\\b`, 'i').exec(phrase)?.[0];
+  return prefix ? { phrase, prefix, identity: phrase.slice(prefix.length).trim() } : null;
+}
 
 function spanishActorPhraseKind(actor) {
   if (!actor) return null;
-  const phrase = String(actor).trim();
-  const staffPrefix = new RegExp(`^${SPANISH_STAFF_ACTOR}\\b`, 'i').exec(phrase)?.[0];
-  if (!staffPrefix) return spanishProperNamePhrase(phrase) ? 'other' : null;
-  const identity = phrase.slice(staffPrefix.length).trim();
-  if (/^de\s+Waves\b/i.test(identity)) return 'staff';
-  return /^(?:de|del)\b/i.test(identity) ? 'other' : 'staff';
+  const staff = spanishStaffPrefix(actor);
+  if (!staff) return spanishProperNamePhrase(actor) ? 'other' : null;
+  if (!staff.identity || /^local$/i.test(staff.identity)) return 'staff';
+  const wavesIdentity = /^de\s+Waves\b\s*(.*)$/i.exec(staff.identity);
+  if (wavesIdentity) return !wavesIdentity[1] || spanishProperNamePhrase(wavesIdentity[1]) ? 'staff' : 'other';
+  const namedStaff = /(?:t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])$/i.test(staff.prefix);
+  if (namedStaff && spanishProperNamePhrase(staff.identity)) return 'staff';
+  return 'other';
+}
+
+function spanishCoordinatedStaffKind(clause) {
+  const staff = spanishStaffPrefix(clause);
+  if (!staff) return null;
+  if (/^de\s+Waves\b/i.test(staff.identity)) return 'staff';
+  if (/^(?:de|del)\b/i.test(staff.identity)) return 'other';
+  const predicate = staff.identity.replace(/^local\s+/i, '');
+  if (SPANISH_COORDINATED_STAFF_PREDICATE_RE.test(predicate)) return 'staff';
+  return /(?:t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])$/i.test(staff.prefix) ? null : 'other';
 }
 
 function spanishCoordinatedSubject(beforeClaim) {
   const conjunction = beforeClaim.match(/\by\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\s+)?$/i);
   if (!conjunction) return null;
   const clause = beforeClaim.slice(0, conjunction.index).split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
-  const staffKind = spanishActorPhraseKind(clause);
+  const staffKind = spanishCoordinatedStaffKind(clause);
   if (staffKind) return staffKind;
   const namedSubject = SPANISH_COORDINATED_NAMED_SUBJECT_RE.exec(clause)?.[1];
   const namedKind = spanishActorPhraseKind(namedSubject);
@@ -203,14 +228,40 @@ function spanishCallerNameMatches(value, callerNames) {
   return callerNames.some((name) => String(name).trim().normalize('NFC').toLocaleLowerCase('es') === normalized);
 }
 
+function spanishCoordinatedRecipientLength(text, roleEvidence) {
+  const hasDestination = SPANISH_TITLED_DESTINATION_RE.test(roleEvidence)
+    || SPANISH_EXPLICIT_PERSON_DESTINATION_RE.test(roleEvidence)
+    || SPANISH_POSSESSIVE_DESTINATION_RE.test(roleEvidence)
+    || SPANISH_BARE_DESTINATION_RE.test(roleEvidence);
+  if (!hasDestination) return 0;
+  const coordinated = SPANISH_COORDINATED_RECIPIENT_RE.exec(text);
+  if (!coordinated) return 0;
+  const phrase = coordinated[1].trim();
+  const words = phrase.split(/\s+/);
+  const containsPredicate = SPANISH_CALLBACK_TARGET_RE.test(phrase)
+    || words.some((_, index) => SPANISH_COORDINATED_STAFF_PREDICATE_RE.test(words.slice(index).join(' ')));
+  if (containsPredicate) return 0;
+  const described = new RegExp(`^(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR}(?:\\s+(.+))?$`, 'i').exec(phrase);
+  const describedPerson = Boolean(described) && (!described[1] || spanishProperNamePhrase(described[1]));
+  const callerPronoun = /^(?:usted(?:es)?|vosotr[oa]s?)$/i.test(phrase);
+  const titledName = /^(?:el|la)\s+[a-záéíóúñü]+\s+(.+)$/i.exec(phrase)?.[1];
+  return describedPerson || callerPronoun || spanishProperNamePhrase(phrase) || spanishProperNamePhrase(titledName)
+    ? coordinated[0].length : 0;
+}
+
 function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
-  for (const destination of roleEvidence.matchAll(new RegExp(SPANISH_HONORIFIC_DESTINATION_RE.source, 'gi'))) {
-    if (!spanishCallerNameMatches(destination[1] || destination[2], callerNames)) return false;
+  for (const destination of roleEvidence.matchAll(new RegExp(SPANISH_TITLED_DESTINATION_RE.source, 'gi'))) {
+    const title = destination[1] || destination[3];
+    const name = destination[2] || destination[4];
+    if (SPANISH_NONPERSON_TITLE_HEAD_RE.test(title) || !spanishProperNamePhrase(name)) continue;
+    if (!spanishCallerNameMatches(name, callerNames)) return false;
   }
   const explicitDestinations = roleEvidence.matchAll(new RegExp(SPANISH_EXPLICIT_PERSON_DESTINATION_RE.source, 'gi'));
   if ([...explicitDestinations].some(([destination]) => !SPANISH_CALLER_DESTINATION_RE.test(destination))) return false;
   const possessiveDestinations = roleEvidence.matchAll(new RegExp(SPANISH_POSSESSIVE_DESTINATION_RE.source, 'gi'));
   if ([...possessiveDestinations].some(([destination]) => !SPANISH_NONPERSON_DESTINATION_RE.test(destination))) return false;
+  const coordinatedPerson = SPANISH_COORDINATED_DESCRIBED_RECIPIENT_RE.exec(roleEvidence)?.[1];
+  if (coordinatedPerson && !/^(?:usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)$/i.test(coordinatedPerson)) return false;
   const destinations = roleEvidence.matchAll(new RegExp(SPANISH_BARE_DESTINATION_RE.source, 'gi'));
   for (const destination of destinations) {
     if (SPANISH_CALLER_DESTINATION_RE.test(destination[0]) || SPANISH_NONPERSON_DESTINATION_RE.test(destination[0])) continue;
@@ -222,10 +273,12 @@ function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
 }
 
 function spanishVisitRangeTargetsCaller(claim, callerNames = []) {
-  const owner = SPANISH_EXPLICIT_VISIT_OWNER_RE.exec(claim)?.[1];
+  const owner = SPANISH_EXPLICIT_VISIT_OWNER_RE.exec(claim)?.[1]
+    || SPANISH_REVERSE_TECHNICIAN_OWNER_RE.exec(claim)?.[1];
   if (!owner) return true;
   if (/^(?:usted(?:es)?|(?:(?:el|la)\s+)?cliente)$/i.test(owner.trim())) return true;
   if (SPANISH_TEMPORAL_VISIT_OWNER_RE.test(owner.trim())) return true;
+  if (/^(?:Waves|(?:(?:su|la)\s+)?(?:visita|cita))$/i.test(owner.trim())) return true;
   return spanishCallerNameMatches(owner, callerNames);
 }
 
@@ -233,8 +286,14 @@ function spanishCallbackHasWavesActor(claim, match, callerNames) {
   const matchText = match[0];
   const beforeClaim = claim.slice(0, match.index);
   const before = beforeClaim.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
-  const after = claim.slice(match.index + matchText.length).split(SPANISH_PREDICATE_BOUNDARY_RE)[0];
-  const roleEvidence = `${before}${matchText}${after}`;
+  const afterClaim = claim.slice(match.index + matchText.length);
+  const afterBoundary = SPANISH_PREDICATE_BOUNDARY_RE.exec(afterClaim);
+  let afterEnd = afterBoundary ? afterBoundary.index : afterClaim.length;
+  let roleEvidence = `${before}${matchText}${afterClaim.slice(0, afterEnd)}`;
+  if (afterBoundary?.[0].trim().toLocaleLowerCase('es') === 'y') {
+    afterEnd += spanishCoordinatedRecipientLength(afterClaim.slice(afterEnd), roleEvidence);
+    roleEvidence = `${before}${matchText}${afterClaim.slice(0, afterEnd)}`;
+  }
   const explicitActor = SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE.exec(roleEvidence);
   const namedActor = spanishNamedActorKind(roleEvidence, SPANISH_NAMED_CALLBACK_SUBJECT_RE, SPANISH_NAMED_POSTPOSED_CALLBACK_SUBJECT_RE);
   const anyExplicitActor = Boolean(explicitActor) || Boolean(namedActor)
@@ -279,12 +338,7 @@ function spanishDeliveryRoleEvidence(claim, match) {
   let right = rightBoundary ? rightBoundary.index : claim.length;
   if (rightBoundary?.[0].trim().toLocaleLowerCase('es') === 'y') {
     const beforeBoundary = claim.slice(left, right);
-    const continuationRaw = claim.slice(right + rightBoundary[0].length).split(/[.!?;]/)[0];
-    const continuation = continuationRaw.trim();
-    const continuedName = continuation.split(/\s+(?:a|para|por|con)\b/i)[0];
-    if (SPANISH_HONORIFIC_DESTINATION_RE.test(beforeBoundary) && spanishProperNamePhrase(continuedName)) {
-      right += rightBoundary[0].length + continuationRaw.search(/\S/) + continuedName.length;
-    }
+    right += spanishCoordinatedRecipientLength(claim.slice(right), beforeBoundary);
   }
   const sharedSubject = sharedAuxiliary ? null : spanishCoordinatedSubject(claim.slice(0, targetAt));
   return { found: true, roleEvidence: claim.slice(left, right), sharedSubject, targetText: target[0] };
