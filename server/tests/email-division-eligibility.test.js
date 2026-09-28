@@ -209,6 +209,15 @@ describe('email-division eligibility', () => {
     });
   });
 
+  test.each([
+    ['broadcast', 'mkt.broadcast.fall'],
+    ['alert', 'lc.alert.storm'],
+  ])('RELATIONSHIP_NOT_ELIGIBLE for a %s to a CRM lead — active alone is not a customer (pre-push audit P1)', async (stream, emailKey) => {
+    const prefs = { email_enabled: true, marketing_offers: true, weather_alerts: true, weather_alert_channel: 'email' };
+    const r = await evalWith({ customer: customerRow({ pipeline_stage: 'new_lead' }), prefs }, { stream, emailKey });
+    expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
     const r = await evalWith({}, { stream: 'nurture', marketingClass: 'marketing', emailKey: 'nur.tip1' });
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
@@ -354,6 +363,14 @@ describe('email-division eligibility', () => {
     expect(r.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
     // the provenance predicate is a grouped where (admin uuid OR a manual message type)
     expect(staffQ.where).toHaveBeenCalledWith(expect.any(Function));
+    // …and a text the customer definitely never received is not contact (codex GitHub round P2):
+    // the second grouped where keeps null/in-flight statuses and drops the failed ones.
+    const grouped = { whereNotNull: jest.fn(), orWhereIn: jest.fn(), whereNull: jest.fn(), orWhereNotIn: jest.fn() };
+    Object.keys(grouped).forEach((m) => grouped[m].mockReturnValue(grouped));
+    staffQ.where.mock.calls.filter((c) => typeof c[0] === 'function').forEach((c) => c[0](grouped));
+    expect(grouped.orWhereIn).toHaveBeenCalledWith('message_type', ['manual', 'manual_reply', 'staff_reply']);
+    expect(grouped.whereNull).toHaveBeenCalledWith('status');
+    expect(grouped.orWhereNotIn).toHaveBeenCalledWith('status', ['failed', 'undelivered', 'blocked', 'canceled', 'cancelled']);
   });
 
   test('a marketing unsubscribe (marketing_newsletter group) does not block an OPERATIONAL lifecycle email but does switch the embedded pitch off (codex GitHub P1)', async () => {

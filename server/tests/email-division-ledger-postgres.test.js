@@ -50,6 +50,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
       phone: `+1941555${String(Math.floor(Math.random() * 9000) + 1000)}`,
       email: customerEmail,
       active: true,
+      pipeline_stage: 'active_customer', // a live customer — broadcast/alert never go to a bare CRM lead
     });
     await db('notification_prefs').insert({
       customer_id: customerId, email_enabled: true, marketing_offers: true,
@@ -62,6 +63,48 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     await db('notification_prefs').where({ customer_id: customerId }).del();
     await db('customers').where({ id: customerId }).del();
   });
+
+  // The library's locked handoff, as the mocked sendTemplate runs it (see the
+  // unit suite): the boundary check is awaited inside `dispatch`; its veto is
+  // a definite non-send.
+  function libraryLike({ result = { sent: true, providerAccepted: true, message: { id: randomUUID() } } } = {}) {
+    return async (args) => {
+      let dispatched = false;
+      let vetoed = null;
+      const verdict = await args.withProviderHandoff(async (database, boundaryCheck) => {
+        try {
+          await boundaryCheck({ database });
+        } catch (err) {
+          if (!err.providerBoundaryBlocked) throw err;
+          vetoed = err.reason;
+          return;
+        }
+        dispatched = true;
+      });
+      if (verdict?.ok !== true) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+      if (vetoed) return { sent: false, aborted: true, reason: 'provider_boundary_blocked' };
+      if (!dispatched) throw new Error('handoff returned without dispatching');
+      return result;
+    };
+  }
+
+  // Runs a reservation's handoff the way the library would, reporting whether
+  // the provider request would have gone out and the last fence verdict.
+  async function runHandoff(rowId) {
+    const verdicts = [];
+    const record = {};
+    const result = await Ledger.reservationHandoff(rowId, { onVerdict: (v) => verdicts.push(v) })(async (database, boundaryCheck) => {
+      try {
+        await boundaryCheck({ database });
+      } catch (err) {
+        if (!err.providerBoundaryBlocked) throw err;
+        record.vetoed = err.reason;
+        return;
+      }
+      record.dispatched = true;
+    });
+    return { result, verdicts, last: verdicts[verdicts.length - 1], dispatched: record.dispatched === true, vetoed: record.vetoed || null };
+  }
 
   function attempt(idempotencyKey, overrides = {}) {
     return Ledger.reserveWithCap({
@@ -267,7 +310,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     const otherId = randomUUID();
     await db('customers').insert({
       id: otherId, first_name: 'Synthetic', last_name: 'Other', phone: `+1941556${String(Math.floor(Math.random() * 9000) + 1000)}`,
-      email: `${otherId}@example.invalid`, active: true,
+      email: `${otherId}@example.invalid`, active: true, pipeline_stage: 'active_customer',
     });
     await db('notification_prefs').insert({ customer_id: otherId, email_enabled: true, marketing_offers: true });
     try {
@@ -350,38 +393,38 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(allowed.ok).toBe(true);
   });
 
-  test('GitHub round P1 (fence): a renewed lease is respected by the sweep; a reclaimed reservation cannot be renewed', async () => {
+  test('GitHub round P1 (fence): a renewed lease is respected by the sweep; a reclaimed reservation is refused inside the handoff', async () => {
     const first = await attempt('lease-key');
     expect(first.ok).toBe(true);
     const backdate = () => db('marketing_email_ledger').where({ id: first.row.id }).update({ reserved_at: new Date(Date.now() - 45 * 60 * 1000) });
 
-    // The owner comes back late but BEFORE anyone else reserved: its
-    // heartbeat renews the lease, so the next attempt's sweep leaves the row
-    // reserved and the outstanding guard denies that attempt.
+    // The owner comes back late but BEFORE anyone else reserved: its handoff
+    // renews the lease and dispatches, so the next attempt's sweep leaves the
+    // row reserved and the outstanding guard denies that attempt.
     await backdate();
-    const renewed = await Ledger.confirmBeforeDispatch(first.row.id);
-    expect(renewed.ok).toBe(true);
-    expect(renewed.recipientEmail).toBe(customerEmail);
+    const renewed = await runHandoff(first.row.id);
+    expect(renewed.result).toEqual({ ok: true });
+    expect(renewed.dispatched).toBe(true);
     const blocked = await attempt('lease-key-2');
     expect(blocked.ok).toBe(false);
     expect(blocked.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
     expect((await db('marketing_email_ledger').where({ id: first.row.id }).first()).status).toBe('reserved');
 
     // The owner pauses again past the lifetime; another attempt's sweep
-    // settles the row and takes the slot. The owner's resumed fence fails —
-    // it must not dispatch.
+    // settles the row and takes the slot. The owner's resumed handoff is
+    // refused before dispatch — it must not send.
     await backdate();
     const replacement = await attempt('lease-key-3');
     expect(replacement.ok).toBe(true);
-    const fenced = await Ledger.confirmBeforeDispatch(first.row.id);
-    expect(fenced.ok).toBe(false);
-    expect(fenced.reason).toBe(Eligibility.REASONS.RESERVATION_RECLAIMED);
+    const fenced = await runHandoff(first.row.id);
+    expect(fenced.result).toEqual({ ok: false, reason: Eligibility.REASONS.RESERVATION_RECLAIMED });
+    expect(fenced.dispatched).toBe(false);
     const settled = await db('marketing_email_ledger').where({ id: first.row.id }).first();
     expect(settled.status).toBe('failed');
     expect(settled.reason).toBe('abandoned_reservation');
   });
 
-  test('the fence asks email_messages first: a reserved row whose key was already accepted completes as sent (ALREADY_DISPATCHED) even when consent has since been withdrawn', async () => {
+  test('the handoff asks email_messages first: a reserved row whose key was already accepted completes as sent (ALREADY_DISPATCHED) and never dispatches again, even when consent has since been withdrawn', async () => {
     const first = await attempt('crashed-after-accept');
     const [message] = await db('email_messages').insert({
       idempotency_key: 'crashed-after-accept', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
@@ -389,8 +432,9 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     }).returning(['id']);
     try {
       await db('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: false });
-      const fence = await Ledger.confirmBeforeDispatch(first.row.id);
-      expect(fence).toMatchObject({ ok: false, reason: Eligibility.REASONS.ALREADY_DISPATCHED });
+      const fenced = await runHandoff(first.row.id);
+      expect(fenced.result).toEqual({ ok: false, reason: Eligibility.REASONS.ALREADY_DISPATCHED });
+      expect(fenced.dispatched).toBe(false);
       const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
       expect(row.status).toBe('sent');
       expect(row.email_message_id).toBe(message.id);
@@ -399,23 +443,34 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     }
   });
 
-  test('GitHub round P1 (consent at the boundary): email switched off after the reservation skips the row instead of dispatching, and frees the slot', async () => {
+  test('GitHub round P1 (consent at the boundary): email switched off after the reservation is caught by the boundary check — the row is skipped, the request vetoed, the slot freed', async () => {
     const first = await attempt('consent-key');
     expect(first.ok).toBe(true);
     await db('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: false });
-    const fence = await Ledger.confirmBeforeDispatch(first.row.id);
-    expect(fence).toMatchObject({ ok: false, reason: Eligibility.REASONS.EMAIL_SWITCH_OFF });
+    const fenced = await runHandoff(first.row.id);
+    expect(fenced.dispatched).toBe(false);
+    expect(fenced.vetoed).toBe(Eligibility.REASONS.EMAIL_SWITCH_OFF);
+    expect(fenced.last).toMatchObject({ ok: false, reason: Eligibility.REASONS.EMAIL_SWITCH_OFF });
     const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
     expect(row.status).toBe('skipped');
     expect(row.reason).toBe(Eligibility.REASONS.EMAIL_SWITCH_OFF);
   });
 
-  test('sendWithLedger end to end: one provider call under the reservation\'s key, the row completes with the message id, and retries or other keys never dispatch again', async () => {
+  test('an address changed after the reservation vetoes the request (RECIPIENT_CHANGED): the message was built for the reserved address', async () => {
+    const first = await attempt('address-key');
+    await db('customers').where({ id: customerId }).update({ email: `changed-${customerId}@example.invalid` });
+    const fenced = await runHandoff(first.row.id);
+    expect(fenced.dispatched).toBe(false);
+    expect(fenced.vetoed).toBe(Eligibility.REASONS.RECIPIENT_CHANGED);
+    expect((await db('marketing_email_ledger').where({ id: first.row.id }).first()).status).toBe('skipped');
+  });
+
+  test("sendWithLedger end to end: one provider call under the reservation's key, template and handoff; the row completes with the message id; retries or other keys never dispatch again", async () => {
     const messageId = randomUUID();
-    sendTemplate.mockResolvedValue({ sent: true, providerAccepted: true, message: { id: messageId } });
+    sendTemplate.mockImplementation(libraryLike({ result: { sent: true, providerAccepted: true, message: { id: messageId } } }));
     const args = {
       customerId, stream: 'broadcast', emailKey: 'mkt.broadcast.weekly', idempotencyKey: 'e2e-key',
-      template: { templateKey: 'mkt.broadcast.weekly', payload: { first_name: 'Synthetic' } },
+      template: { payload: { first_name: 'Synthetic' } },
     };
 
     const sent = await Ledger.sendWithLedger(args);
@@ -423,7 +478,7 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'mkt.broadcast.weekly', to: customerEmail, recipientType: 'customer', recipientId: customerId,
-      idempotencyKey: 'e2e-key', suppressionGroupKey: 'marketing_newsletter',
+      idempotencyKey: 'e2e-key', suppressionGroupKey: 'marketing_newsletter', withProviderHandoff: expect.any(Function),
     }));
     const row = await db('marketing_email_ledger').where({ idempotency_key: 'e2e-key' }).first();
     expect(row.status).toBe('sent');
@@ -437,11 +492,21 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(sendTemplate).toHaveBeenCalledTimes(1);
   });
 
-  test('sendWithLedger: a provider block settles the row as skipped with the library\'s reason and the customer\'s slot is free again', async () => {
-    sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'synthetic_block' });
+  test('GitHub round P1: sendWithLedger refuses a template that is not the judged email key before reserving anything', async () => {
+    const result = await Ledger.sendWithLedger({
+      customerId, stream: 'lifecycle', emailKey: 'lc.welcome', idempotencyKey: 'mismatch-key',
+      template: { templateKey: 'lc.winback_60', payload: {} },
+    });
+    expect(result).toEqual({ ok: false, sent: false, reason: Eligibility.REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false });
+    expect(await db('marketing_email_ledger').where({ idempotency_key: 'mismatch-key' }).first()).toBeUndefined();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test("sendWithLedger: a provider block settles the row as skipped with the library's reason and the customer's slot is free again", async () => {
+    sendTemplate.mockImplementation(libraryLike({ result: { sent: false, blocked: true, reason: 'synthetic_block' } }));
     const blocked = await Ledger.sendWithLedger({
       customerId, stream: 'broadcast', emailKey: 'mkt.broadcast.weekly', idempotencyKey: 'blocked-key',
-      template: { templateKey: 'mkt.broadcast.weekly', payload: {} },
+      template: { payload: {} },
     });
     expect(blocked).toMatchObject({ ok: false, sent: false, reason: 'synthetic_block' });
     const row = await db('marketing_email_ledger').where({ idempotency_key: 'blocked-key' }).first();

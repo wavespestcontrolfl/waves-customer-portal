@@ -294,121 +294,192 @@ test.each([
   expect(eligibleForEmail).not.toHaveBeenCalled();
 });
 
-describe('confirmBeforeDispatch — the provider-boundary fence (codex GitHub round P1s)', () => {
-  test('a still-reserved row is renewed under the customer lock, consent is re-judged from the ROW, and the cleared address is returned', async () => {
+// The library's locked handoff, as the mocked sendTemplate runs it: the
+// closure gets a `dispatch(database, boundaryCheck)`; the boundary check is
+// sendOne's providerBoundaryCheck, awaited after the library's preparation
+// and immediately before the provider request; a `providerBoundaryBlocked`
+// veto is the library's own definite non-send, and an ok:false verdict
+// before dispatch its ABORTED_BEFORE_DISPATCH.
+function libraryLike({ result = { sent: true, providerAccepted: true, message: { id: 'msg-1' } } } = {}) {
+  return async (args) => {
+    let dispatched = false;
+    let vetoed = null;
+    const verdict = await args.withProviderHandoff(async (database, boundaryCheck) => {
+      try {
+        await boundaryCheck({ database });
+      } catch (err) {
+        if (!err.providerBoundaryBlocked) throw err;
+        vetoed = err.reason;
+        return;
+      }
+      dispatched = true;
+    });
+    if (verdict?.ok !== true) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    if (vetoed) return { sent: false, aborted: true, reason: 'provider_boundary_blocked' };
+    if (!dispatched) throw new Error('handoff returned without dispatching');
+    return result;
+  };
+}
+
+// A dispatch as the library would run it: the boundary check first, a veto
+// counts as not dispatched.
+function dispatchLike(record) {
+  return async (database, boundaryCheck) => {
+    try {
+      await boundaryCheck({ database });
+    } catch (err) {
+      if (!err.providerBoundaryBlocked) throw err;
+      record.vetoed = err.reason;
+      return;
+    }
+    record.dispatched = true;
+  };
+}
+
+describe('reservationHandoff — the fence inside the provider handoff (codex GitHub round P1s)', () => {
+  test('holds the row under the customer lock, renews the lease, dispatches, and judges consent from the ROW inside the boundary check', async () => {
     eligibleForEmail.mockResolvedValue(OK_VERDICT);
     const renewQ = chain({ updateReturn: 1 });
     setQueue([chain({ first: RESERVED_ROW }), renewQ], [chain({ first: undefined })]);
-    const now = new Date('2026-09-28T12:00:00Z');
+    const verdicts = [];
+    const record = {};
 
-    const fence = await Ledger.confirmBeforeDispatch('row-1', { now });
+    const result = await Ledger.reservationHandoff('row-1', { onVerdict: (v) => verdicts.push(v) })(dispatchLike(record));
 
-    expect(fence).toEqual({ ok: true, reason: null, row: RESERVED_ROW, recipientEmail: 'sandy@example.test' });
+    expect(result).toEqual({ ok: true });
+    expect(record).toEqual({ dispatched: true });
     expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['marketing-email:cust-1']);
     expect(renewQ.calls.find((c) => c[0] === 'where')[1]).toEqual({ id: 'row-1', status: 'reserved' });
-    expect(renewQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ reserved_at: now });
-    // judged from the row's own fields, never caller arguments
+    expect(renewQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ reserved_at: expect.any(Date) });
+    // judged from the row's own fields, never caller arguments, on the handoff's transaction
     expect(eligibleForEmail).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing', emailKey: 'mkt.broadcast.fall', pestKey: null,
+      customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing', emailKey: 'mkt.broadcast.fall', pestKey: null, conn: db,
     }));
+    expect(verdicts.map((v) => v.ok)).toEqual([true, true]);
   });
 
-  test('a row the sweep already settled cannot be renewed: RESERVATION_RECLAIMED, and consent is not even asked', async () => {
+  test('a row the sweep already settled cannot be held: RESERVATION_RECLAIMED, no dispatch, consent not even asked', async () => {
     setQueue([chain({ first: { ...RESERVED_ROW, status: 'failed' } }), chain({ updateReturn: 0 })], [chain({ first: undefined })]);
-    const fence = await Ledger.confirmBeforeDispatch('row-1');
-    expect(fence.ok).toBe(false);
-    expect(fence.reason).toBe(REASONS.RESERVATION_RECLAIMED);
+    const verdicts = [];
+    const record = {};
+    const result = await Ledger.reservationHandoff('row-1', { onVerdict: (v) => verdicts.push(v) })(dispatchLike(record));
+    expect(result).toEqual({ ok: false, reason: REASONS.RESERVATION_RECLAIMED });
+    expect(record).toEqual({});
+    expect(verdicts).toHaveLength(1);
     expect(eligibleForEmail).not.toHaveBeenCalled();
   });
 
-  test('a still-reserved row whose key email_messages shows accepted is an email that went out: completed as sent, ALREADY_DISPATCHED, consent not asked', async () => {
+  test('a still-reserved row whose key email_messages shows accepted is an email that went out: completed as sent, ALREADY_DISPATCHED, no dispatch', async () => {
     const completeQ = chain({ updateReturn: 1 });
     setQueue([chain({ first: RESERVED_ROW }), completeQ],
       [chain({ first: { id: 'msg-a', sent_at: new Date('2026-09-28T11:59:00Z'), status: 'sent', provider_handoff_phase: 'started' } })]);
-    const fence = await Ledger.confirmBeforeDispatch('row-1');
-    expect(fence).toMatchObject({ ok: false, reason: REASONS.ALREADY_DISPATCHED });
+    const record = {};
+    const result = await Ledger.reservationHandoff('row-1')(dispatchLike(record));
+    expect(result).toEqual({ ok: false, reason: REASONS.ALREADY_DISPATCHED });
+    expect(record).toEqual({});
     expect(completeQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'sent', email_message_id: 'msg-a', reason: 'reconciled_from_email_messages' });
     expect(eligibleForEmail).not.toHaveBeenCalled();
   });
 
-  test('consent withdrawn since the reservation skips the row with the verdict\'s reason', async () => {
+  test("consent withdrawn since the reservation is caught at the boundary: the row is skipped with the verdict's reason and the request vetoed", async () => {
     eligibleForEmail.mockResolvedValue({ ok: false, reason: 'EMAIL_SWITCH_OFF', checks: {} });
     const skipQ = chain({ updateReturn: 1 });
     setQueue([chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), skipQ], [chain({ first: undefined })]);
-    const fence = await Ledger.confirmBeforeDispatch('row-1');
-    expect(fence).toMatchObject({ ok: false, reason: 'EMAIL_SWITCH_OFF' });
+    const verdicts = [];
+    const record = {};
+    const result = await Ledger.reservationHandoff('row-1', { onVerdict: (v) => verdicts.push(v) })(dispatchLike(record));
+    expect(result).toEqual({ ok: true }); // the library's dispatch ran; its own veto protocol carried the refusal
+    expect(record).toEqual({ vetoed: 'EMAIL_SWITCH_OFF' });
+    expect(verdicts[1]).toMatchObject({ ok: false, reason: 'EMAIL_SWITCH_OFF' });
     expect(skipQ.calls.find((c) => c[0] === 'where')[1]).toEqual({ id: 'row-1', status: 'reserved' });
     expect(skipQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'skipped', reason: 'EMAIL_SWITCH_OFF' });
   });
 
-  test('an address changed since the reservation is the one re-cleared, and is stored back on the row', async () => {
+  test('an address changed since the reservation vetoes the request: the message was built for the reserved address (RECIPIENT_CHANGED)', async () => {
     eligibleForEmail.mockResolvedValue({ ok: true, reason: null, checks: { customerEmail: 'new@example.test' } });
-    const recipientQ = chain({ updateReturn: 1 });
-    setQueue([chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), recipientQ], [chain({ first: undefined })]);
-    const fence = await Ledger.confirmBeforeDispatch('row-1');
-    expect(fence.recipientEmail).toBe('new@example.test');
-    expect(fence.row.recipient_email).toBe('new@example.test');
-    expect(recipientQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ recipient_email: 'new@example.test' });
+    const skipQ = chain({ updateReturn: 1 });
+    setQueue([chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), skipQ], [chain({ first: undefined })]);
+    const record = {};
+    await Ledger.reservationHandoff('row-1')(dispatchLike(record));
+    expect(record).toEqual({ vetoed: REASONS.RECIPIENT_CHANGED });
+    expect(skipQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'skipped', reason: REASONS.RECIPIENT_CHANGED });
   });
 });
 
 describe('sendWithLedger — the one dispatch path', () => {
   const template = { templateKey: 'mkt.broadcast.fall', payload: { first_name: 'Sandy' } };
+  const args = { customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template };
+  // reserve (5 chains) → the handoff's row read + lease renewal
+  const throughHandoff = () => [...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 })];
 
-  test('reserve → fence → sendTemplate under the reservation\'s own key/recipient/group → markSent with the message id', async () => {
+  test("reserve → sendTemplate under the reservation's own key/recipient/group/template/handoff → markSent with the message id", async () => {
     eligibleForEmail.mockResolvedValue(OK_VERDICT);
-    sendTemplate.mockResolvedValue({ sent: true, providerAccepted: true, message: { id: 'msg-1' } });
+    sendTemplate.mockImplementation(libraryLike());
     const markSentQ = chain({ updateReturn: 1 });
-    setQueue([...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), chain({ first: { customer_id: 'cust-1' } }), markSentQ], [chain({ first: undefined })]);
+    setQueue([...throughHandoff(), chain({ first: { customer_id: 'cust-1' } }), markSentQ], [chain({ first: undefined })]);
+    const callerHandoff = jest.fn();
 
     const result = await Ledger.sendWithLedger({
-      customerId: 'cust-1', stream: 'broadcast', marketingClass: 'relationship', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1',
-      // a caller cannot redirect the send, reuse another key or pick another group
-      template: { ...template, to: 'someone-else@example.test', idempotencyKey: 'other-key', suppressionGroupKey: 'service_operational' },
+      ...args, marketingClass: 'relationship',
+      // a caller cannot redirect the send, reuse another key, pick another group or supply its own handoff
+      template: { ...template, to: 'someone-else@example.test', idempotencyKey: 'other-key', suppressionGroupKey: 'service_operational', withProviderHandoff: callerHandoff },
     });
 
     expect(result).toMatchObject({ ok: true, sent: true, duplicate: false, message: { id: 'msg-1' } });
     expect(sendTemplate).toHaveBeenCalledTimes(1);
-    expect(sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+    const sent = sendTemplate.mock.calls[0][0];
+    expect(sent).toMatchObject({
       templateKey: 'mkt.broadcast.fall', payload: { first_name: 'Sandy' },
       to: 'sandy@example.test', recipientType: 'customer', recipientId: 'cust-1', idempotencyKey: 'key-1', suppressionGroupKey: 'marketing_newsletter',
-    }));
+    });
+    expect(sent.withProviderHandoff).toEqual(expect.any(Function));
+    expect(sent.withProviderHandoff).not.toBe(callerHandoff);
+    expect(callerHandoff).not.toHaveBeenCalled();
     expect(markSentQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'sent', email_message_id: 'msg-1' });
-    // consent judged twice: at the reservation and again at the boundary
+    // consent judged twice: at the reservation and again inside the handoff
     expect(eligibleForEmail).toHaveBeenCalledTimes(2);
+  });
+
+  test('GitHub round P1: a template that is not the judged email key is refused before anything is reserved', async () => {
+    setQueue([]);
+    const result = await Ledger.sendWithLedger({ ...args, emailKey: 'lc.welcome', template: { templateKey: 'lc.winback_60', payload: {} } });
+    expect(result).toEqual({ ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false });
+    expect(db).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
   });
 
   test('a denial never reaches the provider', async () => {
     eligibleForEmail.mockResolvedValue({ ok: false, reason: 'STAFF_DNC', checks: {} });
     setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: undefined })]);
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toEqual({ ok: false, sent: false, reason: 'STAFF_DNC', row: null, duplicate: false });
     expect(sendTemplate).not.toHaveBeenCalled();
   });
 
   test('a duplicate key (an earlier attempt owns the send) returns duplicate:true without dispatching', async () => {
     setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: { ...RESERVED_ROW, status: 'sent' } })]);
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toMatchObject({ ok: true, sent: false, duplicate: true, reason: 'duplicate' });
     expect(sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('a reservation the sweep reclaimed between reserve and dispatch is not sent (RESERVATION_RECLAIMED)', async () => {
+  test('a reservation the sweep reclaimed before the handoff is not sent (RESERVATION_RECLAIMED), and the library aborts', async () => {
     eligibleForEmail.mockResolvedValue(OK_VERDICT);
+    sendTemplate.mockImplementation(libraryLike());
     setQueue([...freshReservationQueue(), chain({ first: { ...RESERVED_ROW, status: 'failed' } }), chain({ updateReturn: 0 })], [chain({ first: undefined })]);
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toMatchObject({ ok: false, sent: false, reason: REASONS.RESERVATION_RECLAIMED });
-    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(eligibleForEmail).toHaveBeenCalledTimes(1); // the reservation's; the boundary check never ran
   });
 
-  test('consent withdrawn between reserve and dispatch skips the row and is not sent', async () => {
+  test('consent withdrawn between the reservation and the provider request skips the row and is not sent', async () => {
     eligibleForEmail.mockResolvedValueOnce(OK_VERDICT).mockResolvedValueOnce({ ok: false, reason: 'STREAM_FLAG_OFF', checks: {} });
+    sendTemplate.mockImplementation(libraryLike());
     const skipQ = chain({ updateReturn: 1 });
-    setQueue([...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), skipQ], [chain({ first: undefined })]);
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    setQueue([...throughHandoff(), skipQ], [chain({ first: undefined })]);
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toMatchObject({ ok: false, sent: false, reason: 'STREAM_FLAG_OFF' });
     expect(skipQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'skipped', reason: 'STREAM_FLAG_OFF' });
-    expect(sendTemplate).not.toHaveBeenCalled();
   });
 
   test('a library throw after the handoff started (EMAIL_PROVIDER_RETRY_HELD) settles the row as SENT from email_messages, never as a free slot', async () => {
@@ -417,10 +488,10 @@ describe('sendWithLedger — the one dispatch path', () => {
     sendTemplate.mockRejectedValue(held);
     const settleQ = chain({ updateReturn: 1 });
     setQueue(
-      [...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
-      [chain({ first: undefined }), chain({ first: { id: 'msg-u', sent_at: null, status: 'queued', provider_handoff_phase: 'started', updated_at: new Date('2026-09-28T12:00:01Z') } })],
+      [...freshReservationQueue(), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
+      [chain({ first: { id: 'msg-u', sent_at: null, status: 'queued', provider_handoff_phase: 'started', updated_at: new Date('2026-09-28T12:00:01Z') } })],
     );
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toMatchObject({ ok: false, sent: false, reason: 'dispatch_failed', error: held });
     expect(settleQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'sent', email_message_id: 'msg-u', reason: 'provider_handoff_uncertain' });
   });
@@ -430,23 +501,23 @@ describe('sendWithLedger — the one dispatch path', () => {
     sendTemplate.mockRejectedValue(Object.assign(new Error('template disabled'), { code: 'EMAIL_TEMPLATE_DISABLED' }));
     const settleQ = chain({ updateReturn: 1 });
     setQueue(
-      [...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
-      [chain({ first: undefined }), chain({ first: undefined })],
+      [...freshReservationQueue(), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
+      [chain({ first: undefined })],
     );
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result.reason).toBe('dispatch_failed');
     expect(settleQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'failed', reason: 'dispatch_error:EMAIL_TEMPLATE_DISABLED' });
   });
 
-  test('a library block (its own guards said no) is a skip with the library\'s reason', async () => {
+  test("a library block (its own guards said no) is a skip with the library's reason", async () => {
     eligibleForEmail.mockResolvedValue(OK_VERDICT);
-    sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'suppressed' });
+    sendTemplate.mockImplementation(libraryLike({ result: { sent: false, blocked: true, reason: 'suppressed' } }));
     const settleQ = chain({ updateReturn: 1 });
     setQueue(
-      [...freshReservationQueue(), chain({ first: RESERVED_ROW }), chain({ updateReturn: 1 }), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
+      [...throughHandoff(), chain({ first: { customer_id: 'cust-1', idempotency_key: 'key-1' } }), settleQ],
       [chain({ first: undefined }), chain({ first: undefined })],
     );
-    const result = await Ledger.sendWithLedger({ customerId: 'cust-1', stream: 'broadcast', emailKey: 'mkt.broadcast.fall', idempotencyKey: 'key-1', template });
+    const result = await Ledger.sendWithLedger(args);
     expect(result).toMatchObject({ ok: false, sent: false, reason: 'suppressed' });
     expect(settleQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'skipped', reason: 'suppressed' });
   });

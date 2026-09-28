@@ -8,14 +8,16 @@
  * leaves a `reserved` row (safe — it never counts toward the eligibility
  * caps, which read `sent` rows only), never a contact with no record of it.
  *
- * sendWithLedger is the documented entry point: reserve → prove the
- * reservation is still ours and re-run consent at the provider boundary →
- * sendTemplate under the reservation's own idempotency key → settle from the
- * outcome. The primitives (reserveWithCap, confirmBeforeDispatch, markSent,
- * markSkipped, markFailed) stay exported for a sender that must hold other
- * authority rows around the provider call, under the contract each one
- * documents — confirmBeforeDispatch immediately before sendTemplate is not
- * optional on that path (codex GitHub round P1s).
+ * sendWithLedger is the documented entry point: reserve → sendTemplate under
+ * the reservation's own idempotency key and template key, with the fence
+ * composed INTO the library's locked provider handoff (reservationHandoff:
+ * the reservation is proven ours and consent is judged again immediately
+ * before the provider request) → settle from the outcome. The primitives
+ * (reserveWithCap, reservationHandoff, markSent, markSkipped, markFailed)
+ * stay exported for a sender that must hold other authority rows around the
+ * provider call, under the contract each one documents — passing
+ * reservationHandoff as sendTemplate's withProviderHandoff is not optional on
+ * that path (codex GitHub round P1s).
  */
 
 const db = require('../../models/db');
@@ -99,7 +101,7 @@ async function settleAbandonedReservations(trx, customerId, now) {
       await completeFromMessage(trx, row.id, state);
     } else {
       // The staleness is re-checked in the UPDATE itself: a lease renewal
-      // (confirmBeforeDispatch) landing between the select above and here
+      // (reservationHandoff) landing between the select above and here
       // means the owner is alive and about to dispatch, so the row is no
       // longer stale and stays reserved. Both run under the same customer
       // lock, so this is belt-and-braces, not the primary fence.
@@ -382,79 +384,114 @@ function capReasonFor(stream, outstandingStream) {
     : REASONS.CAP_SAME_DAY;
 }
 
-/**
- * The provider-boundary fence, run IMMEDIATELY before sendTemplate (codex
- * GitHub round P1s — sendWithLedger calls it for you; a sender on the
- * primitives must call it itself and must not dispatch on `ok: false`).
- * Under the same per-customer lock the stale-reservation sweep runs under:
- *
- *   0. the delivery authority is asked first: a row whose key
- *      email_messages shows accepted — or handed off with the response
- *      lost — is an email that went out (a crash between acceptance and
- *      markSent inside the sweep's lifetime). It completes as `sent` here,
- *      answers ALREADY_DISPATCHED, and is never dispatched again; a consent
- *      change since can no longer make it read as skipped.
- *   1. the row must still be `reserved`, and its lease is renewed
- *      (reserved_at = now). A worker paused past RESERVATION_LIFETIME_MS
- *      finds its row settled by the sweep — another key may since have been
- *      reserved and sent — and gets RESERVATION_RECLAIMED: its resumed
- *      dispatch would be the duplicate marketing email the cap exists to
- *      prevent. Serializing on the lock is what closes the
- *      select/renew/settle interleaving: whichever transaction holds it
- *      first runs to completion.
- *   2. consent is judged AGAIN, from the row's own stream/key/class/pest
- *      (never caller arguments): a customer who switched email off, turned
- *      marketing offers off, moved the category to SMS, was suppressed or
- *      put on the staff do-not-contact list since the reservation is
- *      skipped here, with the verdict's reason — the reservation was a
- *      snapshot, never continuing authorization. The preference endpoints
- *      write notification_prefs only (no suppression row), so nothing
- *      downstream would catch this.
- *
- * Returns `{ ok: true, row, recipientEmail }` — the address to hand to
- * sendTemplate is the one this recheck just cleared (stored back on the row
- * if it changed) — or `{ ok: false, reason, row }`.
- */
-async function confirmBeforeDispatch(id, { now = new Date() } = {}) {
-  return db.transaction(async (trx) => {
-    const row = await trx('marketing_email_ledger').where({ id }).first();
-    if (!row) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row: null };
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${row.customer_id}`]);
-    const state = await messageStateFor(trx, row.idempotency_key);
-    if (state.kind === 'accepted' || state.kind === 'uncertain') {
-      await completeFromMessage(trx, id, state, ['reserved', 'failed']);
-      return { ok: false, reason: REASONS.ALREADY_DISPATCHED, row };
-    }
-    const renewed = await trx('marketing_email_ledger')
-      .where({ id, status: 'reserved' })
-      .update({ reserved_at: now, updated_at: trx.fn.now() });
-    if (!renewed) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row };
+// --- the provider-boundary fence --------------------------------------------
+//
+// Composed THROUGH sendTemplate's locked handoff, never checked before
+// entering the library (codex GitHub round P1s): template loading, rendering
+// and the library's own suppression work sit between a pre-flight check and
+// the provider request, and a preference change or the stale-reservation
+// sweep in that interval must still stop the send. Two steps:
+//
+//   holdReservation — inside the handoff, under the same per-customer lock
+//   the sweep runs under, held through the provider request. The delivery
+//   authority is asked first: a key email_messages shows accepted, or handed
+//   off with the response lost, is an email that went out (a crash between
+//   acceptance and markSent inside the sweep's lifetime) — the row completes
+//   as `sent`, answers ALREADY_DISPATCHED, and nothing more is dispatched.
+//   Then the row must still be `reserved` and its lease is renewed: a worker
+//   paused past RESERVATION_LIFETIME_MS finds the sweep has settled its row
+//   and another key may since have been sent — RESERVATION_RECLAIMED, no
+//   dispatch. Serializing on the lock is what closes the select/renew/settle
+//   interleaving: whichever transaction holds it first runs to completion.
+//
+//   judgeConsent — sendOne's providerBoundaryCheck, which the library runs
+//   after all of its asynchronous preparation and immediately before the
+//   provider request: eligibility is judged AGAIN from the row's own
+//   stream/key/class/pest (never caller arguments), on the same transaction,
+//   and the address the library is about to send to must be the one this
+//   recheck cleared. A customer who switched email off, turned marketing
+//   offers off, moved the category to SMS, was suppressed or put on the
+//   staff do-not-contact list since the reservation is skipped here, with
+//   the verdict's reason, and the request is vetoed through the library's
+//   own `providerBoundaryBlocked` protocol (a definite non-send) — the
+//   reservation was a snapshot, never continuing authorization.
 
-    const verdict = await eligibleForEmail({
-      customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
-      emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
+async function holdReservation(trx, id, now) {
+  const row = await trx('marketing_email_ledger').where({ id }).first();
+  if (!row) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row: null };
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${row.customer_id}`]);
+  const state = await messageStateFor(trx, row.idempotency_key);
+  if (state.kind === 'accepted' || state.kind === 'uncertain') {
+    await completeFromMessage(trx, id, state, ['reserved', 'failed']);
+    return { ok: false, reason: REASONS.ALREADY_DISPATCHED, row };
+  }
+  const renewed = await trx('marketing_email_ledger')
+    .where({ id, status: 'reserved' })
+    .update({ reserved_at: now, updated_at: trx.fn.now() });
+  if (!renewed) return { ok: false, reason: REASONS.RESERVATION_RECLAIMED, row };
+  return { ok: true, reason: null, row };
+}
+
+function skipReservation(trx, id, reason) {
+  return trx('marketing_email_ledger')
+    .where({ id, status: 'reserved' })
+    .update({ status: 'skipped', reason, updated_at: trx.fn.now() });
+}
+
+async function judgeConsent(trx, row, now) {
+  const verdict = await eligibleForEmail({
+    customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
+    emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
+  });
+  if (!verdict.ok) {
+    await skipReservation(trx, row.id, verdict.reason);
+    return { ok: false, reason: verdict.reason, row };
+  }
+  if (verdict.checks.customerEmail !== row.recipient_email) {
+    await skipReservation(trx, row.id, REASONS.RECIPIENT_CHANGED);
+    return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row };
+  }
+  return { ok: true, reason: null, row };
+}
+
+/**
+ * sendTemplate's `withProviderHandoff`, bound to a reservation — the ONE way
+ * a reservation reaches the provider (sendWithLedger passes it for you; a
+ * sender on the primitives must pass it itself). The library's own abort
+ * result does not carry the fence's reason, so `onVerdict` receives every
+ * verdict as it is made: the hold's, then the boundary check's.
+ */
+function reservationHandoff(rowId, { onVerdict = () => {} } = {}) {
+  return (dispatch) => db.transaction(async (trx) => {
+    const now = new Date();
+    const held = await holdReservation(trx, rowId, now);
+    onVerdict(held);
+    if (!held.ok) return { ok: false, reason: held.reason };
+    await dispatch(trx, async () => {
+      const verdict = await judgeConsent(trx, held.row, now);
+      onVerdict(verdict);
+      if (!verdict.ok) {
+        const veto = new Error(`marketing email reservation ${rowId} refused at the provider boundary: ${verdict.reason}`);
+        veto.providerBoundaryBlocked = true;
+        veto.reason = verdict.reason;
+        throw veto;
+      }
     });
-    if (!verdict.ok) {
-      await trx('marketing_email_ledger')
-        .where({ id, status: 'reserved' })
-        .update({ status: 'skipped', reason: verdict.reason, updated_at: trx.fn.now() });
-      return { ok: false, reason: verdict.reason, row };
-    }
-    const recipientEmail = verdict.checks.customerEmail;
-    if (recipientEmail !== row.recipient_email) {
-      await trx('marketing_email_ledger').where({ id }).update({ recipient_email: recipientEmail, updated_at: trx.fn.now() });
-    }
-    return { ok: true, reason: null, row: { ...row, recipient_email: recipientEmail }, recipientEmail };
+    return { ok: true };
   });
 }
 
 /**
  * The one dispatch path for an email-division sender. `template` is handed
- * to sendTemplate as given, except that the recipient (`to`, recipientType
- * 'customer', recipientId), the `idempotencyKey` and the
- * `suppressionGroupKey` are ALWAYS the reservation's own — the shared key is
- * what lets this ledger be reconciled from email_messages, and the group is
- * the one eligibility judged. Never throws for a delivery outcome; returns
+ * to sendTemplate as given, except that the template key IS the judged email
+ * key (a caller cannot judge an operational key and dispatch marketing or
+ * win-back content under it — codex GitHub round P1; a different
+ * `templateKey` is refused before anything is reserved), and the recipient
+ * (`to`, recipientType 'customer', recipientId), the `idempotencyKey`, the
+ * `suppressionGroupKey` and the `withProviderHandoff` are ALWAYS the
+ * reservation's own — the shared key is what lets this ledger be reconciled
+ * from email_messages, the group is the one eligibility judged, and the
+ * handoff is the fence above. Never throws for a delivery outcome; returns
  *   { ok, sent, reason, row, duplicate, message?, error? }
  *   - denied / fenced / skipped: ok false, reason = the REASONS value or
  *     the library's own block reason;
@@ -472,6 +509,9 @@ async function confirmBeforeDispatch(id, { now = new Date() } = {}) {
 async function sendWithLedger({
   customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {},
 } = {}) {
+  if (template.templateKey != null && template.templateKey !== emailKey) {
+    return { ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false };
+  }
   const reservation = await reserveWithCap({
     customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey, now,
   });
@@ -481,27 +521,31 @@ async function sendWithLedger({
   if (reservation.duplicate) {
     return { ok: true, sent: false, reason: 'duplicate', row: reservation.row, duplicate: true };
   }
-  const fence = await confirmBeforeDispatch(reservation.row.id, { now });
-  if (!fence.ok) {
-    return { ok: false, sent: false, reason: fence.reason, row: fence.row || reservation.row, duplicate: false };
-  }
-  const { row } = fence;
+  const { row } = reservation;
 
+  let fence = null;
   let outcome;
   try {
     outcome = await sendTemplate({
       ...template,
-      to: fence.recipientEmail,
+      templateKey: row.email_key,
+      to: row.recipient_email,
       recipientType: 'customer',
       recipientId: row.customer_id,
       idempotencyKey: row.idempotency_key,
       suppressionGroupKey: groupKeyFor(row.stream, row.email_key, row.marketing_class),
+      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; } }),
     });
   } catch (err) {
     await markFailed(row.id, `dispatch_error:${err.code || err.status || 'unknown'}`);
     return { ok: false, sent: false, reason: 'dispatch_failed', row, duplicate: false, error: err };
   }
-
+  // A fence refusal has already settled the row (completed from the
+  // delivery authority, or skipped with the verdict's reason); the library's
+  // abort result only says "aborted".
+  if (fence && !fence.ok) {
+    return { ok: false, sent: false, reason: fence.reason, row, duplicate: false };
+  }
   return settleDispatchOutcome(row, outcome);
 }
 
@@ -522,5 +566,5 @@ async function settleDispatchOutcome(row, outcome) {
 }
 
 module.exports = {
-  reserve, markSent, markSkipped, markFailed, reserveWithCap, confirmBeforeDispatch, sendWithLedger,
+  reserve, markSent, markSkipped, markFailed, reserveWithCap, reservationHandoff, sendWithLedger,
 };

@@ -46,6 +46,12 @@ const CONNECTED_CALL_STATUSES = ['completed', 'in-progress', 'answered', 'bridge
 // sms_log.message_type values a person types under (the Intelligence Bar
 // included) — see send-manual-customer-sms.js.
 const STAFF_SMS_TYPES = ['manual', 'manual_reply', 'staff_reply'];
+// A staff text the customer definitely never received is not human contact
+// (codex GitHub round P2): the repo's delivered-SMS readers
+// (review-ask-history.js, no-show-detector.js) treat these as unsuccessful.
+// In-flight and uncertain rows (queued, sending, sent, delivered, a null
+// status) still count.
+const FAILED_SMS_STATUSES = ['failed', 'undelivered', 'blocked', 'canceled', 'cancelled'];
 
 const REASONS = {
   CUSTOMER_MISSING: 'CUSTOMER_MISSING',
@@ -69,6 +75,13 @@ const REASONS = {
   // a provider handoff in email_messages — the email went out, or may have —
   // so the row completes as sent and nothing more is dispatched.
   ALREADY_DISPATCHED: 'ALREADY_DISPATCHED',
+  // Ledger-level (the boundary check): the customer's address changed after
+  // the reservation, so the message the library built for the reserved
+  // address goes nowhere.
+  RECIPIENT_CHANGED: 'RECIPIENT_CHANGED',
+  // Ledger-level (sendWithLedger): the template a caller asked to dispatch is
+  // not the email key eligibility judged.
+  TEMPLATE_KEY_MISMATCH: 'TEMPLATE_KEY_MISMATCH',
   CAP_WEEKLY_BROADCAST: 'CAP_WEEKLY_BROADCAST',
   CAP_WEEKLY_ALERT: 'CAP_WEEKLY_ALERT',
   CAP_SAME_PEST_14D: 'CAP_SAME_PEST_14D',
@@ -192,7 +205,15 @@ async function relationshipEligible(stream, emailKey, customer, database) {
     const row = await database('estimates').where({ customer_id: customer.id }).first('id');
     return !!row;
   }
-  return customer.active === true; // broadcast, alert
+  // Broadcast and alert audiences are CUSTOMERS (the plan's alert table:
+  // "city customers", "lawn customers"). `active` alone is true for every
+  // CRM lead and a lead is never demoted from it, so with the default-true
+  // marketing_offers a lead who once asked for a quote would receive
+  // marketing broadcasts indefinitely (pre-push audit P1). Non-customers are
+  // the nurture stream's audience (an estimate on file); the one alert whose
+  // plan audience adds lawn QUOTES (chinch week) needs an explicit allowance
+  // when that sender lands, not a blanket lead pass here.
+  return isLiveCustomer(customer); // broadcast, alert
 }
 
 async function checkCustomer(ctx) {
@@ -313,6 +334,7 @@ async function checkRecentHumanContact(ctx) {
   const staffSms = await database('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     .where((qb) => qb.whereNotNull('admin_user_id').orWhereIn('message_type', STAFF_SMS_TYPES))
+    .where((qb) => qb.whereNull('status').orWhereNotIn('status', FAILED_SMS_STATUSES))
     .where('created_at', '>', threeDaysAgo)
     .first('id');
   if (staffSms) return REASONS.RECENT_HUMAN_CONTACT;
