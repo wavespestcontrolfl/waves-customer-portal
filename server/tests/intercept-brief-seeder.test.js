@@ -10,6 +10,8 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn();
+  // claimNext runs its lock + claim in one transaction; the trx is the db.
+  fn.transaction = jest.fn((cb) => cb(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -172,7 +174,7 @@ describe('availability window gating', () => {
 
     await queue.claimNext({});
 
-    const [sql] = db.raw.mock.calls[0];
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
     expect(sql).toMatch(/AND \(available_at IS NULL OR available_at <= now\(\)\)/);
   });
 

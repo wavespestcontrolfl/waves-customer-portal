@@ -69,6 +69,291 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
+`GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
+call time, no redeploy to flip): on the pest-line service-report payload
+(`/api/reports/:token/data` and the PDF, which share `buildReportV1Data` /
+`reports-public.js`'s pest V2 composition), gate on adds an optional
+`data.pestReportV2.expectations` object with up to three keys — `rain`,
+`spiders`, `whatToExpect` — each present only when that block has something
+to say; gate off, or nothing to say, omits the whole `expectations` key —
+unlike the always-present-but-nullable `defense` / `aiSummary` / `forecast`
+siblings on `pestReportV2`, no `expectations: null` and no null child key
+is ever serialized (codex P0 #5137 round 6); server/services/service-report/
+pest-report-expectations.js is the pure builder. `pest-report-v2.js` now
+builds `expectations` BEFORE its own emptiness predicate and counts a
+non-null result among the fields that keep the section alive (codex P2
+2026-09-29 round 3): a sparse callback report — `suppressDefense`, with no
+primary move, supporting metric, AI summary, or customer concern — used to
+return `null` (no `pestReportV2` at all) before `expectations` was ever
+computed, silently discarding a recorded rain / eave-sweeping / product
+expectation exactly where it would have been the section's ONLY content.
+Such a visit's public payload now carries a minimal `pestReportV2` object
+(status/statusSummary plus `expectations`, every other field null/empty) in
+that case; gate off is unaffected (`expectations` stays `null`, so the
+emptiness predicate is byte-identical to before this fix). `rain: { lines: [string] }`
+— one line stating the trailing 7-day rainfall at the property
+(`application-conditions.js` `fetchServiceWeekWeather`; low-confidence
+city-collective readings are hedged in the wording, never presented as an
+exact number), then an OPTIONAL rain-fast clause ("...rain-fast about N
+after it dries, per the label.") that appears ONLY when
+`products_catalog.rainfast_minutes` is actually set for an applied product —
+NULL for every current pest product as of 2026-09-27, so this clause never
+fires against real data today. When MORE THAN ONE applied product carries a
+positive `rainfast_minutes` (a future catalog state), the clause states the
+LONGEST interval across them (codex P2 2026-09-29 round 2: array order is
+incidental, never a safety ranking — the customer needs the wait time that
+covers every applied product, not whichever happened to sort first). There
+is deliberately NO generic fallback sentence when the catalog has no number
+(revised 2026-09-28): a plain "rain-fast once it has dried" claim is itself
+unsupported — most labels don't state rain-fastness at all, and some
+instead say to avoid rain within a window after application — so with no
+sourced number the clause is simply absent, never a hard-coded or invented
+duration. Then, **live view only**, a forward-looking heavy-rain caveat
+sourced from the NWS forecast (`weather-forecast.js`
+`getDailyRainOutlookBounded`) — read from forecast TEXT only
+(storm/thunderstorm/heavy rain in `shortForecast`; codex P2 2026-09-29
+round 2: `rainChance` alone is the probability of ANY precipitation, not its
+intensity, and `getDailyRainOutlookBounded` exposes no quantitative amount
+to fall back on, so a high chance of light rain must never trigger this
+caveat on the bare percentage) — `reports-public.js` computes that forecast
+signal only when `mode === 'live'` AND the visit's `service_date` is RECENT
+(codex P1 2026-09-29 round 4: within the last 2 ET calendar days —
+`isRecentServiceDate`, an ET-calendar-day comparison via `etDateString`/
+`addETDays`, never 24h epoch-ms arithmetic — today, yesterday, or the day
+before; older never fetches the forecast at all), and always passes `false`
+for the PDF and any other static render or an older live reopen, so the
+PDF/static payload's `rain.lines` can only ever be the trailing-week fact +
+optional rainfast clause, never the forecast sentence, and a customer who
+reopens a weeks-old live report link never gets a heavy-rain caveat dated
+to TODAY's weather framed as being about that old treatment — a PDF/static
+render carries the trailing-week fact
+ONLY once that 7-day window has closed (`application-conditions.js` stamps
+each result with `windowClosed`; `reports-public.js`
+`settledWeekWeatherForRender` drops an open, still-accumulating week from
+every non-live render so no mid-window rain total is ever baked into a
+cached document — the rain block is simply absent until the window closes,
+and — codex P2 2026-09-28 round 5 — the LIVE page withholds it too: an open window is served from the forecast endpoint, whose current-day value includes hours that have not happened yet, so no render describes predicted rain as observed); a second line may add an ants-after-rain expectation, but
+ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
+rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
+the higher 1" bar) or the same live-only forecast signal fires — never on
+the calendar month alone, and never when there is no rain data at all. That
+second line's WORDING is itself gated (owner ruling 2026-09-28, revised
+codex P1 2026-09-29 rounds 2–3): "trails ... usually mean the colony
+is moving through the treated band" is a TREATMENT claim and requires the
+SAME confirmed exterior/perimeter application evidence the `whatToExpect`
+pyrethroid barrier sentence below requires (an explicit, non-inferred
+`perimeter_spray`/`broadcast_spray` method, or an `applicationArea` chip
+that the CONTROLLED classification — `shared/treatment-area-scopes.json`,
+the same source `report-data.js`'s own interior/exterior scope reads —
+places in its `exterior` list, matched by EXACT chip key after a comma
+split and normalization, never a substring/regex match: an earlier
+unanchored `entry points?` alternative matched the controlled INTERIOR
+chip "Interior entry points" too, since it never anchored on the
+"Interior" prefix) on a product whose class is `non_repellent` or
+`pyrethroid` — an ant bait, roach gel, or IGR is never a perimeter band
+either, regardless of where it was placed. An unrecognized or free-text
+area string never qualifies, fail closed. No applications at all
+(inspection/sweep-only visit), an interior-only application, or unknown
+method/area all fall back to a treatment-neutral sentence (rain pushes ants
+indoors; text us if activity persists) that states the same honest
+biological fact without claiming a treatment is responsible. The
+treated-band claim, and the ant/colony-specific non-repellent what-to-expect
+line, additionally require an application the technician TAGGED for ants
+(the structured `targets` list, word-bounded match on "ant"/"ants" — codex
+P1 2026-09-28 round 4): a non-repellent applied for roaches only, or the
+auto-seeded pest mix on a visit with no ant target, gets pest-neutral
+transfer wording instead. Ant bait keeps its ant wording (the product is
+an ant bait by definition). The spider
+card's LOCATION wording ("around the eaves and entry points") requires a
+recorded action that names the eaves/soffit; a generic web action such as
+"Removed accessible webs from the recorded exterior areas." opens the card
+but gets location-neutral wording ("the webs we could reach on the
+exterior") — codex P2 2026-09-28 round 5. The same
+predicate feeds the `EXPECTATIONS` grounding section below; that path is
+structurally incapable of proving perimeter evidence (its product list is
+deduped by catalog product, not by application) and so always gets the
+neutral wording, never a stronger claim than the deterministic card itself
+would make with the same missing evidence. The pest week's rain reading is
+**FROZEN AT FIRST RENDER** (codex P0 2026-09-28, refined codex P1
+2026-09-29 rounds 3–4 — the SAME pin the lawn water balance above uses,
+for the identical reason): `report-data.js`'s `resolvePestWeekWeather` /
+`resolvePestWeekWeatherForBuild`, called from INSIDE `buildReportV1Data`
+itself, is the ONE canonical resolution every caller shares — the direct
+PDF route's pre-render pass, `pdf-queue.js`'s pre-render pass, AND the
+browser's own independent live `/data` fetch all call `buildReportV1Data`.
+`pestWeekWeatherPendingReason` (public, top-level, sibling of the boolean)
+says WHY: `open_window` (time-dependent — `pdf-queue.js` defers the job to
+the next ET midnight, reason `pest_week_weather_unsettled`),
+`no_coordinates` (a legacy record the geocoder backstop may still fill —
+also deferred, `pest_week_weather_no_coordinates`), or `unavailable` /
+`unfrozen` (a provider outage, a fetch timeout or a failed freeze — TRANSIENT,
+reason `pest_week_weather_unavailable`, which takes the queue's normal
+5/30/240-minute failure retry ladder instead of waiting for midnight; codex
+P2 2026-09-28 round 5). A record whose completion-time identity snapshot has
+FROZEN `mapCenter` (even as null) can never regain coordinates, so its
+missing coordinates are PERMANENT and cacheable, not pending. Reports the
+Pest V2 composer excludes — cockroach-family typed reports, or
+`PEST_REPORT_V2` off — never resolve weather at all (no fetch, no pin, never
+uncacheable over weather). The lookup is OPT-IN (codex P2 2026-09-28 round 4, `pestWeekWeather: true`
+in `buildReportV1Data`'s options): only the `/data` response builder
+(which also serves the direct PDF route) and `pdf-queue.js` pass it; every
+other caller — e.g. the public `/:token/map.svg` handler, which renders no
+expectations — skips the resolution entirely (no fetch, no pin write, and
+`pestWeekWeatherUncacheable` stays false), so a cold provider outage can
+never hold a request that has no use for the weather. Live requests bound
+the lookup at 1.2 s; PDF pre-renders stay unbounded.
+The first successful render freezes the settled week onto
+`service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
+atomic conditional UPDATE guarded on the key's absence — no preceding
+read, exactly like the lawn freeze); every later reader — a pre-render
+preflight OR a live view, in either order — replays the SAME persisted
+value. This is what makes `pestWeekWeatherUncacheable` sound: an earlier
+design fetched the week INDEPENDENTLY in each of the three call sites (a
+preflight racing its own short deadline in one process invocation cannot
+know what the browser's own fetch, in a SEPARATE request, will resolve
+moments later — a successful preflight followed by a browser-side timeout
+would cache a PDF that disagrees with what the browser actually rendered);
+the pin removes that divergence entirely, since there is no longer a
+separate fetch anywhere to disagree with the render.
+`pestWeekWeatherUncacheable` is a public, top-level boolean
+`report-data.js` attaches directly to the object `buildReportV1Data`
+returns (sibling of `pestReportV2`, which is composed later in
+`reports-public.js`'s wrapper — so the marker survives even when
+`pestReportV2` itself composes to nothing), TRUE whenever the gate is on,
+either the visit has NO coordinates yet (codex P2 2026-09-28 round 4:
+that state is PENDING, not permanent — the hourly geocoder backstop fills
+null customer/service-location coordinates, the same `no_coordinates`
+rule the lawn water balance uses — so nothing is fetched but nothing is
+cached either) or a fetch was attempted and the result is not both SETTLED (`windowClosed === true`) AND POPULATED
+(`rainInches != null`) AND successfully FROZEN — an open window, a
+provider outage disguised as a "settled" empty reading
+(`fetchServiceWeekWeather`'s own fallback can legitimately return
+`{ rainInches: null, windowClosed: true }` for a geocoded property when
+every source misses), an unexpected fetch exception, and a freeze write
+that could not be persisted (or read back) are all treated alike — never
+cacheable, since a retry (of the freeze, or simply the window closing) can
+recover any of them and the render only shows "no rain block" because the
+data is missing, not because none exists. The raw provider numbers
+(`rainInches`, `dailyRain`, ...) that feed `expectations.rain` are
+server-internal only, carried from `buildReportV1Data` to the caller
+solely through the same opt-in `expectationFactsOut` out-param
+`moa_group`/`rainfast_minutes` already use — never attached to the object
+the function returns, so nothing beyond the boolean marker and the
+customer-facing `rain.lines` sentence documented above reaches the public
+payload. **LIVE requests only** are additionally bounded to a short
+(~1200ms) deadline on the resolver call — `resolvePestWeekWeatherForBuild`
+— so a slow provider never holds a customer's page load; on a timeout the
+request gets the SAME `{ unavailable: true }` sentinel a fetch exception
+produces, and the underlying resolution keeps running in the background
+(never cancelled) and still freezes the real answer once it settles — the
+timed-out request is never itself the one writing a freeze, so it can
+never persist a wrong or partial answer. A background PDF/static
+pre-render pass (the direct route or `pdf-queue.js`) is not a live UX
+concern and stays UNBOUNDED, matching the lawn water balance's own
+equivalent fetch exactly (no deadline there either). Both PDF
+cache-decision sites (the direct `/:token` route and the queued renderer
+in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
+object `buildReportV1Data` returns and skip storing under the stable
+`-pex1` key when it is set, so a later render — once the window closes or
+the provider recovers — is what gets cached, not a permanent "no rain
+block" copy. This flag rides the JSON payload the same way
+`lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
+cache-eligibility marker, not visit data.
+`spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
+non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
+2026-09-28, revised: a spider-targeted product does NOT by itself establish
+that eaves were treated — the tech may have tagged it while applying it
+somewhere else entirely) is a recorded COMPLETED eave/web/soffit protocol
+action; no such action recorded → no spider section at all, regardless of
+any spider-targeted product. `whatWeDid` / `expectation` / `nextStep` are
+ALWAYS one of two fixed combinations: (1) the action was recorded but no
+spider-labeled pyrethroid residual (from the explicit `whatToExpect`
+product-name map below) was also applied, OR was applied with no evidence
+tying it to the eaves — de-web-only wording, no treatment claim ("We
+knocked down webs around the eaves and entry points.") and an expectation
+that never says "the residual we applied"; (2) the action was recorded AND
+a product tagged for spiders that also classifies `pyrethroid` in the
+explicit map was applied WITH evidence it reached the eaves/soffit area
+(owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
+applied anywhere is not enough — the application's own recorded area must
+be the EXACT controlled chip key "Eaves / soffit" or "Eaves / soffits"
+(`shared/treatment-area-scopes.json`; there is no "overhang" chip, so
+nothing else stands in for it — matched by exact key, never a substring),
+or the visit separately recorded a genuine `treatmentApplied: true` eave
+action, never just the sweep-only action that gates the section in the
+first place) → combined wording ("We
+knocked down webs and treated the eaves and entry points where spiders
+build.") with a residual-backed expectation — even here, the eaves-treated
+claim rests on recorded, structured evidence, never on the product tag
+alone and never on free text. Neither combination ever interpolates a raw
+completed protocol-action label. Raw protocol-action labels
+(`server/services/service-report/report-data.js`'s
+`completedProtocolActionLabels` / `completedProtocolActionEntries` — the
+latter keeps each entry's `treatmentApplied` for the residual-evidence check
+above) are internal tech/protocol vocabulary and are SERVER-INTERNAL ONLY:
+`reports-public.js` computes them directly from the DB-joined `service` row
+for this one gated builder call and they are never attached to `data`/the
+object `buildReportV1Data` returns, so no public report payload — `/data`,
+the PDF, `/map.svg`, or any other render — carries a `protocolActionLabels`
+field or any completed-action label text, regardless of the gate.
+`whatToExpect: { lines: [string] }` — up to 3 de-duplicated, honest lines
+keyed to product class, resolved through an EXPLICIT, CLOSED map keyed by
+the exact catalog product name only (owner ruling 2026-09-28, revised:
+active_ingredient / moa_group / category inference was replaced after 2
+rounds of misclassification — e.g. it would have called an Advion Ant Bait
+Gel a roach product via the shared "bait" category). Currently mapped:
+Taurus SC, Alpine WSG → non-repellent; Atticus Talak (the catalog's
+canonical `products_catalog.name` — migration
+20260712100000_catalog_label_rate_backfill.js) AND the longer "Atticus
+Talak 7.9 F" display spelling several fixtures use, Demand CS,
+Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
+(owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
+cracks/voids, never a surface barrier, so it never shares the pyrethroid
+barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
+Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
+explicitly mapped to no class. A product NOT in this map gets no line —
+fail closed, never guessed; extending the map to a new product requires an
+owner-verified name, never reintroduced inference. The pyrethroid barrier
+sentence additionally requires structured application evidence (an EXPLICIT
+`method` of `perimeter_spray` / `broadcast_spray`, or an `applicationArea`
+chip the controlled classification — `shared/treatment-area-scopes.json`'s
+`exterior` list — places there, matched by EXACT chip key after a comma
+split and normalization, never a substring/regex match, codex P1 2026-09-29
+round 3) that the application was exterior — an inferred (not explicitly
+recorded) method is treated as unknown, never assumed exterior; an
+unrecognized or free-text area string never qualifies either, fail closed;
+when the method/area is unknown or indicates an interior application, the
+report uses different, non-barrier wording for the SAME product class
+rather than silently asserting the claim. Never a "guarantee"
+or "eliminate" claim (screened through the existing `validateCustomerCopy`
+banned-copy guard). The what-to-expect facts (never the rain block, never
+the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
+into the AI report writer's grounding context
+(`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
+so generated copy never contradicts the deterministic blocks — that
+grounding text is a prompt input, not part of any customer-fetchable
+payload. The grounding carries NO rain or ants-after-rain lines at all
+(codex P1 2026-09-28 round 4): the writer runs at completion, the same day
+as the visit, when the trailing 7-day window is by definition still
+accumulating, so any total would be a partial reading baked permanently
+into saved summary text while the PDF deliberately withholds that same
+number until `windowClosed` — only the product-class what-to-expect lines
+ground the writer; that caller has no per-application method/area data (its product
+list is deduped by catalog product, not by application), so it always
+falls back to the non-barrier pyrethroid wording rather than assuming a
+barrier — the same fail-closed default, never a contradiction with the
+deterministic card. The grounding never resolves weekly weather for the visit (no
+serviced-parcel lookup, no pin read) — rain is a render-time card only. `moa_group` and `rainfast_minutes` (the catalog facts
+that drive this classification) are SERVER-INTERNAL ONLY (codex P0
+2026-09-28): they are never present on `data.applications[].product` in any
+render (gate on or off, every service line) — `report-data.js`'s
+`buildReportV1Data` hands them to the caller solely through an opt-in
+`expectationFactsOut` out-param that is never attached to the object the
+function returns, the same "server-internal, never on `data`" contract
+`completedProtocolActionLabels` uses.
+
 Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
 unless exactly `true`, read at startup). On, the LIVE service-report payload
 (`/api/reports/:token/data`, the only caller that opts in with
@@ -97,6 +382,32 @@ token. `stripLiveOnlyScheduleFields` also
 deletes it from every non-live render (PDF, static, sms_preview), the same
 staleness rule as `nextAppointment`. No new route and no write; auth, headers
 and rate limits are unchanged.
+
+Report near-you line (owner ask 2026-09-28, "lawn only"):
+`GATE_REPORT_NEAR_YOU` (off unless exactly `true`, read at startup). On, the
+LIVE service-report payload (`/api/reports/:token/data` only — the one caller
+that opts in with `nearYou: true`; the `/ask` Q&A build and every other build
+neither read nor carry it) may carry `nearYou: { city, pest }` on a LAWN report
+only: the lawn pest most often recorded among OTHER lawn customers in this
+report's own service city over the last 30 ET days. A visit's city is the one
+its own report shows: the frozen `reportIdentitySnapshot` city when the record
+has one, else the stamped service address city, else the customer's (the
+report query's `COALESCE(ss.service_address_city, customers.city)`), so a
+customer who later moved never carries old findings to the new city; compared
+trimmed and case-blind. Records count only when completed, performed
+(not inspection-only, customer-declined or incomplete) and customer-visible;
+the pest comes only from each visit's closeout form snapshot
+(`structured_notes.formObservations`, server-allowlisted at completion), matched
+exactly to a definite-live-pest observation — never from `service_findings`
+titles, which can be free text — and is shown as a fixed customer noun
+(`LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS`).
+A pest is named only once at least 3 distinct customers
+(`NEAR_YOU_MIN_CUSTOMERS`) had it — the privacy floor, so one household's
+problem is never broadcast; ties go to the label that sorts first; below the
+floor the field is omitted. `city` echoes the report's own city; there is no
+count, customer name, or address in it. `stripLiveOnlyScheduleFields` also
+deletes it from every non-live render (PDF, static, sms_preview). No new route
+and no write; auth, headers and rate limits are unchanged.
 
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
@@ -165,7 +476,21 @@ transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To
-reconciliation and collects normally again),
+reconciliation and collects normally again). TERMITE RENEWAL ELIGIBILITY
+(2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
+termite annual-plan RENEWAL successor's prepay invoice, found through its own
+`annual_prepay_term_id` link, is ever judged; every other invoice is
+byte-identical and costs no extra query): a renewal pay link the customer
+already holds stops collecting once the prior year's plan no longer backs the
+renewal — the prior plan was cancelled, refunded, or had its dates moved, the
+account was deleted, the renewal payment is under dispute, or the renewal's
+payment grace has closed. `/setup`, `/quote`, `/finalize` and `/update-amount`
+then answer `409 { error, renewalNotPayable: true }` with a customer-safe
+message (no plan, parent or reason detail rides the payload), and `/finalize`
+additionally runs its charge UNDER the renewal gate with the same check
+repeated inside it, so a prior-plan change either waits for the charge or is
+seen by it. `/confirm`, receipts and `invoice.pdf` are unchanged — recording a
+payment Stripe already collected always remains available),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -563,6 +888,165 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+
+"Your upcoming visits" card (owner-approved 2026-09-27): on the same
+`/api/reports/:token/*` payload, `GATE_REPORT_UPCOMING_VISITS` (dark, off
+unless exactly `true`, read at call time) adds an optional
+`upcomingVisitsCard: { visits: [{ serviceType, scheduledDate, windowStart }] }`
+— LIVE VIEW ONLY (`opts.mode === 'live'`; absent from the PDF, `/map.svg`,
+static, and sms_preview renders, and stripped by the shared
+`stripLiveOnlyScheduleFields` the same way `nextAppointment` already is, so a
+reschedule after a cached PDF render never fossilizes into the download),
+AND only for a caller that opts in with `upcomingVisitsCard: true` (codex
+round-5 P2, the same `composeOffers`/`planSummary` shape): `/api/reports/:token/data`
+is the only caller that opts in; the `/ask` Q&A build (which still needs
+`mode: 'live'` for its own `nextAppointment` context) neither reads nor pays
+for the card's paged scheduled_services scan.
+Lists every one of the customer's upcoming scheduled visits across ANY
+program (pest, lawn, tree & shrub, mosquito, termite, rodent, …), not just
+the report's own service line (`nextAppointment` above is unchanged and
+stays same-line-first with a cross-line fallback), for the next 90 days,
+capped at 6, excluding cancelled/completed/rescheduled rows (same
+disclosable-status allow-list as `nextAppointment`: pending/confirmed/
+en_route/on_site). Scoped to THIS report's property only, resolved through
+the shared `server/services/service-report/visit-property-scope.js`
+module (the SAME resolver `cross-sell.js`'s report-identity proof uses —
+codex round-4 P1: a parallel per-caller reimplementation of this chain had
+missed a case in each of three earlier rounds): the linked visit's own
+stamped `service_address_*` is authoritative when present; else its
+`scheduled_services.property_id`'s resolved `customer_properties` address;
+else its `scheduled_services.source_estimate_id`'s resolved
+`estimates.address` — `customer_properties.js` deliberately leaves an
+estimate-backed row unanchored (no `property_id`), so this third leg is
+the only way such a row resolves to its actual (possibly secondary)
+premises; an unlinked/legacy report, or a linked visit carrying NONE of
+the three, falls back to the already-COALESCEd customer-mirror address
+ONLY once this account is PROVEN to have a single premises, the primary
+one (`customerHasOnlyPrimaryPremises`, also moved into
+`visit-property-scope.js` — codex round-5 P1: a multi-property account's
+own legacy no-evidence row is exactly as likely to be the OTHER property,
+and the mirror alone cannot tell the two apart). That proof fails CLOSED
+on any unreadable witness — a second premises the account has ever had
+(active or since deactivated), a query failure, or (this card's own
+strict option, `{ unresolvedFails: true }`, codex round-6 P1) an
+UNRESOLVED witness elsewhere on the account: an unstamped
+`scheduled_services` row whose `property_id` names no `customer_properties`
+row, or whose `source_estimate_id` names no `estimates` row or one with no
+address, fails the proof outright rather than being skipped as "not
+evidence either way" — it might just as easily BE the second premises this
+card would then wrongly disclose. Any of these refuses the mirror
+outright, and the one unscoped row is excluded rather than shown.
+`cross-sell.js` calls the same proof WITHOUT this strict option (its
+unchanged, pre-existing behavior): there, an unresolved witness is treated
+as not being evidence of a second premises and the proof continues past it.
+Every address key folds in `address_line2` (the unit — a normalized
+"Apt 4"/"#4"/"Unit 4" all key identically), so a condo/apartment
+building's units never compare equal (a unit on one side and none on the
+other is a NON-match, not a fallback match), and a key with neither city
+nor zip at all is rejected as unprovable rather than compared. PRIVACY
+(P1 2026-09-28, extended round-4 and round-5): a report whose visit IS
+property/estimate-linked but whose `property_id` or `source_estimate_id`
+cannot be RESOLVED (row deleted, bad link, or the address it names has no
+locality) fails CLOSED — the card is omitted entirely, never falling back
+to the customer mirror (which would name a DIFFERENT property on a
+multi-property account). Only a report carrying NONE of stamp/
+`property_id`/`source_estimate_id`, on an account PROVEN single-premises,
+may use the mirror fallback. Each candidate row is resolved through the
+SAME shared module before being compared to the report's property, so a
+multi-property account's report can never list another property's visits.
+Gate off (default): the field is absent and the payload is byte-identical
+to today.
+
+Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
+rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
+from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
+off unless exactly `true`, read at call time; inert unless
+`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
+without it) layers a priority on top of the existing `crossSell` offer
+ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
+On, the payload's existing `crossSell` object may additionally carry
+`reason` — one short, honest, reason-tied FIXED sentence rendered above
+the CTA button, one per branch below, never composed from or naming a
+location or severity the structured field itself doesn't state (roach:
+"We noted roach activity during this visit — our cockroach control
+program is a focused two-treatment cleanout."; rodent: "We noted signs of
+rodent activity during this visit — …" ("during this visit", never
+"today" — reopening an older report recomputes these reasons from the
+same visit's saved snapshot, so a same-day claim would misdate historical
+findings as current); season-mosquito: "Mosquito season is here in SW Florida — …")
+— and `serviceKey` may resolve to two targets the ladder itself never picks:
+`rodent_bait` and `mosquito`, priced through the SAME
+`buildCustomerPricingResponse` estimator path and per-application-only
+serialization rule as the existing ladder targets. Their prompts/labels
+live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
+deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
+vocabulary the portal offer card and the photo-triage lane
+(`buildPortalOffer`, `buildOfferForFamily`) also read by
+`requestedTargetKey` — those two surfaces are unaffected by this gate and
+still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
+may also resolve to `cockroach_control` — the one target priced OUTSIDE
+the estimator (a fixed one-time catalog price; `mode` is always
+`quote_cta`, `option` is always `null`) — gated on the live `services`
+catalog row (`is_active`, `!is_archived`, `customer_visible`,
+`booking_enabled`) and on the customer having no already-open
+(pending/confirmed/en_route/on_site) visit linked to it.
+
+Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
+visit's typed report snapshots (`service_records.service_data`'s
+`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
+`server/services/project-types.js` is the one source of truth for these
+keys/options) — free-text parsing of `service_findings`
+(category/title/detail/recommendation) and any negation handling over it
+was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
+rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
+observation, text no regex could reliably separate from an actual finding.
+`technician_notes` was never read (raw notes must never egress on a
+customer surface) and still isn't. An UNTYPED (general pest) visit carries
+no typed snapshot at all — no findings signal, season/ladder decides. The
+surviving structured checks, each "unknown/empty value → no signal": roach
+— a COMPANION (never the primary — a primary cockroach report means the
+customer is already mid-program today) typed `cockroach` snapshot's
+`activity_level` is anything other than `'None observed'`; rodent — a
+`rodent_trapping` snapshot's `captures` count is > 0, OR a
+`rodent_bait_station` snapshot's `bait_consumption` is anything other than
+`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
+`'Yes'` (primary or companion, no exclusion). There is no termite findings
+signal (removed 2026-09-28, same round as the ladder change below — a
+termite reading has no production consumer left). Mosquito has NO findings
+branch at all (removed 2026-09-28, a prior round: a mention count
+in short structured text could not be tied reliably to genuine severity)
+— it is offered ONLY by season (America/New_York May–Oct) or the
+unchanged ladder. Season (May–Oct mosquito) runs only when no findings
+branch fired. Termite is never offered from a report (owner ruling
+2026-09-28: report offers push the three pillars — pest, lawn, tree &
+shrub — so the ladder is `pest_control → lawn_care → tree_shrub`, a
+customer owning all three gets no card, and the former termite findings
+and swarm-season branches are gone). The SAME owner ruling applies to
+EVERY offer surface, not only the report ("three pillars is fine for now,
+yes applies there too"): the portal offer card and the photo-triage lane
+(`buildPortalOffer` / `buildPortalPurchaseBasis` / `resolvePortalOfferTarget`,
+and `buildOfferForFamily`) share the identical `OFFER_LADDER` and
+`pickOfferTarget` — a customer owning pest, lawn, AND tree & shrub gets no
+ladder-picked offer on any surface, and the portal's one-tap termite
+purchase path is gone with it. An explicit `requestedTargetKey: 'termite'`
+(e.g. a photo-triage identification of termite activity) is a DIFFERENT,
+deliberate code path — never the ladder's own pick — and is unaffected:
+`OFFER_PROMPTS`/`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite`
+so that request still prices normally. Never offers a family the customer
+already owns — reuses the ladder's own property-scoped ownership + plan-rate
+evidence, including the `termite_bait` → `termite` ownership mapping (this
+also covers a typed rodent/termite report's OWN identity — a
+`rodent_trapping` visit's own family is already counted owned by the
+ladder's existing report-identity corroboration, so no separate
+primary-exclusion rule is needed for rodent/termite the way roach's is). A
+recent, uncorroborated termite report identity still fails the WHOLE report
+card closed (the ambiguity guard's own `GUARDED_OWNERSHIP_FAMILIES` set
+keeps termite even though it left `OFFER_LADDER` — the same
+both-answers-wrong doctrine as a recent pest/lawn/tree identity). Gate off
+(default):
+`crossSell` is byte-identical to today's unchanged ladder pick and carries
+no `reason` field.
+
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
 `structuredObservationsProvenance: "completion_form_snapshot"`. Live reports
@@ -1729,6 +2213,41 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
+(`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
+picture iMessage/SMS/email crawlers show under a texted or emailed customer
+link; `server/index.js` renderHTML writes the matching `og:image` into each
+customer page's `<head>`, and `og:title`/`twitter:title` read just "Waves").
+Mounted OUTSIDE the `/api/` limiter with its own 120/min per-key limiter
+(the `/l` budget), and BEFORE the global body parsers (it reads no body).
+Fixed cards change only the preview tags, never the page's own `<title>`.
+**Only the service report card looks its token up**
+(owner 2026-09-28): `/og/report/:token.jpg` (and the `/report/` and
+`/recap/` pages' head tags, both already behind the report limiter) resolve
+through report-page-metadata's lookup with its `typedReportDelivery`
+suppression — 32-hex format gate before any DB read, read-only, never
+URL-decoded, a failure logs only the error code (knex messages embed the
+token). Its privacy headers precede the limiter. **Deliberate exception to
+"generic 404":** an unknown, malformed or suppressed link returns the
+default card, 200, byte-identical to `/og/default.jpg` with the same
+headers — still no existence oracle, and the crawler shows a branded card.
+**Every other kind is a fixed card** (`/og/<kind>.jpg`, `FIXED_CARDS`:
+project report, appointment, reschedule, prep, invoice, receipt, statement,
+estimate, tracking, assessment, …): it reads nothing from the database,
+carries no token, and is served `public, max-age=3600` without privacy
+headers. A fixed card whose surface is dark (`GATE_APPOINTMENT_PAGE`,
+`payerStatements`, re-service self-serve, `leadInspectionLinkLive`,
+`recruitingComms`) resolves to the default card, matching that surface's
+uniform 404; an unregistered or inherited name gets the default too.
+Payload is a 1200x630 JPEG of an eyebrow, headline and subline: never a
+price, amount, name, address, phone, email, tech name or note, and
+estimates stay generic (no services or prices). Routes match the raw path
+(regex captures that can't hold `%`), so no parameter is URL-decoded and a
+malformed encoding can't reach the JSON error handler; any other `/og` path
+(another kind with a token, a bad token, no `.jpg`) is the default card.
+The file segment two levels under `/og` is always redacted from request
+logs (`redact-request-url.js`). No query parameters are read. The render cache is keyed by card content, never by
+token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
@@ -2281,7 +2800,7 @@ reader and hands a third party an identity they were never told. Do not
 reintroduce it. window_end is never returned — customer surfaces quote
 start + 2h only, and the range is derived server-side with
 `arrivalWindowRange()` so the page cannot drift from the reminders.
-The ONLY write is the confirm: a status-only `pending -> confirmed`
+The confirm write is a status-only `pending -> confirmed`
 transition guarded on the status AND the date/window that were read, plus
 a `job_status_history` row. The client posts the slot it rendered and the
 server confirms ONLY that slot — the office bulk reschedule moves
@@ -2289,7 +2808,127 @@ date/window while LEAVING the row pending, so a status-only guard would
 bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
-than duplicates).
+than duplicates.
+`POST /:token/photos` (dark server foundation, `GATE_VISIT_PREP_PHOTOS`,
+layered on `GATE_APPOINTMENT_PAGE` — this route rides the same router, so
+BOTH must be on): lets the customer attach up to 3 photos + a short note to
+THIS specific upcoming visit before the tech arrives (`server/services/
+visit-prep.js` owns storage). Guard order: the router-level gate/noStore/
+60-per-min limiter, then `visitPrepPreParserGuard` — ONE function mounted
+twice: by `server/index.js` on the `/api/public/appointment` prefix AHEAD
+of the shared `express.json`/`urlencoded` parsers (so a dark or malformed
+photos request 404s before a parser can answer an oversized or malformed
+`application/json` body with its own 413/400), and again as the route's
+own first step. It applies the SAME `TOKEN_RE` format check the GET uses,
+the sub-gate, and a multipart-only body rule (the route accepts nothing
+else, so a JSON / urlencoded / other body never reaches the shared parsers
+even for a well-formed token it cannot yet know is unknown — Codex r4 P0);
+any of them failing answers the identical generic 404, BEFORE
+this route's own limiter runs (the house dark-`GATE_*` contract: a probe
+never sees a revealing 429). THEN a dedicated 6-per-min limiter keyed by
+the shared `/64`-collapsing `unauthenticatedAuthLimitKey` (never the raw
+IP), THEN `loadByToken` (additionally selects `s.property_id`) with the
+same missing-row/deleted-customer 404, THEN eligibility — the SAME generic
+404 again (an ineligible valid token is deliberately indistinguishable from
+an unknown one: this route has no 409 for a past, inactive, one-time, or
+office-owned visit; the GET already tells a legitimate holder whether
+photos can be added) unless the SAME
+grouped/ungrouped state the GET computes is `'upcoming'`, the token's
+membership is known (not `visitUnknown`), `customers.active === true`, the
+visit is recurring-lineage (a one-time visit is out of scope for this lane),
+and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
+it yet — same invariant the confirm write enforces; the eligibility RULE
+is one function, `visitPrepEligibility`, that both this pre-check and the
+late recheck below feed — only the way `state` is READ differs, see below).
+The photo CAP is deliberately NOT pre-checked before the body is parsed: it
+is decided only under the lock, after dedupe (below), so a retry of an
+already-stored submission on a visit that is now full still answers the
+idempotent 200 rather than a misleading "limit reached". ONLY THEN does `multer`
+(memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field size, 10 parts)
+parse the body — a multer size limit is 413, every other multer limit is
+400, both customer-safe and generic. Each file's declared mimetype AND its
+magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree on
+JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF goes through `convertHeicToJpeg` first
+(converter saturation is a retryable 503 `PREP_CONVERTER_BUSY`, a genuine
+conversion failure a 400 `PREP_INVALID_PHOTO`); then EVERY accepted image
+is fully decoded and re-encoded as JPEG through `sharp` (25 MP input
+ceiling, longest edge bounded to 2560 px, EXIF orientation applied,
+metadata dropped) — a payload sharp cannot decode end to end (a truncated
+file, header-only bytes) is refused 400 `PREP_INVALID_PHOTO` rather than
+stored as something the technician cannot render; an unrecognized `topic`/`locationOnProperty`
+is its own code, `PREP_INVALID_FIELD`. Within-request duplicates (the same
+photo attached twice in one submission) fold to one candidate before upload.
+
+The write is NEVER trusted to the pre-check alone. `uploadFunnelPhotoToS3`
+runs first — storage must succeed for the request to succeed (a failure is
+503 `PREP_STORAGE_UNAVAILABLE`, no rows written, any already-uploaded
+objects for that request deleted) — and ONLY THEN does the write take the
+CANONICAL stop lock (`visit-groups.js`'s `lockStopForRow`, the same
+advisory lock every other stop writer takes, retried up to twice on a
+concurrent stop move before answering the generic 404) and re-run,
+under that lock, on FRESH state: (1) a late recheck, run ENTIRELY on the
+write's own transaction connection (never the global pool — a locked
+writer already holds a connection plus the stop's advisory lock, and a
+second pool checkout from inside that hold is how concurrent uploads
+exhaust the pool), and holding ROW locks as well as the advisory lock:
+the token row is taken `FOR UPDATE` first, then reloaded with
+`loadByToken(token, trx)`, and a grouped visit's live members are read
+with `visit-groups.js`'s `openMembers(trx, visit_id, { forUpdate: true })`
+(the confirm path's own locked-membership read) — status writers such as
+`transitionJobStatus` update `scheduled_services` WITHOUT the advisory
+lock, so only the row locks make an en-route tap or a cancellation wait
+for this transaction instead of landing between the recheck and the
+insert — and judged by the SAME pure rules the page applies
+(`membersOneStop`, `groupedState`, `pageState` precedence) — NOT via
+`visitServicesFor`, which resolves member labels through other
+global-pool services the recheck needs none of — and the result feeds the
+same `visitPrepEligibility` rule; refused (the generic 404, nothing
+written) if the row is gone, its
+customer deleted, it is no longer the row the pre-check saw, or it is no
+longer eligible (a status change — en route, cancelled, a grouped sibling
+moving the stop's state — landing between the two reads); (2) the dedupe
+check itself, by `sha256` of the STORED bytes per `scheduled_service_id` —
+run HERE, not before upload, so two concurrent identical submissions can
+both upload and the loser is recognized under the lock rather than racing
+the unique index; a photo found to already exist is dropped and its
+just-uploaded object deleted — an all-duplicate resubmit stores no photo and
+answers 200 (idempotent), but any non-empty `note`/`topic`/`locationOnProperty`
+it carries is written onto the submission that owns the first duplicate
+photo (there is no separate note endpoint, so a corrected note must not be
+silently dropped); (3) the real cap re-count (`capReached()` again,
+with the actual number of new photos), which a GROUPED visit computes
+across every `scheduled_services` row CURRENTLY sharing the stop's
+`visit_id` — membership is resolved fresh from `scheduled_services` at
+count time, never from the `visit_id` stored on a submission (visit-groups
+attaches, detaches and regroups rows without rewriting old submissions, so
+that column is a point-in-time record only) — so two members racing to
+add photos to the same stop can never together exceed the cap, photos added
+before a visit was grouped still count against the stop, and a member moved
+out of a stop takes its photos with it — the loser
+gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
+photos would push it past 6) and its uploaded object is deleted. `property_id`,
+`customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
+row, never the pre-lock read and never the request body. The response is
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201
+when a submission was created, 200 on the idempotent duplicate-only case —
+and NEVER carries a photo URL, an S3 key, the note, or any customer
+identity: the token is shared with whoever received the visit text, so
+nothing submitted through it is ever shown back. The counts in the
+response are computed INSIDE the write transaction — no post-commit read
+can turn a durably stored submission into a 500 that invites a retry.
+Only the route's OWN
+errors (visit-prep.js's `prepError`, marked internally so the route can
+tell them apart) are ever echoed to the caller; any other error — a library
+error that happens to carry a `statusCode` included — goes to the generic
+error handler, never its raw message. Sends NOTHING to anyone (no
+SMS/email/push/admin alert) and never touches `scheduled_services.status`,
+date, window, or technician. Additive on the existing GET: gate on adds a
+top-level `prepPhotos: { eligible, photoCount, photosRemaining }` (the same
+shape, computed whether or not the visit is currently eligible, so the
+client can render the right empty/full state); gate off, the key is absent
+and the GET payload is byte-identical to before this lane. A prepPhotos
+lookup failure on GET fails soft — the key is omitted and a warning is
+logged, never a 500).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
@@ -2707,7 +3346,19 @@ generic 404 — their pages never mount the ask bar. Only write: an
 content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
-keyword-routed as before, so older clients are unaffected. This route and the
+keyword-routed as before, so older clients are unaffected. The service-report
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
+LLM) writes one `service_report_events` row, `report_question_asked`, with
+metadata `{ question_length, topic }` — never the question text or the answer
+(owner ruling 2026-09-28: topic only). `topic` is the answer family the
+question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
+`findings`, `next_steps`, `next_visit`, `applied`, `results`, `summary`,
+`unrouted`); the response body is unchanged. Only this route writes that
+event: the public `POST /api/reports/:token/events` refuses
+`report_question_asked` with the same 400 as an unknown event, so a token
+holder cannot add question rows the engagement tools would count. A staff
+reader's question (the report page sends the portal JWT, verified exactly like
+the `/data` staff read) is answered the same way but writes no row. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
 response, including CORS preflights, the global `/api` limiter's 429 and

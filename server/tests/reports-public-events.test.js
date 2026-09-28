@@ -116,6 +116,37 @@ describe('POST /reports/:token/events', () => {
     });
   });
 
+  test('refuses report_question_asked: only the /ask route records questions (codex P2 on #5167)', async () => {
+    const serviceRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'service-1',
+        customer_id: 'customer-1',
+        report_template_version: 'service_report_v1',
+      }),
+    });
+    const eventInsert = chain();
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return serviceRead;
+      if (table === 'service_report_events') return eventInsert;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventName: 'report_question_asked',
+          metadata: { question_length: 24, topic: 'watering' },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Unknown report event' });
+      expect(eventInsert.insert).not.toHaveBeenCalled();
+    });
+  });
+
   test('a whitespace-padded cross_sell_requested still hits the low action limiter (PR r11 P1)', async () => {
     // The handler TRIMS the event name before matching, so the limiter's
     // skip() must trim identically — comparing the raw body value let
@@ -178,6 +209,7 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
   function clickDb({ openRequest }) {
     const updates = [];
     const inserts = [];
+    const selects = [];
     const q = (table) => {
       const chain = {
         leftJoin: () => chain,
@@ -188,7 +220,13 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
         orderBy: () => chain,
         whereNotIn: () => chain,
         forUpdate: () => chain,
-        select: () => chain,
+        // GATE_REPORT_CROSS_SELL_V2 parity regression (audit finding
+        // cross-sell.js:567): captured so a test can assert the click
+        // path's SELECT for 'service_records as sr' still carries
+        // sr.service_data — the render path is service_records.* (every
+        // column) and a findings-driven V2 offer needs it, so a future
+        // trim of this column list must fail a test, not a customer tap.
+        select: (...cols) => { selects.push({ table, cols }); return chain; },
         returning: async () => [{ id: 'req-new' }],
         update: async (patch) => { updates.push({ table, patch }); return 1; },
         insert: (row) => {
@@ -209,7 +247,7 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
       };
       return chain;
     };
-    return { q, updates, inserts };
+    return { q, updates, inserts, selects };
   }
 
   const clickBody = {
@@ -289,6 +327,20 @@ describe('cross-sell click: identical resubmit vs material refresh (PR r12 P2)',
     expect(triggerNotification).toHaveBeenCalledWith('bundle_quote_requested', expect.objectContaining({
       refreshed: false,
     }));
+  });
+
+  // GATE_REPORT_CROSS_SELL_V2 parity regression: the click-path row must
+  // carry the same inputs the render path's row does, or a findings-driven
+  // offer recomputes differently on tap (service-report-cross-sell-v2.test.js
+  // proves the composer-level failure mode this locks the SELECT for).
+  test('the click-path SELECT for service_records as sr includes service_data', async () => {
+    const { q, selects } = clickDb({ openRequest: null });
+    db.mockImplementation(q);
+
+    expect(await click('1010101010101010f123456789abcdef')).toBe(200);
+    const sr = selects.find((s) => s.table === 'service_records as sr');
+    expect(sr).toBeTruthy();
+    expect(sr.cols).toContain('sr.service_data');
   });
 });
 
@@ -560,13 +612,71 @@ describe('planSummary opt-in ("Your plan" card, GATE_REPORT_PLAN_SUMMARY)', () =
 
   test('the option defaults to OFF and is forwarded to the builder', () => {
     expect(src).toMatch(/planSummary = false,/);
-    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary,\n/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,[^\n]*\bplanSummary,[^\n]*\n/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {
     const optIns = src.match(/planSummary: true/g) || [];
     expect(optIns).toHaveLength(1);
     expect(src).toMatch(/pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true,/);
+  });
+});
+
+describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UPCOMING_VISITS)', () => {
+  // Same shape as composeOffers/planSummary (codex round-5 P2): the paged
+  // scheduled_services scan runs only for the /data render, the one caller
+  // that shows the card. The Q&A endpoint builds in live mode for report
+  // context (nextAppointment etc.) and never reads upcomingVisitsCard.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF and is forwarded to the builder', () => {
+    expect(src).toMatch(/upcomingVisitsCard = false,/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,[^\n]*\bupcomingVisitsCard,\n/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/upcomingVisitsCard: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true,/);
+  });
+
+  test('the Q&A call site does NOT opt in', () => {
+    // The ask handler's call, verbatim — it must stay scan-free.
+    expect(src).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+  });
+});
+
+describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
+  // Same shape as planSummary/upcomingVisitsCard: the city-wide lawn-findings
+  // read runs only for the /data render, the one caller that shows the line.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF and is forwarded to the builder', () => {
+    expect(src).toMatch(/nearYou = false,/);
+    expect(src).toMatch(/pinnedLawnHistoryIdentity,[^\n]*\bupcomingVisitsCard,\n\s*nearYou,\n/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/nearYou: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,/);
+  });
+});
+
+describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () => {
+  // The service-report /:token/ask handler records what the answer covered,
+  // never what the customer typed.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('records exactly question_length and topic — never the question text or the answer', () => {
+    const m = src.match(/recordServiceReportEvent\(service, 'report_question_asked', 'public_report', req, \{([\s\S]*?)\}\);/);
+    expect(m).toBeTruthy();
+    const keys = m[1].replace(/\/\/.*$/gm, '').split(',').map((k) => k.trim().split(':')[0].trim()).filter(Boolean);
+    expect(keys.sort()).toEqual(['question_length', 'topic']);
+  });
+
+  test('the topic comes from the same routing that produced the answer', () => {
+    expect(src).toMatch(/const \{ answer, topic \} = routeServiceReportQuestion\(\{/);
   });
 });
 

@@ -1409,15 +1409,19 @@ describe('L1: pest engine reads only the pest section', () => {
     expect(text).not.toContain('turfgrasses');
   });
 
-  test('listEntries({ section: "pest" }) equals the unfiltered list for the real (today all-pest) catalog data', () => {
+  test('listEntries({ section: "pest" }) excludes L1b\'s 119 plant/condition entries from the real catalog data', () => {
     // The real, un-mocked loader — not the FIXTURE this file mocks
-    // `../services/species-catalog` to. No plant/condition entries exist
-    // yet, so filtering to the pest section must change nothing.
+    // `../services/species-catalog` to. L1b landed 119 draft plant/condition
+    // entries (72 plant + 47 condition); filtering to the pest section must
+    // exclude every one of them, leaving the pre-existing 239 pest entries
+    // untouched.
     const real = jest.requireActual('../services/species-catalog');
     const all = real.listEntries();
     const pestOnly = real.listEntries({ section: 'pest' });
-    expect(pestOnly.map((e) => e.slug).sort()).toEqual(all.map((e) => e.slug).sort());
+    expect(all.length).toBe(358);
     expect(pestOnly.length).toBe(239);
+    expect(pestOnly.every((e) => real.sectionOf(e) === 'pest')).toBe(true);
+    expect(all.filter((e) => real.sectionOf(e) !== 'pest')).toHaveLength(119);
   });
 
   // Codex #5143 r1 P2: filtering the PROMPT to pest-section entries doesn't

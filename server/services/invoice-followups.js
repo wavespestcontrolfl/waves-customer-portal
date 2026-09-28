@@ -1,4 +1,4 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+const { billingLegDeliveryState, billingLegContactTime, originalBillingContactArgs } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -63,6 +63,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
+// Delivered statuses, the whitelist late-payment-checker.js's own candidate
+// query uses: a sequence is only revived on an invoice the customer has.
+const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 
 // A dunning touch fires on its first ELIGIBLE send day or not at all (owner
 // ruling 2026-08-04, after the 07-29→08-04 cron outage left 17 sequences due).
@@ -134,10 +137,12 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
-async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit) {
+async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
   if (result?.ok === true) {
-    return explicit && typeof ContactLedger.markDelivered === 'function'
-      && !await ContactLedger.markDelivered(ledger);
+    const originalContact = originalBillingContactArgs(result);
+    originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
+    return (explicit || originalContact.length > 0) && typeof ContactLedger.markDelivered === 'function'
+      && !await ContactLedger.markDelivered(ledger, ...originalContact);
   }
   if (followupEmailOutcomeUncertain(result, explicit)) return true;
   // A retryable refusal before the provider never reached the customer. An
@@ -363,7 +368,7 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
  * Create (or re-hydrate) a sequence row for a newly-issued invoice.
  * Call this from the invoice-send flow.
  */
-async function scheduleForInvoice(invoiceId) {
+async function scheduleForInvoice(invoiceId, { adoption = false } = {}) {
   // Cheap unlocked pre-checks: a missing / non-schedulable / payer-billed
   // invoice never arms a sequence, and none of those verdicts can be flipped
   // by an ownership change (a merge moves customer_id, not status or payer).
@@ -413,6 +418,9 @@ async function scheduleForInvoice(invoiceId) {
     // Existing-row check moved under the lock too: it and the INSERT must be
     // one atomic decision, or two concurrent arms race the unique(invoice_id).
     const existing = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+    // Orphan adoption only arms an invoice that has NO row: one that gained
+    // a row since the sweep selected it belongs to whoever armed it.
+    if (adoption && existing) return null;
     if (existing) {
       // Unvoid → resend lifecycle re-arm (Codex #3493 r2): voidInvoice
       // terminally stops the sequence with the SYSTEM stop
@@ -546,24 +554,238 @@ async function scheduleForInvoice(invoiceId) {
     if (activePlan) return null;
 
     const customer = await trx('customers').where({ id: invoice.customer_id }).first();
-    const onAutopay = await customerOnAutopay(customer, { db: trx });
+    if (adoption) {
+      // An invoice whose customer has unresolved ACH failures is left for a
+      // person (Codex #5202 r1 P1): a fresh autopay hold would wait for
+      // webhooks that may never come, and seeding the counter from
+      // ach_failure_log double-counts a failure the webhook has logged but
+      // not yet passed to handleAutopayFailure. Checked for EVERY adoption,
+      // before autopay eligibility (Codex #5202 r2 P1): failures that
+      // committed since selection can have already moved the customer off
+      // autopay, which would otherwise arm an ACTIVE row. The webhook's own
+      // per-customer lock (stripe-webhook.js 'ach.escalation') fences the
+      // read: a failure logged before it is seen here; one still in flight
+      // waits for this row to commit, and its handleAutopayFailure then
+      // counts it against this row as usual.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['ach.escalation', String(invoice.customer_id)],
+      );
+      if (await unresolvedAchFailureCount(invoice.customer_id, trx)) {
+        logger.info(`[invoice-followups] adoption left invoice ${invoiceId} for a person: customer has unresolved ACH failures`);
+        return null;
+      }
+    }
+    // Adoption fails closed on an unreadable payment method (Codex #5202 r1
+    // P1): the default swallows the read error as "not on autopay" and would
+    // arm an ACTIVE row for an enrolled customer. The throw rolls this
+    // transaction back, so no row exists and the next sweep retries.
+    const onAutopay = await customerOnAutopay(customer, { db: trx, ...(adoption ? { failClosed: true } : {}) });
 
     // Anchor the cadence to when the invoice went out. Falls back through
     // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
     // or older rows without sent_at populated) still get scheduled correctly.
     const anchorAt = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
-    const nextAt = computeNextTouchAt(anchorAt, 0);
+    // Adoption lands the row on its first step whose send day has not
+    // passed, already re-dated past this run, in this same insert (Codex
+    // #5202 r1 P2: a separate deferral write could fail after the stale
+    // skip and leave the first reminder to be passed over next run).
+    const landing = adoption ? adoptionLanding(anchorAt, new Date()) : { stepIndex: 0, nextAt: computeNextTouchAt(anchorAt, 0) };
+    if (!landing) {
+      logger.info(`[invoice-followups] adoption left invoice ${invoiceId} for a person: every ladder step has passed`);
+      return null;
+    }
+    const nextAt = landing.nextAt;
 
     const [row] = await trx('invoice_followup_sequences').insert({
       invoice_id: invoiceId,
       customer_id: invoice.customer_id,
       status: onAutopay ? 'autopay_hold' : 'active',
-      step_index: 0,
+      step_index: landing.stepIndex,
       next_touch_at: onAutopay ? null : nextAt,
       is_autopay_held: !!onAutopay,
     }).returning('*');
     return row;
   });
+}
+
+// GATE_DUNNING_ADOPT_ORPHANS, read at call time (strict 'true'): an invoice
+// sent outside the direct-send path (the only caller of scheduleForInvoice)
+// never got a sequence row and was left to the legacy late-payment-checker.js
+// alone. The sweep only runs once that checker is retired
+// (latePaymentCheckerRetiredLive): beside a still-running checker every
+// adoption is a same-morning handoff (#5179 drew seven audit rounds of
+// them). Off, or the checker still running: byte-identical — runPending
+// never looks for orphans (the adopt gate alone logs one warning).
+function adoptOrphanInvoicesLive() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && latePaymentCheckerRetiredLive();
+}
+
+function adoptGateSetWithCheckerRunning() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true' && !latePaymentCheckerRetiredLive();
+}
+
+/**
+ * Where an adopted row lands (pure): the first step whose send day has not
+ * passed — the same stale test runPending's skip-forward applies — dated no
+ * earlier than the NEXT run, so a row is never sent in the run that adopted
+ * it and never lands on a day already stale by the time it is picked up.
+ * null = every step's day has passed (Fable #5202 P1): arming it would
+ * stale-complete without a single reminder, so it is left for a person.
+ */
+function adoptionLanding(anchorAt, now) {
+  let stepIndex = 0;
+  let nextAt = computeNextTouchAt(anchorAt, stepIndex);
+  while (nextAt && isStaleTouch(nextAt, now)) {
+    stepIndex += 1;
+    nextAt = computeNextTouchAt(anchorAt, stepIndex);
+  }
+  if (!nextAt) return null;
+  if (nextAt.getTime() <= now.getTime()) {
+    nextAt = firstEligibleFireAt(anchorTo10amNY(now, 1, config.sendWindow.hour));
+  }
+  return { stepIndex, nextAt };
+}
+
+// The count stripe-webhook.js's ACH failure handler escalates on: unresolved
+// failures in the last 90 days.
+async function unresolvedAchFailureCount(customerId, database = db) {
+  return Number((await database('ach_failure_log')
+    .where({ customer_id: customerId, resolved: false })
+    .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
+    .count('* as cnt')
+    .first())?.cnt || 0);
+}
+
+// Candidate selection, shared by the dry run and the live sweep (which runs
+// it under the retiring checker's cron lock, so every history read below
+// sees whatever an in-flight checker run wrote).
+async function selectAdoptionCandidates() {
+  const rows = await db('invoices as i')
+    .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'i.id')
+    .join('customers as c', 'c.id', 'i.customer_id')
+    .whereNull('s.id')
+    // Delivered statuses ONLY — not "not draft/terminal", which also admits
+    // 'scheduled'/'sending', an invoice queued for its FIRST send that has
+    // not reached the customer; the same evidence late-payment-checker.js's
+    // own candidate query requires.
+    .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereNull('c.deleted_at')
+    // Same guard scheduleForInvoice applies under the invoice lock — filtered
+    // here too so the dry-run candidate set matches what adoption would do.
+    .whereNotExists(function noActivePlan() {
+      this.select(1).from('payment_plans')
+        .whereRaw('payment_plans.invoice_id = i.id')
+        .andWhere('payment_plans.status', 'active');
+    })
+    .orderByRaw('COALESCE(i.sent_at, i.sms_sent_at, i.created_at) asc')
+    .select(
+      'i.id as invoice_id', 'i.invoice_number', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.sent_at', 'i.sms_sent_at', 'i.created_at',
+    );
+
+  const now = new Date();
+  const candidates = [];
+  const skipped = [];
+  for (const row of rows) {
+    const candidate = {
+      invoice_id: row.invoice_id,
+      customer_id: row.customer_id,
+      sent_at: row.sent_at || row.sms_sent_at || row.created_at,
+      amount_due: invoiceAmountDue(row),
+    };
+    // amount due > 0 — the same "is there anything to collect" test the
+    // legacy checker's own dunning decision is built on.
+    if (!(candidate.amount_due > 0)) continue;
+    const skip = (reason) => skipped.push({ invoice_id: candidate.invoice_id, customer_id: candidate.customer_id, reason });
+    // Same rule as the reopened-invoice revival: an invoice the legacy
+    // checker ever contacted carries state the ladder does not model, so the
+    // sweep leaves it and the dry-run lists it for a person to settle.
+    const history = await legacyCheckerContacted(candidate.invoice_id, row.invoice_number);
+    if (history.unavailable || history.contacted) {
+      skip(history.unavailable ? 'legacy_history_unreadable' : 'has_legacy_history');
+      continue;
+    }
+    if (!adoptionLanding(candidate.sent_at, now)) { skip('past_final_step'); continue; }
+    // Same rule scheduleForInvoice re-checks under the ACH lock.
+    let achFailures;
+    try {
+      achFailures = await unresolvedAchFailureCount(candidate.customer_id);
+    } catch (err) {
+      logger.warn(`[invoice-followups] ACH history read failed for invoice ${candidate.invoice_id} — skipped this run: ${err.message}`);
+      skip('ach_history_unreadable');
+      continue;
+    }
+    if (achFailures) { skip('ach_failure_history'); continue; }
+    candidates.push({
+      ...candidate,
+      days_since_sent: Math.floor((now.getTime() - new Date(candidate.sent_at).getTime()) / 86400000),
+    });
+  }
+  return { candidates, skipped };
+}
+
+/**
+ * Find delivered, open, homeowner-billed invoices with NO
+ * invoice_followup_sequences row and no legacy checker history, and arm one
+ * for each through scheduleForInvoice — the exact path a normal invoice send
+ * takes, so every one of its guards (payer-billed, active payment plan,
+ * autopay hold, ownership-under-lock) applies unchanged. Nothing is sent
+ * here: scheduleForInvoice's adoption mode lands the row on its first step
+ * whose day has not passed, dated no earlier than the next run, in the same
+ * insert.
+ *
+ * `dryRun: true` writes nothing and returns the candidates plus the
+ * skipped-with-reason list (the hand list for a person: has_legacy_history,
+ * past_final_step, ach_failure_history); oldest-sent-first either way, same
+ * selection as the live sweep.
+ *
+ * The live sweep runs under the legacy checker's own cron lock (Codex #5202
+ * r1 P1): a checker run that started before the gate flip, or on a draining
+ * pod, finishes (and writes its history) before candidates are read. If that
+ * lock is held, the sweep is refused for this run.
+ */
+async function adoptOrphanInvoices({ dryRun = false } = {}) {
+  if (dryRun) return selectAdoptionCandidates();
+
+  if (!latePaymentCheckerRetiredLive()) {
+    logger.warn('[invoice-followups] adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep (and the script\'s --execute) only run once the legacy checker is retired');
+    return { adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_running' };
+  }
+  const { runExclusive } = require('../utils/cron-lock');
+  const locked = await runExclusive('late-payment-check', async () => {
+    const { candidates, skipped } = await selectAdoptionCandidates();
+    const adoptedIds = [];
+    for (const candidate of candidates) {
+      try {
+        const armed = await scheduleForInvoice(candidate.invoice_id, { adoption: true });
+        if (armed) adoptedIds.push(candidate.invoice_id);
+      } catch (err) {
+        // One candidate's failure must never abort the whole sweep — the
+        // transaction rolled back, and the next run re-selects it fresh.
+        logger.error(`[invoice-followups] adoption failed for invoice ${candidate.invoice_id}: ${err.message}`);
+      }
+    }
+    return { adopted: adoptedIds.length, invoiceIds: adoptedIds, skipped };
+  }, { recordHealth: false, waitForSlot: false });
+  // runExclusive's own refusal is { skipped: true, reason }; the body's
+  // result carries a skipped ARRAY, which is truthy even when empty.
+  if (locked?.skipped === true) {
+    logger.warn(`[invoice-followups] adoption refused this run: the late-payment checker's lock is held (${locked.reason})`);
+    return { adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_lock_held' };
+  }
+  const leftForAPerson = locked.skipped.filter((s) => s.reason !== 'legacy_history_unreadable' && s.reason !== 'ach_history_unreadable').length;
+  if (leftForAPerson) {
+    logger.info(`[invoice-followups] adoption left ${leftForAPerson} invoice(s) for a person to settle (see the dry-run script)`);
+  }
+  if (locked.adopted) {
+    logger.info(`[invoice-followups] adopted ${locked.adopted} orphan invoice(s): ${locked.invoiceIds.join(', ')}`);
+  }
+  return locked;
 }
 
 /**
@@ -581,6 +803,21 @@ async function runPending() {
 
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
+  if (latePaymentCheckerRetiredLive()) await reviveReopenedLowStepSequences();
+  if (adoptGateSetWithCheckerRunning()) {
+    logger.warn('[invoice-followups] GATE_DUNNING_ADOPT_ORPHANS ignored: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep only runs once the legacy checker is retired');
+  }
+  // Adoption runs BEFORE the batch select; an adopted row is always dated
+  // after this run, so the batch never picks it up today.
+  // A sweep failure never costs the day's due touches (Codex #5202 r2 P1): a
+  // touch missed at this tick is past its stale grace by the next one.
+  if (adoptOrphanInvoicesLive()) {
+    try {
+      await adoptOrphanInvoices();
+    } catch (err) {
+      logger.error(`[invoice-followups] orphan adoption sweep failed — due touches still run: ${err.message}`);
+    }
+  }
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
@@ -669,44 +906,166 @@ async function runPending() {
 }
 
 /**
- * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
- * or Day 90 step on a still-open invoice picks up again at that step. That
- * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
- * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
- * A payment finish before Day 30 keeps its lower index and stays with the
- * legacy checker (hasActiveSequence). The same invoice guards as the send
- * batch apply. Each revival is guarded on the row still being that
- * finished sequence, and a step already past its send day is passed over by
- * the stale-touch pass in the same run, never sent late.
+ * Shared by both revival paths below: a 'completed' sequence in
+ * [minStepIndex, maxStepIndexExclusive) whose invoice is open again gets
+ * put back at the step it finished on (never advanced), guarded on the row
+ * still being that finished sequence. A step whose send day already passed
+ * is passed over by the stale-touch pass in the same run, never sent late —
+ * the same guarantee adoptOrphanInvoices' fresh rows rely on.
+ *
+ * `reanchorToNow` (reviveReopenedLowStepSequences only — Codex pre-push P0
+ * D): the OLD send-time anchor stays right for a Day 60/90 finish (its next
+ * touch is still measured from the original send), but a low-step finish
+ * reopened long after its own Day 90 would otherwise land back on the SAME
+ * already-exhausted timeline — computeNextTouchAt would return null, the
+ * row stale-completes without sending, and this function would try to
+ * revive it again on every future run, forever. Re-anchoring to NOW (the
+ * reopen IS a new debt event) guarantees a future next_touch_at, so it is
+ * picked up, sent, and NEVER re-selected as 'completed' by this query
+ * again — no loop.
+ *
+ * Delivered/published statuses only (PUBLISHED_INVOICE_STATUSES, the same
+ * whitelist late-payment-checker.js's own candidate query uses) — not the wider
+ * "not terminal" test, for the same reason: a sequence's invoice should
+ * never be draft/scheduled/sending by the time it HAS a finished sequence,
+ * but if one ever were, it has not reached the customer and must not be
+ * revived into an active reminder.
  */
-async function reviveLegacyFinishedSequences() {
-  const legacyCount = config.steps.length;
+// Has the legacy checker ever contacted the customer about this invoice?
+// Such an invoice carries state the ladder does not model (which tier it
+// delivered, a pending email retry, spacing from that delivery), so the
+// ladder never picks it up on its own; the person settling it can arm a
+// sequence by hand. An unreadable history is not an empty one.
+async function legacyCheckerContacted(invoiceId, invoiceNumber = null) {
+  try {
+    const rows = await db('collections_contact_ledger')
+      .where({ source: 'late_payment_checker' })
+      .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoiceId])]);
+    if ((rows || []).length > 0) return { contacted: true };
+    // The ledger has no rows from before it existed (its migration did not
+    // backfill), so the checker's own dedupe record counts too (Codex #5202
+    // r1 P1): activity_log 'late_payment_reminder', keyed by metadata
+    // invoiceId on newer rows and by invoiceKey `<number or id>|<tier> DAYS`
+    // on every row.
+    const refs = [String(invoiceId), ...(invoiceNumber ? [String(invoiceNumber)] : [])];
+    const activity = await db('activity_log')
+      .where({ action: 'late_payment_reminder' })
+      .where(function thisInvoice() {
+        this.whereRaw("metadata->>'invoiceId' = ?", [String(invoiceId)])
+          .orWhereRaw(`split_part(metadata->>'invoiceKey', '|', 1) IN (${refs.map(() => '?').join(', ')})`, refs);
+      })
+      .first('id');
+    return { contacted: !!activity };
+  } catch (err) {
+    logger.warn(`[invoice-followups] legacy-history lookup failed for invoice ${invoiceId} — treating as contacted for this run: ${err.message}`);
+    return { contacted: true, unavailable: true };
+  }
+}
+
+async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { reanchorToNow = false } = {}) {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'completed')
-    .where('s.step_index', '>=', legacyCount)
-    .where('s.step_index', '<', followupSteps().length)
-    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .where('s.step_index', '>=', minStepIndex)
+    .where('s.step_index', '<', maxStepIndexExclusive)
+    .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
     .select(
-      's.id', 's.step_index', 's.anchor_at', 's.created_at',
+      's.id', 's.invoice_id', 's.step_index', 's.anchor_at', 's.created_at', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
     );
   let revived = 0;
+  const leftForAPerson = [];
   for (const row of rows) {
-    const nextAt = computeNextTouchAt(sequenceAnchor(row), row.step_index);
-    if (!nextAt) continue;
-    const updated = await db('invoice_followup_sequences')
-      .where({ id: row.id, status: 'completed', step_index: row.step_index })
-      .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
-    revived += Number(updated) || 0;
+    try {
+      const anchorAt = reanchorToNow ? new Date() : sequenceAnchor(row);
+      const nextAt = computeNextTouchAt(anchorAt, row.step_index);
+      if (!nextAt) continue;
+      const patch = {
+        updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt,
+        ...(reanchorToNow ? { anchor_at: anchorAt } : {}),
+      };
+      const guard = { id: row.id, status: 'completed', step_index: row.step_index };
+      if (!reanchorToNow) {
+        revived += Number(await db('invoice_followup_sequences').where(guard).update(patch)) || 0;
+        continue;
+      }
+      // Reopened-invoice revival (re-anchored to now, so it WILL send): an
+      // invoice the legacy checker already contacted may have had its 60- and
+      // 90-day tiers, and re-dunning it from Day 10 would follow a final
+      // notice with five more reminders (Fable review of #5198) — left for a
+      // person. And the invoice is re-read under its row lock so a payment
+      // that settled it between the select and this update cannot leave an
+      // active sequence on a paid invoice (Codex #5198 r1).
+      if ((await legacyCheckerContacted(row.invoice_id, row.invoice_number)).contacted) {
+        leftForAPerson.push(row.invoice_id);
+        continue;
+      }
+      revived += await db.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: row.invoice_id }).forUpdate().first('status', 'payer_id', 'scheduled_send_error');
+        if (!invoice || !PUBLISHED_INVOICE_STATUSES.includes(normalizedStatus(invoice)) || invoice.payer_id
+          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 0;
+        return Number(await trx('invoice_followup_sequences').where(guard).update(patch)) || 0;
+      });
+    } catch (err) {
+      // One row's failure must never abort the whole revival pass (Fable
+      // pre-push P2 E) — the next run re-selects it fresh.
+      logger.error(`[invoice-followups] revival failed for sequence ${row.id}: ${err.message}`);
+    }
   }
+  if (leftForAPerson.length) {
+    logger.info(`[invoice-followups] reopened invoice(s) with legacy checker history left for a person to settle: ${leftForAPerson.join(', ')}`);
+  }
+  return revived;
+}
+
+/**
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
+ * or Day 90 step on a still-open invoice picks up again at that step. That
+ * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
+ * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
+ * A payment finish before Day 30 keeps its lower index; see
+ * reviveReopenedLowStepSequences below for what owns THAT case once the
+ * legacy checker retires. The same invoice guards as the send batch apply.
+ */
+async function reviveLegacyFinishedSequences() {
+  const revived = await reviveFinishedSequences(config.steps.length, followupSteps().length);
   if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
   return revived;
 }
+
+// GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'). A
+// sequence that finished BEFORE the legacy Day 30 end — an invoice paid
+// (stopOnPayment) after only its early touches fired, then reopened by a
+// dispute/refund reversal — has always relied on the legacy
+// late-payment-checker.js as its ONLY fallback: hasActiveSequence
+// deliberately excludes a low-step 'completed' row from "owned" (codex
+// #5126 r1) precisely so that checker picks it back up. Retiring the
+// checker removes that fallback with nothing to replace it (Codex pre-push
+// r1 P1) — this revives it here instead, at the step it finished on, so the
+// ladder owns the reopened invoice the same way it already owns a Day 60/90
+// finish above. Off (checker still running): unchanged, this never runs.
+// Retirement requires the Day 90 ladder to be live: with the ladder off the
+// follow-up cadence ends at Day 30 and the checker is the only sender of the
+// 60- and 90-day reminders (Codex on #5175).
+function latePaymentCheckerRetiredLive() {
+  return process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true' && ladderThrough90Live();
+}
+
+async function reviveReopenedLowStepSequences() {
+  // step_index === config.steps.length (exhausted the legacy cadence
+  // without ever being paid) sits OUTSIDE [0, config.steps.length) — never
+  // selected here, so it can never loop through this path either; that
+  // long-standing "hand off to the legacy checker" case is unrelated to a
+  // reopened invoice and out of this lane's scope.
+  const revived = await reviveFinishedSequences(0, config.steps.length, { reanchorToNow: true });
+  if (revived) logger.info(`[invoice-followups] retired checker: ${revived} reopened invoice(s) resumed on their follow-up sequence (re-anchored to the reopen)`);
+  return revived;
+}
+
 
 // Steps the two cadences time differently (Day 7 vs 10, Day 14 vs 17), and
 // the widest gap between them plus a day's margin.
@@ -1174,6 +1533,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // a definite failed delivery stamps send_failed, while an unknown outcome
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
+  const originalDeliveryTimes = [];
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
@@ -1198,8 +1558,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     if (emailLedger) {
       const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
         ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
-      if (claim.delivered) emailResult = { ok: true, deduped: true };
-      else if (claim.resolved) {
+      if (claim.delivered) {
+        emailResult = { ok: true, deduped: true };
+        if (emailLedger.occurred_at) originalDeliveryTimes.push(emailLedger.occurred_at);
+      } else if (claim.resolved) {
         emailResult = {
           ok: false,
           delivered: false,
@@ -1219,7 +1581,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             })
           : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
         const attemptHeld = await settleFollowupEmailLedger(
-          ContactLedger, emailLedger, emailResult, selectedChannels !== null,
+          ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
       }
@@ -1233,6 +1595,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let appSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
+  let smsDeferredOwned = false;
+  let smsOutcomeMayHaveDelivered = false;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
@@ -1277,7 +1641,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (ledger.occurred_at) originalDeliveryTimes.push(ledger.occurred_at);
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -1301,11 +1665,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
       }
-      if (billingLegDeliveryState(channel, result || {})) {
+      const delivery = billingLegDeliveryState(channel, result || {});
+      if (delivery) {
+        const occurredAt = billingLegContactTime(result);
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (delivery === 'deduped' && occurredAt) originalDeliveryTimes.push(occurredAt);
+        if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
-          && !await ContactLedger.markDelivered(ledger)) holdStep();
+          && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1379,6 +1746,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+        smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
         // Send-window block (this cron runs hourly, incl. nights): not a
@@ -1431,6 +1799,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   resolve_from_by_customer: true,
                 }),
               });
+              smsDeferredOwned = true;
               logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
             } catch (queueErr) {
               smsHoldUnowned = true;
@@ -1517,6 +1886,19 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     return;
   }
 
+  const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
+  const originalAt = originalDeliveryTimes.length
+    ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
+  // Only an earlier accepted leg reached the customer on this path. Return
+  // this run's credit draw; the previous attempt's applied credit stays put.
+  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered && dunAppliedCredit > 0) {
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
+    } catch (e) {
+      logger.warn(`[invoice-followups] credit reversal after prior-delivery replay skipped for ${row.invoice_id}: ${e.message}`);
+    }
+  }
   const nextIndex = row.step_index + 1;
   // anchor_at (set when an admin edit shifted the due date) overrides the
   // send-time anchor so the whole remaining cadence stays on one timeline.
@@ -1527,13 +1909,16 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
-    last_touch_at: new Date(),
+    last_touch_at: freshDelivery ? new Date() : originalAt,
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
+
+  // An already delivered leg advances its step without a new outbound touch.
+  if (!freshDelivery) return;
 
   // Log to customer_interactions for the 360 view
   try {
@@ -2237,6 +2622,7 @@ async function isDunningStopped(invoiceId, database = db) {
 }
 
 module.exports = {
+  adoptOrphanInvoices,
   scheduleForInvoice,
   runPending,
   // Used by the scheduled-SMS executor to suppress stale deferred

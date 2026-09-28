@@ -58,8 +58,13 @@ function refreshDraft(overrides = {}) {
 }
 const BRIEF = { action_type: 'refresh_existing_page', target_url: '/pest-control-sarasota-fl/', city: 'Sarasota', service: 'pest' };
 
+// The publisher's owner-list chokepoint makes one company-extraction model
+// call on the final text; these pages name no company unless a test says so
+// (the chokepoint's own decision logic stays real).
+const businessNameConfirmer = require('../services/content/business-name-confirmer');
 beforeEach(() => {
   db.mockReset();
+  jest.spyOn(businessNameConfirmer, 'extractCompanyNames').mockResolvedValue({ ok: true, key: 'k', companies: [] });
 });
 
 function registryQuery(row, seen = []) {
@@ -100,6 +105,23 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
     gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/x/y/pull/77', head: { sha: 'h' } });
     gh.createIssueComment.mockResolvedValue({});
+  });
+
+  // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
+  // refreshed text (Codex r5 on #5146).
+  test('a refresh naming an off-list company is refused before any branch is cut, and the check saw the final text', async () => {
+    businessNameConfirmer.extractCompanyNames.mockImplementation(async (finalDraft) => ({
+      ok: true, key: 'k', companies: /Bug Out/.test(finalDraft.body) ? ['Bug Out'] : [],
+    }));
+    const draft = refreshDraft({ body: 'Bug Out competes with local providers in Sarasota for recurring plans.' });
+
+    await expect(pub.publishRefresh(draft, BRIEF)).rejects.toMatchObject({ code: 'BLOG_OWNER_LIST_BLOCKED' });
+
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][0].body).toContain('Bug Out competes');
+    expect(businessNameConfirmer.extractCompanyNames.mock.calls[0][1]).toMatchObject({ final: true });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(draft.company_extraction).toMatchObject({ companies: ['Bug Out'] });
   });
 
   test('preserves protected frontmatter and changes only meta + body + modified', async () => {
@@ -304,6 +326,51 @@ describe('publishRefresh blog-schema validation gate', () => {
     const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
     expect(data.meta_description.length).toBeGreaterThanOrEqual(115);
     expect(data.meta_description.length).toBeLessThanOrEqual(160);
+  });
+
+  test('a cost-guide refresh adds the mapped price_range only when the live post has none', async () => {
+    const liveCost = VALID_BLOG
+      .replace('post_type: "diagnostic"', 'post_type: "cost"')
+      .replace('primary_keyword: "drywood termite signs"', 'primary_keyword: "termite treatment cost sarasota"');
+    gh.getFile.mockResolvedValue({ content: liveCost, sha: 'blog-sha' });
+    await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
+    expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.price_range)
+      .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).toContain('Added cost-guide price card');
+
+    // An owner-set list (even an explicit empty one) is never replaced or removed.
+    for (const ownerSet of ['price_range:\n  - "termite_bait_install"', 'price_range: []']) {
+      jest.clearAllMocks();
+      gh.getFile.mockResolvedValue({ content: liveCost.replace('category: "termite"', `category: "termite"\n${ownerSet}`), sha: 'blog-sha' });
+      await pub.publishRefresh(blogRefreshDraft(), BLOG_BRIEF);
+      const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+      expect(data.price_range).toEqual(ownerSet.includes('[]') ? [] : ['termite_bait_install']);
+      expect(gh.createPr.mock.calls[0][0].body).not.toContain('Added cost-guide price card');
+    }
+  });
+
+  test('a title/meta rewrite of a cost guide adds the mapped price_range only when the live post has none', async () => {
+    const liveCost = VALID_BLOG
+      .replace('post_type: "diagnostic"', 'post_type: "cost"')
+      .replace('primary_keyword: "drywood termite signs"', 'primary_keyword: "termite treatment cost sarasota"');
+    const rewrite = () => pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: BLOG_FILE_PATH,
+      title: 'What Termite Treatment Costs in Sarasota Homes',
+      meta_description: 'See what shapes termite treatment pricing for Sarasota homes, from home size to treatment approach, and what to ask before you book a visit.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/blog/drywood-termite-signs-sarasota/' });
+
+    gh.getFile.mockResolvedValue({ content: liveCost, sha: 'blog-sha' });
+    expect((await rewrite()).status).toBe('pr_open');
+    expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.price_range)
+      .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).toContain('Added cost-guide price card');
+
+    jest.clearAllMocks();
+    gh.getFile.mockResolvedValue({ content: liveCost.replace('category: "termite"', 'category: "termite"\nprice_range:\n  - "termite_trenching"'), sha: 'blog-sha' });
+    await rewrite();
+    expect(fm.parse(gh.putFile.mock.calls[0][0].content).data.price_range).toEqual(['termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).not.toContain('Added cost-guide price card');
   });
 
   test('blocks a blog refresh that pushes meta_description out of the 115-160 bound', async () => {

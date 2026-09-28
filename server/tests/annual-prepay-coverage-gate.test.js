@@ -28,6 +28,7 @@ function chainable(firstResult) {
   });
   stub.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(stub); return stub; });
   stub.first = jest.fn(() => Promise.resolve(firstResult));
+  stub.then = (resolve, reject) => Promise.resolve(firstResult === undefined ? [] : [firstResult]).then(resolve, reject);
   return stub;
 }
 
@@ -40,6 +41,7 @@ function coveredQuery({ liveTerm = undefined, rejectWith = null, forbidQuery = f
     if (rejectWith) {
       const stub = chainable(undefined);
       stub.first = jest.fn(() => Promise.reject(rejectWith));
+      stub.then = (resolve, reject) => Promise.reject(rejectWith).then(resolve, reject);
       return stub;
     }
     return chainable(liveTerm);
@@ -136,6 +138,63 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
   test('other prepaid method (cash/Zelle): NOT covered here — short-circuits before any query', async () => {
     coveredQuery({ forbidQuery: true });
     await expect(annualPrepayCoversVisit(stampedVisit({ prepaid_method: 'cash' }))).resolves.toBe(false);
+  });
+
+  // Codex round-7 P1 (2nd audit round): a strict caller (visit-completion-
+  // payment.js / visit-completion-invoice.js's throwOnError:true) needs an
+  // unverifiable termite-grace lookup to REFUSE the charge — the SAME
+  // fail-closed contract as the stamp-based checks above — never silently
+  // read as "no grace coverage" and fall through to an ordinary uncovered
+  // result for an unstamped visit that may genuinely still be in grace.
+  test('an unstamped visit whose termite-grace lookup throws, under throwOnError: strict callers get the throw, never a silent false', async () => {
+    coveredQuery({ rejectWith: new Error('db unreachable') });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit, db, { throwOnError: true }))
+      .rejects.toThrow('db unreachable');
+  });
+
+  test('the SAME unstamped visit, non-strict (billing suppression): the lookup failure still degrades to NOT covered', async () => {
+    coveredQuery({ rejectWith: new Error('db unreachable') });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
+  });
+
+  // Codex #4971 round-4 (post-merge audit) P0: annualPrepayTableExists()
+  // catches a probe error internally and caches false, so the table-exists
+  // check itself never lets a throwOnError caller see the failure — a
+  // DIFFERENT gap than the covered-term query throwing (pinned above). Pin
+  // that a throw from the schema probe ITSELF propagates under throwOnError,
+  // never silently reading as "table absent, not covered".
+  test('an unstamped visit whose termite-grace TABLE PROBE throws, under throwOnError: the probe error propagates', async () => {
+    db.schema = { hasTable: jest.fn().mockRejectedValue(new Error('schema probe unreachable')) };
+    _private.resetCachesForTests();
+    coveredQuery({ forbidQuery: true });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit, db, { throwOnError: true }))
+      .rejects.toThrow('schema probe unreachable');
+  });
+
+  test('the SAME table-probe throw, non-strict: still degrades to NOT covered (annualPrepayTableExists\' own cached fail-closed path)', async () => {
+    db.schema = { hasTable: jest.fn().mockRejectedValue(new Error('schema probe unreachable')) };
+    _private.resetCachesForTests();
+    coveredQuery({ forbidQuery: true });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
+  });
+
+  // A failed table probe answers false for that call only — it is never
+  // cached, so the NEXT call re-probes instead of treating the table as
+  // absent for the life of the process (which made syncTermForInvoicePayment
+  // silently no-op after one transient DB error).
+  test('a failed table probe is not cached — the next call re-probes and proceeds', async () => {
+    const hasTable = jest.fn()
+      .mockRejectedValueOnce(new Error('the database system is in recovery mode'))
+      .mockResolvedValue(true);
+    db.schema = { hasTable };
+    _private.resetCachesForTests();
+    await expect(_private.annualPrepayTableExists()).resolves.toBe(false);
+    await expect(_private.annualPrepayTableExists()).resolves.toBe(true);
+    expect(hasTable).toHaveBeenCalledTimes(2);
   });
 
   test('no-config / no-stamp visit: NOT covered (short-circuit, no query)', async () => {

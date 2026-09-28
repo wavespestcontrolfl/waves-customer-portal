@@ -84,6 +84,12 @@ test('a replay carries its entry\'s provider-boundary predicate into the send (t
     lead_id: 'lead-1', voicemail_phone: '+19415550101', to_phone: '+19415550101',
   }));
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ providerPreSendCheck: boundaryCheck, entryPoint: 'scheduled_sms_cron' }));
+  // Owner ruling 2026-09-28: an already-queued deferred voicemail text goes
+  // out on the very next replay instead of waiting for the 8am-8pm window —
+  // this entry point is used for nothing else, so the replay marks it
+  // customer-initiated (checkSendWindow's CUSTOMER_ACTION_ENTRY_POINTS
+  // escape hatch) unconditionally.
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
 });
 
 test('a deferred billing notice replays with its delivery category and Email-sidecar marker', async () => {

@@ -59,6 +59,7 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'submit_review_reply',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'run_seo_pipeline',
 ]);
 
@@ -102,6 +103,7 @@ const BILLING_TOOL_NAMES = new Set([
   'save_customer_estimate',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
   'approve_price',
   'create_pending_estimate',
   'create_agent_estimate_draft',
@@ -147,6 +149,7 @@ const ACTION_LABELS = {
   update_restock_request: 'Update a restock request',
   request_instant_payout: 'Request an INSTANT payout',
   request_standard_payout: 'Request a standard payout',
+  cancel_pending_payout: 'Cancel a pending payout',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
 };
@@ -552,7 +555,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // may still land in review (office alerted), a hold may be parked for
     // the rebooked visit instead of released, and a void is skipped when
     // money is in flight or the invoice sits on a finalized statement.
-    if (c.fee?.applies) {
+    if (c.fee?.blocked_by_invoice) {
+      // visit-cancellation-followthrough.js throws before either card rail
+      // when an invoice still holds money after the void — no charge, no
+      // release, office alerted. Stated first so no fee sentence below can
+      // promise a charge the commit will skip.
+      push('billing', 'No late-cancel fee is charged and no card hold is released automatically — an invoice for this visit still holds money after the void, so the office is alerted to review the fee');
+    } else if (c.fee?.applies) {
       const amt = c.fee.amount != null ? `$${Number(c.fee.amount).toFixed(2)}` : 'the agreed';
       push('billing', c.fee.unresolved
         ? `A late-cancel fee MAY be charged to the card on file (${amt} — lane state could not be verified; unresolved outcomes go to office review)`
@@ -567,11 +576,34 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     }
     for (const inv of c.invoices || []) {
       const total = inv.total != null ? `$${Number(inv.total).toFixed(2)}` : '';
-      const credit = Number(inv.credit_applied) > 0 ? `; $${Number(inv.credit_applied).toFixed(2)} account credit restored` : '';
-      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''}) — applied credits/deposits restored${credit}; skipped for office review if a payment is in flight or it sits on a finalized statement`);
+      const restored = [
+        Number(inv.credit_applied) > 0 ? `$${Number(inv.credit_applied).toFixed(2)} account credit` : null,
+        Number(inv.deposit_credit) > 0 ? `$${Number(inv.deposit_credit).toFixed(2)} deposit credit` : null,
+      ].filter(Boolean);
+      const restoredText = restored.length ? `; ${restored.join(' and ')} restored` : '';
+      push('billing', `Void invoice ${inv.invoice_number || inv.id} (${inv.status}${total ? `, ${total}` : ''})${restoredText} — skipped for office review if a payment is in flight, it sits on a finalized statement, or its amounts change first`);
     }
     if ((c.invoices || []).length) {
       push('billing', 'Only the invoices listed above are voided — anything created after this card is left for office review');
+    }
+    // Inspection-credit reversal (appointment-cancel-impact.js's read-only
+    // mirror of inspection-credit.reverseInspectionCreditForBooking): most
+    // cancels have nothing redeemed against them (null, nothing pushed). A
+    // redeemed offer either reverses for its exact amount, or is deferred to
+    // office review (an unresolved invoice / a lookup failure) — the SAME
+    // two outcomes the real reversal reaches; a rebind (a live alternate
+    // booking or series child still earns it) is a no-op the card need not
+    // disclose as a billing effect, so it is skipped here (it stays in the
+    // pinned structure). A reversal takes the credit back out of the
+    // customer's balance; when that balance was already spent the real
+    // reversal refuses and alerts the office, which the sentence states.
+    for (const credit of c.inspection_credit_reversal || []) {
+      const amt = `$${Number(credit.amount).toFixed(2)}`;
+      if (credit.deferred) {
+        push('billing', `A ${amt} inspection credit tied to this booking is NOT reversed at cancel — an invoice for this visit still holds money, so the office is alerted`);
+      } else if (credit.would_reverse) {
+        push('billing', `The ${amt} inspection credit this booking earned is taken back out of the customer's account balance (if it was already spent, the office is alerted to collect or write it off)`);
+      }
     }
   }
 
@@ -600,7 +632,19 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // repair_closeout: one effect per planned step (server-owned labels), plus
+  // the open items the confirm will NOT touch — never a flattened dump of
+  // the plan object.
+  if (toolName === 'repair_closeout' && Array.isArray(preview?.steps)) {
+    push('customer', `Visit: ${preview.visit || preview.service_id} — ${preview.customer_name || preview.customer_id || 'customer unresolved'}`);
+    for (const st of preview.steps) {
+      push(['comms', 'billing'].includes(st.kind) ? st.kind : 'operational', String(st.effect || st.step));
+    }
+    if (Array.isArray(preview.manual) && preview.manual.length) {
+      push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
+    }
+  }
+  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -752,12 +796,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
+      // A repair plan that queues a report email or receipt contacts the
+      // customer through the delivery workers.
+      || (toolName === 'repair_closeout' && preview?.notifies_customer === true));
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
   if (notifiesCustomer) {
-    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
+    let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (bookingConfirmationText) {
@@ -805,6 +852,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // PaymentIntent cannot be restored, and the customer's payment link is
     // dead (codex #4348 r7 P2).
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      // The Bill action writes a 'billed' visit disposition no portal path
+      // removes (voiding the draft leaves the visit "already handled").
+      || (toolName === 'repair_closeout' && Array.isArray(preview?.steps) && preview.steps.some((st) => st.step === 'bill_visit'))
       || preview?.financial_effects?.revertible_from_queue === false
       || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
@@ -821,6 +871,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     ...(preview?.pinned_recipient ? { pinned_recipient: preview.pinned_recipient } : {}),
     ...(preview?.pinned_customer ? { pinned_customer: preview.pinned_customer } : {}),
     ...(preview?.pinned_appointment ? { pinned_appointment: preview.pinned_appointment } : {}),
+    // The exact structured effect set (fee amount, invoice ids/credit_applied,
+    // inspection-credit offer ids/amounts) — not just its formatted text
+    // above — so two different effect sets that happen to render identical
+    // sentences (rare, but possible with a rounded dollar amount) can never
+    // hash alike. cancel_appointment's commit path recomputes this same
+    // shape (appointment-cancel-impact.js) and refuses on any mismatch.
+    ...(toolName === 'cancel_appointment' && preview?.cancellation ? { pinned_cancellation: preview.cancellation } : {}),
     ...(preview?.pinned_approval ? { pinned_approval: preview.pinned_approval } : {}),
     ...(preview?.pinned_estimate ? { pinned_estimate: preview.pinned_estimate } : {}),
     // The card caps/truncates preview lines for presentation only — the

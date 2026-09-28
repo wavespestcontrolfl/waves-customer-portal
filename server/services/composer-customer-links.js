@@ -559,7 +559,16 @@ const CODE_ALPHABET_RUN_RE = /[a-hjkmnp-z2-9]{10,}/gi;
 // base64url signature>; the lead id is tried whole and as its trailing
 // uuid, so a prefix glued onto it cannot hide the token.
 const SIGNED_TOKEN_RE = /([A-Za-z0-9-]+)(\.\d{9,11}(?:\.sms-[0-9a-f]{16})?\.[A-Za-z0-9_-]{43})/g;
-async function strayConsultationCredentialPresent(runs, hosts) {
+// codex #5018 P2: `conn` defaults to the global `db` for every EXISTING
+// caller (send-time checks, never inside a held transaction) — call-
+// booking-link-text.js's linkSentRecently is the one caller that threads
+// its OWN held connection through, because it can run this whole scan
+// while neverSendRecheck's phone-locked handoff already occupies one of a
+// constrained pool's connections; a second implicit pool checkout here
+// (this function's own short_codes lookup) could starve under that
+// constraint and time out instead of completing on the connection already
+// held.
+async function strayConsultationCredentialPresent(runs, hosts, conn = db) {
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
   const codes = new Set();
   for (const raw of runs) {
@@ -587,7 +596,7 @@ async function strayConsultationCredentialPresent(runs, hosts) {
   }
   const all = [...codes];
   for (let i = 0; i < all.length; i += 500) {
-    const rows = await db('short_codes').whereIn('code', all.slice(i, i + 500)).where({ kind: 'consultation' }).select('code', 'kind');
+    const rows = await conn('short_codes').whereIn('code', all.slice(i, i + 500)).where({ kind: 'consultation' }).select('code', 'kind');
     if ((rows || []).some((r) => r.kind === 'consultation')) return true;
   }
   return false;
@@ -1445,7 +1454,24 @@ async function checkContractLinks(ctx, contracts) {
 // the short link in a browser) is verified directly. Each entry is
 // { lead_id, expired, invalid }: a long-form token on our host that fails
 // its signature is `invalid`, never ignored.
-async function consultationLinkRows(body) {
+//
+// Also reused (codex #5018 P2) by call-booking-link-text.js's own
+// linkSentRecently, which scans PAST sms_log bodies for a long-form
+// /inspection/<token> the short_codes-only EXISTS check can't see (a code
+// minted through buildLeadConsultationLink is always short-wrapped before
+// send, but staff can paste the long-form bearer directly). `expired` is
+// deliberately not disqualifying there — history asks "was this lead's
+// link already sent," not "is it still valid right now" — only `invalid`
+// (the signature itself never matched) means the row proves nothing.
+//
+// `conn` (codex #5018 P2, pre-push finding): defaults to the global `db`,
+// unchanged for every existing caller. linkSentRecently passes its OWN
+// held connection — it can run while neverSendRecheck's phone-locked
+// handoff already occupies a connection from a constrained pool, and this
+// function's own short_codes lookups (here and in
+// strayConsultationCredentialPresent) must land on THAT connection rather
+// than checking out a second one that may not be available.
+async function consultationLinkRows(body, conn = db) {
   const runs = decodedRuns(body);
   const hosts = ownedPortalHosts();
   // An explicit http:// link is remembered as plaintext (Codex #4709 r7
@@ -1465,7 +1491,7 @@ async function consultationLinkRows(body) {
     .map((code) => code.toLowerCase()));
   const rows = [];
   if (codes.length) {
-    const shortRows = await db('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id', 'target_url');
+    const shortRows = await conn('short_codes').whereIn('code', codes).where({ kind: 'consultation' }).select('code', 'expires_at', 'lead_id', 'target_url');
     const { verifyLeadConsultationToken: verifyTarget } = require('../utils/lead-consultation-token');
     for (const row of shortRows) {
       // The redirect's own signed target, re-verified at send (Codex #4709
@@ -1483,7 +1509,7 @@ async function consultationLinkRows(body) {
   }
   // A consultation bearer anywhere inside a URL on a host we do NOT own is
   // refused outright: the third party could harvest the 14-day bearer.
-  if (await strayConsultationCredentialPresent(runs, hosts)) {
+  if (await strayConsultationCredentialPresent(runs, hosts, conn)) {
     rows.push({ lead_id: null, expired: false, invalid: false, foreignHost: true });
   }
   const { verifyLeadConsultationToken } = require('../utils/lead-consultation-token');
@@ -2654,6 +2680,7 @@ module.exports = {
   bearerLinkSendCheck,
   checkConsultationLinkSend,
   bodyCarriesConsultationLink,
+  consultationLinkRows,
   markStatementsSent,
   markPrepGuidesSent,
   recheckPrepLinks,

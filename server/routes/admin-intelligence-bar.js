@@ -59,9 +59,11 @@ const { SOCIAL_OPS_TOOLS, executeSocialOpsTool } = require('../services/intellig
 const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../services/intelligence-bar/managed-agents-ops-tools');
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
+const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+const { ibFullAccess } = require('../services/intelligence-bar/ib-access');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
 const ActionRegistry = require('../services/intelligence-bar/action-registry');
@@ -104,6 +106,7 @@ const AGENT_ESTIMATE_WRITE_TOOL = 'create_agent_estimate_draft';
 // Schedule tool names for routing execution
 const SCHEDULE_TOOL_NAMES = new Set(SCHEDULE_TOOLS.map(t => t.name));
 const CLOSEOUT_TOOL_NAMES = new Set(CLOSEOUT_TOOLS.map(t => t.name));
+const CLOSEOUT_REPAIR_TOOL_NAMES = new Set(CLOSEOUT_REPAIR_TOOLS.map(t => t.name));
 const DASHBOARD_TOOL_NAMES = new Set(DASHBOARD_TOOLS.map(t => t.name));
 const SEO_TOOL_NAMES = new Set(SEO_TOOLS.map(t => t.name));
 const PROCUREMENT_TOOL_NAMES = new Set(PROCUREMENT_TOOLS.map(t => t.name));
@@ -184,6 +187,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Merge repoints whole customer records — admin only, like the
   // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
+  // Closeout repair queues customer report emails / receipts — admin only,
+  // like the closeout reads it builds on.
+  ...CLOSEOUT_REPAIR_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -425,6 +431,12 @@ function withCacheBreakpoint(messages) {
 // contract the card shows can be exact. Cancels happen on the Dispatch
 // screen, which owns the waiver and review controls, until a rails-binding
 // lane makes the effect set pinnable.
+// PR A of that lane (ib-cancel-pinned-effects) built the deterministic
+// pre-commit impact computation (server/services/appointment-cancel-
+// impact.js) and the commit-side refuse-on-drift check (tools.js
+// cancelAppointment) but ships DARK — this refusal is deliberately left in
+// place here. PR B removes it and wires proposePendingWrite to populate
+// preview.cancellation from that module, once it has been reviewed.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
@@ -1969,12 +1981,24 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 // (codex #4348 r14 P1): merge_customers is offered only while
 // GATE_IB_MERGE_CUSTOMERS is on. The executor refuses at execution time
 // too, so a forced call fails closed with the list.
-function getToolsForContext(context, isAdmin = false) {
-  const tools = toolsForContextUngated(context, isAdmin);
+// fullAccess (owner ruling 2026-09-28, ibFullAccess()) is the ONLY thing
+// that widens a tool LIST to include a red-tier (confirmed-endpoint) tool —
+// still never a card: the /query tool loop refuses to execute one from the
+// model regardless of role (CONFIRMED_ACTION_TOOL_NAMES branch), so a
+// full-access request that sees the tool listed can only ever be told to
+// use the owner-only /execute confirm flow. A request without full access
+// never sees it at all, so the bar never proposes it there.
+function getToolsForContext(context, isAdmin = false, fullAccess = false) {
+  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+    // Defense in depth: catches a future red tool reaching a context list
+    // through a module that forgot its own write-free "query" export
+    // (banking-tools.js / seo-tools.js already build one for the branches
+    // below) — never offered without full access, whatever module it rides.
+    .filter(t => fullAccess || !CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(t.name));
   return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
 }
 
-function toolsForContextUngated(context, isAdmin = false) {
+function toolsForContextUngated(context, isAdmin = false, fullAccess = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
     return TECH_TOOLS;
@@ -2001,14 +2025,15 @@ function toolsForContextUngated(context, isAdmin = false) {
   // — and only while GATE_IB_THREADS is on (the tool refuses at execution
   // time too, so a forced call fails closed with the rest of threads).
   const infra = isAdmin ? [...INFRA_TOOLS, ...(IbThreads.threadsEnabled() ? HISTORY_TOOLS : [])] : [];
+  const closeoutRepair = isAdmin ? CLOSEOUT_REPAIR_TOOLS : [];
   if (context === 'schedule' || context === 'dispatch') {
-    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...SCHEDULE_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'dashboard') {
-    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...infra];
+    return [...base, ...DASHBOARD_TOOLS, ...CLOSEOUT_TOOLS, ...closeoutRepair, ...infra];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...base, ...SEO_QUERY_TOOLS, ...infra];
+    return [...base, ...(fullAccess ? SEO_TOOLS : SEO_QUERY_TOOLS), ...infra];
   }
   if (context === 'procurement' || context === 'inventory') {
     return [...base, ...PROCUREMENT_TOOLS, ...infra];
@@ -2036,7 +2061,7 @@ function toolsForContextUngated(context, isAdmin = false) {
     return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
-    return [...base, ...BANKING_QUERY_TOOLS, ...infra];
+    return [...base, ...(fullAccess ? BANKING_TOOLS : BANKING_QUERY_TOOLS), ...infra];
   }
   if (context === 'estimates') {
     // create_agent_estimate_draft's trust boundary (feature gate + forced UI
@@ -2090,6 +2115,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (CLOSEOUT_TOOL_NAMES.has(toolName)) {
     return executeCloseoutTool(toolName, input);
+  }
+  if (CLOSEOUT_REPAIR_TOOL_NAMES.has(toolName)) {
+    return executeCloseoutRepairTool(toolName, input, actionContext);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
     return executeScheduleTool(toolName, input, actionContext);
@@ -2424,9 +2452,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       techName: req.technicianName || pageData?.tech_name || null,
     } : null;
 
-    // Select tools based on context and role (email tools are admin-only)
+    // Select tools based on context and role (email tools are admin-only).
+    // Red-tier tools additionally require full access (owner ruling
+    // 2026-09-28) — never a card either way; see getToolsForContext.
     let tools = (platformEnabled ? ActionRegistry.initialTools(context, actionScope)
-      : getToolsForContext(context, req.techRole === 'admin')).map(apiToolDefinition);
+      : getToolsForContext(context, req.techRole === 'admin', ibFullAccess(req))).map(apiToolDefinition);
 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
@@ -2963,6 +2993,17 @@ router.post('/execute', async (req, res, next) => {
       // replay protection. Structural: no env value changes this.
       return res.status(409).json({ error: 'This write requires a confirmed pending action. Use /confirm-action with a pending_action_id.' });
     }
+    // Owner-only access model (owner ruling 2026-09-28): red-tier
+    // (confirmed-endpoint) actions run only for the contact@
+    // wavespestcontrol.com login (or IB_FULL_ACCESS_EMAILS). Every other
+    // admin login is otherwise unrestricted (yellow/green stay unchanged).
+    // Checked before the idempotency key is minted and before any executor
+    // runs — no side effect happens for a refused request. Technician
+    // tokens never reach this line: isToolAllowedForRole above already
+    // refused them with their existing, stricter message.
+    if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && !ibFullAccess(req)) {
+      return res.status(403).json({ error: 'This action is limited to the owner account.' });
+    }
     if (CONFIRMED_ACTION_TOOL_NAMES.has(action) && confirmed !== true) {
       return res.status(400).json({ error: 'Explicit confirmation is required for this action' });
     }
@@ -3275,6 +3316,12 @@ router.post('/confirm-action', async (req, res, next) => {
         // unique, so identity is enforced by id, never by the name match.
         if (action.tool_name === 'assign_technician' && livePreview?.would_assign_to_id) {
           execParams._verified_tech_id = String(livePreview.would_assign_to_id);
+        }
+        // repair_closeout: the verified preview's step list IS the approved
+        // plan — the executor runs exactly these and refuses if its own
+        // re-plan differs (pre-push P1: never add a step the card lacked).
+        if (action.tool_name === 'repair_closeout' && Array.isArray(livePreview?.steps)) {
+          execParams._verified_repair_steps = livePreview.steps;
         }
         // set_estimate_presentation: the verified preview's previous-name
         // snapshot rides to the executor to re-assert under the estimate
@@ -3658,3 +3705,7 @@ module.exports = router;
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
 module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));
+// Exposed for the full-access tool-offering test (owner ruling 2026-09-28) —
+// keeps that test tied to the route's own offered-tool list instead of a
+// re-implementation of it.
+module.exports.getToolsForContext = getToolsForContext;

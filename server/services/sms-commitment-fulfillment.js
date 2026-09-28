@@ -45,7 +45,18 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     never answered by money.
 // 16: a property-scoped ask admits a payment nothing ties to any property;
 //     only a payment tied to another property is refused.
-const FULFILLMENT_POLICY = 16;
+// 17: a plain-information `other` ask (reply_answerable, owner ruling
+//     2026-09-28) admits an operator-sent staff sms reply as a witness — R3
+//     (staff saying "done" is not proof) still governs every ACTION request,
+//     which is never stamped reply_answerable (Codex #5088 precedent).
+// 18: any text a person sends after a general `other` ask closes it, without
+//     the model (owner ruling 2026-09-28, after a dry run in which every
+//     overdue bell was an ask staff had answered within minutes): the bell
+//     means nobody from Waves responded. R3 and 17's reply_answerable stamp
+//     are gone.
+// 19: the no-model close is a customer's ask only (basis 'request'); a
+//     promise Waves made is never closed by a later reply.
+const FULFILLMENT_POLICY = 19;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -117,6 +128,40 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // still judges whether this payment answers this question: there is no
 // payment shortcut, only visit progress (R1) closes without the model.
 const moneyAnswerable = (commitment) => commitment.sms_context?.money_answerable === true;
+
+// A reply that a person actually sent: the composer's persisted stamp or the
+// sending admin (operator_sent, the loader), or a send through the staff
+// draft-approval queue (ai_approved / ai_revised, admin-drafts.js only).
+// Never a bare 'manual' type, which automated senders reuse (Codex #5169 r1 P1).
+const STAFF_APPROVED_SMS_TYPES = ['ai_approved', 'ai_revised'];
+const operatorReply = (record) => record.operator_sent === true || STAFF_APPROVED_SMS_TYPES.includes(record.message_type);
+// A scheduled text is written when it is queued, not when it goes out: one
+// queued before the ask never answers it (scheduled_at, the loader).
+const writtenAfterAsk = (record, commitment) => !record.scheduled_at
+  || new Date(record.scheduled_at) > new Date(commitment.sms_context?.source_at);
+// The owner's any-reply ruling (2026-09-28) covers a customer's ask (basis
+// 'request'). A promise Waves made (basis 'promise') is kept by doing it,
+// never by a later reply ("Thanks!" is no prep guide): the model judges it.
+const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'request';
+// A call a person placed: the staff bridge rings a staff phone first and
+// dials the customer only after that person presses 1 (call-bridge.js,
+// sourced by admin-communications.js and tech-line.js). Automated outbound
+// calls log other sources ('collections_voice'), so the list is an allowlist
+// (Codex #5169 r1 P1: a completed call alone proves no person).
+const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click'];
+// A call back that reached the customer: placed through the staff bridge,
+// and the recording's reviewed extraction heard a live conversation, not
+// voicemail — the bar call-commitments.js sets for a returned callback. The
+// stored status and duration are the staff leg's, so they alone never show
+// the customer answered (Codex #5220 r1 P1): a call that rang out left no
+// recording. A callback-card call records its customer leg, which must have
+// completed too (>= 60 s).
+function personCallBack(record) {
+  if (!STAFF_CALL_SOURCES.includes(record.source)) return false;
+  if (record.v2_extraction_status !== 'valid' || record.is_voicemail !== 'false') return false;
+  return record.customer_leg_status == null
+    || (record.customer_leg_status === 'completed' && Number(record.customer_leg_seconds) >= 60);
+}
 
 // The keys a payments row names its invoice by, as the Stripe webhook's
 // findInvoiceForPayment reads them: a dispute stamps dispute_invoice_id
@@ -221,6 +266,16 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
         conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
         conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
+        // Persisted operator provenance (owner ruling 2026-09-28): the
+        // composer's human_authored stamp or the sending admin. message_type
+        // 'manual' alone is overloaded across automated senders (twilio.js),
+        // so a reply-answerable ask never trusts the type by itself.
+        conn.raw("(COALESCE(sms_log.metadata->>'human_authored', '') = 'true' OR sms_log.admin_user_id IS NOT NULL) as operator_sent"),
+        // When a scheduled text was written: its queue row's creation. The
+        // provider row this reads is stamped at handoff (scheduler.js), so
+        // a text queued before the ask would otherwise read as a reply.
+        conn.raw(`CASE WHEN sms_log.metadata->>'scheduled_sms_log_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN (SELECT q.created_at FROM sms_log q WHERE q.id = (sms_log.metadata->>'scheduled_sms_log_id')::uuid) END as scheduled_at`),
         // The property an automated notice was about, as snapshotted at send
         // time (twilio.js / push-channel-routing). Never the visit's CURRENT
         // property: a later property switch must not re-scope a delivered
@@ -230,7 +285,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
-      .select('id', 'status', 'duration_seconds', 'transcription', 'created_at'),
+      // Who placed the call and whether it reached the customer (personCallBack).
+      .select('id', 'status', 'duration_seconds', 'transcription', 'created_at', 'source', 'v2_extraction_status',
+        conn.raw("ai_extraction_enriched->'meta'->>'is_voicemail' as is_voicemail"),
+        conn.raw("metadata->'customer_leg'->>'status' as customer_leg_status"),
+        conn.raw("metadata->'customer_leg'->>'duration_seconds' as customer_leg_seconds")),
     email: conn('emails').where({ customer_id: customerId }).where('received_at', '>', after)
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
@@ -638,14 +697,22 @@ function admissibleWitness(record, commitment, records = []) {
   const estimateDelivery = recipientSpecificEstimate(commitment) && record.type === 'email_delivery';
   if (!witnessTypes(commitment).includes(record.type)) return false;
   if (['estimate', 'visit', 'payment'].includes(record.type) && !scopedToProperty(record, commitment)) return false;
-  if (emails.size && record.type !== 'email_delivery') return false;
+  // A general ask can name an address without asking for delivery to it
+  // ("is jane@… the email on my account?"); a person's reply or call back
+  // answers it whatever the address (Codex #5169 r1 P2, owner ruling
+  // 2026-09-28).
+  if (emails.size && record.type !== 'email_delivery' && !(['sms', 'call'].includes(record.type) && customerAsk(commitment))) return false;
   const after = new Date(commitment.sms_context?.source_at);
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
     sms: () => smsDelivered(record)
       && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type)
-      && automatedNoticeInScope(record, commitment),
-    call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60,
+      && automatedNoticeInScope(record, commitment)
+      // A general ask takes only a reply a person wrote after it, never an automated notice.
+      && (commitment.kind !== 'other' || (operatorReply(record) && writtenAfterAsk(record, commitment))),
+    call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60
+      // A general ask takes only a call back that reached the customer.
+      && (commitment.kind !== 'other' || personCallBack(record)),
     // The SendGrid writer records an open or click as a timestamp without
     // moving status past 'sent'; engagement proves receipt even when the
     // delivery event was lost.
@@ -688,11 +755,14 @@ const ORDERING_TIME = {
 const PAYMENT_WITNESS_KINDS = Object.freeze(['other']);
 function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
-  // R3 (owner ruling 2026-09-24, the split-billing ask "separate the charges" — the owner's
-  // own staff reply "Done: ... is now the Auto Pay method" does NOT close
-  // this): a human staff text/call/email no longer closes an `other` ask by
-  // itself. Only a visit event (R1) or a payment landing (R2) does.
-  if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) return ['visit', 'payment'];
+  // Owner ruling 2026-09-28 (reversing R3, 2026-09-24): a general `other` ask
+  // is answered by any text a person from Waves sends after it (operatorReply
+  // in witnesses.sms — never an automated notice, never a bare 'manual'
+  // type) or a call back that reached the customer (personCallBack), which
+  // close a customer's ask without the model (replyFulfillment) and are
+  // judged by the model for a promise Waves made, as well as by a visit event
+  // (R1) or money landing (R2), which the model still judges.
+  if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) return ['visit', 'payment', 'sms', 'call'];
   // `callback` keeps its existing mix: a real call back, or the same visible
   // field progress that answers an "other" ask (owner ruling 2026-09-24).
   if (commitment.kind === 'callback') return [...REQUIRED_TYPES.callback, 'visit'];
@@ -727,9 +797,10 @@ function fatalFailures(evidence, commitment, witness) {
 // ants"): an event record — a visit's field progress, move or cancellation,
 // or money landing (R2) — reaches the model the moment it happens, even
 // inside an open window, instead of waiting for the deadline like a message
-// witness. There is no no-model close: the other kind also carries
+// witness. An event never closes without the model: the other kind also carries
 // cancellations, payment support and missing materials, and whether a given
-// event answers THIS ask is semantic (Codex #4816 r2–r10). The dry-run
+// event answers THIS ask is semantic (Codex #4816 r2–r10). Only a person's
+// reply or call back to a general ask does (replyFulfillment). The dry-run
 // misses that R1 set out to fix were the model citing a context record; the
 // prompt now names witness_refs, so it cites the admissible event.
 // A payment landing IS a SYSTEM_EVENT_TYPE (R2): a settlement question with
@@ -793,6 +864,26 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
     payment_source: witness.payment_source,
     matched_at: matchedAt, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
+}
+
+// Owner ruling 2026-09-28: a customer's general ask (customerAsk) is handled
+// once a person from Waves responds — any text a person sent, or a call back
+// that reached the customer, after it (witnessAllowed) — whatever was said,
+// so no model judges whether it was enough: the bell means nobody
+// responded. A promise Waves made is not an ask: the model judges it. The earliest
+// response loaded is the witness. Source failures cannot hide it: the loaded
+// response happened whatever a failed or truncated channel held. Inside an
+// open window (eventOnly) a message waits for the deadline, as before. Null
+// when nobody responded; the model then judges any event evidence.
+function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
+  if (!customerAsk(commitment)) return null;
+  const replies = evidence.records.filter((row) => ['sms', 'call'].includes(row.type)
+    && witnessAllowed(row, commitment, evidence.records, eventOnly));
+  if (!replies.length) return null;
+  const at = (row) => new Date(witnessTime(row, commitment)).getTime();
+  const reply = replies.reduce((first, row) => (at(row) < at(first) ? row : first));
+  return { verdict: 'fulfilled', record_type: reply.type, record_id: reply.id, matched_at: witnessTime(reply, commitment),
+    quote: null, basis: 'person_reply', extractor_version: VERSION };
 }
 
 // The event page's scan watermark and attempt stamp are bookkeeping, not obligation content.
@@ -892,6 +983,10 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   const eventOnly = verdict.event_only === true;
   if (fulfillmentFingerprint(commitment, evidence, { eventOnly }).evidenceHash !== verdict.evidence_hash) return false;
+  if (verdict.basis === 'person_reply') {
+    const reply = replyFulfillment(evidence, commitment, { eventOnly });
+    return reply?.record_type === verdict.record_type && String(reply.record_id) === String(verdict.record_id);
+  }
   return groundFulfillment({ verdict: 'fulfilled', record_ref: `${verdict.record_type}:${verdict.record_id}`,
     quote: verdict.quote }, evidence, commitment, { eventOnly }).verdict === 'fulfilled';
 }
@@ -912,6 +1007,8 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date(), ev
 }
 
 async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } = {}) {
+  const reply = replyFulfillment(evidence, commitment, { eventOnly });
+  if (reply) return reply;
   // Only a supporting channel's truncation may wait for the witness; every
   // other failure is settled before a provider sees the evidence.
   const settled = evidence.failures.filter((failure) => !relaxableTruncation(failure, commitment));

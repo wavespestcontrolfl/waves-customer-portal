@@ -9,6 +9,8 @@
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/invoice', () => ({ markDeliverySent: jest.fn(async () => ({ status: 'sent' })) }));
+
 
 const updates = [];
 const chain = {
@@ -22,7 +24,7 @@ mockDb.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 mockDb.fn = { now: () => 'now()' };
 jest.mock('../models/db', () => mockDb);
 
-const { finalizeDeferredCompletionSend, stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
+const { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
 
 describe('stripPayLinkLineFromBody (round 9 #4634 finding 1)', () => {
   const payUrl = 'https://pay.wavespestcontrol.com/i/abc123';
@@ -157,4 +159,106 @@ test('the delivered-at stamp is only added when the record has none; status is a
   const stamp = JSON.parse(bindings[1]);
   expect(Object.keys(stamp)).toEqual(['completionSmsDeferredDeliveredAt']);
   expect(Number.isNaN(Date.parse(stamp.completionSmsDeferredDeliveredAt))).toBe(false);
+});
+
+test('wrapper invoice completion forwards the original App witness on finalize-only retry', async () => {
+  const Invoice = require('../services/invoice');
+  const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true, app_event_already_visible_at: '2026-09-08T15:00:00Z' };
+  expect(await finalizeDeferredCompletionSend(meta, { retry: true })).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, deduped: true, eventVisibleAt: meta.app_event_already_visible_at,
+  }));
+});
+
+test('finalize-only replay forwards durable Email and Text originals without inventing a new delivery', async () => {
+  const Invoice = require('../services/invoice');
+  const meta = { invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_email: true, invoice_prior_email: true, invoice_prior_email_at: '2026-09-08T14:00:00Z',
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: '2026-09-08T16:00:00Z' };
+  expect(await finalizeDeferredCompletionSend(meta, { retry: true })).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: true,
+    eventVisibleAt: meta.invoice_prior_delivery_at,
+    emailEventVisibleAt: meta.invoice_prior_email_at,
+    smsEventVisibleAt: meta.invoice_prior_sms_at,
+  }));
+});
+
+test('Email-only old replay does not claim a Text send or substitute a retry timestamp', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: true,
+    invoice_prior_email_at: null, invoice_delivery_sms: false, invoice_prior_sms: false }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: false, deduped: true, eventVisibleAt: null,
+  }));
+});
+
+test('legacy mixed replay keeps old App time but treats its new Email sibling as fresh', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: false,
+    invoice_prior_email_at: null, invoice_delivery_sms: true, invoice_prior_sms: true,
+    invoice_prior_sms_at: '2026-09-08T14:00:00Z' }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: false, eventVisibleAt: null,
+    smsEventVisibleAt: '2026-09-08T14:00:00Z',
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('emailEventVisibleAt');
+});
+
+test('legacy mixed replay keeps old Email time but treats its new Text sibling as fresh', async () => {
+  const Invoice = require('../services/invoice');
+  await finalizeDeferredCompletionSend({ invoice_id: 'inv-1', mark_invoice_delivery: true,
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_prior_delivery_at: null, invoice_delivery_email: true, invoice_prior_email: true,
+    invoice_prior_email_at: '2026-09-08T14:00:00Z', invoice_delivery_sms: true, invoice_prior_sms: false,
+    invoice_prior_sms_at: null }, { retry: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    email: true, sms: true, deduped: false, eventVisibleAt: null,
+    emailEventVisibleAt: '2026-09-08T14:00:00Z',
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('smsEventVisibleAt');
+});
+
+test('deferred decline finalize-only uses durable per-rail times and old notice time', async () => {
+  const Invoice = require('../services/invoice');
+  updates.length = 0;
+  Invoice.markDeliverySent.mockClear();
+  const meta = { invoice_id: 'inv-1', service_record_id: 'rec-1',
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_email: true, invoice_prior_email: true, invoice_prior_email_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: '2026-09-08T14:00:00Z' };
+  expect(await finalizeDeferredDeclineNotice(meta)).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, email: true, deduped: true,
+    eventVisibleAt: meta.invoice_prior_delivery_at,
+    smsEventVisibleAt: meta.invoice_prior_sms_at,
+    emailEventVisibleAt: meta.invoice_prior_email_at,
+  }));
+  const notes = updates.find((update) => update.structured_notes).structured_notes;
+  expect(JSON.parse(notes.bindings[0])).toEqual({ paymentFailedNoticeStatus: 'sent',
+    paymentFailedNoticeSentAt: new Date(meta.invoice_prior_delivery_at).toISOString() });
+});
+
+test('deferred decline keeps a fresh Email sibling fresh and does not invent a missing App timestamp', async () => {
+  const Invoice = require('../services/invoice');
+  updates.length = 0;
+  Invoice.markDeliverySent.mockClear();
+  await finalizeDeferredDeclineNotice({ invoice_id: 'inv-1', service_record_id: 'rec-1',
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_delivery_email: true, invoice_prior_email: false,
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: null });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, email: true, deduped: false, smsEventVisibleAt: null,
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('emailEventVisibleAt');
+  const notes = JSON.parse(updates.find((update) => update.structured_notes).structured_notes.bindings[0]);
+  expect(notes.paymentFailedNoticeStatus).toBe('sent');
+  expect(Date.parse(notes.paymentFailedNoticeSentAt)).toBeGreaterThan(Date.parse('2026-09-08T16:00:00Z'));
 });

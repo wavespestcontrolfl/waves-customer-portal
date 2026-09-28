@@ -19,7 +19,9 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
-jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model' }));
+// anthropicAcceptsEffort lets the wire request carry a caller's effort, as it
+// would on a real Opus 5.5 DEEP model.
+jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model', anthropicAcceptsEffort: () => true }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({
     trackKey: 'st_augustine',
@@ -194,6 +196,37 @@ describe('generatePage', () => {
     const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'error');
     expect(errorLog).toBeTruthy();
     expect(errorLog.description).toMatch(/existing content preserved/);
+  });
+
+  test('never saves a page cut off at max_tokens — existing content preserved', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nHard-won existing analysis.',
+      data_point_count: 3,
+      source_treatment_ids: ['o1', 'o2', 'o3'],
+      stale_flag: false,
+    };
+    const state = useDb({ knowledge_entries: [existing] });
+    global.__anthropicCreate = jest.fn(async () => ({
+      stop_reason: 'max_tokens',
+      content: [{ type: 'text', text: '# Talstar P\n\n| Metric | Avg. Delta | Direction | |' }],
+      usage: { input_tokens: 100, output_tokens: 16000 },
+    }));
+
+    const result = await wiki.generatePage(
+      'product/talstar-p', 'product',
+      { outcomes: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }, { id: 'o4' }] },
+      'Product: Talstar P'
+    );
+
+    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    // High and medium effort both ran pages into the cap at 16000 (2026-09-28).
+    expect(global.__anthropicCreate.mock.calls[0][0].output_config).toEqual({ effort: 'low' });
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.content).toBe(existing.content);
+    const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
+    expect(contentPatch).toBeUndefined();
   });
 
   test('still creates a placeholder stub for a brand-new page when the AI call fails', async () => {
@@ -729,6 +762,25 @@ describe('weeklyRefreshIfDue', () => {
     expect(result.error).toBe('db exploded');
     const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.trigger_type === 'weekly_cron_error');
     expect(errorLog).toBeTruthy();
+  });
+
+  test('a stale track page refreshes with the grass_track id from its title, not the slug', async () => {
+    useDb({
+      knowledge_entries: [{
+        id: 'ke-t', slug: 'track/st-augustine', category: 'track',
+        title: 'Track st_augustine Performance', stale_flag: true,
+      }],
+      knowledge_update_log: [],
+      treatment_outcomes: [],
+    });
+    const trackSpy = jest.spyOn(wiki, 'updateTrackPage').mockResolvedValue({ writeState: 'skipped' });
+    const seasonalSpy = jest.spyOn(wiki, 'updateSeasonalPage').mockResolvedValue({ writeState: 'skipped' });
+
+    await wiki.weeklyRefresh();
+
+    expect(trackSpy).toHaveBeenCalledWith('st_augustine', expect.anything());
+    trackSpy.mockRestore();
+    seasonalSpy.mockRestore();
   });
 
   test('vision-score reconcile keyset-paginates the whole window instead of a blind cap', async () => {

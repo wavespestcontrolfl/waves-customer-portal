@@ -100,6 +100,20 @@ describe('billing channel email adapter', () => {
     }));
   });
 
+  test.each([
+    ['sent_at', { sent_at: new Date('2026-05-20T14:00:00Z'), created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-20T14:00:00Z')],
+    ['created_at fallback', { sent_at: null, created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
+    ['valid created_at after invalid sent_at', { sent_at: 'invalid', created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
+    ['no usable timestamp', { sent_at: 'invalid', created_at: null }, null],
+    ['missing message', null, null],
+  ])('deduped accepted Email carries stored %s for stamp repair', async (_label, message, sentAt) => {
+    mockSendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message });
+
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt,
+    });
+  });
+
   test('passes only complete allowlisted producer context to the template snapshot', async () => {
     mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
     await sendBillingChannelEmail(input({
