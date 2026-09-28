@@ -1606,6 +1606,32 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/og/:kind/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
+(`server/routes/og-preview.js`, link-preview images, owner 2026-09-27:
+the picture iMessage/SMS/email crawlers show under a texted or emailed
+customer link; `server/index.js` renderHTML writes the matching `og:image`
+into each customer page's `<head>`, and `og:title`/`twitter:title` read
+just "Waves"). Mounted OUTSIDE the `/api/` limiter with its own 120/min
+per-key limiter (the `/l` budget). **Token cards** — kinds `report`,
+`report-project`, `appointment`, `reschedule`, `prep` — resolve through
+`link-preview-metadata.js`, which format-gates the token before any DB read
+and re-applies what the page itself would show: `typedReportDelivery`
+suppression, `GATE_APPOINTMENT_PAGE` plus the page's own state (the date and
+window appear only while `pageStateForVisit` says `upcoming`), expired prep.
+Read-only: a render never stamps a view. Privacy headers precede the
+limiter. **Deliberate exception to "generic 404":** an unknown, malformed,
+dark-gated or suppressed link returns the default card, 200, byte-identical
+to `/og/default.jpg` and with the same headers — still no existence oracle,
+and the crawler shows a branded card, not a broken one. **Token-free cards**
+(`/og/<kind>.jpg`, the 17 `FIXED_CARDS`: invoice, receipt, statement,
+estimate, tracking, assessment, …) read nothing from the database and carry
+no token, so they are served `public, max-age=3600` without privacy
+headers; an unregistered name gets the default card. Payload is a
+1200x630 JPEG of an eyebrow, headline and subline: never a price, amount,
+name, address, phone, email, tech name or note, and estimates stay generic
+(no services or prices). Token segments are redacted from request logs
+(`redact-request-url.js`). No query parameters are read. The render cache
+is keyed by card content, never by token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the

@@ -1,6 +1,7 @@
 /**
- * Per-link Open Graph preview images — GET /og/:kind/:token.jpg and
- * GET /og/default.jpg.
+ * Per-link Open Graph preview images — GET /og/:kind/:token.jpg,
+ * GET /og/<kind>.jpg (token-free cards) and GET /og/default.jpg. Contract:
+ * docs/public-route-contracts.md.
  *
  * Mounted BEFORE the SPA catch-all and OUTSIDE any auth (server/index.js) —
  * this is the endpoint iMessage/SMS/email link-preview crawlers actually
@@ -20,6 +21,17 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { FIXED_CARDS, resolveCardContent } = require('../services/link-preview-metadata');
 const { renderLinkPreviewJpeg } = require('../services/link-preview-card-renderer');
+
+// Token-bearing cards (/og/:kind/:token.jpg) get the privacy headers before
+// the limiter, like every other token surface (docs/public-route-contracts.md).
+router.use((req, res, next) => {
+  if (req.path.split('/').filter(Boolean).length > 1) {
+    res.set('Cache-Control', 'no-store');
+    res.set('X-Robots-Tag', 'noindex');
+    res.set('Referrer-Policy', 'no-referrer');
+  }
+  next();
+});
 
 // Public and outside the /api limiter, and a token-bearing card costs a DB
 // lookup — same per-IP budget as the /l short links. Preview crawlers fetch
@@ -63,7 +75,11 @@ function cacheSet(key, value) {
   }
 }
 
-async function renderCached(cacheKey, content) {
+// Keyed by what the card SHOWS, never by token: a moved or cancelled
+// appointment resolves new content and so renders a new image, and two links
+// with the same words share one render.
+async function renderCached(content) {
+  const cacheKey = JSON.stringify([content.eyebrow, content.headline, content.subline]);
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
   const buffer = await renderLinkPreviewJpeg(content);
@@ -73,13 +89,15 @@ async function renderCached(cacheKey, content) {
 
 function sendJpeg(res, buffer) {
   res.set('Content-Type', 'image/jpeg');
-  res.set('Cache-Control', 'public, max-age=3600');
+  // Token-free cards are plain brand images; token cards keep the no-store
+  // the privacy middleware already set.
+  if (!res.get('Cache-Control')) res.set('Cache-Control', 'public, max-age=3600');
   return res.send(buffer);
 }
 
 async function sendDefault(res) {
   try {
-    const buffer = await renderCached('default', DEFAULT_CONTENT);
+    const buffer = await renderCached(DEFAULT_CONTENT);
     return sendJpeg(res, buffer);
   } catch (err) {
     logger.error(`[og-preview] default card render failed: ${err.message}`);
@@ -95,7 +113,7 @@ router.get('/:file', async (req, res) => {
   const kind = match && Object.prototype.hasOwnProperty.call(FIXED_CARDS, match[1]) ? match[1] : null;
   if (!kind) return sendDefault(res);
   try {
-    return sendJpeg(res, await renderCached(kind, FIXED_CARDS[kind]));
+    return sendJpeg(res, await renderCached(FIXED_CARDS[kind]));
   } catch (err) {
     logger.error(`[og-preview] card render failed for kind=${kind}: ${err.message}`);
     return sendDefault(res);
@@ -117,7 +135,7 @@ router.get('/:kind/:tokenFile', async (req, res) => {
   try {
     const content = await resolveCardContent(kind, token);
     if (!content) return sendDefault(res);
-    const buffer = await renderCached(`${kind}:${token}`, content);
+    const buffer = await renderCached(content);
     return sendJpeg(res, buffer);
   } catch (err) {
     logger.error(`[og-preview] card render failed for kind=${kind}: ${err.message}`);

@@ -60,6 +60,14 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/api/public/inspection/${tok}?x=1`)).toBe('/api/public/inspection/[REDACTED]?x=1');
   });
 
+  test('redacts the token in a link-preview image URL; token-free card URLs stay', () => {
+    expect(redactRequestUrl(`/og/report/${'a'.repeat(32)}.jpg`)).toBe('/og/report/[REDACTED]');
+    expect(redactRequestUrl('/og/report-project/jane-sample-0123456789ab.jpg')).toBe('/og/report-project/[REDACTED]');
+    expect(redactRequestUrl(`/og/appointment/${'b'.repeat(64)}.jpg`)).toBe('/og/appointment/[REDACTED]');
+    expect(redactRequestUrl('/og/pay.jpg')).toBe('/og/pay.jpg');
+    expect(redactRequestUrl('/og/default.jpg')).toBe('/og/default.jpg');
+  });
+
   test('does not throw on malformed escapes or alter URLs without a query', () => {
     expect(redactRequestUrl('/api/plain/path')).toBe('/api/plain/path');
     expect(() => redactRequestUrl('/api/path?%E0%A4%A=value&token')).not.toThrow();
