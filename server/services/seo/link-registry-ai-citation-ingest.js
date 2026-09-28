@@ -48,7 +48,7 @@
  */
 
 const { isEnabled } = require('../../config/feature-gates');
-const { ensureDomain, isNeverTargetHost } = require('./link-registry');
+const { ensureDomain, isNeverTargetHost, touchKey } = require('./link-registry');
 const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
 const { AI_CITATION_SOURCE_DETAIL_PREFIX } = require('./link-authority-policy');
 const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
@@ -214,7 +214,8 @@ function citationDetail(d) {
  *   included — a host cited under two categories counts as two here).
  * - byCategory: a count per category — the run's classification summary.
  * - enqueued: how many (listing + editorial) candidates this run sends/would send.
- * - dryRun: one whereIn on seo_link_domains to split would-insert vs existing; no writes.
+ * - dryRun: reads seo_link_domains + seo_link_domain_sources to report the
+ *   same inserted / existing / touched totals a live run would; no writes.
  * - Otherwise every candidate goes through ensureDomain in ONE transaction.
  */
 async function runAiCitationFeeder(db, { dryRun = false, lookbackDays = DEFAULT_LOOKBACK_DAYS, now = new Date() } = {}) {
@@ -260,16 +261,38 @@ async function runAiCitationFeeder(db, { dryRun = false, lookbackDays = DEFAULT_
     // against the DB snapshot; every later occurrence of the SAME host in
     // this preview is always `existing` (the hypothetical insert from its
     // first occurrence would already have happened by then).
+    //
+    // Codex P2 2026-09-28 (round 8): `touched` mirrors the live count too.
+    // A live ensureDomain on an EXISTING domain reports touched when its
+    // (domain_id, touch_key) row is new — so each candidate's key is derived
+    // with link-registry's own touchKey() (the exact function ensureDomain
+    // uses, never a copy) and looked up in seo_link_domain_sources, plus
+    // the keys this preview's earlier candidates would already have written.
+    // Still read-only: two whereIn reads, no writes.
     const hosts = [...new Set(enqueueable.map((d) => d.host))];
-    const known = hosts.length ? await db('seo_link_domains').select('domain').whereIn('domain', hosts) : [];
-    const knownSet = new Set(known.map((k) => k.domain));
+    const known = await db('seo_link_domains').select('id', 'domain').whereIn('domain', hosts);
+    const idByDomain = new Map(known.map((k) => [k.domain, k.id]));
+    const keyOf = (d) => touchKey(SOURCE, null, citationDetail(d));
+    const knownIds = [...idByDomain.values()];
+    const existingTouches = knownIds.length
+      ? await db('seo_link_domain_sources').select('domain_id', 'touch_key')
+        .whereIn('domain_id', knownIds).whereIn('touch_key', [...new Set(enqueueable.map(keyOf))])
+      : [];
+    const domainById = new Map(known.map((k) => [k.id, k.domain]));
+    const touchSeen = new Set(existingTouches.map((t) => `${domainById.get(t.domain_id)}\n${t.touch_key}`));
     const countedThisRun = new Set();
-    for (const c of out.candidates) {
-      const alreadyCountedThisRun = countedThisRun.has(c.domain);
-      c.existing = alreadyCountedThisRun || knownSet.has(c.domain);
-      countedThisRun.add(c.domain);
-      if (c.existing) out.existing += 1; else out.inserted += 1;
-    }
+    enqueueable.forEach((d, i) => {
+      const c = out.candidates[i];
+      const touch = `${d.host}\n${keyOf(d)}`;
+      c.existing = countedThisRun.has(d.host) || idByDomain.has(d.host);
+      countedThisRun.add(d.host);
+      if (!c.existing) out.inserted += 1;
+      else {
+        out.existing += 1;
+        if (!touchSeen.has(touch)) out.touched += 1;
+      }
+      touchSeen.add(touch);
+    });
     return out;
   }
 

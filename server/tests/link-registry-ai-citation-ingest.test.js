@@ -11,10 +11,10 @@ const {
 } = require('../services/seo/link-registry-ai-citation-ingest');
 const { touchKey, TOUCH_DETAIL_MAX } = require('../services/seo/link-registry');
 
-function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
-  const store = { domains: [...domains], sources: [], mentions: [...mentions], queries: [...queries], updates: [], selects: [] };
+function fakeDb({ domains = [], sources = [], mentions = [], queries = [] } = {}) {
+  const store = { domains: [...domains], sources: [...sources], mentions: [...mentions], queries: [...queries], updates: [], selects: [] };
   const builder = (table) => {
-    const st = { where: null, cmp: [], whereIn: null, whereNotNull: null, insert: null };
+    const st = { where: null, cmp: [], whereIns: [], whereNotNull: null, insert: null };
     const q = {
       insert(row) { st.insert = row; return q; },
       onConflict() { return q; },
@@ -27,7 +27,7 @@ function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
         if (typeof a === 'object' && op === undefined) st.where = a; else st.cmp.push([a, op, v]);
         return q;
       },
-      whereIn(col, vals) { st.whereIn = [col, vals]; return q; },
+      whereIn(col, vals) { st.whereIns.push([col, vals]); return q; },
       whereNotNull(col) { st.whereNotNull = col; return q; },
       orderBy() { return q; },
       async first() { const r = await q.then(); return r[0]; },
@@ -47,10 +47,10 @@ function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
             }
             throw new Error(`unexpected insert into ${table}`);
           }
-          if (table === 'seo_link_domains') {
-            let rows = store.domains;
+          if (table === 'seo_link_domains' || table === 'seo_link_domain_sources') {
+            let rows = table === 'seo_link_domains' ? store.domains : store.sources;
             if (st.where) rows = rows.filter((d) => Object.entries(st.where).every(([k, v]) => d[k] === v));
-            if (st.whereIn) rows = rows.filter((d) => st.whereIn[1].includes(d[st.whereIn[0]]));
+            for (const [col, vals] of st.whereIns) rows = rows.filter((d) => vals.includes(d[col]));
             return rows;
           }
           if (table === 'seo_llm_mentions') {
@@ -339,6 +339,42 @@ describe('runAiCitationFeeder', () => {
     expect(db._store.sources).toEqual([]);
     const byDomain = Object.fromEntries(r.candidates.map((c) => [c.domain, c.existing]));
     expect(byDomain).toEqual({ 'bbb.org': true, 'yelp.com': false });
+    expect(r.touched).toBe(1); // bbb.org has no ai_citation touch yet — live would add one
+  });
+
+  // Codex P2 2026-09-28 (round 8): the preview's touched count uses the SAME
+  // touchKey() ensureDomain uses, against seo_link_domain_sources, so dry-run
+  // totals equal a live run's — for an existing domain that already has the
+  // exact key (not touched) and one that lacks it (touched).
+  describe('dryRun touched count matches a live run', () => {
+    const BBB = 'https://www.bbb.org/us/fl/sarasota/profile/pest-control/sample-co';
+    const YELP = 'https://www.yelp.com/biz/sample-co-sarasota';
+    const ANGI = 'https://www.angi.com/companylist/us/fl/sarasota/sample-co.htm';
+    const detailFor = (url) => citationDetail({ category: 'listing', sampleUrls: [url] });
+    const fixture = () => ({
+      domains: [
+        { id: 'd1', domain: 'bbb.org', source: 'competitor_gap', discovery_priority: 'normal' },
+        { id: 'd2', domain: 'yelp.com', source: 'competitor_gap', discovery_priority: 'normal' },
+      ],
+      sources: [
+        // bbb.org already carries this exact citation's touch; yelp.com has only an unrelated one
+        { id: 's1', domain_id: 'd1', source: 'ai_citation', touch_key: touchKey(SOURCE, null, detailFor(BBB)) },
+        { id: 's2', domain_id: 'd2', source: 'competitor_gap', touch_key: 'competitor_gap:scan' },
+      ],
+      mentions: [mention({ cited_urls: [BBB, YELP, ANGI] })],
+    });
+
+    test('existing-with-key ⇒ not touched; existing-without-key ⇒ touched; new ⇒ inserted', async () => {
+      const dry = fakeDb(fixture());
+      const preview = await runAiCitationFeeder(dry, { dryRun: true, now: NOW });
+      expect(preview).toMatchObject({ enqueued: 3, inserted: 1, existing: 2, touched: 1 });
+      expect(dry._store.sources).toHaveLength(2); // read-only
+      expect(dry._store.domains).toHaveLength(2);
+
+      const live = fakeDb(fixture());
+      const actual = await runAiCitationFeeder(live, { now: NOW });
+      for (const k of ['enqueued', 'inserted', 'existing', 'touched']) expect(preview[k]).toBe(actual[k]);
+    });
   });
 
   test('no measured rows in the window ⇒ a clean no-op', async () => {

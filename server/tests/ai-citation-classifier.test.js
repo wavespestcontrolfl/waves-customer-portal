@@ -234,6 +234,23 @@ describe('classifyUrl', () => {
       expect(r.subtype).toBeUndefined();
     });
 
+    // Codex P2 2026-09-28 (round 8): query values are tokenized DECODED —
+    // raw, `near%20me` split into "near", "20me" and the marker was missed.
+    test('a percent-encoded query marker (?q=pest%20control%20near%20me) is decoded before tokenizing', () => {
+      const pi = { providerIntent: true };
+      expect(classifyUrl('https://example.com/search?q=pest%20control%20near%20me', pi))
+        .toMatchObject({ category: 'editorial', subtype: 'listicle_candidate' });
+      expect(classifyUrl('https://example.com/search?q=pest+control+near+me', pi)).toMatchObject({ subtype: 'listicle_candidate' }); // '+' is a space too
+      expect(classifyUrl('https://example.com/search?q=pest%20control%20companies', pi).category).toBe('other'); // no marker ⇒ still other
+    });
+
+    test('a malformed escape in the query never throws — the readable remainder still tokenizes', () => {
+      const pi = { providerIntent: true };
+      expect(() => classifyUrl('https://example.com/search?q=best%2&x=%E0%A4%A', pi)).not.toThrow();
+      expect(classifyUrl('https://example.com/search?q=best%2', pi)).toMatchObject({ subtype: 'listicle_candidate' });
+      expect(classifyUrl('https://example.com/search?q=%zzpest', pi).category).toBe('other');
+    });
+
     test('negative: a provider question with NO local or best/top/rated/near-me token stays other', () => {
       const r = classifyUrl('https://www.unknownlocaldirectory.example/pest-control-companies', { providerIntent: true });
       expect(r.category).toBe('other');
@@ -302,6 +319,11 @@ describe('classifyUrl', () => {
 });
 
 describe('isLocallyRelevant', () => {
+  test('a multi-word place in a percent-encoded or +-encoded query is found (decoded, round 8)', () => {
+    expect(isLocallyRelevant('https://example.com/search?city=north%20port')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/search?city=lakewood+ranch')).toBe(true);
+    expect(isLocallyRelevant('https://example.com/search?city=%E0%A4%A')).toBe(false); // malformed, never throws
+  });
   test('a known SWFL local-news host is relevant regardless of path', () => {
     expect(isLocallyRelevant('https://www.heraldtribune.com/anything')).toBe(true);
   });

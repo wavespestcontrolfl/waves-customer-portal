@@ -160,11 +160,26 @@ function isLocallyRelevant(urlString) {
   try { u = new URL(urlString); } catch { return false; }
   const host = canonicalProspectDomain(u.hostname) || u.hostname.toLowerCase();
   if (matchesAny(host, SWFL_LOCAL_DOMAINS)) return true;
-  const hay = `${host} ${decodeURIComponentSafe(u.pathname)} ${u.search}`.toLowerCase();
+  const hay = `${host} ${decodeURIComponentSafe(u.pathname)} ${decodedQuery(u)}`.toLowerCase();
   return GEO_TERMS.some((t) => hay.includes(t));
 }
 function decodeURIComponentSafe(v) {
   try { return decodeURIComponent(v); } catch { return v; }
+}
+// The query string as readable text: every searchParams key and value,
+// DECODED (percent escapes, and '+' as a space), the way the pathname is
+// decoded (Codex P2 2026-09-28, round 8: `?q=pest%20control%20near%20me`
+// tokenized raw as "near", "20me" and missed the "near me" marker; the same
+// raw query hid a multi-word place like `?city=north%20port` from
+// isLocallyRelevant). WHATWG URLSearchParams never throws on a malformed
+// escape (a stray `%2` stays literal); any unexpected failure still falls
+// back to the raw search string rather than throwing.
+function decodedQuery(u) {
+  try {
+    return [...u.searchParams].map(([k, v]) => `${k} ${v}`).join(' ');
+  } catch {
+    return u.search;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +211,7 @@ function tokenize(s) {
 function hasBestToken(urlString) {
   let u;
   try { u = new URL(urlString); } catch { return false; }
-  const tokens = tokenize(`${u.hostname} ${decodeURIComponentSafe(u.pathname)} ${u.search}`);
+  const tokens = tokenize(`${u.hostname} ${decodeURIComponentSafe(u.pathname)} ${decodedQuery(u)}`);
   if (tokens.some((t) => BEST_TOKENS.includes(t))) return true;
   // "near-me" / "near me" split into the adjacent token pair ["near", "me"]
   // (bare "nearme" — no separator — is already a single token above).
@@ -284,6 +299,6 @@ module.exports = {
   _internals: {
     LISTING_DOMAINS, EDITORIAL_DOMAINS, REFERENCE_SUFFIXES, REFERENCE_DOMAINS, competitorDomains,
     EXTRA_COMPETITOR_DOMAINS, COMMUNITY_VIDEO_DOMAINS, SWFL_LOCAL_DOMAINS, GEO_TERMS, BEST_TOKENS,
-    matchesSuffix, matchesAny, facebookCategory, forbesCategory, hasBestToken, PROVIDER_INTENT_WORDS_RE,
+    matchesSuffix, matchesAny, facebookCategory, forbesCategory, hasBestToken, decodedQuery, PROVIDER_INTENT_WORDS_RE,
   },
 };
