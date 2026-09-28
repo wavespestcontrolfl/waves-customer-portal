@@ -1870,7 +1870,7 @@
      "find_slots": [
       {
        "when": {
-        "city": "Bradenton",
+        "city": {"regex": "^\\s*Bradenton\\s*$"},
         "when": ["next week", "próxima semana", "semana que viene", "semana entrante"]
        },
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
@@ -1879,7 +1879,7 @@
      "get_availability": [
       {
        "when": {
-        "city": "Bradenton"
+        "city": {"regex": "^\\s*Bradenton\\s*$"}
        },
        "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
       }
@@ -3266,7 +3266,10 @@
        "\\bdec[i\u00ed]r(?:lo|la|melo|mela|noslo)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
        "\\bdecir(?:me|nos)?\\s+(?:eso|otra\\s+vez|de\\s+nuevo)\\b",
        "\u00bf\\s*(?:c[o\u00f3]mo|qu[e\u00e9])\\s+(?:dijo|dice)\\s*\\?",
-       "\u00bf\\s*perd[o\u00f3]n\\s*\\?"
+       "\u00bf\\s*perd[o\u00f3]n\\s*\\?",
+       "\\b(?:(?:me\\s+)?(?:puede|podr[i\u00ed]a)\\s+(?:aclarar|explicar)(?:me|nos|lo|la)?|me\\s+(?:aclara|explica))(?:\\s+(?:eso|lo\\s+que\\s+(?:dijo|quiso\\s+decir)))?\\b",
+       "(?:^|[\u00bf.!]\\s*|\\b(?:(?<!no\\s)necesito\\s+que\\s+|por\\s+favor,?\\s+))(?:me\\s+)?(?:aclare|explique)(?:me|nos|lo|la)?\\b",
+       "(?:^|[\u00bf.!]\\s*)(?:qu[e\u00e9]\\s+(?:quiere\\s+decir|significa)(?:\\s+(?:eso|con\\s+eso))?|a\\s+qu[e\u00e9]\\s+se\\s+refiere)\\b"
       ],
       "onTurn": 2
      },

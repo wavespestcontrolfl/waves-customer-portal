@@ -331,6 +331,7 @@ describe('voice relay eval — fixture lint', () => {
             expect(entry.when).toEqual({ name: expect.stringMatching(/\w{3}/), street: expect.stringMatching(/\w{3}/) });
           } else {
             if (s.id === 'spanish-slot-gone') expect(entry.when.city).toEqual({ regex: '^Bradenton$' });
+            else if (s.id === 'spanish-booking-happy-path') expect(entry.when.city).toEqual({ regex: '^\\s*Bradenton\\s*$' });
             else expect(entry.when.city).toBe('Bradenton');
             if (name === 'find_slots') {
               // EN "next week", always present — a Spanish scenario's own
@@ -344,6 +345,7 @@ describe('voice relay eval — fixture lint', () => {
               expect(Object.keys(entry.when).sort()).toEqual(['city', 'when']);
             } else {
               if (s.id === 'spanish-slot-gone') expect(entry.when).toEqual({ city: { regex: '^Bradenton$' } });
+              else if (s.id === 'spanish-booking-happy-path') expect(entry.when).toEqual({ city: { regex: '^\\s*Bradenton\\s*$' } });
               else expect(entry.when).toEqual({ city: 'Bradenton' });
             }
             // EN "property is in Bradenton" or an es scenario's own "la
@@ -6757,6 +6759,18 @@ describe('voice relay eval — named spoken checks', () => {
     }
   });
 
+  test('spanish-booking-happy-path fixtures require the exact requested city', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH), TEST_RUN_DATE).scenarios.find((s) => s.id === 'spanish-booking-happy-path');
+    const slotInput = (city) => ({ city, when: 'next week' });
+    expect(replay._internals.pickToolResponse(scenario, 'find_slots', 1, slotInput('Not Bradenton'), {})).toEqual({ mismatch: true });
+    expect(replay._internals.pickToolResponse(scenario, 'find_slots', 1, slotInput('Bradenton Beach'), {})).toEqual({ mismatch: true });
+    expect(replay._internals.pickToolResponse(scenario, 'find_slots', 1, slotInput('bradenton'), {}).response.text).toContain('slot_ref: S2');
+    expect(replay._internals.pickToolResponse(scenario, 'find_slots', 1, slotInput('  Bradenton  '), {}).response.text).toContain('slot_ref: S2');
+    expect(replay._internals.pickToolResponse(scenario, 'get_availability', 1, { city: 'Not Bradenton' }, {})).toEqual({ mismatch: true });
+    expect(replay._internals.pickToolResponse(scenario, 'get_availability', 1, { city: 'bradenton' }, {}).response.text).toContain('slot_ref: S2');
+  });
+
   // Codex round-4 P1: mirrors the English slot-gone order-constraint fix.
   test('spanish-slot-gone blocks request_booking(S1) before the first pick and request_booking(S3) before the second', () => {
     const replay = require('../services/eval/voice-relay-replay');
@@ -6842,6 +6856,10 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. La oficina abre al amanecer, pero la visita será al final del día. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. La oficina le llamará para confirmar que la visita será a primera hora.',
       'Ya presenté la solicitud de re-servicio. El técnico va a llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico tiene que llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico debe llegar después del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico tendrá que venir después de la cena. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. La visita necesita comenzar al amanecer. La oficina le llamará.',
     ]) {
       const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, qualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -6866,6 +6884,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio va a estar registrada después del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio va a quedar registrada después del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. El técnico no va a llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico no tiene que llegar tras el almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico no debe llegar después del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Su solicitud tendrá que estar registrada después del almuerzo. La oficina le llamará.',
     ]) {
       const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -7532,6 +7553,19 @@ describe('voice relay eval — named spoken checks', () => {
     expect(spelledCoordinated.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail', detail: expect.stringContaining('99') });
     expect(replay._internals.scenarioStatus({ checks: spelledCoordinated })).toBe('fail');
     for (const text of [
+      'El mejorado cuesta ciento diecinueve por aplicación junto con el premium noventa y nueve.',
+      'El mejorado cuesta ciento diecinueve por aplicación más el premium noventa y nueve.',
+      'El mejorado cuesta ciento diecinueve por aplicación además del premium noventa y nueve.',
+      'El mejorado cuesta ciento diecinueve por aplicación + el premium noventa y nueve.',
+      'El mejorado cuesta ciento diecinueve por aplicación & el premium noventa y nueve.',
+    ]) {
+      const coordinatedPrice = replay._internals.evaluateChecks(scenario, record({ order: [
+        pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text, turn: 2 },
+      ] }));
+      expect([text, coordinatedPrice.find((c) => c.check === 'amount_requires_unit')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: coordinatedPrice })]).toEqual([text, 'fail']);
+    }
+    for (const text of [
       'El programa mejorado cuesta 119 por cada aplicación y una llamada de la oficina confirmará los detalles.',
       'El programa mejorado cuesta 119 por cada aplicación y dos llamadas de la oficina confirmarán los detalles.',
       'El programa mejorado cuesta 119 por cada aplicación y una revisión confirmará los detalles.',
@@ -7679,6 +7713,41 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(conjugatedRepeat.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
     const correctAddrCapture = { kind: 'tool', name: 'capture_lead', input: fullLead, ok: true, receipt: true, turn: 4 };
+    for (const text of [
+      '¿Puede aclarar eso?',
+      '¿Puede explicar eso?',
+      '¿Me aclara lo que dijo?',
+      '¿Me podría aclarar lo que dijo?',
+      '¿Qué quiere decir?',
+      '¿Qué significa eso?',
+      '¿A qué se refiere?',
+      'Necesito que aclare eso.',
+      'Por favor, aclare lo que quiso decir.',
+    ]) {
+      const clarification = replay._internals.evaluateChecks(scenario, record({ order: [
+        { kind: 'agent', text, turn: 2 },
+        correctAddrCapture,
+        { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Un miembro del equipo le dará seguimiento.', turn: 4 },
+      ] }));
+      expect([text, clarification.find((c) => c.check === 'spoken_never_matches' && c.status === 'fail')]).toEqual([text, expect.objectContaining({ severity: 'critical' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: clarification })]).toEqual([text, 'fail']);
+    }
+    for (const text of [
+      'Entendido, no hace falta aclarar nada.',
+      'Entendido, no necesito que aclare nada.',
+      'Entendido, le puedo aclarar cualquier duda.',
+      'Entendido, gracias por aclararlo.',
+      'Entendido, entiendo lo que quiere decir.',
+      'Entendido, sé a qué se refiere.',
+      'Entendido, ya sé qué significa eso.',
+    ]) {
+      const acknowledgment = replay._internals.evaluateChecks(scenario, record({ order: [
+        { kind: 'agent', text, turn: 2 },
+        correctAddrCapture,
+        { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Un miembro del equipo le dará seguimiento.', turn: 4 },
+      ] }));
+      expect([text, replay._internals.scenarioStatus({ checks: acknowledgment })]).toEqual([text, 'pass']);
+    }
     for (const turn of [1, 2, 3]) {
       const early = replay._internals.evaluateChecks(scenario, record({ order: [
         { ...correctAddrCapture, turn },
