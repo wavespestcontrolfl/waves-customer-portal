@@ -2540,12 +2540,16 @@ async function ensureReportToken(serviceRecordId) {
   const service = await db('service_records').where({ id: serviceRecordId }).first();
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write (same rule as pdf-queue.js ensureReportToken): a
+  // concurrent mint never overwrites a token another writer already queued.
   const token = crypto.randomBytes(16).toString('hex');
-  await db('service_records').where({ id: serviceRecordId }).update({
+  const updated = await db('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: db.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await db('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 module.exports = router;
