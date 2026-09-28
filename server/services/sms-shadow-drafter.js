@@ -479,13 +479,22 @@ async function requestedServiceType(inboundMessage) {
     // Explicit inspection intent first (pre-push audit P1): the pricing
     // resolver folds "WDO inspection" into the termite family, which would
     // price a bait-system treatment for an inspection request.
+    const pestWords = /\b(?:pest|bugs?|roach(?:es)?|ants?|spiders?|general)\b/i;
     const inspection = /\bwdo\b/i.test(text) ? 'wdo_inspection'
       : /\binspection\b/i.test(text) && /\btermite/i.test(text) ? 'termite_inspection'
         : /\binspection\b/i.test(text) && /\b(?:rodent|rats?|mice|mouse)\b/i.test(text) ? 'rodent_inspection'
-          : null;
+          : /\binspection\b/i.test(text) && pestWords.test(text) ? 'pest_inspection'
+            : null;
+    // One-time / initial pest work (Codex #5194 r2): the pricing resolver's
+    // special-intent branch maps only lawn, mosquito and termite there and
+    // returns null for pest, which would fall through to the 45-minute
+    // General Pest default although a cleanout runs 90.
+    const oneTimePest = !inspection && /\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i.test(text) && pestWords.test(text)
+      ? 'pest_initial_cleanout' : null;
     const { serviceKeyFromText } = require('./customer-pricing-ai');
-    const key = inspection ? null : serviceKeyFromText(text);
-    const candidates = inspection ? [inspection] : (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
+    const explicit = inspection || oneTimePest;
+    const key = explicit ? null : serviceKeyFromText(text);
+    const candidates = explicit ? [explicit] : (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
     if (!candidates || !candidates.length) return null;
     const { resolveServiceType } = require('./service-library');
     for (const catalogKey of candidates) {
@@ -506,6 +515,25 @@ async function requestedServiceType(inboundMessage) {
 // service, not collapse to standalone lawn care. Null → caller falls back
 // to the customer's own visit.
 const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
+const SERVICE_FAMILY_ALIASES = Object.freeze({
+  pest: /\b(?:pest|bugs?|general|quarterly|bimonthly|cleanout|roach)\b/i,
+  lawn: /\b(?:lawn|turf|grass|fert\w*|weed)\b/i,
+  mosquito: /\bmosquito/i,
+  tree_shrub: /\b(?:tree|shrub|ornamental)\b/i,
+  palm: /\bpalm/i,
+  termite: /\b(?:termite|wdo)\b/i,
+  rodent: /\b(?:rodent|rats?|mice|mouse)\b/i,
+});
+function serviceFamilyOf(serviceName) {
+  const name = String(serviceName || '');
+  // most specific first: a combined label like "Lawn + Tree & Shrub" is
+  // asked about by either family, and each alias answers for its own
+  for (const family of ['termite', 'rodent', 'mosquito', 'palm', 'tree_shrub', 'lawn', 'pest']) {
+    if (SERVICE_FAMILY_ALIASES[family].test(name)) return family;
+  }
+  return null;
+}
+
 async function newBookingServiceType(inboundMessage, context) {
   const text = String(inboundMessage || '');
   // A complaint or cancellation is about the visit the customer already
@@ -514,9 +542,13 @@ async function newBookingServiceType(inboundMessage, context) {
   if (EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text)) return null;
   const requested = await requestedServiceType(text);
   if (!requested) return null;
-  const head = requested.toLowerCase().split(/[\s&+/-]+/)[0];
-  const alreadyScheduled = (context?.upcomingServices || [])
-    .some((s) => s && s.type && head && String(s.type).toLowerCase().includes(head));
+  // Already on the calendar? Compared by service FAMILY (Codex #5194 r2):
+  // "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
+  // Termite Bait Station" share the pest family even though no first word
+  // matches. The family aliases mirror the pricing resolver's matchers.
+  const family = serviceFamilyOf(requested);
+  const alreadyScheduled = Boolean(family) && (context?.upcomingServices || [])
+    .some((s) => s && s.type && SERVICE_FAMILY_ALIASES[family].test(String(s.type)));
   return alreadyScheduled ? null : requested;
 }
 
@@ -921,7 +953,10 @@ const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(
 const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
-function replyQuotesUngroundedAmount(reply, context) {
+// `opts.byMeaning` pins the strict clause/status-aware rule regardless of
+// the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
+// rollback is still a v12 draft and is rechecked as one.
+function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
   const text = String(reply || '');
@@ -936,7 +971,7 @@ function replyQuotesUngroundedAmount(reply, context) {
   // Gate on: only payments that actually went through (Codex r7 —
   // recentPayments is attempted history and carries failed / pending /
   // overdue rows too, none of which back "your payment went through").
-  const realAnswers = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const paidCents = new Set(finite((context.billing?.recentPayments || [])
     .filter((p) => !realAnswers || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
     .map((p) => (p?.amount != null ? centsOf(p.amount) : null))));

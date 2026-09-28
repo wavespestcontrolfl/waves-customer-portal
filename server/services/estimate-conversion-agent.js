@@ -725,7 +725,11 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     // availability lookup only when the inbound is routed as an ESTIMATE
     // interaction — a reschedule of an existing visit is priced with that
     // visit's service, not an unrelated open estimate's service_interest.
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null });
+    // …and only when the message is actually LINKED to that estimate
+    // (Codex #5194 r2): it carried the estimate's short code, or names the
+    // estimate/quote — never merely because the customer has one open.
+    const estimateLinked = Boolean(shortCode) || /\b(?:estimate|quote|proposal)\b/i.test(String(body || ''));
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW && estimateLinked ? estimate : null });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft

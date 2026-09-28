@@ -557,3 +557,18 @@ describe('processInboundSms — intended actions persist on the estimate-review 
     expect(snapshot).not.toHaveProperty('intended_actions');
   });
 });
+
+
+// #5194 r2: the resolved estimate reaches the drafter only when the message
+// is LINKED to it (its short code, or estimate wording) — never merely
+// because the customer has one open.
+describe('processInboundSms — estimate forwarded only when the message is linked to it', () => {
+  test('a generic request with an open estimate on file forwards estimateId null; explicit estimate wording forwards it', async () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+    await processInboundSms({ customer: CUSTOMER, from: '+19415551234', to: '+19415550000', body: 'Can you add lawn service Tuesday?', smsLogId: 'sms-link-1' });
+    const calls = generateGroundedDraft.mock.calls;
+    expect(calls[calls.length - 1][0]).toMatchObject({ estimateId: null });
+  });
+});

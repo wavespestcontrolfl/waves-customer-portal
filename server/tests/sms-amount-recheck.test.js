@@ -34,9 +34,24 @@ test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a re
   ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
   replyQuotesUngroundedAmount.mockReturnValue(true);
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx);
+  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx, { byMeaning: true });
   replyQuotesUngroundedAmount.mockReturnValue(false);
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
+});
+
+test('a v12 decision is rechecked strictly even after a gate rollback (prompt version wins over the live gate)', async () => {
+  realAnswersGateOn.mockReturnValue(false);
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 95, recentPayments: [{ amount: 95, status: 'failed' }] } });
+  replyQuotesUngroundedAmount.mockReturnValue(true);
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toMatchObject({ stale: true });
+  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment.', expect.any(Object), { byMeaning: true });
+  await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
+  // an older-prompt decision under a gate that is ON stays on the legacy rule
+  realAnswersGateOn.mockReturnValue(true);
+  replyQuotesUngroundedAmount.mockClear();
+  ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 120.5, recentPayments: [] } });
+  await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $120.50.', promptVersion: 'house_voice_v11', dbh: dbWithCustomer({ id: 'c1' }) });
+  expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
 });
 
 test('gate OFF: the guard is not consulted', async () => {

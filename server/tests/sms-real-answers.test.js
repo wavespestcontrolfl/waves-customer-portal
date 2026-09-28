@@ -1965,3 +1965,40 @@ describe('#5194 round 1', () => {
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });
+
+
+describe('#5194 round 2', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', pest_inspection: 'Pest Inspection Service', pest_general_quarterly: 'General Pest Control (Quarterly)', lawn_fertilization: 'Lawn Fertilization & Weed Control' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key] } : null) }));
+
+  test('explicit one-time / initial pest work and a generic pest inspection resolve (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I book a one-time pest treatment?')).resolves.toBe('Initial Pest Cleanout');
+    await expect(drafter.requestedServiceType('I need an initial cleanout for roaches')).resolves.toBe('Initial Pest Cleanout');
+    await expect(drafter.requestedServiceType('Can someone do a pest inspection?')).resolves.toBe('Pest Inspection Service');
+    await expect(drafter.requestedServiceType('Can you add quarterly pest control?')).resolves.toBe('General Pest Control (Quarterly)');
+  });
+
+  test('already-scheduled is judged by service FAMILY: "pest control?" against a "Quarterly Pest + Termite Bait Station" visit is not a new booking', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }], customer: { id: 'c1' } };
+    await expect(drafter.newBookingServiceType('What times do you have for pest control?', ctx)).resolves.toBeNull();
+    await expect(drafter.newBookingServiceType('Can you add lawn service?', ctx)).resolves.toBe('Lawn Fertilization & Weed Control');
+  });
+
+  test('the deadline for "by 9 AM tomorrow morning" on a row inserted after midnight is that row\'s own 9 AM, not a day later', () => {
+    const { followupDeadline } = require('../services/sms-followup-sla');
+    // drafted 23:58 ET Monday, row inserted 00:02 ET Tuesday (= 04:02Z) → Tuesday 9 AM
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T04:02:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    // drafted and inserted 21:30 ET Monday → Tuesday 9 AM (unchanged)
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T01:30:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+  });
+});

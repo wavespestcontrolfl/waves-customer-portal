@@ -61,7 +61,7 @@ async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
   if (!realAnswers || !decision.customer_id) return null;
   const { outgoingAmountsStale } = require('./sms-amount-recheck');
-  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody });
+  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 

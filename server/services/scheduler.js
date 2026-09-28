@@ -4060,7 +4060,10 @@ function initScheduledJobs() {
               // obligations only, payment history only for an ack, fail
               // closed on any error.
               const { outgoingAmountsStale } = require('./sms-amount-recheck');
-              amountsStale = (await outgoingAmountsStale({ customerId: msg.customer_id, body: msg.message_body })).stale;
+              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
+              amountsStale = (await outgoingAmountsStale({
+                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
+              })).stale;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above

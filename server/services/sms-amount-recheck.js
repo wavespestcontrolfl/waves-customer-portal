@@ -34,14 +34,24 @@ function bodyAmountCents(body) {
  * open invoice, monthly dues) may validate an amount; payment-history amounts
  * validate only an acknowledgement.
  */
-async function outgoingAmountsStale({ customerId, body, dbh = db } = {}) {
+// `promptVersion` (the decision's own) selects the strict rule: a real-
+// answers draft is rechecked as one even after the gate is rolled back
+// while its card is still pending (Codex #5194 r2 P1). Without a version
+// the live gate decides.
+function strictForVersion(promptVersion) {
+  if (typeof promptVersion === 'string' && promptVersion) return promptVersion.startsWith('house_voice_v12');
+  return require('./sms-followup-sla').realAnswersGateOn();
+}
+
+async function outgoingAmountsStale({ customerId, body, promptVersion = null, dbh = db } = {}) {
+  const strict = strictForVersion(promptVersion);
   const bodyAmounts = bodyAmountCents(body);
   if (!bodyAmounts.length) {
     // Price grammar the numeric extractor cannot verify ("fifty dollars",
     // "45/mo") is unverifiable, not amount-free (audit P1): with real
     // answers on it fails closed, mirroring the drafter's draft-time rule.
     const { hasPriceQuote } = require('./sms-suggest-mode');
-    if (require('./sms-followup-sla').realAnswersGateOn() && hasPriceQuote(String(body || ''))) {
+    if (strict && hasPriceQuote(String(body || ''))) {
       return { stale: true, reason: 'amount_unverifiable' };
     }
     return { stale: false };
@@ -67,8 +77,8 @@ async function outgoingAmountsStale({ customerId, body, dbh = db } = {}) {
     // an acknowledgement — a payment that later failed, was refunded or
     // disputed no longer authorizes "we received your $95 payment", even
     // when the reversal reopened a balance for the same figure.
-    if (!stale && require('./sms-followup-sla').realAnswersGateOn()) {
-      stale = require('./sms-shadow-drafter').replyQuotesUngroundedAmount(String(body || ''), ctx || {});
+    if (!stale && strict) {
+      stale = require('./sms-shadow-drafter').replyQuotesUngroundedAmount(String(body || ''), ctx || {}, { byMeaning: true });
     }
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {

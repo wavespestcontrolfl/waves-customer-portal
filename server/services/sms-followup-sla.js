@@ -90,7 +90,14 @@ function followupDeadline(phrase, draftedAt) {
   const p = String(phrase || '').toLowerCase();
   if (p === 'within the hour') return new Date(at.getTime() + 60 * 60 * 1000);
   if (p === 'by 9 am this morning') return parseETDateTime(`${etDateString(at)}T09:00:00`);
-  if (p === 'by 9 am tomorrow morning') return parseETDateTime(`${etDateString(addETDays(at, 1))}T09:00:00`);
+  if (p === 'by 9 am tomorrow morning') {
+    // The phrase is only ever generated after 8 PM ET. A decision row
+    // inserted after midnight (draft started before it) still means the
+    // 9 AM of ITS OWN date, not a day later (Codex #5194 r2).
+    const { etParts } = require('../utils/datetime-et');
+    const generatedBeforeMidnight = etParts(at).hour < 8;
+    return parseETDateTime(`${etDateString(generatedBeforeMidnight ? at : addETDays(at, 1))}T09:00:00`);
+  }
   return null;
 }
 function followupDeadlinePassed({ body, draftedAt, now = new Date() }) {
