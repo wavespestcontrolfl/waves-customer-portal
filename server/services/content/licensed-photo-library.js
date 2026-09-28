@@ -213,21 +213,61 @@ const SUFFIX_LIKE_RE = /\w-like\b/i;
 // They read as a comparison only when a pest is named on BOTH sides of the
 // SAME occurrence ("fire ants or red ants", "carpenter ants from
 // termites"). PEST_NOUN_RE is a small, generic, plural-tolerant list of
-// pest nouns — deliberately NOT the catalog's specific aliases — so an
-// uncatalogued species on either side (the whole reason this guard exists;
-// see the "brown recluse" tests below) still counts as a pest.
+// pest nouns, widened below with the catalog's organism head nouns, so a
+// species named without a generic noun on either side ("brown recluse and
+// huntsman spider" — the whole reason this guard exists) still counts.
 const CONNECTOR_RE = /\b(and|or|from|not)\b/gi;
 const PEST_NOUN_RE = /\b(ants?|roach(?:es)?|cockroach(?:es)?|spiders?|beetles?|bugs?|termites?|wasps?|bees?|hornets?|fl(?:y|ies)|moths?|mosquito(?:e?s)?|ticks?|fleas?|mites?|lizards?|geckos?|anoles?|snakes?|rodents?|rats?|mouse|mice|caterpillars?|worms?|grubs?|earwigs?|silverfish|centipedes?|millipedes?|scorpions?|weevils?|aphids?|whitefl(?:y|ies)|crickets?|grasshoppers?)\b/i;
 
-// True when some connector occurrence has a pest noun both before and
-// after it — the shape of an actual comparison ("X and Y", "X from Y").
+// The generic list cannot name every species ("brown recluse", "southern
+// black widow" carry no generic noun), so the approved species catalog's
+// organism names add their head nouns (the last word of each common name
+// and alias: recluse, widow, orbweaver…). Sign/plant/disease entries are
+// left out, and so are head words that are ordinary topic words. If the
+// catalog cannot be read, every connector counts as a comparison again
+// (fail closed — the pre-r10 behaviour).
+const NON_PEST_HEAD_WORDS = new Set(['adult', 'colony', 'frass', 'gals', 'holes', 'hive', 'legs', 'larva', 'larvae', 'swarm', 'wall', 'ums', 'poly']);
+function organismHeadNouns(entry) {
+  if (entry?.kind !== 'organism') return [];
+  return [entry.common_name, ...(entry.aliases || [])]
+    .map((name) => (String(name || '').toLowerCase().match(/[a-z]+/g) || []).pop())
+    .filter((head) => head && head.length >= 3 && !NON_PEST_HEAD_WORDS.has(head));
+}
+function loadCatalogPestHeads() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../../data/species-catalog-v1/entries');
+    const heads = new Set();
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json'))) {
+      const data = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      const entries = Array.isArray(data) ? data : (data.entries || data.species || []);
+      for (const entry of entries) for (const head of organismHeadNouns(entry)) heads.add(head);
+    }
+    return heads.size ? heads : null;
+  } catch {
+    return null;
+  }
+}
+const CATALOG_PEST_HEADS = loadCatalogPestHeads();
+function namesPest(text) {
+  if (PEST_NOUN_RE.test(text)) return true;
+  for (const word of String(text).match(/[a-z]+/g) || []) {
+    if (CATALOG_PEST_HEADS.has(word) || CATALOG_PEST_HEADS.has(word.replace(/e?s$/, ''))) return true;
+  }
+  return false;
+}
+
+// True when some connector occurrence names a pest both before and after
+// it — the shape of an actual comparison ("X and Y", "X from Y").
 function isConnectorComparison(text) {
   CONNECTOR_RE.lastIndex = 0;
   let match;
   while ((match = CONNECTOR_RE.exec(text))) {
+    if (!CATALOG_PEST_HEADS) return true;
     const before = text.slice(0, match.index);
     const after = text.slice(match.index + match[0].length);
-    if (PEST_NOUN_RE.test(before) && PEST_NOUN_RE.test(after)) return true;
+    if (namesPest(before) && namesPest(after)) return true;
   }
   return false;
 }

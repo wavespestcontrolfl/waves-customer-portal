@@ -152,16 +152,12 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
 
   test('returns null for every comparison phrasing named in review round 2 (Codex P1 follow-up)', () => {
     // Codex r10 on #5216 narrows the bare and/or/from/not connectors to
-    // require a pest noun on BOTH sides (see the connector tests below), so
-    // the bare-"and"/bare-"or" cases here spell out "recluse SPIDER" — the
-    // ordinary way that name is written — to keep naming a pest on the
-    // uncatalogued side too; every other line already carries an
-    // unconditional comparison word (between/compared to/mistaken for/
-    // confused with/look-alike/instead of) and is unaffected.
-    expect(matchSpecies('brown recluse spider and huntsman spider')).toBeNull();
+    // a pest named on BOTH sides; "brown recluse" still counts through the
+    // catalog's organism head nouns (recluse), so these stay null.
+    expect(matchSpecies('brown recluse and huntsman spider')).toBeNull();
     expect(matchSpecies('difference between a brown recluse and a huntsman spider')).toBeNull();
     expect(matchSpecies('huntsman spider compared to brown recluse')).toBeNull();
-    expect(matchSpecies('is it a huntsman spider or a brown recluse spider')).toBeNull();
+    expect(matchSpecies('is it a huntsman spider or a brown recluse')).toBeNull();
     expect(matchSpecies('huntsman spider mistaken for a brown recluse')).toBeNull();
     expect(matchSpecies('huntsman spider confused with a brown recluse')).toBeNull();
     expect(matchSpecies('a brown recluse look-alike: the huntsman spider')).toBeNull();
@@ -293,6 +289,18 @@ describe('isIdentificationPost matches the publisher\'s normalized post_type', (
   ])('%j', (fmIn) => {
     const shipped = normalizeAutonomousBlogFrontmatter({ title: 'T', meta_description: 'x', ...fmIn }, {}).post_type;
     expect(isIdentificationPost(fmIn)).toBe(shipped === 'diagnostic');
+  });
+});
+
+describe('connector comparisons use the catalog\'s organism names', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['southern black widow or huntsman spider', null],
+    ['huntsman spider and brown widows', null],
+    ['fire ant bites and mounds', 'fire ant'],
+    ['fire ant signs and identification', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
   });
 });
 
