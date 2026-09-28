@@ -9,8 +9,10 @@
  * builder and the canonical sendCustomerMessage pipeline verbatim — no new
  * SMS copy, no new sender, no new STOP/consent handling.
  *
- * Gate: GATE_CALL_BOOKING_LINK_TEXT (default off; off = byte-identical —
- * nothing is read or written by this module). Also requires
+ * Gate: GATE_CALL_BOOKING_LINK_TEXT (default off; off = no staging, claim,
+ * or send — the only thing that still runs is pruning stale
+ * consultation_link_send_attempts rows, since the two manual senders write
+ * those regardless of this gate; see sweep()'s own doc comment). Also requires
  * GATE_LEAD_INSPECTION_LINK live (buildLeadConsultationSmsLine's own gate) —
  * with that off, every dispatch attempt gets `link_disabled` and sends
  * nothing; this module does not duplicate that check.
@@ -1930,7 +1932,13 @@ async function clearDispatchMarkers(call) {
 // reprocess: past that, from the ORIGINAL send_at, stop retrying and
 // record a reason.
 async function recordRetryableDecision(conn, call, entry, leadId, now, result, skip) {
-  if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
+  // codex round-3 P2: clear BEFORE the deadline exit too — this outcome is
+  // still a definite no-send (retryable), so the deadline branch is a
+  // terminal skip, not a reason to leave the marker rows as if it sent.
+  if (pastRetryDeadline(entry, now)) {
+    await clearDispatchMarkers(call);
+    return skip(result.code || result.reason || 'send_retry_timeout');
+  }
   await clearDispatchMarkers(call);
   const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
   const nextAllowedAtValid = rawNextAllowedAt && !Number.isNaN(rawNextAllowedAt.getTime());
@@ -2136,7 +2144,20 @@ async function dispatchDueCalls(conn, now) {
 }
 
 async function sweep(conn = db, { now = new Date() } = {}) {
-  if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
+  if (!isEnabled(GATE)) {
+    // codex round-3 P2: the two manual routes (admin-leads.js, admin-
+    // communications.js) insert successful consultation_link_send_attempts
+    // rows regardless of this gate, so pruning them must not depend on it
+    // either or the table grows unbounded while the feature is dark. Never
+    // stage, claim or send while the gate is off — this is housekeeping
+    // only.
+    try {
+      await pruneConsultationLinkAttempts(conn, now);
+    } catch (err) {
+      logger.warn(`[call-booking-link-text] consultation-link attempt housekeeping failed while gate is off (${err.code || err.name || 'error'})`);
+    }
+    return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
+  }
   const { staged, ineligible } = await stage(conn, { now });
   const { sent, dispatchSkipped } = await dispatchDueCalls(conn, now);
   // Safety net for a worker that died between claimForDispatch and any
@@ -2224,5 +2245,10 @@ module.exports = {
   linkSentRecently,
   LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS,
   MANUAL_SEND_RACE_GUARD_WINDOW_MS,
-  _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently },
+  // recordRetryableDecision (round-3 P2 follow-up): the pastRetryDeadline
+  // early-return's own marker cleanup is otherwise unreachable through
+  // dispatchClaimedCall alone (its own pre-send deadline check already
+  // gates the identical (entry, now) pair) — a direct reach-in test-only
+  // export, same convention as the rest of this bag.
+  _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision },
 };

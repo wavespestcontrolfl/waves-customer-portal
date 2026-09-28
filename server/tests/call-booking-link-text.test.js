@@ -42,6 +42,7 @@ jest.mock('../services/outbound-call-reason', () => ({
 
 const db = require('../models/db');
 const markerDb = require('../models/marker-db');
+const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -77,6 +78,7 @@ const {
   DISPATCH_BATCH,
   CONSULTATION_ATTEMPT_TABLE,
   linkSentRecently,
+  _private,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -513,12 +515,36 @@ describe('stagingIneligibleReason', () => {
   });
 });
 
-// ── Gate off is a true no-op ──────────────────────────────────────────────
-test('gate off: sweep never touches the database', async () => {
+// ── Gate off: staging/dispatch are a true no-op, but manual-attempt
+// housekeeping still runs (codex round-3 P2) ──────────────────────────────
+test('gate off: sweep stages and dispatches nothing, but still prunes stale consultation-link attempt rows', async () => {
   isEnabled.mockReturnValue(false);
-  const result = await sweep(db, { now: new Date() });
+  const calledTables = [];
+  const conn = jest.fn((table) => {
+    calledTables.push(table);
+    const chain = {};
+    ['where', 'limit', 'whereIn'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.select = jest.fn(async () => []);
+    chain.del = jest.fn(async () => 0);
+    return chain;
+  });
+  const result = await sweep(conn, { now: new Date() });
   expect(result).toEqual({ staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 });
-  expect(db).not.toHaveBeenCalled();
+  // The only table this touches is CONSULTATION_ATTEMPT_TABLE (the select-
+  // then-delete pair pruneConsultationLinkAttempts issues) — never call_log,
+  // leads, or the handoff marker table: nothing may stage, claim or send
+  // while the gate is off.
+  expect(calledTables).toEqual([CONSULTATION_ATTEMPT_TABLE, CONSULTATION_ATTEMPT_TABLE]);
+  isEnabled.mockReturnValue(true);
+});
+
+// A pruning failure while the gate is off must not throw — logged and
+// swallowed, same as the gate-on housekeeping calls.
+test('gate off: a pruning failure is caught and logged, never thrown', async () => {
+  isEnabled.mockReturnValue(false);
+  const conn = jest.fn(() => { throw new Error('connection reset'); });
+  await expect(sweep(conn, { now: new Date() })).resolves.toEqual({ staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 });
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('consultation-link attempt housekeeping failed while gate is off'));
   isEnabled.mockReturnValue(true);
 });
 
@@ -2406,6 +2432,40 @@ describe('dispatchClaimedCall', () => {
     expect(result3.deferred).toBeUndefined();
     expect(result3.skipped).toBe('send_retry_timeout'); // caught by the pre-send deadline check
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // only round 1 ever reached the sender
+  });
+
+  // codex round-3 P2: recordRetryableDecision's OWN pastRetryDeadline exit
+  // must clear both marker tables too, not only the ordinary requeue path
+  // below it — dispatchClaimedCall's own earlier pre-send deadline check
+  // (proven above) already keeps this branch unreachable through the public
+  // entry point, so recordRetryableDecision is exercised directly via the
+  // module's _private reach-in, the same way its own doc comment upgrade
+  // describes the risk: a marker written by onDispatchStart during THIS
+  // retryable send must not survive a deadline give-up.
+  test("recordRetryableDecision's past-deadline exit still clears both dispatch marker tables", async () => {
+    const now = new Date('2026-09-27T13:00:00Z');
+    const originalSendAt = new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString();
+    const entry = { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt };
+    const call = { id: 'call-past-deadline', metadata: { call_booking_link_text: entry } };
+
+    const del = jest.fn(async () => 1);
+    const deletedTables = [];
+    const markerConn = jest.fn((table) => {
+      deletedTables.push(table);
+      return { where: jest.fn(() => ({ del })) };
+    });
+    markerConn.transaction = jest.fn(async (fn) => fn(markerConn));
+    markerDb.mockReturnValue(markerConn);
+
+    const skip = jest.fn(async (reason) => ({ sent: false, skipped: reason }));
+    const result = { retryable: true, code: 'PROVIDER_FAILURE' };
+
+    const outcome = await _private.recordRetryableDecision(db, call, entry, 'lead-1', now, result, skip);
+
+    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE');
+    expect(del).toHaveBeenCalledTimes(2);
+    expect(deletedTables).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
+    expect(outcome).toEqual({ sent: false, skipped: 'PROVIDER_FAILURE' });
   });
 
   // ── handoff_started_at — the fact that decides safe-to-retry vs

@@ -1383,6 +1383,10 @@ router.post('/:id/consultation-link', async (req, res, next) => {
 const { isUsPhone } = require('../services/lead-consultation-link');
 
 router.post('/:id/send-sms', async (req, res, next) => {
+  // codex #5196 round-3 P2: declared above the try block (not inside it) so
+  // the catch below can see it too — a throw that reached onDispatchStart
+  // must get the same definite-failure cleanup as the resolved-result path.
+  let consultationAttemptId = null;
   try {
     const { message, mediaUrls, mediaAttachments, fromNumber } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
@@ -1454,10 +1458,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
     // codex #5196 P1: durable pre-provider evidence for THIS send, written
     // only when it carries a validated consultation link (same condition
     // that runs the race guard below) — see insertConsultationLinkAttempt's
-    // own doc comment. Kept in this closure so onDispatchAbort and the
-    // post-send definite-failure cleanup below both delete exactly this
-    // attempt, never a sibling one.
-    let consultationAttemptId = null;
+    // own doc comment. consultationAttemptId is declared above the try
+    // block (round-3 P2) so onDispatchAbort, the post-send definite-failure
+    // cleanup below, AND the catch cleanup all delete exactly this attempt,
+    // never a sibling one.
     const sendResult = await sendCustomerMessage({
       to: lead.phone,
       body: message,
@@ -1571,7 +1575,20 @@ router.post('/:id/send-sms', async (req, res, next) => {
       performedBy: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
     });
     res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // codex #5196 round-3 P2: same definite-failure cleanup as the
+    // resolved-result path above, for a throw that reached (or passed
+    // through) onDispatchStart — matches admin-communications.js's own
+    // catch cleanup so the two routes can't drift.
+    if (consultationAttemptId != null) {
+      const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+      if (!isRealProviderSend(err?.providerOutcome) && !isAmbiguousProviderOutcome(err?.providerOutcome)) {
+        const { deleteConsultationLinkAttempt } = require('../services/call-booking-link-text');
+        await deleteConsultationLinkAttempt(consultationAttemptId);
+      }
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/leads/:id/schedule-callback — schedule a callback for a lead

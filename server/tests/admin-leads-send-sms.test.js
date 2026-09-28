@@ -267,6 +267,53 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
     expect(onDispatchAbort).toBeUndefined();
     expect(insertConsultationLinkAttempt).not.toHaveBeenCalled();
   });
+
+  // codex round-3 P2: consultationAttemptId is now declared above the try
+  // block so the route's catch — not just its resolved-result path above —
+  // also applies the definite-failure cleanup, matching admin-
+  // communications.js's own catch. persistAudit (or anything else past
+  // onDispatchStart) throwing after the marker row was written is the real
+  // shape this covers.
+  describe('a throw after onDispatchStart (codex round-3 P2)', () => {
+    test('a definite-failure providerOutcome on the thrown error deletes the attempt row', async () => {
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        if (opts.onDispatchStart) await opts.onDispatchStart();
+        const err = new Error('persist audit failed after a definite rejection');
+        err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+        throw err;
+      });
+      const response = await send();
+      expect(response.status).toBe(500);
+      expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+      expect(deleteConsultationLinkAttempt).toHaveBeenCalledWith('attempt-42');
+    });
+
+    test('an ambiguous providerOutcome on the thrown error keeps the attempt row', async () => {
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        if (opts.onDispatchStart) await opts.onDispatchStart();
+        const err = new Error('handoff crossed the SDK boundary with no verdict yet');
+        err.providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+        throw err;
+      });
+      const response = await send();
+      expect(response.status).toBe(500);
+      expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+      expect(deleteConsultationLinkAttempt).not.toHaveBeenCalled();
+    });
+
+    test('a real-send providerOutcome on the thrown error keeps the attempt row', async () => {
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        if (opts.onDispatchStart) await opts.onDispatchStart();
+        const err = new Error('post-send bookkeeping failed after Twilio accepted it');
+        err.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM_real_accepted' };
+        throw err;
+      });
+      const response = await send();
+      expect(response.status).toBe(500);
+      expect(insertConsultationLinkAttempt).toHaveBeenCalled();
+      expect(deleteConsultationLinkAttempt).not.toHaveBeenCalled();
+    });
+  });
 });
 
 test('rejects a stale destination before transport', async () => {
