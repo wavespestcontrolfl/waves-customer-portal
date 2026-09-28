@@ -795,7 +795,40 @@ the new-lead / existing-customer Customer 360 note so the office can give
 the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
 `message`, the AI triage prose or the Lead Response Agent's message, and
 the agent's `get_lead_details` tool strips it; a missing, blank or
-non-string value is a no-op),
+non-string value is a no-op; and both accept an OPTIONAL `heard_about` —
+the quote form's self-reported "How did you hear about us?" answer,
+validated against a FIXED allowlist (`server/routes/lead-webhook.js`
+`sanitizeHeardAbout`): `google_search`, `google_maps`, `chatgpt`,
+`other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
+`truck_yard_sign`, `other`. Any other value — including free text — is
+SILENTLY DROPPED (never stored; the request still succeeds as if the field
+were absent). A valid value is stored verbatim in `leads.heard_about`
+(nullable column, migration `20260928020000_leads_heard_about.js`) and
+surfaced on the admin lead detail. It is DELIBERATELY SEPARATE from
+`leads.lead_source_id` / the classified `lead_source` — self-reported, never
+merged into technically-observed attribution, and "unknown" (the field
+omitted or invalid) stores NULL rather than a guess. Separately and
+independently of `heard_about`, the SAME technically-observed attribution
+pipeline both endpoints already run (UTM/click-id/referrer →
+`server/services/lead-source-classify.js`) now also classifies an
+AI-assistant referral: a visitor who asked ChatGPT, Perplexity, Gemini,
+Copilot, Claude, or another AI answer engine and followed its citation
+link — matched by EITHER `utm_source` (`chatgpt.com` / `chatgpt` / `openai`
+for ChatGPT, and the analogous values per assistant) OR the raw
+`document.referrer` host (`chatgpt.com`, `chat.openai.com`,
+`perplexity.ai`, `gemini.google.com`, `bard.google.com`,
+`copilot.microsoft.com`, `claude.ai`, `you.com`, …; the shared table is
+`server/services/ai-referral-sources.js`) — checked after every paid/GBP/
+Meta UTM or click-id branch (those still win) and before the domain/hub
+fallback. A match resolves `lead_source = 'ai_assistant'`
+(`server/services/source-names.js` label: "AI Assistant") and, via the
+seeded `lead_sources` row (migration
+`20260928030000_ai_assistant_lead_source.js`), a real `lead_source_id`.
+The identical detection table is shared with `resolveLeadSource`
+(`server/services/lead-source-resolver.js`), the classifier
+`/api/public/estimator/property-lookup` and `/api/public/quote/calculate`
+use — see those entries below — so an AI-referred visitor is classified
+the same way regardless of which endpoint their lead lands on),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -1184,6 +1217,13 @@ same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
 with identical semantics. Also accepts the OPTIONAL `timeline` described
 under `/api/webhooks/lead` above, with the same storage and urgency
 semantics; it survives the later `/api/public/quote/calculate` snapshot).
+Attribution (referrer/UTM/click-ids) resolves through
+`server/services/lead-source-resolver.js`, which shares its AI-assistant
+referral detection table with `/api/webhooks/lead`'s classifier (see that
+entry above) — a ChatGPT/Perplexity/Gemini/Copilot/Claude referral
+classifies `ai_assistant` here identically. `heard_about` (also described
+under `/api/webhooks/lead` above) is NOT currently read by this endpoint —
+only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
