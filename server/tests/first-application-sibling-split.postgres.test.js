@@ -2297,8 +2297,31 @@ suite('first-application-sibling-split — periodic sweep', () => {
       expect(anchor.first_application_invoice_id).toBeNull();
     }));
 
-    test('leaves an already-priced sibling out (single-program-equivalent — never stamped)', () => rollbackTest(async (trx) => {
+    // Codex r20 P1: a sibling's CURRENT price is mutable (a staff price edit)
+    // and does not shrink or replace the combined invoice — price alone never
+    // excludes a member. Only a live invoice of its own that bills the base
+    // application (the shared client_id `scheduled_<id>_primary` identity)
+    // proves the split, exactly as the live sweep decides it.
+    test('a priced sibling with NO base-application invoice of its own is still stamped (a price edit does not un-cover it)', () => rollbackTest(async (trx) => {
       const ids = await seedHistoricalPair(trx, { siblingPriced: true });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      const [anchor, sibling] = await Promise.all([
+        trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+      expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('a priced sibling WITH its own live base-application invoice was split off — left out (single-program result, nothing stamped)', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx, { siblingPriced: true });
+      await trx('invoices').insert({
+        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.siblingId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`, status: 'sent',
+        title: 'Lawn Care', notes: 'Split from the combined invoice.',
+        line_items: JSON.stringify([{ client_id: `scheduled_${ids.siblingId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
+        subtotal: 60, total: 60,
+      });
       await backfillFirstApplicationInvoiceStamps(trx);
       const [anchor, sibling] = await Promise.all([
         trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
@@ -2492,20 +2515,24 @@ suite('first-application-sibling-split — periodic sweep', () => {
         expect(sibling.first_application_invoice_id).toBeNull();
       }));
 
-      test('a same-estimate program from a separate accept that already picked up its OWN price is NOT stamped', () => rollbackTest(async (trx) => {
+      // Codex r20 P1: price alone is not split evidence — within the shared
+      // instant and on the anchor's date, a priced row with no
+      // base-application invoice of its own is still a covered member (the
+      // next test is the real exclusion: an own live base-application invoice).
+      test('a same-accept program that merely picked up a price (no base-application invoice of its own) IS stamped', () => rollbackTest(async (trx) => {
         const ids = await seedAcceptanceEvidencePair(trx, {
           anchorCreatedAt: new Date('2026-08-01T10:00:00Z'),
-          siblingCreatedAt: new Date('2026-08-01T10:00:03Z'), // even within the shared-instant window
-          siblingScheduledDate: SAME_DATE, // even still on the anchor's own current date
-          siblingEstimatedPrice: 60, // already priced — hand-split, never re-absorbed
+          siblingCreatedAt: new Date('2026-08-01T10:00:03Z'),
+          siblingScheduledDate: SAME_DATE,
+          siblingEstimatedPrice: 60,
         });
         await backfillFirstApplicationInvoiceStamps(trx);
         const [anchor, sibling] = await Promise.all([
           trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
           trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
         ]);
-        expect(anchor.first_application_invoice_id).toBeNull();
-        expect(sibling.first_application_invoice_id).toBeNull();
+        expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+        expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
       }));
 
       test('a same-estimate program that already has its OWN live invoice is NOT stamped, even with a shared created_at instant', () => rollbackTest(async (trx) => {
@@ -3444,6 +3471,37 @@ suite('first-application-sibling-split — periodic sweep', () => {
 
     test('backfill recognizer: an unrecognizable hand invoice on the anchor is still never a candidate', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx, { stamp: false, matchInvoiceText: false });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
+    }));
+
+    // Codex r20 P1s: a later staff price edit does not un-cover a sibling; an
+    // itemized invoice line is acceptance-time evidence that needs no
+    // reschedule history.
+    test('backfill: a covered sibling priced LATER by staff (no base-application invoice of its own) is still stamped', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 42 });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('backfill: a moved sibling with NO reschedule_log row is still stamped when the invoice\'s own line items itemize it (client_id scheduled_<id>_primary)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await trx('invoices').where({ id: ids.invoiceId }).update({
+        line_items: JSON.stringify([
+          { client_id: `scheduled_${ids.pestId}_primary`, description: 'Quarterly Pest Control', quantity: 1, unit_price: 97.2, amount: 97.2 },
+          { client_id: `scheduled_${ids.lawnId}_primary`, description: 'Lawn Care', quantity: 1, unit_price: 56.4, amount: 56.4 },
+        ]),
+      });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBe(ids.invoiceId);
+      expect((await row(trx, ids.pestId)).first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('backfill: a moved sibling with NO reschedule_log row and NO itemized line stays unstamped (logged for hand review)', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { stamp: false });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: MOVED });
       await backfillFirstApplicationInvoiceStamps(trx);
       expect((await row(trx, ids.lawnId)).first_application_invoice_id).toBeNull();
     }));

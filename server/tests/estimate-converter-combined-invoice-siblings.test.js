@@ -35,28 +35,28 @@ describe('isAutoScheduledCombinedInvoiceSibling', () => {
     })).toBe(false);
   });
 
-  // A seasonal roll (rolledSeasonalFirstDate) can land a companion unit on
-  // a DIFFERENT date than the anchor at the exact moment of creation — it
-  // was never part of this trip's combined charge, so it must be excluded
-  // even though it shares combined pricing.
-  test('a combined-pricing unit that lands on a DIFFERENT date (e.g. a seasonal roll) → excluded', () => {
+  // Codex r20 P1: a seasonal roll (rolledSeasonalFirstDate) can land a
+  // companion unit on a DIFFERENT date than the anchor — but the combined
+  // invoice's amount (sameDayVisitTotalForPricingFrequency) already sums
+  // that unit's first application, so it IS covered and must be stamped;
+  // otherwise its own-date completion mints the application again.
+  test('a combined-pricing unit that lands on a DIFFERENT date (e.g. a seasonal roll) still qualifies — the invoice already bills it', () => {
     expect(isAutoScheduledCombinedInvoiceSibling({
       sharesCombinedInvoicePricing: true,
       unitFirstDate: '2027-02-01',
       anchorScheduledDate: '2026-10-01',
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  // No anchor date yet means this IS the first unit inserted — the caller
-  // never reaches this branch for the anchor itself (it takes the
-  // firstScheduledServiceId branch instead), but the pure function still
-  // fails closed rather than throwing or matching a null against a null.
-  test('no anchor date known yet → excluded (fails closed, never matches null-against-null)', () => {
+  // Dates play no part in the decision at all (Codex r20 P1): the anchor
+  // itself never reaches this branch (it takes the firstScheduledServiceId
+  // branch first), so a missing anchor date is irrelevant to a later unit.
+  test('the anchor date is irrelevant — a combined-pricing unit qualifies with no anchor date known', () => {
     expect(isAutoScheduledCombinedInvoiceSibling({
       sharesCombinedInvoicePricing: true,
       unitFirstDate: null,
       anchorScheduledDate: null,
-    })).toBe(false);
+    })).toBe(true);
   });
 
   test('a third same-day combined-pricing unit also qualifies (3+ program accept)', () => {

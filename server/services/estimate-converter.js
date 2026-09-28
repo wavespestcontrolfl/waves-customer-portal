@@ -2737,18 +2737,25 @@ function lineAnnualPerVisitAmount(svc, acceptedPlanFrequency) {
 // amount belong on the SAME combined first-application invoice as the
 // anchor unit (P1-B, Codex round 13 on PR #5021)? Extracted out of
 // convertEstimate's auto-schedule loop so the decision is directly unit
-// testable without the full conversion integration harness. Requires ALL
-// of: the unit's own row was left unpriced specifically because more than
-// one recurring program is being auto-scheduled together
+// testable without the full conversion integration harness. Requires: the
+// unit's own row was left unpriced specifically because more than one
+// recurring program is being auto-scheduled together
 // (sharesCombinedInvoicePricing — see the call site for what that
-// excludes), an anchor date is already known (the anchor unit inserted
-// first in loop order), and this unit landed on that EXACT anchor date —
-// never an inferred "close enough" comparison, since a seasonal roll can
-// legitimately land a companion unit on a different date at the same
-// moment of creation, in which case it was never part of this trip's
-// combined charge to begin with.
-function isAutoScheduledCombinedInvoiceSibling({ sharesCombinedInvoicePricing, unitFirstDate, anchorScheduledDate }) {
-  return !!(sharesCombinedInvoicePricing && anchorScheduledDate && unitFirstDate === anchorScheduledDate);
+// excludes).
+//
+// Codex r20 P1 (PR #5021): the DATE is deliberately NOT part of this
+// decision any more. The combined invoice's amount
+// (estimate-public.js sameDayVisitTotalForPricingFrequency) sums EVERY
+// covered program's first application without knowing where the converter
+// will land each first visit, so a seasonal roll that puts a companion on
+// a later month does not remove that application from the invoice — the
+// unit is still covered, and leaving it unstamped let its own-date
+// completion mint the application a second time. Membership is therefore:
+// created by this multi-program accept AND left unpriced because it shares
+// the combined pricing. `unitFirstDate` / `anchorScheduledDate` are kept in
+// the signature for callers/tests but ignored.
+function isAutoScheduledCombinedInvoiceSibling({ sharesCombinedInvoicePricing }) {
+  return !!sharesCombinedInvoicePricing;
 }
 
 function reservedAcceptPerVisitSplit({
@@ -6514,7 +6521,17 @@ const EstimateConverter = {
             // the combined first-application invoice's stamp should cover
             // (Codex round-12 P2) — the id is collected here, at the
             // moment of promotion, rather than reconstructed later by date.
-            if (sameTrip && parentRow?.id) combinedInvoiceMemberIds.push(parentRow.id);
+            // Codex r20 P1: the combined first-application invoice's amount is
+            // sameDayVisitTotalForPricingFrequency — the SUM of every covered
+            // program's first application, with no knowledge of dates — so a
+            // promoted companion the converter lands on a different day (a
+            // seasonal roll, a unit outside the capacity reservation) is
+            // still billed by that invoice. Every promoted parent is a
+            // member; the stamper itself re-verifies each is top-level,
+            // recurring and unpriced (a priced unit bills itself and is not
+            // covered). A designed off-date member raises one advisory
+            // divergence alert the office dismisses once.
+            if (parentRow?.id) combinedInvoiceMemberIds.push(parentRow.id);
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
@@ -7141,9 +7158,10 @@ const EstimateConverter = {
             sharesCombinedInvoicePricing, unitFirstDate, anchorScheduledDate,
           })) {
             // P1-B: a second-or-later top-level recurring parent this loop
-            // just inserted, on the SAME date as the anchor, left unpriced
-            // because it shares the combined first-application invoice with
-            // the anchor — collected at the exact moment of insertion
+            // just inserted, left unpriced because it shares the combined
+            // first-application invoice with the anchor (whatever date the
+            // converter landed it on — Codex r20 P1) — collected at the
+            // exact moment of insertion
             // (never a later date query, which could also catch an
             // unrelated program that merely happens to land on the same
             // day). estimate-public.js's stamp call site now covers it
