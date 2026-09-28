@@ -1330,9 +1330,18 @@ describe('planOpenTimesRecheck — what a send path rechecks given the body that
     expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: `${orig} Friday works too.`, originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
   });
 
+  test('edited: a CALENDAR-DATE change with the same time ("September 29" → "October 6"), no weekday in the drafted reply → refuse', () => {
+    const snap = { lookup: {}, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] };
+    const orig = 'How about September 29 from 9:00 AM - 11:00 AM?';
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about October 6 from 9:00 AM - 11:00 AM?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about 10/6 from 9:00 AM - 11:00 AM?', originalBody: orig })).toEqual({ action: 'refuse', reason: 'edited_offer_text' });
+    // the date-anchored span kept verbatim → recheck as usual
+    expect(planOpenTimesRecheck({ snapshot: snap, outgoingBody: 'How about September 29 from 9:00 AM - 11:00 AM? Thanks!', originalBody: orig })).toEqual({ action: 'recheck', quotedWindows: snap.quotedWindows });
+  });
+
   test('looksLikeOfferText: broad on purpose', () => {
     const { looksLikeOfferText } = require('../services/sms-shadow-drafter');
-    for (const t of ['Tue 9–11 AM', 'thurs', '2pm', '9 - 11', 'tomorrow morning', 'Sat.', '10:30 a.m.']) expect(looksLikeOfferText(t)).toBe(true);
+    for (const t of ['Tue 9–11 AM', 'thurs', '2pm', '9 - 11', 'tomorrow morning', 'Sat.', '10:30 a.m.', 'October 6', 'Sept. 29th', '10/6', '10/06/2026']) expect(looksLikeOfferText(t)).toBe(true);
     for (const t of ["I'll confirm a time and get right back to you.", 'Your balance is $99.', 'Thanks!', '']) expect(looksLikeOfferText(t)).toBe(false);
   });
 

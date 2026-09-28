@@ -540,7 +540,10 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   let originalResidual = original;
   const notKept = [];
   for (const w of pairs) {
-    const day = String(w.date || '').split(',')[0].trim();
+    // Anchors: the weekday, then the calendar date ("September 29") — a
+    // date label renders as "Tuesday, September 29".
+    const label = String(w.date || '');
+    const day = [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean);
     const span = offerSpanInText(original, day, w.window);
     if (span && body.includes(span)) {
       kept.push(w);
@@ -556,8 +559,9 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
   const lowerResidual = residual.toLowerCase();
   for (const { w, day } of notKept) {
     if (countQuotedWindow(residual, w.window) > 0) return { action: 'refuse', reason: 'edited_offer_text' };
-    if (day && original.toLowerCase().includes(day.toLowerCase()) && lowerResidual.includes(day.toLowerCase())) {
-      return { action: 'refuse', reason: 'edited_offer_text' };
+    for (const anchor of day) {
+      const a = anchor.toLowerCase();
+      if (original.toLowerCase().includes(a) && lowerResidual.includes(a)) return { action: 'refuse', reason: 'edited_offer_text' };
     }
   }
   // (2) Nothing offer-like may be ADDED (pre-push audit P1: an appended
@@ -580,7 +584,7 @@ function planOpenTimesRecheck({ snapshot, outgoingBody, originalBody = null }) {
 // names or abbreviations, clock times, bare hour ranges, or relative-day
 // words. Deliberately broad — it only decides what an EDIT may leave behind
 // or add, and the safe answer to "not sure" is refuse.
-const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/gi;
+const OFFER_TOKEN_RE = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?\b|\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b|\b\d{1,2}(:\d{2})?\s*(a\.?m|p\.?m)\b|\b\d{1,2}(:\d{2})?\s*[-–—]\s*\d{1,2}(:\d{2})?\b|\b(today|tomorrow|tonight|morning|afternoon|evening|noon)\b/gi;
 function offerTokens(text) {
   return (String(text || '').match(OFFER_TOKEN_RE) || []).map((t) => t.toLowerCase().replace(/\s+/g, ' ').replace(/\./g, ''));
 }
@@ -588,9 +592,13 @@ function looksLikeOfferText(text) {
   return offerTokens(text).length > 0;
 }
 
-// The shortest substring of `text` containing both `day` (case-insensitive)
-// and `window` (exact), whichever order; just the window text when the day
-// is not named at all; null when the window is absent.
+// The shortest substring of `text` containing the pair's day anchor
+// (case-insensitive) and its `window` (exact), whichever order; just the
+// window text when no anchor is named; null when the window is absent.
+// The anchor is the weekday when the reply names it, else the calendar
+// date ("September 29") — a reply that wrote the date instead of the
+// weekday binds through the date (pre-push audit P1: "September 29 from
+// 9-11" edited to "October 6 from 9-11" must not keep the September span).
 function offerSpanInText(text, day, window) {
   const positions = (needle, haystack) => {
     const out = [];
@@ -601,8 +609,16 @@ function offerSpanInText(text, day, window) {
   };
   const windowAt = positions(window, text);
   if (!windowAt.length) return null;
-  const dayAt = day ? positions(day.toLowerCase(), text.toLowerCase()) : [];
-  if (!dayAt.length) return window;
+  const anchors = Array.isArray(day) ? day : [day];
+  let anchor = null;
+  let dayAt = [];
+  for (const a of anchors) {
+    if (!a) continue;
+    dayAt = positions(a.toLowerCase(), text.toLowerCase());
+    if (dayAt.length) { anchor = a; break; }
+  }
+  if (!anchor) return window;
+  day = anchor;
   let best = null;
   for (const wi of windowAt) {
     for (const di of dayAt) {
