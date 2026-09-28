@@ -1461,7 +1461,10 @@ async function maybeAutoMerge(run, pr) {
         const extraction = ctr && ctr.companyExtraction;
         const extractionGoverns = !(extraction && extraction.ok === true
           && Array.isArray(extraction.companies) && extraction.companies.length === 0);
-        const flagged = ctr === undefined ? true : Boolean((ctr && ctr.requiresHumanReview === true) || extractionGoverns);
+        // Any recorded competitor name (the final committed text's included)
+        // governs the run too (pre-push r11).
+        const namesRecorded = Boolean(ctr && Array.isArray(ctr.namedCompetitors) && ctr.namedCompetitors.length > 0);
+        const flagged = ctr === undefined ? true : Boolean((ctr && ctr.requiresHumanReview === true) || extractionGoverns || namesRecorded);
         let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
         const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();

@@ -1392,8 +1392,11 @@ class AutonomousRunner {
     // The owner-list chokepoint's result on the COMMITTED text rides the
     // persisted verdict — the merge-time poller judges exactly this.
     if (draft?.company_extraction) {
+      const priorNames = Array.isArray(run.comparison_table_result?.namedCompetitors) ? run.comparison_table_result.namedCompetitors : [];
+      const finalNames = Array.isArray(draft.final_named_competitors) ? draft.final_named_competitors : [];
       run.comparison_table_result = {
         ...(run.comparison_table_result || {}),
+        namedCompetitors: [...new Set([...priorNames, ...finalNames])].sort(),
         companyExtraction: draft.company_extraction,
         ...(Array.isArray(draft.competitors_approved_by_list) && draft.competitors_approved_by_list.length
           ? { competitors_approved_by_list: draft.competitors_approved_by_list } : {}),

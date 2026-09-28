@@ -1723,10 +1723,16 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     ['has no stored company extraction', { pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }],
     ['is an unflagged blog verdict recorded before the company check (no extraction)', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [] }],
     ['is a stored NULL blog verdict (pre-check PR)', null],
+    ['is unflagged but records a deterministic name from the final text, with the kill switch now off', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: ['Orkin'], companyExtraction: { ok: true, key: 'k', companies: [] }, killSwitchOff: true }],
     ['is unflagged but its stored extraction found an off-list company', { pass: true, findings: [], requiresHumanReview: false, namedCompetitors: [], companyExtraction: { ok: true, key: 'k', companies: ['Bug Out'] } }],
   ])('governed run whose verdict %s is withheld at merge time', async (_label, verdict) => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    await withGatesOn(async () => {
+    const fgMod = require('../config/feature-gates');
+    const realGate = fgMod.isEnabled;
+    const killed = Boolean(verdict && verdict.killSwitchOff);
+    await (killed
+      ? (async (fn) => { jest.spyOn(fgMod, 'isEnabled').mockImplementation((g) => (g === 'namedCompetitorAutopublish' ? false : realGate(g))); try { await fn(); } finally { fgMod.isEnabled.mockRestore(); } })
+      : withGatesOn)(async () => {
       setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ verdict }) });
       greenMergePath();
 

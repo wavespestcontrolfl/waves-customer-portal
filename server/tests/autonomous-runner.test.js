@@ -3305,6 +3305,7 @@ describe('named-competitor autopublish gate', () => {
       expect(result.comparison_table_result.competitors_approved_by_list).toEqual(['HomeTeam Pest Defense', 'Orkin']);
       // The chokepoint's result on the committed text is what the poller judges.
       expect(result.comparison_table_result.companyExtraction).toMatchObject({ ok: true, companies: ['HomeTeam Pest Defense', 'Orkin'] });
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['HomeTeam Pest Defense', 'Orkin']);
       expect(queue.skip).not.toHaveBeenCalled();
     });
 
@@ -3346,6 +3347,23 @@ describe('named-competitor autopublish gate', () => {
       expect(result.reviewer_notes).toContain(companies[0]);
       expect(result.comparison_table_result.companyExtraction).toMatchObject({ companies });
       expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
+    test('deterministic names found only in the FINAL text (publisher-added) are persisted on the verdict (pre-push r11)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(920);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        // The publisher adds a reused image alt naming Orkin.
+        draft.body = `${draft.body}\n\n![Orkin truck outside a Venice home](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      const { runner } = namedCompetitorScenario({ publisher, comparisonGate: realGate, intercept: false, body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['Orkin']);
     });
 
     test('the model listing no company publishes an ordinary post, even with the kill switch off', async () => {

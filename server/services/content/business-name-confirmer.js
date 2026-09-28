@@ -222,7 +222,8 @@ function ownerListError(code, message, fields) {
  * to the same key). Competitor content commits only on the unattended
  * named-competitor lane (namedCompetitorAutopublishEligible) with every
  * name on the owner list. The result is left on the draft
- * (draft.company_extraction, draft.competitors_approved_by_list) for the
+ * (draft.company_extraction, draft.final_named_competitors,
+ * draft.competitors_approved_by_list) for the
  * runner to persist with the verdict the merge-time poller judges.
  *
  * Throws (no commit):
@@ -250,6 +251,10 @@ async function assertOwnerListForCommit({ draft, brief = {}, frontmatter = {}, b
       { retryable: extraction.retryable === true, extraction });
   }
   const names = Array.isArray(comparison.namedCompetitors) ? comparison.namedCompetitors : [];
+  // The deterministic names of the FINAL text ride along too, so the
+  // merge-time recheck (kill switch included) governs a run whose
+  // publisher-added text named a competitor (pre-push r11).
+  if (draft && typeof draft === 'object') draft.final_named_competitors = names;
   if (!names.length && !extraction.companies.length) return extraction;
   if (!gate.namedCompetitorAutopublishEligible(brief)) {
     throw ownerListError('BLOG_OWNER_LIST_BLOCKED',
