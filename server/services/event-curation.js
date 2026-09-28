@@ -535,7 +535,7 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
  * before ever approving, so a row that is no longer eligible under CURRENT
  * rules can never ride a stale assessment to approval.
  */
-function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT) {
+function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT, { sourceId = null } = {}) {
   const query = db('events_raw as e')
     .select(...CANDIDATE_COLUMNS, 'e.score_breakdown', 'e.rejection_codes', 'e.audience_tags',
       'e.novelty_type', 'e.editorial_evidence', 'e.curation_note', 'e.curated_at')
@@ -543,6 +543,8 @@ function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT) {
     .whereNotNull('e.curated_at')
     .whereNotNull('e.score_breakdown')
     .where('e.start_at', '>=', new Date());
+  // Optional scope (tests run against a shared database): one source only.
+  if (sourceId) query.where('e.source_id', sourceId);
 
   return applyCurationHardGates(query)
     .orderBy('e.start_at', 'asc')
@@ -731,11 +733,11 @@ async function applyRescore(row, decision, { canApprove = decision.approve } = {
  * next run. Shares the EVENT_AUTO_CURATION kill switch with fresh curation —
  * both auto-approve through the same path.
  */
-async function runScoreRescore({ limit = RESCORE_RUN_LIMIT } = {}) {
+async function runScoreRescore({ limit = RESCORE_RUN_LIMIT, sourceId = null } = {}) {
   if (!curationEnabled()) {
     return { disabled: true, candidates: 0, rescored: 0, approved: 0 };
   }
-  const rows = await buildRescoreCandidateQuery(limit);
+  const rows = await buildRescoreCandidateQuery(limit, { sourceId });
   if (!rows.length) {
     logger.info(`[event-curation] rescore: 0/0 candidates updated, 0 newly approved (feature floor ${featureScoreFloor()})`);
     return {

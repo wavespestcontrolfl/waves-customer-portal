@@ -262,7 +262,8 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     // The feed rewrote the held row's listing after the operator's reset.
     await db('events_raw').where({ id: heldChangedId }).update({ description: 'Rewritten listing text.' });
 
-    await runScoreRescore();
+    // Scoped to this suite's synthetic source so a shared dev database is untouched.
+    await runScoreRescore({ sourceId });
 
     const held = await db('events_raw').where({ id: heldId }).first();
     const free = await db('events_raw').where({ id: freeId }).first();
