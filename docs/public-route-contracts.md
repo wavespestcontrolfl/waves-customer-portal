@@ -3838,7 +3838,37 @@ be `/admin`-relative; subject/body/metadata size-capped) or marks rows
 read + `metadata.resolved` — never deletes, never touches customer rows.
 No customer PII may be posted here (the ops-cron contract is id prefixes
 and masked phones). Treat the auth ordering and the exceptions-only kind
-allowlist as security/ruling-critical).
+allowlist as security/ruling-critical.
+Admin-alerts-brevity scope (owner ruling 2026-09-28): the payload also
+accepts optional `headline` (string, ≤60 chars), `summary` (string, ≤110
+chars), and `audience` (`'owner'`|`'engineering'`|`'fyi'`), each validated
+and trimmed the same way as `subject`/`body` (blank → `null`, oversized or
+wrong-typed → 400). The submitted `body` no longer becomes the bell's
+displayed body: it persists verbatim to `notifications.detail` (the
+Activity feed's expander and the destination page read `detail || body`;
+the bell itself never reads `detail`) and the bell title never carries the
+`KIND: ` prefix any more (kind rides in `metadata.kind` only). The stored
+title is the caller's own `headline`, else `${area} — ${subject}` (or that
+check's own parsed headline, e.g. the data-hygiene sweep's fixed subject
+shape) from the server-side check → destination map
+(`server/config/ops-alert-routes.js`, keyed on the check id — `key` up to
+its first `:`, regex-matchable), cut to 60 chars at a word boundary; the
+bell body is the caller's `summary`, else null (never the whole report).
+`link` substitution: the caller's own `/admin`-relative link is kept
+verbatim UNLESS it is absent or is literally the Activity feed
+(`/admin/agents?tab=activity`), in which case the map's own page for that
+check is used instead (falling back to the Activity feed itself for an
+unmapped check). `audience` resolves from the caller's own value, else the
+map's audience for that check, else FIX→`engineering`/ACT→`owner` for an
+unmapped one; a non-`owner` audience stamps `metadata.feed = 'activity'`
+and that row is excluded from the admin bell's list, unread count, and
+mark-all-read (it still lists in the Activity feed). `audience` and `feed`
+join the reserved metadata keys the caller's own `metadata` object cannot
+override (alongside the existing `opsKey`/`subject`/`kind`/`source`/
+`dedupeKey`/`dedupeVersion`/`resolved`/`resolvedAt`/`resolvedBy`/
+`observedAt`). None of this changes the auth ordering, the FIX/ACT-only
+kind allowlist, the 404/401/409/400/503 status layering, or `/resolve`,
+which are unchanged from the paragraph above).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

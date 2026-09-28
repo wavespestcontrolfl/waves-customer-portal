@@ -46,6 +46,18 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
+// Activity-only rows (metadata.feed === 'activity' — deliverOpsDigest stamps
+// this for a non-owner audience, admin-alerts-brevity scope 2026-09-28)
+// never reach the admin BELL: not its list, not its unread count, not
+// mark-all-read. They still show in the Agents → Activity feed, which reads
+// notifications directly and does not go through these helpers. Deliberately
+// NOT folded into scopeAdminFeedToRole above: that helper also scopes
+// markReadAdmin (mark-one-read by id), which the Activity feed's own Review
+// link relies on to clear a row the feed itself can see.
+function excludeActivityOnlyFromBell(query) {
+  return query.whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'");
+}
+
 // `scheduledServiceId` (app property scope, PR 3): the five appointment keys
 // follow the visit's NON-primary saved property (enforced under
 // GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
@@ -89,13 +101,104 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 // sweep. Customer-facing notifications are untouched.
 const { stripEmoji } = require('../utils/strip-emoji');
 
+// Admin brevity guard (owner ruling 2026-09-28, admin-alerts-brevity scope):
+// next to the no-emoji rule above, an `ops_digest` BODY over this length is
+// cut at a word boundary rather than left to run on for a screen-length
+// jargon dump — MAX_ADMIN_BODY_CHARS matches the scope doc's "one sentence,
+// 110 characters or less" rule. Scoped to `ops_digest` ONLY (see
+// DIGEST_CATEGORY below): only the Agents → Activity feed ever reads
+// `detail` (services/agent-activity.js, category ops_digest rows only), so
+// moving another admin category's body there would make the full text
+// unreachable — the bell would show a truncated line with nowhere to read
+// the rest. Every other admin category is stored byte-for-byte and merely
+// LOGGED when its body runs long, exactly like the title rule below. The
+// TITLE is never cut for ANY category (see MAX_ADMIN_TITLE_CHARS) —
+// several senders dedupe/refresh by an exact title lookup against the
+// stored row (google-business.js's "Review sync health escalation [...]"
+// signature marker and its per-location review-request title,
+// voice-agent/relay-alert.js); a title this guard silently shortened would
+// never match that probe again and the alert would re-ring on every run.
+// ops-digest.js composes its OWN ≤60-char headline before this guard ever
+// sees it, so that path is unaffected either way.
+const DIGEST_CATEGORY = 'ops_digest'; // written by services/ops-digest.js and routes/ops-digest-ingest.js
+const MAX_ADMIN_TITLE_CHARS = 80; // logged when exceeded; never enforced by cutting
+const MAX_ADMIN_BODY_CHARS = 110; // enforced (cut into detail) for ops_digest only; logged for every other category
+
+// Cuts `text` to at most `max` chars, breaking on the last word boundary
+// inside the budget and appending an ellipsis — never mid-word, never over
+// `max`. A string with no space inside the budget just hard-cuts (still
+// never exceeds `max`).
+function truncateAtWord(text, max) {
+  const s = String(text || '');
+  if (s.length <= max) return s;
+  const ellipsis = '…';
+  const budget = Math.max(max - ellipsis.length, 0);
+  let cut = s.slice(0, budget);
+  const lastSpace = cut.lastIndexOf(' ');
+  if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  return `${cut.trimEnd()}${ellipsis}`;
+}
+
+// Admin-only: for `ops_digest` rows, cuts an over-length BODY at a word
+// boundary and moves the full original into `detail` (the Activity feed's
+// only reader of it). A caller-supplied detail is kept ALONGSIDE the full
+// body (full body first), unless it already contains it verbatim. Every
+// OTHER admin category's body is stored unchanged and merely logged when
+// it runs long — nothing reads THEIR `detail`, so cutting would just lose
+// text. The TITLE is never cut for any category (see MAX_ADMIN_TITLE_CHARS
+// above) — only logged, so an offender can be found without breaking a
+// sender's own exact-title dedupe/refresh probe. Never logs title/body
+// text — they carry customer names — only the category.
+function applyAdminBrevityGuard({ category, title, body, detail }) {
+  let nextBody = body;
+  let nextDetail = detail || null;
+  let trimmed = false;
+  if (typeof title === 'string' && title.length > MAX_ADMIN_TITLE_CHARS) {
+    logger.info(`[notifications] admin title over ${MAX_ADMIN_TITLE_CHARS} chars (${category || 'notification'})`);
+  }
+  if (typeof body === 'string' && body.length > MAX_ADMIN_BODY_CHARS) {
+    if (category === DIGEST_CATEGORY) {
+      nextBody = truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
+      nextDetail = nextDetail && nextDetail.includes(body)
+        ? nextDetail
+        : [body, nextDetail].filter(Boolean).join('\n\n');
+      trimmed = true;
+    } else {
+      logger.info(`[notifications] admin body over ${MAX_ADMIN_BODY_CHARS} chars (${category || 'notification'})`);
+    }
+  }
+  if (trimmed) logger.info(`[notifications] brevity guard trimmed admin ${category || 'notification'}`);
+  return { title, body: nextBody, detail: nextDetail };
+}
+
+// Emoji-strip THEN brevity-cut, admin rows only — one function so create()
+// and notifyAdmin's refresh comparison (which must judge "did the content
+// change?" on the SAME normalized text) never drift apart.
+function normalizeAdminNotificationText({ category, title, body, detail }) {
+  const strippedTitle = stripEmoji(title) || title;
+  const strippedBody = stripEmoji(body) || null;
+  // `detail` is admin notification text too — the Activity feed renders it
+  // — so the no-emoji rule covers it like title/body (codex r2 P2 on #5236).
+  const strippedDetail = stripEmoji(detail) || null;
+  return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail: strippedDetail });
+}
+
+// Bell-routing stamps an ops digest carries in metadata (ops-digest.js
+// digestRowFields); a change to any of them is a real refresh.
+const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
+
 const NotificationService = {
   scopeAdminFeedToRole,
+  // The admin row text exactly as create() would persist it (emoji-stripped,
+  // brevity-cut for ops_digest) — for a caller that rewrites a standing row
+  // directly instead of through notifyAdmin (google-business.js's
+  // same-signature digest refresh), so its stored text can't drift.
+  normalizeAdminText: normalizeAdminNotificationText,
   // Create a notification.
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, detail, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -150,6 +253,12 @@ const NotificationService = {
       // A title that was ONLY emoji falls back to the original rather than
       // inserting an empty string.
       const isAdmin = recipientType === 'admin';
+      // Admin brevity guard (owner ruling 2026-09-28): word-boundary cut
+      // title/body, full body (+ caller detail) preserved in `detail`.
+      // Customer-facing rows are untouched — no cut, no detail column use.
+      const normalized = isAdmin
+        ? normalizeAdminNotificationText({ category, title, body, detail })
+        : { title, body: body || null, detail: detail || null };
       // The bell exposes the same copy as native push. Recheck after any
       // preference/property lookup and dedupe lock, before persisting it.
       if (typeof shouldContinue === 'function') {
@@ -166,8 +275,11 @@ const NotificationService = {
         recipient_type: recipientType,
         recipient_id: recipientId || null,
         category,
-        title: isAdmin ? (stripEmoji(title) || title) : title,
-        body: (isAdmin ? stripEmoji(body) : body) || null,
+        title: normalized.title,
+        body: normalized.body,
+        // Only rows that carry a detail write the column: customer rows and
+        // short admin rows insert exactly the columns they did before it.
+        ...(normalized.detail ? { detail: normalized.detail } : {}),
         icon: icon || getCategoryIcon(category),
         link: link || null,
         metadata: metadata ? JSON.stringify(metadata) : null,
@@ -222,10 +334,14 @@ const NotificationService = {
         }
         const existing = await existingQuery.first();
         if (existing) {
-          // Compared and stored in create()'s admin form (emoji-stripped),
-          // or an emoji title would read as "changed" on every emission.
-          const nextTitle = stripEmoji(title) || title;
-          const nextBody = stripEmoji(body) || null;
+          // Compared and stored in create()'s admin form (emoji-stripped +
+          // brevity-cut), or a difference the guard itself introduces (an
+          // emoji title, an over-length body) would read as "changed" on
+          // every emission and re-bell for no real reason.
+          const normalized = normalizeAdminNotificationText({ category, title, body, detail: createOpts.detail });
+          const nextTitle = normalized.title;
+          const nextBody = normalized.body;
+          const nextDetail = normalized.detail;
           const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
           const existingMeta = typeof existing.metadata === 'string'
             ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
@@ -233,8 +349,15 @@ const NotificationService = {
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
-          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
-            const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
+          const detailChanged = (existing.detail || null) !== (nextDetail || null);
+          // Routing metadata is content too: a FIX -> ACT flip with identical
+          // text must still merge the new feed/kind/audience, or the owner's
+          // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
+          // #5236). Only keys this emission actually carries are compared.
+          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
+            && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
+          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged || routingChanged)) {
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
@@ -450,10 +573,10 @@ const NotificationService = {
 
   // Get notifications for admin
   async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
-    return scopeAdminFeedToRole(
+    return excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role,
-    )
+    ))
       .orderBy('created_at', 'desc')
       .orderBy('id', 'desc')
       .limit(limit).offset(offset);
@@ -465,10 +588,10 @@ const NotificationService = {
   // advisory-lock transaction and must not borrow a second pool
   // connection while holding one.
   async getAdminUnreadCount({ role } = {}, trx = null) {
-    const [{ count }] = await scopeAdminFeedToRole(
+    const [{ count }] = await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       (trx || db)('notifications').where({ recipient_type: 'admin' }),
       role,
-    )
+    ))
       .whereNull('read_at')
       .count('* as count');
     return parseInt(count);
@@ -514,10 +637,10 @@ const NotificationService = {
 
   // Mark all read for admin
   async markAllReadAdmin({ role } = {}) {
-    await scopeAdminFeedToRole(
+    await excludeActivityOnlyFromBell(scopeAdminFeedToRole(
       db('notifications').where({ recipient_type: 'admin' }),
       role,
-    ).whereNull('read_at').update({ read_at: new Date() });
+    )).whereNull('read_at').update({ read_at: new Date() });
   },
 
   // Mark a customer's inbound_sms admin bells read — the ONE writer for
@@ -607,4 +730,11 @@ module.exports._private = {
   CUSTOMER_PREFERENCE_KEYS,
   customerPreferenceEnabled,
   existingCustomerNotification,
+  truncateAtWord,
+  applyAdminBrevityGuard,
+  normalizeAdminNotificationText,
+  excludeActivityOnlyFromBell,
+  MAX_ADMIN_TITLE_CHARS,
+  MAX_ADMIN_BODY_CHARS,
+  DIGEST_CATEGORY,
 };

@@ -283,4 +283,28 @@ describe('composeYellowDigest', () => {
     expect(composed.html).toContain('&lt;script&gt;');
     expect(composed.html).toContain('open_contradiction');
   });
+
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary lead with blocked pages when any are pending review', () => {
+    const composed = composeYellowDigest({
+      pending: [redPage(), redPage({ slug: 'compliance/other' })],
+      blocked: [],
+      recentYellow: [yellowPage()],
+    });
+    expect(composed.headline).toBe('Knowledge — 2 pages blocked for review');
+    expect(composed.summary).toBe('1 more updated this week; review when you can.');
+  });
+
+  // Zero-guard: pending can be empty while yellow pages exist — the
+  // headline must never read "Knowledge — 0 pages blocked for review".
+  test('headline/summary lead with yellow pages when nothing is blocked', () => {
+    const composed = composeYellowDigest({
+      pending: [],
+      blocked: [],
+      recentYellow: [yellowPage(), yellowPage({ slug: 'lawn/other' })],
+    });
+    expect(composed.headline).toBe('Knowledge — 2 pages updated this week');
+    expect(composed.summary).toBe('Review optional; nothing is blocked.');
+  });
 });

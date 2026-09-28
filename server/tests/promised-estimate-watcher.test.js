@@ -92,6 +92,20 @@ describe('composePromisedEstimateDigest', () => {
     expect(composed.oldestDays).toBe(6);
   });
 
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`.
+  test('headline/summary give the owner-facing short form', () => {
+    const composed = composePromisedEstimateDigest([row(80)]);
+    expect(composed.headline).toBe('Estimates — 1 promised quote not sent');
+    expect(composed.summary).toBe('Oldest is 80 days.');
+  });
+
+  test('headline pluralizes the count and summary pluralizes the day count', () => {
+    const composed = composePromisedEstimateDigest([row(1), row(1)]);
+    expect(composed.headline).toBe('Estimates — 2 promised quotes not sent');
+    expect(composed.summary).toBe('Oldest is 1 day.');
+  });
+
   test('masks phone when no customer name and includes summary', () => {
     const composed = composePromisedEstimateDigest([row(3)]);
     expect(composed.text).toContain('…1234');
