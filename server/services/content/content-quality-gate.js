@@ -1213,16 +1213,20 @@ const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 const RAW_IMG_TAG_RE = /<img\b([^>]*)>/gi;
 const { htmlAttrValue: attrValue, matchStandaloneImageLine } = require('./licensed-photo-library');
+// alt is trimmed in every form, exactly as the shared matchStandaloneImage
+// Line (the publisher's re-host path) trims it — Codex P1 r9: an untrimmed
+// alt here false-failed identification_photo_alt_mismatch on a placement
+// the publisher would have re-hosted with the trimmed alt.
 function collectBodyImageOccurrences(body) {
   const out = [];
   let m;
   INLINE_IMAGE_RE.lastIndex = 0;
-  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || ''), url: String(m[2] || '').trim(), form: 'inline' });
+  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || '').trim(), url: String(m[2] || '').trim(), form: 'inline' });
 
   const refDefs = require('./content-guardrails').markdownReferenceDefinitions(body);
   REFERENCE_IMAGE_RE.lastIndex = 0;
   while ((m = REFERENCE_IMAGE_RE.exec(body))) {
-    const alt = String(m[1] || '');
+    const alt = String(m[1] || '').trim();
     const label = String(m[2] || '').trim() || alt; // collapsed `![alt][]` resolves via alt
     const dest = refDefs.get(label.trim().toLowerCase());
     if (dest) out.push({ alt, url: String(dest).trim(), form: 'reference' });
@@ -1231,7 +1235,7 @@ function collectBodyImageOccurrences(body) {
   RAW_IMG_TAG_RE.lastIndex = 0;
   while ((m = RAW_IMG_TAG_RE.exec(body))) {
     const attrs = m[1] || '';
-    const alt = attrValue(attrs, 'alt') || '';
+    const alt = String(attrValue(attrs, 'alt') || '').trim();
     const src = attrValue(attrs, 'src');
     if (src) out.push({ alt, url: src.trim(), form: 'img' });
     const srcset = attrValue(attrs, 'srcset');

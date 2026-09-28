@@ -723,3 +723,14 @@ describe('checkNextStepsRelatedPostsClosedSet', () => {
     expect(r.reason).toBe('next_steps_entry_missing_label_or_href');
   });
 });
+
+// Codex P1 (9th round): the gate trims alt exactly as the shared placement
+// matcher (the publisher's re-host path) does — incidental whitespace in the
+// alt must not false-fail a placement the publisher would re-host.
+test('checkPhotoSlotsLicensedOnly: incidental whitespace around the alt does not false-fail (matches the publisher)', () => {
+  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
+  const b = brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: 'fire ant' }, flagged_for_human: false }] } });
+  for (const body of [`![  fire ant  ](${PHOTO_URL})`, `<img src="${PHOTO_URL}" alt=" fire ant ">`]) {
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body }, b).ok).toBe(true);
+  }
+});
