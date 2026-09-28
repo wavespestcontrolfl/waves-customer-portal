@@ -21,6 +21,8 @@ export const CATEGORY_COLORS = {
   default:   { bg: '#27272A', fg: '#FFFFFF' }, // near-black
 };
 
+import { classifyTermiteScope } from '@estimate-termite-scope';
+
 export function detectServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
   // Mirror server/utils/service-normalizer.js precedence (codex P2 #3038 r4):
@@ -33,12 +35,11 @@ export function detectServiceCategory(serviceType) {
   if (treeToken && !lawnSurfaceToken && !/mosquito|termite|wdo/.test(s)) return 'tree';
   if (/lawn|turf|fertil|weed|dethatch|aerat|sod|top\s*dress/.test(s)) return 'lawn';
   if (/mosquito/.test(s)) return 'mosquito';
-  // Drill-and-foam termite forms only — "Foam Drill" / "Drill-and-Foam" /
-  // "Recurring Foam Treatment (Quarterly)" / foam_drill / foam_recurring
-  // carry no "termite" token of their own (mirrors the server normalizer).
-  // NOT a bare 'foam' substring: foam sealant is rodent-exclusion material,
-  // and "Rodent Exclusion — Foam Sealing" must reach the rodent branch.
-  if (/termite|wdo|bora|termidor|trelona|foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s)) return 'termite';
+  // The same termite rule as the server normalizer (shared
+  // estimate-termite-scope: termiticide, borate, the drill/recurring foam
+  // forms; rodent foam sealing stays rodent), so the calendar color never
+  // disagrees with server scheduling and report routing (Codex #5195 r1).
+  if (classifyTermiteScope(s)) return 'termite';
   // bird box / roof-entry: rodent-exclusion hardware with no rodent token
   // in the catalog name (mirrors the server normalizer).
   if (/rodent|rat|mouse|mice|bird\s*box|roof-entry|trap[\s_-]*only/.test(s)) return 'rodent';
