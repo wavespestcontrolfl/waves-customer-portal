@@ -180,13 +180,18 @@ const CONTAINER_USAGE_UNITS = new Set(['bottle', 'bottles', 'jug', 'jugs', 'cont
 // "1 trap" for traps, "4 x 30g tubes" for tubes. Null when the pack is
 // measured by weight/volume ("500 g" of packets, an "18 lb pail" of blocks).
 function packCountForUsage(containerSize, usageUnit) {
-  const singular = (w) => String(w || '').trim().toLowerCase().replace(/s$/, '');
+  // Same count-noun normalization parsePackCount applies (boxes -> box,
+  // blox -> block); anything it does not know just drops a trailing s.
+  const singular = (w) => {
+    const word = String(w || '').trim().toLowerCase();
+    return parsePackCount(`1 ${word}`)?.unit || word.replace(/s$/, '');
+  };
   const pack = parsePackCount(containerSize);
   if (pack && countUnitsCompatible(pack.unit, singular(usageUnit))) return pack.count;
   const multi = String(containerSize || '').trim().toLowerCase().match(/^(\d+)\s*x\s.*?([a-z]+)$/);
   // "4 x 1 gal case": a trailing case/pack/box/kit names the outer wrapper,
   // not the multiplied item, so one case keeps the full package price.
-  const outer = /^(?:case|pack|box|boxe|kit|carton)$/;
+  const outer = /^(?:case|pack|box|kit|carton)$/;
   if (multi && Number(multi[1]) > 0 && !outer.test(singular(multi[2])) && singular(multi[2]) === singular(usageUnit)) return Number(multi[1]);
   return null;
 }
@@ -198,10 +203,16 @@ function cogsUnitCost(p) {
   const sameUnit = normalizeUnit(costUnit) === normalizeUnit(p.usage_unit);
   const bothMeasured = convertToOz(1, costUnit) != null && convertToOz(1, p.usage_unit) != null;
   const usable = p.cost_per_unit != null && (sameUnit || bothMeasured);
-  const one = costLineFromUsage({ ...p, ...(usable ? {} : { cost_per_unit: null }), usage_amount: 1, usage_per_1000sf: null, notes: '' }, 0);
-  if (!one.warning && Number.isFinite(one.cost)) return one.cost;
+  // A zero is a placeholder, never a real unit cost: fall back to the
+  // package price scaled by unit_size_oz.
+  const unitLine = (withCostPerUnit) => costLineFromUsage({
+    ...p, ...(withCostPerUnit ? {} : { cost_per_unit: null }), usage_amount: 1, usage_per_1000sf: null, notes: '',
+  }, 0);
+  for (const line of usable ? [unitLine(true), unitLine(false)] : [unitLine(false)]) {
+    if (!line.warning && Number.isFinite(line.cost) && line.cost > 0) return line.cost;
+  }
   const price = parseFloat(p.best_price);
-  if (!Number.isFinite(price) || price < 0) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
   const count = packCountForUsage(p.container_size, p.usage_unit);
   if (count) return price / count;
   if (CONTAINER_USAGE_UNITS.has(String(p.usage_unit || '').trim().toLowerCase())) return price;

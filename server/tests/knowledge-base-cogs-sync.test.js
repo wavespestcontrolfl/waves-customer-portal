@@ -88,6 +88,18 @@ describe('KB COGS sync lines', () => {
     expect(oz.term.fixed).toBe(3);
   });
 
+  test('irregular count plurals match the pack noun', () => {
+    const c = cogsLineForUsage(row({ best_price: '120', container_size: '12 boxes', unit_size_oz: null, usage_unit: 'boxes' }));
+    expect(c.term.fixed).toBe(10);
+  });
+
+  test('a zero cost_per_unit placeholder falls through to the package price', () => {
+    const c = cogsLineForUsage(row({ cost_per_unit: '0', cost_unit: 'oz', usage_amount: '2', usage_unit: 'oz', unit_size_oz: '100', best_price: '100' }));
+    expect(c.term.fixed).toBe(2);
+    const none = cogsLineForUsage(row({ cost_per_unit: '0', cost_unit: 'oz', usage_unit: 'oz', best_price: '0' }));
+    expect(none.term).toBeNull();
+  });
+
   test('a generic counted pack resolves before the whole-package fallback', () => {
     const each = cogsLineForUsage(row({ best_price: '100', container_size: '20 count', unit_size_oz: null, usage_unit: 'each' }));
     expect(each.term.fixed).toBe(5);
