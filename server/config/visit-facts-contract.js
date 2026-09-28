@@ -204,6 +204,8 @@ const RODENT_REPORT_NARRATIVE = 'server/services/service-report/rodent-report-na
 const KNOWLEDGE_BRIDGE = 'server/services/knowledge-bridge.js';
 const REENTRY = 'server/services/service-report/reentry.js';
 const ACTIVITY_SCORES_STORE = 'server/services/service-report/activity-scores-store.js';
+const METRICS_BAND = 'server/services/service-report/metrics-band.js';
+const TREE_SHRUB_CLOSEOUT = 'server/services/tree-shrub-closeout.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -483,6 +485,18 @@ function genericCompletionFacts(opts = {}) {
       whenMissing: 'hidden',
     },
     {
+      key: 'protocol_action_scopes_completed',
+      label: 'Protocol action scopes completed (interior/exterior/treatment metadata per action)',
+      capture: ['derived'],
+      storage: 'structured_notes.protocolActionScopesCompleted',
+      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
+      readers: withExtra('protocol_action_scopes_completed', [
+        { file: REPORT_DATA, section: 'Treatment scope (interior/exterior) + re-entry countdown retained/zeroed decision (structuredActionScope / treatmentScope / normalizeAdvisoryForTreatmentScope)' },
+      ]),
+      whenMissing: 'fallback',
+      notes: 'Derived companion to protocol_actions_completed: each entry pairs a completed action\'s label with its scope (interior/exterior)/treatmentApplied/dryDown metadata (from the protocol definition, mirrored client-side). Never itself a rendered report line — report-data.js\'s structuredActionScope/treatmentScope is the authoritative signal that decides whether interior/exterior treatment occurred and whether the re-entry countdown is retained or zeroed. Falls back to area-text and product-based scope classification when absent.',
+    },
+    {
       key: 'technician_notes',
       label: 'Technician notes box (INTERNAL column; holds the AI report draft after Generate)',
       capture: ['voice', 'tap', 'derived'],
@@ -527,6 +541,33 @@ function genericCompletionFacts(opts = {}) {
       readers: withExtra('customer_recap', [{ file: REPORT_DATA, section: 'Visit summary paragraph' }]),
       whenMissing: 'fallback',
       notes: 'Server-generated at completion; no client posts it today. report-data.js falls back to a generated visitSummary when customerRecap is empty.',
+    },
+    {
+      key: 'visit_time_on_site',
+      label: 'Visit time on site (minutes, "Time on site")',
+      capture: ['derived', 'tap'],
+      storage: 'structured_notes.timeOnSite',
+      writers: [COMPLETE_SERVICE, SCHEDULE_PAGE],
+      readers: withExtra('visit_time_on_site', [
+        { file: METRICS_BAND, section: 'computeOnSiteMin (customer-visible on-site duration, primary source)' },
+        { file: REPORT_DATA, section: 'visitTiming.onSiteMinutes' },
+        { file: REPORT_VIEW_PAGE, section: '"Time on site" line (non-WaveGuard reports with duration display enabled)', readerSymbol: 'onSiteMinutes' },
+      ]),
+      whenMissing: 'fallback',
+      notes: 'Customer-visible on a non-WaveGuard report when the admin "Show duration when reliable" setting is on (ReportViewPage.jsx suppresses it entirely for WaveGuard members). SchedulePage.jsx sends the running-timer/admin-typed minutes; complete-scheduled-service.js otherwise sets it from the packet duration allocation. computeOnSiteMin (metrics-band.js) prefers this value, then visit_duration_allocation, then the raw started_at/ended_at span.',
+    },
+    {
+      key: 'visit_duration_allocation',
+      label: 'Visit duration allocation (packet-derived minutes, fallback source for time on site)',
+      capture: ['derived'],
+      storage: 'structured_notes.visitDurationAllocation',
+      writers: [COMPLETE_SERVICE],
+      readers: withExtra('visit_duration_allocation', [
+        { file: METRICS_BAND, section: 'computeOnSiteMin (fallback source when visit_time_on_site is absent)' },
+        { file: REPORT_DATA, section: 'visitTiming.onSiteMinutes (fallback source)' },
+      ]),
+      whenMissing: 'fallback',
+      notes: 'Server-computed multi-visit-packet duration allocation ({ version: 1, allocatedMinutes, ... }); feeds the SAME customer-visible "Time on site" line as visit_time_on_site (never rendered on its own) only when that fact is absent.',
     },
     {
       key: 'customer_interaction',
@@ -581,26 +622,32 @@ function genericCompletionFacts(opts = {}) {
  * `structuredFindings` on top of it, never replaces it — and
  * complete-scheduled-service.js freezes these into structured_notes
  * unconditionally (~5755-5801, ~5854-5874): customerRecap, customerInteraction,
- * protocolActionsCompleted, recommendations, formRecommendations, techTips and
- * technician_notes. report-data.js reads them the same way for a typed report:
- * buildProtocolPayload (~1791-1848, actions/recommendations/techTips) and the
- * visit-summary resolution (~5411-5416, customerRecap falling back to the
+ * protocolActionsCompleted, protocolActionScopesCompleted, customerConcernText,
+ * timeOnSite, visitDurationAllocation, recommendations, formRecommendations,
+ * techTips and technician_notes. report-data.js reads them the same way for a
+ * typed report: buildProtocolPayload (~1791-1848, actions/recommendations/techTips)
+ * and the visit-summary resolution (~5411-5416, customerRecap falling back to the
  * screened technicianReportCustomerCopy parse of technician_notes);
  * report-data.js's provenance-guaranteed formRecommendations read (~1824-1832)
  * is the copy the customer report's "What we recommend" section actually uses
  * (`recommendations` can carry raw `[Next]` technician-note lines, which never
- * egress — codex P2, round 5). The re-entry timing pair
- * (reentry_exterior_minutes / reentry_interior_minutes) is frozen onto
- * `service_records.advisory` the same unconditional way (~6396-6589) — a typed
- * closeout runs the SAME re-entry block as a basic one. Sourced from
- * genericCompletionFacts so a shared wiring change is never hand-copied onto a
- * typed line.
+ * egress — codex P2, round 5). structuredCustomerConcern (customerConcernText)
+ * feeds the pest/lawn/tree-&-shrub V2 builders' "what you flagged" card the
+ * same way on a typed completion (codex follow-up on #5190). The re-entry
+ * timing pair (reentry_exterior_minutes / reentry_interior_minutes) is frozen
+ * onto `service_records.advisory` the same unconditional way (~6396-6589) — a
+ * typed closeout runs the SAME re-entry block as a basic one, and the SAME
+ * on-site duration facts (timeOnSite / visitDurationAllocation) feed the
+ * customer-visible "Time on site" line (metrics-band.js computeOnSiteMin)
+ * regardless of typed vs. untyped. Sourced from genericCompletionFacts so a
+ * shared wiring change is never hand-copied onto a typed line.
  * @returns {VisitFact[]}
  */
 const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'customer_recap',
   'customer_interaction',
   'protocol_actions_completed',
+  'protocol_action_scopes_completed',
   'recommendations',
   'form_recommendations',
   'tech_tips',
@@ -608,6 +655,9 @@ const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'visit_outcome',
   'reentry_exterior_minutes',
   'reentry_interior_minutes',
+  'customer_concern_text',
+  'visit_time_on_site',
+  'visit_duration_allocation',
 ]);
 
 function typedSharedCompletionFacts() {
@@ -755,8 +805,16 @@ function requiredTypedKeys(typedForm) {
 /**
  * The findingsFields of a typed form that are visit facts: every
  * non-internal field (the report shows it), plus an internal field the
- * completion validator requires (voice fill must still write it). Internal,
- * optional fields are office-only data, not report facts.
+ * completion validator unconditionally requires (voice fill must still write
+ * it), plus an internal `pesticideOnly` field — CONDITIONALLY required
+ * whenever the visit's products include an insecticide/other pesticide
+ * (validateTreeShrubTypedCompliance in tree-shrub-closeout.js, mirrored
+ * pre-submit by the client's own `f.pesticideOnly` gate), which
+ * REQUIRED_FINDINGS_FIELDS has no way to express since it names only
+ * unconditionally-required keys (codex follow-up on #5190: pollinator_status
+ * / irac_frac_logged were silently dropped here, losing their real
+ * writer/reader edges entirely). Internal, optional, non-pesticideOnly
+ * fields are office-only data, not report facts.
  * @param {string} typedForm
  * @returns {Array<Object>} PROJECT_TYPES findingsFields entries
  */
@@ -766,7 +824,7 @@ function typedFactFields(typedForm) {
     throw new Error(`visit-facts-contract: unknown typed form ${typedForm}`);
   }
   const required = requiredTypedKeys(typedForm);
-  return cfg.findingsFields.filter((field) => !field.internal || required.has(field.key));
+  return cfg.findingsFields.filter((field) => !field.internal || required.has(field.key) || field.pesticideOnly);
 }
 
 /**
@@ -810,7 +868,7 @@ function typedFormFacts(typedForm, overrides = {}) {
   }
   return typedFactFields(typedForm).map((field) => {
     const readers = typedFieldReaders(field, builder, extraReaders);
-    const notes = typedFieldNotes(field, extraNotes);
+    const notes = typedFieldNotes(field, extraNotes, required);
     const placement = typedFieldPlacement(field, required, requiredCompanion);
     return {
       key: field.key,
@@ -832,9 +890,11 @@ function typedFormFacts(typedForm, overrides = {}) {
 }
 
 /** Every reader edge for one typed field: the generic findings list, the
- * areas-treated reader, its TYPED_REPORT_BUILDERS entry (if any) and any
- * per-key override. Split out of typedFormFacts() to keep that function's
- * complexity down. */
+ * areas-treated reader, its TYPED_REPORT_BUILDERS entry (if any), the
+ * pesticide compliance gate (pesticideOnly fields only — internal, so
+ * TYPED_FINDINGS_LIST is skipped above; these are the fields' ONLY real
+ * readers) and any per-key override. Split out of typedFormFacts() to keep
+ * that function's complexity down. */
 function typedFieldReaders(field, builder, extraReaders) {
   const readers = [];
   if (!field.internal) readers.push(TYPED_FINDINGS_LIST);
@@ -844,16 +904,36 @@ function typedFieldReaders(field, builder, extraReaders) {
   if (builder && builder.keys.includes(field.key)) {
     readers.push({ file: builder.file, section: builder.sections[field.key] || builder.defaultSection });
   }
+  if (field.pesticideOnly) {
+    readers.push({
+      file: TREE_SHRUB_CLOSEOUT,
+      section: 'Pesticide compliance gate — required whenever an insecticide/other pesticide product is recorded on the visit (validateTreeShrubTypedCompliance)',
+    });
+    readers.push({
+      file: SCHEDULE_PAGE,
+      section: 'Client pre-submit pesticide compliance gate (mirrors validateTreeShrubTypedCompliance so the tech is guided to the field pre-submit, codex P2 r13)',
+      readerSymbol: 'pesticideOnly',
+    });
+  }
   readers.push(...(extraReaders[field.key] || []));
   return readers;
 }
 
-/** Every note for one typed field (internal / companionOnly / requiredUnless
- * / per-key override). Split out of typedFormFacts() to keep that function's
- * complexity down. */
-function typedFieldNotes(field, extraNotes) {
+/** Every note for one typed field (internal / conditionally-required
+ * pesticideOnly / companionOnly / requiredUnless / per-key override). Split
+ * out of typedFormFacts() to keep that function's complexity down.
+ * @param {Set<string>} required - this form's REQUIRED_FINDINGS_FIELDS set,
+ *   distinguishing an unconditionally-required internal field from a
+ *   conditionally-required (pesticideOnly) one for the note text. */
+function typedFieldNotes(field, extraNotes, required) {
   const notes = [];
-  if (field.internal) notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
+  if (field.internal) {
+    if (required.has(field.key)) {
+      notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
+    } else if (field.pesticideOnly) {
+      notes.push('Internal field (never shown on the report); CONDITIONALLY required whenever an insecticide/other pesticide product is applied — enforced by validateTreeShrubTypedCompliance (tree-shrub-closeout.js) and mirrored pre-submit by the client (SchedulePage.jsx, gated on f.pesticideOnly). Not in REQUIRED_FINDINGS_FIELDS (which names only unconditional requirements), so whenMissing below reflects only the unconditional (never-required) case.');
+    }
+  }
   if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
   if (field.requiredUnless) {
     notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
@@ -980,16 +1060,30 @@ function typedActivityScoreFacts(typedForm) {
     label: `${indicator.label} (0-5 activity score for the gauge + trend chart)`,
     capture: indicator.derive ? ['prefill', 'voice', 'tap'] : ['voice', 'tap'],
     storage: 'service_activity_scores.score',
-    writers: [via(COMPLETE_SERVICE, 'service_activity_scores'), via(SCHEDULE_PAGE, 'activityScore')],
+    // On a COMBINED visit where this form runs as a companion,
+    // SchedulePage.jsx sends the score inside companionFindings[].activityScore
+    // and complete-scheduled-service.js freezes it onto
+    // service_data.companionReportSnapshots[].activity.score BEFORE inserting
+    // this SAME service_activity_scores trend row (codex follow-up on #5190;
+    // buildTypedReportSnapshot's `activity` param, ~L4072-4082). Same
+    // last-segment key as storage (score), not a second fact.
+    companionStorage: 'service_data.companionReportSnapshots[].activity.score',
+    writers: [
+      via(COMPLETE_SERVICE, 'service_activity_scores'),
+      via(SCHEDULE_PAGE, 'activityScore'),
+      via(COMPLETE_SERVICE, 'companionReportSnapshots'),
+      via(SCHEDULE_PAGE, 'companionFindings'),
+    ],
     readers: [{
       file: ACTIVITY_SCORES_STORE,
       section: 'Customer ActivityCard gauge + cross-visit trend chart',
       readerSymbol: 'loadActivityCustomerView',
     }],
     whenMissing: 'hidden',
-    notes: indicator.derive
+    notes: (indicator.derive
       ? `Prefills from the ${indicator.derive.field} findings field (deriveActivityScore); the tech can still touch/override it (activityScoreSource records which).`
-      : 'Manually tech-set (no ACTIVITY_INDICATORS.derive for this form) — no other registered findings field can reconstruct it.',
+      : 'Manually tech-set (no ACTIVITY_INDICATORS.derive for this form) — no other registered findings field can reconstruct it.')
+      + ' On a companion submission the same score also freezes onto the companion\'s own typed snapshot (service_data.companionReportSnapshots[].activity.score) before the service_activity_scores row inserts.',
   }];
 }
 
@@ -1014,8 +1108,6 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
-  timeOnSite: 'Labor/duration costing bookkeeping, not a customer report fact.',
-  visitDurationAllocation: 'Labor/duration costing bookkeeping (packet duration allocation), not a customer report fact.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
@@ -1037,7 +1129,6 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   treeShrubCloseout: 'Tree & shrub required-photos gate audit summary; the photos/captions themselves are the registered facts (completion_photos / completion_photo_caption).',
   treeShrubCloseoutWarnings: 'Tree & shrub required-photos gate audit warnings, paired with treeShrubCloseout.',
   inventoryDeductions: 'Inventory ledger bookkeeping, not a customer report fact.',
-  protocolActionScopesCompleted: 'Internal scoping metadata paired with the registered protocol_actions_completed fact; not separately rendered.',
   completionTelemetry: 'Opaque client-side completion-form timing, persisted for budget analysis only.',
   typedReportDelivery: 'Delivery-posture bookkeeping (auto_send vs disabled), frozen so a later profile graduation can\'t retroactively expose a report that was never sent — not itself a report claim.',
   companionReportDelivery: 'Delivery-posture bookkeeping for companion sections, same rule as typedReportDelivery.',
@@ -1405,6 +1496,12 @@ const VISIT_FACTS_CONTRACT = {
         readers: {
           evidence_level: [{ file: ACTIVITY_INDICATORS, section: 'Flea activity gauge + Today\'s Result flea story (buildTodaysResult)' }],
           activity_areas: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result flea story (buildTodaysResult)' }],
+          // buildTodaysResult's flea branch composes its "what we did" body
+          // through composedWorkSentence(), which reads this field via
+          // WORK_PHRASE_FIELDS.flea (field: 'treatment_completed') — a real
+          // reader edge the generic typed findings list alone doesn't name
+          // (codex follow-up on #5190).
+          treatment_completed: [{ file: ACTIVITY_INDICATORS, section: 'Today\'s Result flea story body (composedWorkSentence / WORK_PHRASE_FIELDS.flea)' }],
         },
         notes: {
           customer_prep: 'Owner spec: cooperation must be unmistakable.',
@@ -1503,6 +1600,26 @@ const VISIT_FACTS_CONTRACT = {
       ...typedSharedCompletionFacts(),
       ...typedActivityScoreFacts('one_time_lawn_treatment'),
       typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  // Bora-Care wood treatment (basic form, one-time termite-adjacent):
+  // completes through the SAME basic Complete Service form as one_time_pest
+  // (completion-lane-registry.js ONE_TIME_GENERIC_BY_DESIGN), including the
+  // pest activity rating picker every one_time_pest job shows — the form
+  // does not branch UI by catalog key. Its beetle/wood-decay-fungi targets
+  // don't exist in termite_treatment's option list, so it stays its own
+  // basic-form line rather than joining one_time_pest's or lawn's vocabulary
+  // (codex follow-up on #5190).
+  bora_care: {
+    label: 'Bora-Care wood treatment (basic form: one-time termite-adjacent wood treatment)',
+    catalogKeys: ['bora_care'],
+    voiceFill: true,
+    facts: [
+      ...genericCompletionFacts(),
+      pestActivityRatingFact(),
       ...productFacts(),
       ...photoFacts(),
     ],

@@ -417,8 +417,16 @@ describe('visit facts contract registry', () => {
       for (const key of required) {
         if (!fields.has(key)) problems.push(`${line}: REQUIRED_FINDINGS_FIELDS.${def.typedForm} names ${key}, not a field of the form`);
       }
+      // Mirrors typedFactFields()'s own inclusion rule exactly (independent
+      // re-derivation, not a call into it): a pesticideOnly internal field
+      // (pollinator_status / irac_frac_logged) is CONDITIONALLY required —
+      // validateTreeShrubTypedCompliance enforces it whenever a pesticide
+      // product is on the visit — which REQUIRED_FINDINGS_FIELDS has no way
+      // to express, so it must be included here too or a bypass of
+      // typedFactFields's own filter would go undetected (codex follow-up on
+      // #5190).
       const expected = cfg.findingsFields
-        .filter((f) => !f.internal || required.has(f.key))
+        .filter((f) => !f.internal || required.has(f.key) || f.pesticideOnly)
         .map((f) => f.key)
         .sort();
       const typed = def.facts.filter((f) => f.typedForm === def.typedForm);
@@ -487,6 +495,30 @@ describe('visit facts contract registry', () => {
       if (indicator && !fact) problems.push(`${line}: ${def.typedForm} has an ACTIVITY_INDICATORS entry but no typed_activity_score fact`);
       if (!indicator && fact) problems.push(`${line}: typed_activity_score registered but ${def.typedForm} has no ACTIVITY_INDICATORS entry`);
       if (fact && fact.typedForm !== undefined) problems.push(`${line}.typed_activity_score: should not carry typedForm (not a findingsFields entry)`);
+    }
+    expect(problems).toEqual([]);
+  });
+
+  // On a combined visit where this form runs as a COMPANION, the score is
+  // ALSO frozen onto the companion's own typed snapshot
+  // (service_data.companionReportSnapshots[].activity.score) before the
+  // service_activity_scores trend row inserts — a fact naming only the
+  // trend-table storage would silently miss that path (codex follow-up on
+  // #5190). Not covered by the generic typedFormFacts companion checks below
+  // (this fact carries no typedForm), so it needs its own assertion.
+  test('typed activity score records its companion storage path and writer edges', () => {
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const fact = def.facts.find((f) => f.key === 'typed_activity_score');
+      if (!fact) continue;
+      const expectedCompanionStorage = 'service_data.companionReportSnapshots[].activity.score';
+      if (fact.companionStorage !== expectedCompanionStorage) {
+        problems.push(`${line}.typed_activity_score: companionStorage missing/incorrect (expected ${expectedCompanionStorage})`);
+      }
+      const hasSymbol = (sym) => fact.writers.some((w) => w && typeof w === 'object' && w.writerSymbol === sym);
+      if (!hasSymbol('companionReportSnapshots') || !hasSymbol('companionFindings')) {
+        problems.push(`${line}.typed_activity_score: missing companion writer edges (companionReportSnapshots / companionFindings)`);
+      }
     }
     expect(problems).toEqual([]);
   });
