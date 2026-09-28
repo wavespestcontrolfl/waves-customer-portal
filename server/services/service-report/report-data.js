@@ -4190,12 +4190,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
-      // never reach the customer's permanent report token.
-      const turfPhotos = await knex('lawn_assessment_photos')
-        .where({ assessment_id: linkedAssessment.id, customer_visible: true })
-        .orderBy('photo_order', 'asc')
-        .orderBy('taken_at', 'asc')
-        .catch(() => []);
+      // never reach the customer's permanent report token. Shared with the
+      // cache-signature side (photo-set-signature.js) through
+      // resolveLawnReportPhotos — see report-photo-set.js — so the two never
+      // drift on which rows a report can show (pre-push P1, third round).
+      const turfPhotos = await require('./report-photo-set').resolveLawnReportPhotos(linkedAssessment.id, knex);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
         // Dropped-but-expected turf photo — same silent-omission class.
