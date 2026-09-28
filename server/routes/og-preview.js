@@ -115,43 +115,41 @@ async function sendDefault(res) {
   }
 }
 
+// Routes match the RAW path with regexes whose captures can't hold a '%',
+// so Express never URL-decodes a parameter here: a malformed encoding can't
+// throw past this router into the JSON error handler.
+
 // /og/default.jpg, and /og/<kind>.jpg for a card whose words are the same
 // for every customer (FIXED_CARDS — no token, no lookup; a dark surface's
-// card is the default). Anything else in this shape gets the default card.
-router.get('/:file', async (req, res) => {
-  const match = /^([a-z-]+)\.jpg$/.exec(String(req.params.file || ''));
-  const content = match ? fixedCard(match[1]) : null;
+// card is the default).
+router.get(/^\/([a-z-]+)\.jpg$/, async (req, res) => {
+  const kind = req.params[0];
+  const content = fixedCard(kind);
   if (!content) return sendDefault(res);
   try {
     return sendJpeg(res, await renderCached(content));
-  } catch (err) {
-    logger.error(`[og-preview] card render failed for kind=${match[1]}: ${err.code || err.name}`);
-    return sendDefault(res);
-  }
-});
-
-// One route for every kind — :tokenFile carries the token AND the .jpg
-// extension (Express route params don't span a literal dot cleanly), split
-// in the handler. A kind or token that fails validation (including a
-// missing .jpg) falls back to the default card exactly like an unknown
-// token — never a 404, never a distinguishable response.
-router.get('/:kind/:tokenFile', async (req, res) => {
-  const { kind } = req.params;
-  const tokenFile = String(req.params.tokenFile || '');
-  const match = /^(.+)\.jpg$/i.exec(tokenFile);
-  if (!match) return sendDefault(res);
-  const token = match[1];
-
-  try {
-    const content = await resolveCardContent(kind, token);
-    if (!content) return sendDefault(res);
-    const buffer = await renderCached(content);
-    return sendJpeg(res, buffer);
   } catch (err) {
     logger.error(`[og-preview] card render failed for kind=${kind}: ${err.code || err.name}`);
     return sendDefault(res);
   }
 });
+
+// The one token-bearing card: the service report, 32-hex token.
+router.get(/^\/report\/([a-f0-9]{32})\.jpg$/i, async (req, res) => {
+  try {
+    const content = await resolveCardContent('report', req.params[0]);
+    if (!content) return sendDefault(res);
+    return sendJpeg(res, await renderCached(content));
+  } catch (err) {
+    logger.error(`[og-preview] card render failed for kind=report: ${err.code || err.name}`);
+    return sendDefault(res);
+  }
+});
+
+// Anything else under /og — another kind with a token, a bad token, a
+// missing .jpg, a malformed encoding — is the default card, never a 404 or
+// a distinguishable response.
+router.get(/.*/, (req, res) => sendDefault(res));
 
 module.exports = router;
 module.exports._internals = { cache, inFlight, DEFAULT_CONTENT };

@@ -49,7 +49,7 @@ beforeEach(() => {
 
 test('a token card carries the privacy headers', async () => withServer(async (base) => {
   resolveCardContent.mockResolvedValue({ eyebrow: 'APPOINTMENT', headline: 'Pest Control', subline: 'October 2, 2026' });
-  const res = await get(base, `/og/appointment/${HEX}.jpg`);
+  const res = await get(base, `/og/report/${'a'.repeat(32)}.jpg`);
   expect(res.status).toBe(200);
   expect(res.headers.get('content-type')).toBe('image/jpeg');
   expect(res.headers.get('cache-control')).toBe('no-store');
@@ -61,19 +61,23 @@ test('a token card carries the privacy headers', async () => withServer(async (b
 test('unknown, malformed and unregistered links are byte-identical to the default card', async () => withServer(async (base) => {
   resolveCardContent.mockResolvedValue(null);
   const def = await get(base, '/og/default.jpg');
-  for (const path of [`/og/appointment/${HEX}.jpg`, '/og/appointment/not-a-jpg', '/og/nope/x.jpg']) {
+  for (const path of [`/og/report/${'a'.repeat(32)}.jpg`, `/og/report/${'a'.repeat(31)}.jpg`, '/og/report/not-a-jpg', '/og/nope/x.jpg', '/og/pay/some-invoice-token.jpg', '/og/report/%E0%A4%A.jpg', '/og/a/b/c']) {
     const res = await get(base, path);
     expect(res.status).toBe(200);
     expect(res.body).toBe(def.body);
     expect(res.headers.get('cache-control')).toBe('no-store');
   }
+  // one segment: no token, so the default is a plain brand image
+  const oneSegment = await get(base, '/og/%E0%A4%A.jpg');
+  expect(oneSegment.status).toBe(200);
+  expect(oneSegment.body).toBe(def.body);
 }));
 
 test('a moved appointment renders its new content, never the cached old slot', async () => withServer(async (base) => {
   resolveCardContent.mockResolvedValueOnce({ eyebrow: 'APPOINTMENT', headline: 'Pest Control', subline: 'October 2, 2026' });
-  expect((await get(base, `/og/appointment/${HEX}.jpg`)).body).toContain('October 2');
+  expect((await get(base, `/og/report/${'a'.repeat(32)}.jpg`)).body).toContain('October 2');
   resolveCardContent.mockResolvedValueOnce({ eyebrow: 'APPOINTMENT', headline: 'Pest Control', subline: 'View your visit details' });
-  const after = await get(base, `/og/appointment/${HEX}.jpg`);
+  const after = await get(base, `/og/report/${'a'.repeat(32)}.jpg`);
   expect(after.body).toContain('View your visit details');
   expect(after.body).not.toContain('October 2');
 }));

@@ -1632,9 +1632,12 @@ headers. A fixed card whose surface is dark (`GATE_APPOINTMENT_PAGE`,
 uniform 404; an unregistered or inherited name gets the default too.
 Payload is a 1200x630 JPEG of an eyebrow, headline and subline: never a
 price, amount, name, address, phone, email, tech name or note, and
-estimates stay generic (no services or prices). `/og/report/<token>.jpg`
-segments are redacted from request logs (`redact-request-url.js`). No query
-parameters are read. The render cache is keyed by card content, never by
+estimates stay generic (no services or prices). Routes match the raw path
+(regex captures that can't hold `%`), so no parameter is URL-decoded and a
+malformed encoding can't reach the JSON error handler; any other `/og` path
+(another kind with a token, a bad token, no `.jpg`) is the default card.
+The file segment two levels under `/og` is always redacted from request
+logs (`redact-request-url.js`). No query parameters are read. The render cache is keyed by card content, never by
 token.
 `/r/:code` (referral click-track + redirect to the marketing site; also
 OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a

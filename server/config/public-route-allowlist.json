@@ -134,8 +134,9 @@
       "mount": "/og",
       "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
       "routes": [
-        "GET /og/:file",
-        "GET /og/:kind/:tokenFile",
+        "GET /og<re:^\\/([a-z-]+)\\.jpg$>",
+        "GET /og<re:^\\/report\\/([a-f0-9]{32})\\.jpg$/i>",
+        "GET /og<re:.*>",
         "USE /og (inline function#844ec3c3)"
       ]
     },
