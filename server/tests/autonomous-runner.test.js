@@ -2464,7 +2464,7 @@ describe('runNext internal-link shadow behavior', () => {
       const result = await runner.runNext();
 
       // Shipping is the candidate sweep's job alone (one PR path).
-      expect(result.outcome).toBe('completed_published');
+      expect(result.outcome).toBe('completed_planned');
       expect(result.astro_pr_url).toBeUndefined();
       expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
       expect(internalLinkExecutor.runPrBatch).not.toHaveBeenCalled();

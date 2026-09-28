@@ -2528,7 +2528,10 @@ class AutonomousRunner {
           claim: 'complete',
           notes: `internal_links_planned:${summary}`,
           patch: {
-            outcome: 'completed_published',
+            // Planned, not published: publication accounting (digest, caps,
+            // visibility, rankings) counts only completed_published, and the
+            // links ship later only if every auto-merge gate passes.
+            outcome: 'completed_planned',
             link_tasks_queued: taskIds.length,
             reviewer_notes: `Planned ${candidates} internal-link candidate(s); the daily sweep ships them through the auto-merge checks.`,
           },
