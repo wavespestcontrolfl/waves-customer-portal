@@ -1098,6 +1098,14 @@ async function prepareResumeCampaign(sendId) {
     err.code = 'NOT_RESUMABLE';
     throw err;
   }
+  const reclaimingStaleSend = send.status === 'sending' && sendingClaimIsStale(send);
+  if (send.status === 'sending' && !reclaimingStaleSend) {
+    // An active sendCampaign owns the work. A crash/deploy claim ages out
+    // after a bounded lease, giving the operator recovery without prod SQL.
+    const err = new Error('campaign is actively sending; refusing to resume');
+    err.code = 'STILL_SENDING';
+    throw err;
+  }
   // A resume mails the rest of the list from what is stored NOW. A campaign
   // persisted before a stricter claim scan shipped, or one edited after its
   // first attempt failed, must pass the same validation the manual and
@@ -1112,23 +1120,27 @@ async function prepareResumeCampaign(sendId) {
       // accepts draft/scheduled only) with its approval cleared; the
       // per-recipient delivery ledger is untouched, so a later send of the
       // corrected copy reaches only the recipients still outstanding
-      // (codex round 9).
-      await db('newsletter_sends').where({ id: send.id }).whereIn('status', ['failed', 'sent', 'sending']).update({
-        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, updated_at: new Date(),
+      // (codex round 9). A live 'sending' owner was refused above; the reset
+      // is a compare-and-set on the state inspected here — the same guard
+      // the claim below uses — so it never lands on a row another worker
+      // claimed since, and clearing the claim token tells a stuck original
+      // worker (via its heartbeat ownership check) it no longer owns the
+      // campaign (pre-push audit P1).
+      const resetQuery = db('newsletter_sends').where({ id: send.id, status: send.status });
+      if (reclaimingStaleSend) {
+        resetQuery.where('updated_at', '<=', new Date(Date.now() - sendingLeaseMinutes() * 60 * 1000));
+      }
+      const reset = await resetQuery.update({
+        status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
+        sending_claim_token: null, updated_at: new Date(),
       });
-      const err = new Error(`campaign no longer passes validation and was returned to draft for editing: ${errors.join('; ')}`);
+      const err = new Error(reset
+        ? `campaign no longer passes validation and was returned to draft for editing: ${errors.join('; ')}`
+        : `campaign no longer passes validation (it changed state meanwhile and was left as is): ${errors.join('; ')}`);
       err.code = 'VALIDATION_FAILED';
       err.errors = errors;
       throw err;
     }
-  }
-  const reclaimingStaleSend = send.status === 'sending' && sendingClaimIsStale(send);
-  if (send.status === 'sending' && !reclaimingStaleSend) {
-    // An active sendCampaign owns the work. A crash/deploy claim ages out
-    // after a bounded lease, giving the operator recovery without prod SQL.
-    const err = new Error('campaign is actively sending; refusing to resume');
-    err.code = 'STILL_SENDING';
-    throw err;
   }
 
   // Are there outstanding non-success deliveries to resume? If delivery

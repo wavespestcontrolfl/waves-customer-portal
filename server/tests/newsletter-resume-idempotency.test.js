@@ -668,6 +668,50 @@ describe('resumeCampaign — preconditions', () => {
     expect(sendUpdate).toMatchObject({ status: 'draft', proof_approved_at: null, proof_token: null, scheduled_for: null });
   });
 
+  test('an actively sending Pest Insider campaign that fails the claim scan is refused as STILL_SENDING and never reset to draft (pre-push audit P1)', async () => {
+    let sendUpdate = null;
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        return chain({
+          first: {
+            id: 's', status: 'sending', updated_at: new Date(), newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'STILL_SENDING' });
+    expect(sendUpdate).toBeNull();
+  });
+
+  test('a stale sending Pest Insider campaign that fails the claim scan is reset only if still stale, and its claim token is revoked', async () => {
+    let sendUpdate = null;
+    const wheres = [];
+    db.mockImplementation((table) => {
+      if (table === 'newsletter_sends') {
+        const q = chain({
+          first: {
+            id: 's', status: 'sending', updated_at: new Date(Date.now() - 60 * 60 * 1000), sending_claim_token: 'old-token',
+            newsletter_type: 'pest-insider-monthly', subject: 'Pest Insider — September',
+            html_body: '<p>Termites swarm again after storms.</p>', text_body: 'Termites swarm again after storms.', event_ids: [],
+          },
+          updated: 1,
+          onUpdate: (payload) => { sendUpdate = payload; },
+        });
+        const where = q.where;
+        q.where = jest.fn((...args) => { wheres.push(args); return where(...args); });
+        return q;
+      }
+      throw new Error(`unexpected ${table}`);
+    });
+    await expect(prepareResumeCampaign('s')).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(sendUpdate).toMatchObject({ status: 'draft', sending_claim_token: null, proof_approved_at: null });
+    expect(wheres).toContainEqual([{ id: 's', status: 'sending' }]);
+    expect(wheres.some(([col, op]) => col === 'updated_at' && op === '<=')).toBe(true);
+  });
+
   test('resume with only ineligible outstanding rows terminalizes them, then reports NOTHING_TO_RESUME', async () => {
     let sweepUpdate = null;
     let sweepQuery = null;
