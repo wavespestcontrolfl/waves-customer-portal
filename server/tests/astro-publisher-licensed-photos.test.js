@@ -472,3 +472,45 @@ describe('resolveBodyImages — licensed photo position survives the refresh sta
     expect(photoAt).toBeLessThan(credit);
   });
 });
+
+// Codex r2 on #5216 ("Exempt diagnostic posts from the merge-time image
+// minimum"): the autonomous poller's merge-time check uses the SAME
+// identification predicate as resolveBodyImages, so a diagnostic PR with
+// fewer than BODY_IMAGE_MIN licensed photos is not withheld forever.
+describe('assertBodyImagesAtHead — diagnostic exemption from the image minimum', () => {
+  const { assertBodyImagesAtHead } = pub._internals;
+  const FILE = 'src/content/blog/pest-control/fire-ant-id.mdx';
+  const post = (postType) => [
+    '---',
+    'title: Fire Ant Identification',
+    `post_type: ${postType}`,
+    '---',
+    '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+    '',
+    'Fire ants build sandy mounds in Florida yards.',
+    '',
+  ].join('\n');
+  afterEach(() => { gh.getFile.mockReset(); gh.getFile.mockResolvedValue(null); });
+
+  test('a diagnostic post with zero body images passes the merge-time check', async () => {
+    gh.getFile.mockImplementation(async (path) => (path === FILE ? { content: post('diagnostic'), sha: 'abc' } : null));
+    const r = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/x', filePath: FILE });
+    expect(r.reason).toBeNull();
+    expect(r).toMatchObject({ ok: true });
+  });
+
+  test('the same post as a non-diagnostic type is still held to the minimum', async () => {
+    gh.getFile.mockImplementation(async (path) => (path === FILE ? { content: post('how-to'), sha: 'abc' } : null));
+    const r = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/x', filePath: FILE });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/minimum 2/);
+  });
+
+  test('publisher and merge-time check share one predicate', () => {
+    const { isIdentificationPost } = require('../services/content/licensed-photo-library');
+    expect(isIdentificationPost({ post_type: 'diagnostic' })).toBe(true);
+    expect(isIdentificationPost({ post_type: ' Diagnostic ' })).toBe(true);
+    expect(isIdentificationPost({ post_type: 'how-to' })).toBe(false);
+    expect(isIdentificationPost(null)).toBe(false);
+  });
+});

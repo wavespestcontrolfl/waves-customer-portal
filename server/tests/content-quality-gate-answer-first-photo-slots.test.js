@@ -6,8 +6,7 @@
  *     BottomLineBox, and the early estimate/quote CTA comes after it)
  *   - photo_slots_licensed_only (C3: an identification draft's
  *     pest/sign/look-alike photos are a closed set of licensed URLs)
- *   - next_steps_related_posts_closed_set (C2: optional frontmatter
- *     fields, never a minimum, but every href/path must be verified)
+ *   (C2 next_steps / related_posts moved to content-guardrails — Codex r2)
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -17,7 +16,6 @@ const {
   checkVerdictBoxFirst,
   checkCtaAfterVerdictBox,
   checkPhotoSlotsLicensedOnly,
-  checkNextStepsRelatedPostsClosedSet,
   collectBodyImageOccurrences,
 } = require('../services/content/content-quality-gate')._internals;
 
@@ -197,6 +195,27 @@ describe('checkCtaAfterVerdictBox', () => {
 
 // ── photo_slots_licensed_only ───────────────────────────────────────
 
+// ── photo_slots_licensed_only ──────────────────────────────────────
+// Every licensed photo carries the full catalog entry (the composer only
+// ever attaches real PHOTO_LIBRARY entries) and the EXACT attribution line:
+//   Photo: [credit](source_page) ([license](license_url))
+const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
+const PHOTO = {
+  url: PHOTO_URL,
+  alt: 'fire ant',
+  credit: 'Test Photographer',
+  license: 'CC BY 2.0',
+  license_url: 'https://creativecommons.org/licenses/by/2.0',
+  source_page: 'https://commons.wikimedia.org/wiki/File:Real_fire_ant.jpg',
+};
+const ATTR = `Photo: [${PHOTO.credit}](${PHOTO.source_page}) ([${PHOTO.license}](${PHOTO.license_url}))`;
+function photoBrief(photo = PHOTO, extra = []) {
+  return brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo, flagged_for_human: false }, ...extra] } });
+}
+function diag(body, fm = {}) {
+  return { frontmatter: { post_type: 'diagnostic', ...fm }, body };
+}
+
 describe('checkPhotoSlotsLicensedOnly', () => {
   test('defers on a non-diagnostic draft', () => {
     const r = checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: '![a fire ant](https://example.com/ai-art.png)' }, brief());
@@ -205,333 +224,232 @@ describe('checkPhotoSlotsLicensedOnly', () => {
   });
 
   test('a diagnostic draft with NO photo_slots on the brief still fails on any embedded image — never fails open (Codex P1)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![a fire ant](https://example.com/ai-art.png)' },
-      brief(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag('![a fire ant](https://example.com/ai-art.png)'), brief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
   test('a diagnostic draft with NO photo_slots and NO body image passes (nothing to enforce)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: 'Fire ants sting. Call a pro.' },
-      brief(),
-    );
-    expect(r.ok).toBe(true);
+    expect(checkPhotoSlotsLicensedOnly(diag('Fire ants sting. Call a pro.'), brief()).ok).toBe(true);
   });
 
   test('fails when the body embeds an image URL NOT in the brief photo_slots (e.g. AI-generated art)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false },
-          { slot: 'sign', photo: null, flagged_for_human: true },
-          { slot: 'look_alike', photo: null, flagged_for_human: true },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![a fire ant, ai generated](https://example.com/ai-art.png)' },
-      b,
-    );
+    const b = photoBrief(PHOTO, [{ slot: 'sign', photo: null, flagged_for_human: true }]);
+    const r = checkPhotoSlotsLicensedOnly(diag('![a fire ant, ai generated](https://example.com/ai-art.png)'), b);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
-  test('passes when every embedded image URL is one of the brief photo_slots', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
-      b,
-    );
-    expect(r.ok).toBe(true);
+  test('passes when the licensed image and its exact attribution line are present', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), photoBrief()).ok).toBe(true);
   });
 
   test('fails when a licensed URL is reused with a MISLABELED alt (Codex P1)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      // Real fire-ant URL, but relabeled as a termite — the URL alone must not vouch for the caption.
-      { frontmatter: { post_type: 'diagnostic' }, body: '![a termite](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
-      b,
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`![a termite](${PHOTO_URL})\n\n${ATTR}`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^identification_photo_alt_mismatch:/);
   });
 
-  test('fails when the credit/license attribution is dropped from the body (Codex P1)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)' },
-      b,
-    );
+  test('fails when the attribution line is dropped from the body (Codex P1)', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})`), photoBrief());
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_credit_missing:/);
+    expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
-  test('passes when alt, credit, and license all match the catalog entry exactly', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant', credit: 'Judy Gallagher', license: 'CC BY 2.0' }, flagged_for_human: false },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
-      b,
-    );
-    expect(r.ok).toBe(true);
-  });
-
-  test('fails when the catalog entry has a license_url/source_page but the body carries only bare text (Codex P1: CC requires a link)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          {
-            slot: 'pest',
-            photo: {
-              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
-              alt: 'fire ant',
-              credit: 'Judy Gallagher',
-              license: 'CC BY 2.0',
-              license_url: 'https://creativecommons.org/licenses/by/2.0',
-              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
-            },
-            flagged_for_human: false,
-          },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      // Credit + license text present, but neither is an actual link.
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\nPhoto: Judy Gallagher (CC BY 2.0)' },
-      b,
-    );
+  test('fails closed on a catalog entry missing any attribution field', () => {
+    const { license_url: _drop, ...incomplete } = PHOTO;
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), photoBrief(incomplete));
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_(license_link|source_link)_missing:/);
+    expect(r.reason).toMatch(/^identification_photo_catalog_entry_incomplete:/);
   });
 
-  // Codex P1 (2nd round): the old check was `body.includes(url)`, which a
-  // BARE url in plain prose (never wrapped in markdown link syntax, so it
-  // never renders as a clickable hyperlink) also satisfies.
-  test('fails when the license_url/source_page appear as BARE unlinked text, not inside a markdown link', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          {
-            slot: 'pest',
-            photo: {
-              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
-              alt: 'fire ant',
-              credit: 'Judy Gallagher',
-              license: 'CC BY 2.0',
-              license_url: 'https://creativecommons.org/licenses/by/2.0',
-              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
-            },
-            flagged_for_human: false,
-          },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      {
-        frontmatter: { post_type: 'diagnostic' },
-        body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\n'
-          + 'Photo: Judy Gallagher (CC BY 2.0). See https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg '
-          + 'and https://creativecommons.org/licenses/by/2.0 for details.',
-      },
-      b,
-    );
+  // Open item from r1 + Codex r2 on #5216: credit and license must be the
+  // LINK TEXT of the exact instructed form, not just present somewhere.
+  test.each([
+    ['bare credit/license text, no links', `Photo: ${PHOTO.credit} (${PHOTO.license})`],
+    ['bare URLs as prose', `Photo: ${PHOTO.credit} (${PHOTO.license}) ${PHOTO.source_page} ${PHOTO.license_url}`],
+    ['links present but with generic link text', `Photo: [source](${PHOTO.source_page}) by ${PHOTO.credit}, [license](${PHOTO.license_url}) ${PHOTO.license}`],
+    ['credit linked to the license deed (swapped destinations)', `Photo: [${PHOTO.credit}](${PHOTO.license_url}) ([${PHOTO.license}](${PHOTO.source_page}))`],
+  ])('fails the exact-form check: %s', (_label, line) => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${line}`), photoBrief());
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_(license_link|source_link)_missing:/);
+    expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
-  test('passes when the license and source page are linked as the writer instruction requires', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          {
-            slot: 'pest',
-            photo: {
-              url: 'https://upload.wikimedia.org/real-fire-ant.jpg',
-              alt: 'fire ant',
-              credit: 'Judy Gallagher',
-              license: 'CC BY 2.0',
-              license_url: 'https://creativecommons.org/licenses/by/2.0',
-              source_page: 'https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg',
-            },
-            flagged_for_human: false,
-          },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      {
-        frontmatter: { post_type: 'diagnostic' },
-        body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)\n\n'
-          + 'Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:Real_Fire_Ant.jpg) '
-          + '([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))',
-      },
-      b,
-    );
-    expect(r.ok).toBe(true);
+  // Codex r2 on #5216 ("Require visible licensed-photo attribution"): an
+  // attribution only inside a comment or code is not visible to readers.
+  test.each([
+    ['an HTML comment', `<!-- ${ATTR} -->`],
+    ['an MDX comment', `{/* ${ATTR} */}`],
+    ['a fenced code block', '```\n' + ATTR + '\n```'],
+    ['an inline code span', '`' + ATTR + '`'],
+  ])('fails when the only attribution sits inside %s', (_label, hidden) => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${hidden}`), photoBrief());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
   test('passes when a flagged slot is correctly omitted (no image for it at all)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false },
-          { slot: 'look_alike', photo: null, flagged_for_human: true },
-        ],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant](https://upload.wikimedia.org/real-fire-ant.jpg)' },
-      b,
-    );
-    expect(r.ok).toBe(true);
+    const b = photoBrief(PHOTO, [{ slot: 'look_alike', photo: null, flagged_for_human: true }]);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), b).ok).toBe(true);
   });
 
-  // Codex P1 (2026-09-28): the check must see every rendered image form,
-  // not just an inline Markdown image.
   test('a raw <img> tag with an unlicensed src fails the gate (Codex P1 — raw <img> is explicitly accepted by content-guardrails)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '<img src="https://ai-art.example.com/fake-fire-ant.png" alt="fire ant">' },
-      brief(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag('<img src="https://ai-art.example.com/fake-fire-ant.png" alt="fire ant">'), brief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
   test('a raw <img> tag whose src IS a licensed URL passes when alt/attribution match', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '<img src="https://upload.wikimedia.org/real-fire-ant.jpg" alt="fire ant">' },
-      b,
-    );
-    expect(r.ok).toBe(true);
+    expect(checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" alt="fire ant">\n\n${ATTR}`), photoBrief()).ok).toBe(true);
   });
 
   test('a raw <img> srcset entry with an unlicensed URL fails the gate even when src is licensed', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
-      },
-    });
     const r = checkPhotoSlotsLicensedOnly(
-      {
-        frontmatter: { post_type: 'diagnostic' },
-        body: '<img src="https://upload.wikimedia.org/real-fire-ant.jpg" srcset="https://ai-art.example.com/fake-2x.png 2x" alt="fire ant">',
-      },
-      b,
+      diag(`<img src="${PHOTO_URL}" srcset="https://ai-art.example.com/fake-2x.png 2x" alt="fire ant">\n\n${ATTR}`),
+      photoBrief(),
     );
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
   test('a reference-style image (![alt][ref] + [ref]: url) with an unlicensed URL fails the gate', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][pic]\n\n[pic]: https://ai-art.example.com/fake-fire-ant.png' },
-      brief(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag('![fire ant][pic]\n\n[pic]: https://ai-art.example.com/fake-fire-ant.png'), brief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
   });
 
-  // Codex P1 (7th round): a licensed reference-style image is now REJECTED
-  // at the gate (the publisher cannot re-host it, so approving it here only
-  // deferred the failure to publish time). Still resolved + attribution-
-  // checked first, so an unlicensed one keeps its more specific reason.
   test('a reference-style image resolving to a licensed URL is rejected as an unsupported form (publisher cannot re-host it)', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][pic]\n\n[pic]: https://upload.wikimedia.org/real-fire-ant.jpg' },
-      b,
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
   });
 
   test('collapsed reference form (![alt][]) resolves via the alt text as the label, and is likewise rejected as unsupported', () => {
-    const b = brief({
-      voice_constraints: {
-        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
-      },
-    });
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][]\n\n[fire ant]: https://upload.wikimedia.org/real-fire-ant.jpg' },
-      b,
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant][]\n\n${ATTR}\n\n[fire ant]: ${PHOTO_URL}`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
+  });
+
+  test('incidental whitespace around the alt does not false-fail (matches the publisher)', () => {
+    for (const body of [`![  fire ant  ](${PHOTO_URL})\n\n${ATTR}`, `<img src="${PHOTO_URL}" alt=" fire ant ">\n\n${ATTR}`]) {
+      expect(checkPhotoSlotsLicensedOnly(diag(body), photoBrief()).ok).toBe(true);
+    }
+  });
+
+  test('a licensed standalone <img> whose alt contains ">" passes (Codex P1 r11)', () => {
+    const photo = { ...PHOTO, alt: 'workers can be > 1/4 inch' };
+    expect(checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" alt="${photo.alt}">\n\n${ATTR}`), photoBrief(photo)).ok).toBe(true);
   });
 });
 
 // Codex P1 (7th round): the gate approves only placements the publisher's
 // re-hosting pass can actually re-host — standalone on its own line.
 describe('checkPhotoSlotsLicensedOnly — publishable placement', () => {
-  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
-  const b = () => brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: 'fire ant' }, flagged_for_human: false }] } });
-
   test('a licensed image placed MID-PARAGRAPH fails with a clear reason (it would never be re-hosted)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: `See the photo ![fire ant](${PHOTO_URL}) below.` },
-      b(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`See the photo ![fire ant](${PHOTO_URL}) below.\n\n${ATTR}`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
   });
 
   test('the same licensed URL used once standalone AND once inline still fails (counted per occurrence)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: `![fire ant](${PHOTO_URL})\n\nAgain: ![fire ant](${PHOTO_URL}) here.` },
-      b(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}\n\nAgain: ![fire ant](${PHOTO_URL}) here.`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
   });
 
   test('a standalone inline image and a standalone <img> tag both pass', () => {
-    for (const body of [`Intro.\n\n![fire ant](${PHOTO_URL})\n\nMore.`, `Intro.\n\n<img src="${PHOTO_URL}" alt="fire ant">\n\nMore.`]) {
-      expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body }, b()).ok).toBe(true);
+    for (const body of [`Intro.\n\n![fire ant](${PHOTO_URL})\n\n${ATTR}\n\nMore.`, `Intro.\n\n<img src="${PHOTO_URL}" alt="fire ant">\n\n${ATTR}\n\nMore.`]) {
+      expect(checkPhotoSlotsLicensedOnly(diag(body), photoBrief()).ok).toBe(true);
     }
   });
 
   test('a standalone <img> carrying a srcset is rejected as unsupported (the publisher re-hosts src only)', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      { frontmatter: { post_type: 'diagnostic' }, body: `<img src="${PHOTO_URL}" srcset="${PHOTO_URL} 2x" alt="fire ant">` },
-      b(),
-    );
+    const r = checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" srcset="${PHOTO_URL} 2x" alt="fire ant">\n\n${ATTR}`), photoBrief());
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^identification_photo_unsupported_form:srcset:/);
+  });
+});
+
+// Codex r2 on #5216 ("Allow preserved licensed images through diagnostic
+// refreshes"): a refresh brief carries no photo_slots; the post's own
+// re-hosted photos are grandfathered from the LIVE previous version.
+describe('checkPhotoSlotsLicensedOnly — refresh grandfathering', () => {
+  const LOCAL = '/images/blog/pest-control/fire-ants/body-1.webp';
+  const refreshBrief = () => brief({ action_type: 'refresh_existing_page', page_type: 'refresh', voice_constraints: {} });
+  const liveBody = `<BottomLineBox verdict="v" recommendation="r" />\n\nIntro.\n\n![fire ant](${LOCAL})\n\n${ATTR}\n\nMore.`;
+  const ctx = (body = liveBody) => ({ previousVersion: { body }, liveFrontmatter: { post_type: 'diagnostic' } });
+
+  test('a preserved local photo with its attribution passes', () => {
+    const draft = diag(`<BottomLineBox verdict="v2" recommendation="r2" />\n\nNew intro.\n\n![fire ant](${LOCAL})\n\n${ATTR}\n\nNew more.`);
+    expect(checkPhotoSlotsLicensedOnly(draft, refreshBrief(), ctx())).toEqual({ ok: true });
+  });
+
+  test('the preserved photo fails once its attribution is dropped', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\nNo credit.`), refreshBrief(), ctx());
+    expect(r).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${LOCAL}` });
+  });
+
+  test('the preserved photo fails when its attribution survives only in a comment', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n<!-- ${ATTR} -->`), refreshBrief(), ctx());
+    expect(r.ok).toBe(false);
+  });
+
+  test('grants are per occurrence — a second copy of the same local photo is unlicensed', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}\n\n![fire ant](${LOCAL})`), refreshBrief(), ctx());
+    expect(r).toEqual({ ok: false, reason: `unlicensed_or_unknown_identification_photo:${LOCAL}` });
+  });
+
+  test('a relabeled alt is not grandfathered', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![a termite](${LOCAL})\n\n${ATTR}`), refreshBrief(), ctx());
+    expect(r.ok).toBe(false);
+  });
+
+  test('a local image the live body never carried (or carried without attribution) is not grandfathered', () => {
+    const other = '/images/blog/pest-control/fire-ants/body-2.webp';
+    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${other})\n\n${ATTR}`), refreshBrief(), ctx()).ok).toBe(false);
+    const unattributed = ctx(`Intro.\n\n![fire ant](${LOCAL})\n\nMore.`);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), refreshBrief(), unattributed).ok).toBe(false);
+  });
+
+  test('a live photo that only appeared inside a comment grants nothing', () => {
+    const commented = ctx(`<!--\n![fire ant](${LOCAL})\n\n${ATTR}\n-->`);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), refreshBrief(), commented).ok).toBe(false);
+  });
+
+  test('a new-post brief never grandfathers, even with a previousVersion in context', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), brief(), ctx());
+    expect(r.ok).toBe(false);
+  });
+});
+
+// Codex r2 on #5216 ("Classify refreshes using the retained live post
+// type"): publishRefresh ships the LIVE frontmatter, so a refresh is judged
+// by the live post_type, not the draft's.
+describe('refresh classification uses the live post_type', () => {
+  const refreshBrief = () => brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+  const noBoxBody = 'Intro prose first.\n\n<BottomLineBox verdict="v" recommendation="r" />';
+
+  test('a refresh draft that omits post_type is still held to answer-first when the live post is diagnostic', () => {
+    const draft = { frontmatter: {}, body: noBoxBody };
+    const ctx = { liveFrontmatter: { post_type: 'diagnostic' } };
+    expect(checkVerdictBoxFirst(draft, refreshBrief(), ctx)).toEqual({ ok: false, reason: 'verdict_box_not_first_block' });
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: '![x](https://example.com/ai.png)' }, refreshBrief(), ctx).ok).toBe(false);
+  });
+
+  test('a refresh draft that CLAIMS diagnostic on a non-diagnostic live post is judged by the live type', () => {
+    const draft = { frontmatter: { post_type: 'diagnostic' }, body: noBoxBody };
+    expect(checkVerdictBoxFirst(draft, refreshBrief(), { liveFrontmatter: { post_type: 'how-to' } }).ok).toBe(true);
+  });
+
+  test('without a live frontmatter load the draft value is the fallback', () => {
+    const draft = { frontmatter: { post_type: 'diagnostic' }, body: noBoxBody };
+    expect(checkVerdictBoxFirst(draft, refreshBrief(), {}).ok).toBe(false);
+  });
+
+  test('a new post ignores liveFrontmatter entirely', () => {
+    const draft = { frontmatter: { post_type: 'how-to' }, body: noBoxBody };
+    expect(checkVerdictBoxFirst(draft, brief(), { liveFrontmatter: { post_type: 'diagnostic' } }).ok).toBe(true);
   });
 });
 
@@ -557,182 +475,11 @@ describe('collectBodyImageOccurrences', () => {
   });
 });
 
-// ── next_steps_related_posts_closed_set ─────────────────────────────
-
-describe('checkNextStepsRelatedPostsClosedSet', () => {
-  test('passes when neither field is present (fully optional)', () => {
-    const r = checkNextStepsRelatedPostsClosedSet({ frontmatter: {} }, brief());
-    expect(r.ok).toBe(true);
-  });
-
-  test('fails closed when next_steps is a non-array value instead of being silently ignored (Codex P1)', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: { label: 'Get an estimate', href: '/contact/' } } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('next_steps_not_an_array');
-  });
-
-  test('fails closed when related_posts is a non-array value instead of being silently ignored (Codex P1)', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: '/pest-control/made-up-post/' } },
-      brief(),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('related_posts_not_an_array');
-  });
-
-  test('fails when next_steps has more than 4 entries', () => {
-    const nextSteps = Array.from({ length: 5 }, (_, i) => ({ label: `Step ${i}`, href: '/contact/' }));
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: nextSteps } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('next_steps_exceeds_max_4');
-  });
-
-  test('fails an off-site absolute URL even when its PATH matches an allowed route (Codex P1)', () => {
-    // https://unrelated.example/contact/ must never pass just because its
-    // pathname happens to match a real allowed path on OUR site.
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://unrelated.example/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
-  });
-
-  test('passes an absolute URL on the real hub host matching an allowed route', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://www.wavespestcontrol.com/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(true);
-  });
-
-  // Codex P2 (2026-09-28): the normalizer now defers to content-guardrails'
-  // safeFleetUrlPath (the shared fleet-origin contract) instead of a
-  // parallel, weaker hostname-only check.
-  test('rejects a non-http(s) scheme (ftp://) even on the real hub host', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'ftp://www.wavespestcontrol.com/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
-  });
-
-  test('rejects a non-standard port even on the real hub host', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://www.wavespestcontrol.com:444/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
-  });
-
-  test('rejects embedded credentials even on the real hub host', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://attacker:pw@www.wavespestcontrol.com/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
-  });
-
-  test('fails when a related_posts entry is not on the brief-verified list', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: ['/pest-control/made-up-post/'] } },
-      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
-  });
-
-  test('passes when a related_posts entry matches a brief-verified related-post path', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: ['/pest-control/real-post/'] } },
-      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
-    );
-    expect(r.ok).toBe(true);
-  });
-
-  // Codex P2 (2026-09-28): related_posts is the Astro hand-picked blog-id
-  // rail (rankRelatedPosts) — it must match the brief's OWN verified list
-  // EXACTLY, never the broader route verifier next_steps uses.
-  test('fails when a related_posts entry only differs by CASE from the brief-verified path (silently drops on the Astro side otherwise)', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: ['/Pest-Control/Real-Post/'] } },
-      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
-  });
-
-  test('fails when a related_posts entry is a generic allowlisted route (e.g. /contact/) rather than a real related post', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: ['/contact/'] } },
-      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
-  });
-
-  test('fails when a related_posts entry is only in internal_links_to_add, not the brief-verified related-post list', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { related_posts: ['/pest-control-calculator/'] } },
-      brief({ internal_links_to_add: ['/pest-control-calculator/'], voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
-  });
-
-  test('next_steps keeps the broader verifier — the SAME generic allowlisted route that fails for related_posts still passes for next_steps', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Contact us', href: '/contact/' }] } },
-      brief(),
-    );
-    expect(r.ok).toBe(true);
-  });
-
-  test('fails when a next_steps href is not on the closed set', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Found a live one?', href: '/made-up-route/' }] } },
-      brief(),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
-  });
-
-  test('passes when a next_steps href is in internal_links_to_add', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ label: 'Get an estimate', href: '/pest-control-calculator/' }] } },
-      brief({ internal_links_to_add: ['/pest-control-calculator/'] }),
-    );
-    expect(r.ok).toBe(true);
-  });
-
-  test('fails when a next_steps entry is missing a label or href', () => {
-    const r = checkNextStepsRelatedPostsClosedSet(
-      { frontmatter: { next_steps: [{ href: '/contact/' }] } },
-      brief({ internal_links_to_add: ['/contact/'] }),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('next_steps_entry_missing_label_or_href');
-  });
-});
-
-// Codex P1 (9th round): the gate trims alt exactly as the shared placement
-// matcher (the publisher's re-host path) does — incidental whitespace in the
-// alt must not false-fail a placement the publisher would re-host.
-test('checkPhotoSlotsLicensedOnly: incidental whitespace around the alt does not false-fail (matches the publisher)', () => {
-  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
-  const b = brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: 'fire ant' }, flagged_for_human: false }] } });
-  for (const body of [`![  fire ant  ](${PHOTO_URL})`, `<img src="${PHOTO_URL}" alt=" fire ant ">`]) {
-    expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body }, b).ok).toBe(true);
-  }
+// C2 frontmatter next_steps / related_posts are judged by content-guardrails
+// (content-guardrails-next-steps-related-posts.test.js), not a hard check here.
+test('the quality gate no longer carries a separate next_steps/related_posts check', () => {
+  const gate = require('../services/content/content-quality-gate');
+  expect(gate._internals.checkNextStepsRelatedPostsClosedSet).toBeUndefined();
 });
 
 // Codex P1 (r10): the box-tag match must be quote-aware — a literal `>`
@@ -749,9 +496,3 @@ test('checkCtaAfterVerdictBox: a link after a literal ">" inside a box prop is s
   expect(r.reason).toBe('link_inside_verdict_box');
 });
 
-test('checkPhotoSlotsLicensedOnly: a licensed standalone <img> whose alt contains ">" passes (Codex P1 r11)', () => {
-  const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
-  const ALT = 'workers can be > 1/4 inch';
-  const b = brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo: { url: PHOTO_URL, alt: ALT }, flagged_for_human: false }] } });
-  expect(checkPhotoSlotsLicensedOnly({ frontmatter: { post_type: 'diagnostic' }, body: `<img src="${PHOTO_URL}" alt="${ALT}">` }, b).ok).toBe(true);
-});

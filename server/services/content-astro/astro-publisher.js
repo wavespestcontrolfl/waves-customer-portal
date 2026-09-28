@@ -27,6 +27,7 @@ const fm = require('./frontmatter');
 const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { matchStandaloneImageLine, isIdentificationPost } = require('../content/licensed-photo-library');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const { applyCostGuidePriceRange } = require('./price-range');
 const contentGuardrails = require('../content/content-guardrails');
@@ -2302,7 +2303,11 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   } catch (_) { /* no safe frontmatter slug — file key only */ }
   const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)), slug: ownSlugs });
   if (!valid.ok) return { ok: false, reason: valid.reason };
-  if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
+  // Identification posts never get generated images, so a slot with no
+  // licensed photo legitimately leaves them under the minimum — the SAME
+  // exemption resolveBodyImages applies, from the same shared predicate,
+  // judged on the frontmatter the merge ships (Codex r2 on #5216).
+  if (!isIdentificationPost(parsed?.data) && valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
   const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
   if (!pictures.ok) return { ok: false, reason: pictures.reason };
   return { ok: true, reason: null, baseSha };
@@ -2922,7 +2927,6 @@ const LICENSED_PHOTO_FETCH_TIMEOUT_MS = 20000;
 // src-only <img>, alone on its own line. Anything else is rejected at the
 // gate; if it ever reached here it would be left in the body and
 // validateBodyImageRefs would fail closed (park, never a hotlink).
-const { matchStandaloneImageLine } = require('../content/licensed-photo-library');
 function licensedPhotoError(slug, url, detail) {
   const err = new Error(`autonomous blog body images: licensed identification photo for ${slug} (${url}) ${detail}`);
   err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -3073,8 +3077,23 @@ async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
 
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
-  if (!bodyImagesEnabled()) return none;
-  const isDiagnostic = frontmatter?.post_type === 'diagnostic';
+  // ONE predicate with the merge-time check and the quality gate.
+  const isDiagnostic = isIdentificationPost(frontmatter);
+  if (!bodyImagesEnabled()) {
+    // GATE_BLOG_BODY_IMAGES only controls AI GENERATION. Licensed
+    // identification photos are re-hosted regardless (Codex r2 on #5216):
+    // with the gate off a diagnostic draft must still ship the verified
+    // local WebP, never a hotlink to the remote catalog URL.
+    if (!isDiagnostic) return none;
+    const licensed = await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx });
+    if (!licensed.placements.length) return none;
+    return {
+      ...none,
+      body: insertBodyImages(licensed.body, licensed.placements),
+      files: licensed.files,
+      images: licensed.images,
+    };
+  }
   // A refresh draft may RETAIN a publisher-managed reference while
   // rewriting its section: the picture then ships under prose it may no
   // longer describe, bypassing the reuse context check (GH r28). Managed

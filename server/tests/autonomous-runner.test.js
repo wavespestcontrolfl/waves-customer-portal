@@ -3795,3 +3795,52 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     }
   });
 });
+
+// Codex r2 on #5216 ("Classify refreshes using the retained live post
+// type"): publishRefresh ships the LIVE frontmatter, so the runner hands
+// the quality gate that live frontmatter and the gate classifies the
+// refresh by it, not by the draft.
+describe('refresh quality gate receives the live frontmatter', () => {
+  test('ctx.liveFrontmatter is the live page frontmatter on a refresh', async () => {
+    const claimedAt = new Date('2026-09-28T10:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_refresh_live_type', action_type: 'refresh_existing_page', page_url: '/pest-control/fire-ant-id/', claimed_at: claimedAt }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_refresh_live_type',
+        action_type: 'refresh_existing_page',
+        page_type: 'refresh',
+        target_url: '/pest-control/fire-ant-id/',
+        human_review_required: false,
+      }),
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { body: 'Refreshed body.', frontmatter: {} } }) };
+    const liveFm = { post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [] };
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue(liveFm),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live body.' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/pest-control/fire-ant-id.mdx' }),
+      isBlogTarget: jest.fn().mockReturnValue(true),
+    };
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['verdict_box_first'], soft_failures: [], total_score: 0, min_total_score: 80 }) };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder,
+      dispatcher,
+      publisher,
+      qualityGate,
+      factsSufficiency: { check: jest.fn().mockResolvedValue({ applicable: false }) },
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      uniquenessGate: { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }), evaluateBlog: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) },
+    });
+    await runner.runNext();
+    expect(qualityGate.evaluate).toHaveBeenCalled();
+    const [, gateBrief, ctx] = qualityGate.evaluate.mock.calls[0];
+    expect(gateBrief.action_type).toBe('refresh_existing_page');
+    expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic' });
+    expect(ctx.previousVersion).toEqual({ body: 'Live body.' });
+  });
+});

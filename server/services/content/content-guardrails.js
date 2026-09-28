@@ -5209,6 +5209,98 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
   return null;
 }
 
+// ── C2 frontmatter links: next_steps / related_posts (Codex r2 on #5216) ──
+// These fields render on the published post exactly like body links, so
+// they are judged by the SAME chokepoints body links go through — never a
+// parallel validator. evaluate() turns each next_steps entry into the body
+// link it renders as, "[label](href)", and feeds that block to every
+// customer-copy scan (compliance, price, brand, citation …) and to
+// internalRouteFinding. What the body guard cannot see is checked here:
+// the entry SHAPE (array, label + href, max 4) and the publish HOST of an
+// absolute href — internalRouteFinding reduces any fleet URL to its
+// pathname (hubHostSet deliberately holds every spoke), so a hub post's
+// "https://<spoke>/contact/" would otherwise pass as "/contact/".
+// A refresh never ships these (publishRefresh freezes frontmatter apart
+// from the editable meta fields), so evaluate() skips them there.
+const NEXT_STEPS_MAX = 4;
+// Characters that would let a label or href break out of the synthesized
+// "[label](href)" link and forge a different one.
+const NEXT_STEP_LABEL_UNSAFE_RE = /[[\]\r\n]/;
+const NEXT_STEP_HREF_UNSAFE_RE = /[\s()<>[\]]/;
+function publishHostSet(publishHosts) {
+  const hosts = new Set();
+  for (const value of Array.isArray(publishHosts) ? publishHosts : []) {
+    let host = String(value || '').trim().toLowerCase();
+    try { host = new URL(host.includes('://') ? host : `https://${host}`).hostname.toLowerCase(); } catch { continue; }
+    const bare = host.replace(/^www\./, '');
+    hosts.add(bare);
+    hosts.add(`www.${bare}`);
+  }
+  return hosts;
+}
+function nextStepsLinkMarkdown(frontmatter) {
+  const steps = Array.isArray(frontmatter?.next_steps) ? frontmatter.next_steps : [];
+  return steps
+    .filter((step) => step && typeof step.label === 'string' && typeof step.href === 'string')
+    .map((step) => `[${step.label.trim()}](${step.href.trim()})`)
+    .join('\n\n');
+}
+function nextStepEntryFinding(step, hosts) {
+  const label = typeof step?.label === 'string' ? step.label.trim() : '';
+  const href = typeof step?.href === 'string' ? step.href.trim() : '';
+  if (!label || !href) return finding('P0', 'NEXT_STEPS_INVALID', 'Every frontmatter next_steps entry needs a non-empty label and href.');
+  if (NEXT_STEP_LABEL_UNSAFE_RE.test(label) || NEXT_STEP_HREF_UNSAFE_RE.test(href)) {
+    return finding('P0', 'NEXT_STEPS_INVALID', `next_steps entry "${label}" carries link syntax or whitespace in its label/href — use plain label text and a bare path.`);
+  }
+  if (href.startsWith('/') && !href.startsWith('//')) return null; // renders on the publish host
+  // Absolute: the SAME fleet-origin contract as every other absolute link,
+  // but against ONLY the brief's resolved publish host — never the whole
+  // fleet.
+  if (!hosts.size || !safeFleetUrlPath(href, hosts)) {
+    return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `next_steps href "${href}" is not a path on this post's publish host — use a root-relative path like "/contact/".`);
+  }
+  return null;
+}
+function nextStepsFrontmatterFinding(frontmatter, { publishHosts = [] } = {}) {
+  const steps = frontmatter?.next_steps;
+  if (steps == null) return null;
+  if (!Array.isArray(steps)) return finding('P0', 'NEXT_STEPS_INVALID', 'frontmatter next_steps must be an array of { label, href } entries.');
+  if (steps.length > NEXT_STEPS_MAX) return finding('P0', 'NEXT_STEPS_INVALID', `frontmatter next_steps has ${steps.length} entries; the maximum is ${NEXT_STEPS_MAX}.`);
+  const hosts = publishHostSet(publishHosts);
+  for (const step of steps) {
+    const bad = nextStepEntryFinding(step, hosts);
+    if (bad) return bad;
+  }
+  return null;
+}
+// related_posts is the Astro rail's hand-picked id list: each entry must be
+// EXACTLY one of the brief's verified related-post paths, and it obeys the
+// same publish-time liveness result the body-link guard consumes
+// (staleRelatedPostLinks / relatedPostLinksLive from _deriveGuardrailOptions)
+// — a stale path, or any path once the publish routing drifted, is denied
+// with the same P0 the body guard raises for a body link to it.
+function relatedPostsFrontmatterFinding(frontmatter, { relatedPostLinks = [], relatedPostLinksLive = true, staleRelatedPostLinks = [] } = {}) {
+  const posts = frontmatter?.related_posts;
+  if (posts == null) return null;
+  if (!Array.isArray(posts)) return finding('P0', 'RELATED_POSTS_INVALID', 'frontmatter related_posts must be an array of related-post paths from the brief.');
+  const verified = new Set((Array.isArray(relatedPostLinks) ? relatedPostLinks : []).filter((v) => typeof v === 'string'));
+  const stale = new Set((Array.isArray(staleRelatedPostLinks) ? staleRelatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link)).filter(Boolean));
+  for (const entry of posts) {
+    if (typeof entry !== 'string' || !entry.trim()) return finding('P0', 'RELATED_POSTS_INVALID', 'Every frontmatter related_posts entry must be a non-empty path string.');
+    if (!verified.has(entry)) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is not one of the brief's verified related posts (exact path required).`);
+    }
+    if (stale.has(normalizeInternalPath(entry))) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is no longer live (unpublished, noindexed or moved since this brief was composed).`);
+    }
+    if (!relatedPostLinksLive) {
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `frontmatter related_posts entry "${entry}" is no longer a live target after the publish routing changed since this brief was composed.`);
+    }
+  }
+  return null;
+}
+
 // Normalize service/topic value(s) to candidate FAQ_BLOCKED_SERVICES ids. The
 // ids are lowercase/singular/hyphenated ('rodent', 'bed-bug'), but legacy blog
 // `tag` values are display-cased plurals ("Rodents", "Bed Bugs", "Cockroaches").
@@ -6564,7 +6656,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], photoAllowedUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], photoAllowedUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], publishHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6589,7 +6681,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // gate 3c, the in-loop self-lints, the metadata handler — inherits one
   // behavior. DESCRIPTION FIELDS ONLY: a {{cityPhone}} in a title,
   // metaTitle, or hero alt has no sanctioned use and stays fully validated.
-  const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
+  const metaFields = ['title', 'metaTitle', 'meta_description', 'metaDescription']
     .concat(isRefresh ? [] : ['hero_image_alt'])
     .map((f) => {
       const v = frontmatter[f];
@@ -6602,6 +6694,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     .filter(Boolean)
     .map(String)
     .join('\n\n');
+  // C2 next_steps render as links on the post: each entry joins the
+  // customer-copy scans (and the internal-route gate below) as the exact
+  // body link it renders as, "[label](href)" — Codex r2 on #5216. Skipped
+  // on a refresh, which never ships draft frontmatter beyond the meta
+  // fields above.
+  const nextStepsLinks = isRefresh ? '' : nextStepsLinkMarkdown(frontmatter);
+  const editableMeta = [metaFields, nextStepsLinks].filter(Boolean).join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
   // Refresh grandfathering surface: what the live prior body already
@@ -6622,6 +6721,16 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     }
   }
 
+  // A refresh brief carries no photo_slots, yet a diagnostic post this
+  // pipeline created keeps its licensed-photo attribution links (Commons
+  // source page + CC deed). Those exact URLs are grandfathered from the
+  // live prior body — only the ones that sit in an exact-form attribution
+  // line under one of our own committed images (Codex r2 on #5216).
+  const refreshPhotoUrls = refreshPriorBody
+    ? require('./licensed-photo-library').priorLicensedPhotoGrants(blankNonRenderedMarkdown(refreshPriorBody))
+      .flatMap((g) => [g.sourcePage, g.licenseUrl])
+    : [];
+
   const findings = [
     // Price must cover everything that ships: body AND meta. Third-party
     // price citations carry their OWN flag, stricter than operatorCitations:
@@ -6632,7 +6741,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls: [...(Array.isArray(photoAllowedUrls) ? photoAllowedUrls : []), ...refreshPhotoUrls] }),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,
@@ -6700,7 +6809,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody)
       ? finding('P1', 'REFRESH_PRIOR_BODY_UNAVAILABLE', 'Refresh draft arrived without the live prior body, so the component/internal-route gates cannot grandfather preserved-legacy content — routed to review (fail closed).')
       : uncatalogedComponentFinding(body, refreshExemptComponents),
-    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
+    isRefresh ? null : nextStepsFrontmatterFinding(frontmatter, { publishHosts }),
+    isRefresh ? null : relatedPostsFrontmatterFinding(frontmatter, { relatedPostLinks, relatedPostLinksLive, staleRelatedPostLinks }),
+    (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(nextStepsLinks ? `${body}\n\n${nextStepsLinks}` : body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
     ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts, relatedPostLinksLive, staleRelatedPostLinks),
@@ -6813,7 +6924,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

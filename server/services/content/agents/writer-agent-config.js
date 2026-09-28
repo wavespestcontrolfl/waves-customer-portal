@@ -258,7 +258,7 @@ POST TYPE + DUPLICATE INTENT (binding):
       check, a call-a-pro trigger, or "no action needed beyond X").
       confidence is optional, same contract as the general BottomLineBox rule.
     • The early estimate/quote CTA required elsewhere in these instructions
-      (see PAGE-TYPE OUTPUT STANDARDS / METADATA + INTERNAL LINKS) comes
+      (see the page-type output standards below) comes
       AFTER this box — after the first section, never squeezed in before it
       or above it. The verdict box IS the first section; the CTA follows the
       answer, not the other way around.
@@ -364,17 +364,19 @@ wasted):
       whichever entries are a genuinely strong fit for this post's readers
       into frontmatter.related_posts — the Astro related-posts rail
       hand-picks these ahead of its own automatic ranking. Every value must
-      be one of those 'path's verbatim, or a URL already in
-      internal_links_to_add / the static allowlist above. Omit the field
-      entirely rather than pad it with a weak fit.
+      be one of those 'path's verbatim (exact spelling and case) — nothing
+      else. Omit the field entirely rather than pad it with a weak fit.
     • frontmatter.next_steps (optional array of up to 4 { label, href }
       objects — the Astro schema hard-caps this at 4): a short "what did you
       find?" row for the reader's actual next move. Only when it concretely
       helps — never invented to fill the field. Every href must be a REAL
       URL from internal_links_to_add, voice_constraints.related_posts, or
       the static allowlist above — the SAME closed set body links use, never
-      a guessed route. label is the plain link text (e.g. "Found a live
-      one?", "Seeing the damage, not the pest?").
+      a guessed route — written as a root-relative path ("/contact/"), never
+      a full URL to another site. label is the plain link text (e.g. "Found
+      a live one?", "Seeing the damage, not the pest?") and is customer-facing
+      copy held to every body rule (no safety/EPA claims, no prices, no
+      brand names).
 
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:

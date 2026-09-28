@@ -234,4 +234,58 @@ function matchStandaloneImageLine(line) {
   return { alt: String(htmlAttrValue(attrs, 'alt') || '').trim(), url: src };
 }
 
-module.exports = { PHOTO_LIBRARY, matchSpecies, findPhotoForSlot, buildPhotoSlots, matchStandaloneImageLine, htmlAttrValue };
+// ONE predicate for "this post is an identification post" (Codex r2 on
+// #5216): the publisher's re-host / no-AI-art path, the merge-time image
+// assertion and the quality gate all read post_type through here, so they
+// can never disagree about which posts are exempt from the generated-image
+// minimum.
+function isIdentificationPost(frontmatter) {
+  return String(frontmatter?.post_type || '').trim().toLowerCase() === 'diagnostic';
+}
+
+// The EXACT attribution line a licensed slot photo carries (the PHOTO
+// SLOTS writer instruction): credit and license are the visible LINK TEXT,
+// the source page and license deed are the link destinations. Shared by the
+// quality gate so the instruction and its check cannot drift.
+function photoAttributionLine(photo) {
+  return `Photo: [${photo.credit}](${photo.source_page}) ([${photo.license}](${photo.license_url}))`;
+}
+const PHOTO_ATTRIBUTION_LINE_RE = /^\s*Photo: \[([^\]\n]+)\]\(([^)\s]+)\) \(\[([^\]\n]+)\]\(([^)\s]+)\)\)\s*$/;
+// Our own committed body images (the re-hosted copies) live here.
+const LOCAL_BLOG_IMAGE_PREFIX = '/images/blog/';
+
+// Refresh grandfathering for re-hosted licensed photos (Codex r2 on #5216):
+// a refresh brief carries no photo_slots, so the gate recognizes a
+// preserved photo only from the LIVE previous version — a standalone local
+// /images/blog/ image line immediately followed (blank lines aside) by an
+// exact-form attribution line. `renderedPriorBody` must already have
+// comments/code blanked (content-guardrails.blankNonRenderedMarkdown) so a
+// commented-out example grants nothing. Returns one grant per occurrence:
+// { url, alt, attribution, sourcePage, licenseUrl }.
+function priorLicensedPhotoGrants(renderedPriorBody) {
+  const lines = String(renderedPriorBody || '').split('\n');
+  const grants = [];
+  for (let i = 0; i < lines.length; i++) {
+    const img = matchStandaloneImageLine(lines[i]);
+    if (!img || !img.url.startsWith(LOCAL_BLOG_IMAGE_PREFIX)) continue;
+    let j = i + 1;
+    while (j < lines.length && !lines[j].trim()) j++;
+    const attr = j < lines.length ? PHOTO_ATTRIBUTION_LINE_RE.exec(lines[j]) : null;
+    if (!attr) continue;
+    grants.push({ url: img.url, alt: img.alt, attribution: lines[j].trim(), sourcePage: attr[2], licenseUrl: attr[4] });
+  }
+  return grants;
+}
+
+module.exports = {
+  PHOTO_LIBRARY,
+  matchSpecies,
+  findPhotoForSlot,
+  buildPhotoSlots,
+  matchStandaloneImageLine,
+  htmlAttrValue,
+  isIdentificationPost,
+  photoAttributionLine,
+  priorLicensedPhotoGrants,
+  PHOTO_ATTRIBUTION_LINE_RE,
+};

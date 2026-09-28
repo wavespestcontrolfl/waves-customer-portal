@@ -34,7 +34,7 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
-const { isFaqBlockedService, isKnownGoodInternalRoute } = require('./content-guardrails');
+const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
 // threshold is always a reachable fraction of that page type's own
@@ -119,11 +119,9 @@ const HARD_CHECKS = [
   // URLs the brief's voice_constraints.photo_slots supplied. Common (not
   // page-type-scoped) because post_type is independent of page_type.
   { name: 'photo_slots_licensed_only', weight: 0, evaluate: checkPhotoSlotsLicensedOnly },
-  // Owner ruling 2026-09-28 (work order C2): frontmatter.next_steps /
-  // .related_posts are optional (no minimum — #5062), but when present
-  // every href/path must be a route the brief already verified, same
-  // closed-set posture as body internal links.
-  { name: 'next_steps_related_posts_closed_set', weight: 0, evaluate: checkNextStepsRelatedPostsClosedSet },
+  // (C2 frontmatter next_steps / related_posts are NOT checked here: they
+  // render as links, so content-guardrails.evaluate() judges them with the
+  // body-link chokepoints — Codex r2 on #5216.)
 ];
 
 const PAGE_TYPE_CHECKS = {
@@ -1091,8 +1089,23 @@ function checkBodySyntaxSupported(draft, _brief, context = {}) {
 // on — post_type is a writer decision independent of the brief's page_type)
 // and every customer-question page (post_type doesn't gate that one; the
 // page type itself IS the "question" case).
-function isIdentificationOrQuestionDraft(draft, brief) {
-  return draft?.frontmatter?.post_type === 'diagnostic' || brief?.page_type === 'customer-question';
+// Codex r2 on #5216: a refresh ships the LIVE frontmatter (publishRefresh
+// freezes it), so a refresh is classified by the live post_type the runner
+// hands in as context.liveFrontmatter — never by whatever the refresh draft
+// happened to repeat (the refresh tool schema does not require post_type).
+// Without a live load the draft's own value is the fallback. The post_type
+// comparison itself is licensed-photo-library.isIdentificationPost — the
+// SAME predicate the publisher and the merge-time image check use.
+function effectiveFrontmatter(draft, brief, context) {
+  const isRefresh = brief?.action_type === 'refresh_existing_page';
+  if (isRefresh && context?.liveFrontmatter && typeof context.liveFrontmatter === 'object') return context.liveFrontmatter;
+  return draft?.frontmatter || {};
+}
+function isIdentificationDraft(draft, brief, context) {
+  return isIdentificationPost(effectiveFrontmatter(draft, brief, context));
+}
+function isIdentificationOrQuestionDraft(draft, brief, context) {
+  return isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question';
 }
 
 // C2: the verdict box (BottomLineBox) must be the LITERAL first block of
@@ -1100,8 +1113,8 @@ function isIdentificationOrQuestionDraft(draft, brief) {
 // leading `[BottomLineBox` component tag is unambiguous: the writer's
 // Markdown subset never puts significant whitespace or commentary before
 // the first real content.
-function checkVerdictBoxFirst(draft, brief) {
-  if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
+function checkVerdictBoxFirst(draft, brief, context) {
+  if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '').trim();
   if (!body) return { ok: false, reason: 'empty_body' };
   if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
@@ -1128,8 +1141,8 @@ function checkVerdictBoxFirst(draft, brief) {
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
 const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
-function checkCtaAfterVerdictBox(draft, brief) {
-  if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
+function checkCtaAfterVerdictBox(draft, brief, context) {
+  if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '');
   // Codex P1 (r10): quote-aware — a naive `[^>]*` stopped at the first
   // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
@@ -1149,54 +1162,28 @@ function checkCtaAfterVerdictBox(draft, brief) {
 
 // C3: an identification draft's pest/sign/look-alike photos are a CLOSED
 // set — exactly the licensed URLs voice_constraints.photo_slots supplied.
-// No brief photo_slots at all (non-diagnostic drafts, or a diagnostic
-// draft on a page type the composer never attaches slots to) means this
-// check has nothing to enforce and defers.
+// A diagnostic draft with no brief photo_slots has an EMPTY allowlist
+// (any image fails) — see checkPhotoSlotsLicensedOnly.
 // Codex P1: URL membership alone let a real licensed URL carry a
 // MISLABELED alt (e.g. the fire-ant photo captioned "Termite") with no
 // credit/license reproduced at all — both explicitly required by the
 // PHOTO SLOTS writer instruction. Every embedded slot photo must now match
 // its catalog entry's URL AND alt text exactly, and the body must carry
-// that entry's credit and license string somewhere (the instructed
-// attribution line), not merely the bare image markdown.
-// One embedded image's attribution, checked against its catalog entry.
-// `checks` pairs each required-substring field with the reason code it
-// reports missing — walked as data instead of a repeated if-chain so
-// checkPhotoSlotsLicensedOnly's own complexity stays low.
-// 'text' fields (credit/license) are the visible LABEL text inside a
-// markdown link — a bare substring match is the real requirement (they
-// are prose, not a URL). 'link' fields (license_url/source_page) are the
-// opposite: Codex P1 (2nd round) — checking `body.includes(url)` only
-// proved the URL string appears somewhere in the text, not that it
-// renders as an actual clickable hyperlink (CC BY/BY-SA compliance,
-// per the instruction this check enforces, needs a real link — "See
-// https://creativecommons.org/licenses/by/2.0" as bare prose would have
-// passed the old check without ever being clickable). 'link' fields must
-// appear as the DESTINATION of a real markdown link, `[text](URL)`.
-const PHOTO_ATTRIBUTION_FIELDS = [
-  ['credit', 'identification_photo_credit_missing', 'text'],
-  ['license', 'identification_photo_license_missing', 'text'],
-  ['license_url', 'identification_photo_license_link_missing', 'link'],
-  ['source_page', 'identification_photo_source_link_missing', 'link'],
-];
-const MD_LINK_DEST_RE = /\]\(([^)]+)\)/g;
-function bodyLinksTo(body, url) {
-  MD_LINK_DEST_RE.lastIndex = 0;
-  let m;
-  while ((m = MD_LINK_DEST_RE.exec(body))) {
-    if (m[1].trim() === url) return true;
-  }
-  return false;
-}
-function validateSlotPhotoAttribution(photo, alt, url, body) {
+// that entry's attribution line, not merely the bare image markdown.
+// Codex r2 on #5216: attribution is judged on the RENDERED view (comments
+// and code blanked — content-guardrails.blankNonRenderedMarkdown, the view
+// the guardrails use), and must be the EXACT instructed line, so the credit
+// and license are the visible link TEXT and the source page / license deed
+// the link DESTINATIONS: photoAttributionLine() →
+//   Photo: [credit](source_page) ([license](license_url))
+// A credit hidden in a comment, a bare URL, or the parts scattered across
+// the body no longer pass.
+const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page'];
+function validateSlotPhotoAttribution(photo, alt, url, renderedBody) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
-  for (const [field, reasonCode, kind] of PHOTO_ATTRIBUTION_FIELDS) {
-    const value = photo[field];
-    if (!value) continue;
-    const present = kind === 'link' ? bodyLinksTo(body, value) : body.includes(value);
-    if (!present) return { ok: false, reason: `${reasonCode}:${url}` };
-  }
+  if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
+  if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
   return null;
 }
 // Codex P1: the inline-only regex saw NOTHING for a raw <img> (explicitly
@@ -1216,7 +1203,7 @@ const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
 // general unsupported-body-syntax gate.
 const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
-const { htmlAttrValue: attrValue, matchStandaloneImageLine } = require('./licensed-photo-library');
+const { htmlAttrValue: attrValue, matchStandaloneImageLine, isIdentificationPost, photoAttributionLine, priorLicensedPhotoGrants } = require('./licensed-photo-library');
 // alt is trimmed in every form, exactly as the shared matchStandaloneImage
 // Line (the publisher's re-host path) trims it — Codex P1 r9: an untrimmed
 // alt here false-failed identification_photo_alt_mismatch on a placement
@@ -1286,8 +1273,27 @@ function firstUnpublishablePlacement(occurrences, body) {
   return null;
 }
 
-function checkPhotoSlotsLicensedOnly(draft, brief) {
-  if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
+// Refresh grandfathering (Codex r2 on #5216): a refresh brief carries no
+// photo_slots, so a diagnostic post's OWN re-hosted photos
+// (/images/blog/<slug>/body-N.webp) are recognized from the live previous
+// version instead — per occurrence, same alt, and only while the exact
+// attribution line that accompanied it live is still rendered in the draft.
+function refreshPhotoGrants(brief, context) {
+  if (brief?.action_type !== 'refresh_existing_page') return [];
+  const prior = context?.previousVersion?.body;
+  if (typeof prior !== 'string' || !prior.trim()) return [];
+  return priorLicensedPhotoGrants(require('./content-guardrails').blankNonRenderedMarkdown(prior));
+}
+function consumeRefreshGrant(grants, alt, url, renderedBody) {
+  const idx = grants.findIndex((g) => g.url === url && g.alt === alt);
+  if (idx === -1) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+  const [grant] = grants.splice(idx, 1);
+  if (!renderedBody.includes(grant.attribution)) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  return null;
+}
+
+function checkPhotoSlotsLicensedOnly(draft, brief, context) {
+  if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
   // Codex P1: an EMPTY or missing photo_slots list must NEVER fail open — a
   // diagnostic draft on a page type the composer doesn't attach slots to
   // (or a stored brief that predates this change) still carries the owner
@@ -1295,127 +1301,19 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
   // empty list is an EMPTY ALLOWLIST: any body image at all is unlicensed.
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
+  const grants = refreshPhotoGrants(brief, context);
   const body = String(draft.body || '');
+  const renderedBody = require('./content-guardrails').blankNonRenderedMarkdown(body);
   const occurrences = collectBodyImageOccurrences(body);
   for (const { alt, url } of occurrences) {
-    const failure = validateSlotPhotoAttribution(byUrl.get(url), alt, url, body);
+    const photo = byUrl.get(url);
+    const failure = photo || !grants.length
+      ? validateSlotPhotoAttribution(photo, alt, url, renderedBody)
+      : consumeRefreshGrant(grants, alt, url, renderedBody);
     if (failure) return failure;
   }
   const placement = firstUnpublishablePlacement(occurrences, body);
   if (placement) return placement;
-  return { ok: true };
-}
-
-// C2: frontmatter.next_steps / .related_posts are optional (no minimum —
-// the owner dropped the related-links quota, #5062) but every href/path
-// present must be a route the brief already verified: one of
-// voice_constraints.related_posts' paths, internal_links_to_add, or the
-// static allowlist / known city-service pattern (isKnownGoodInternalRoute)
-// — the same closed-set posture the body's own internal-route gate applies.
-// Codex P1: the earlier version took `.pathname` off ANY absolute URL,
-// so "https://unrelated.example/contact/" normalized to "/contact/" and
-// matched the allowed set even though it points off-site. An absolute URL
-// must name one of OUR OWN hub/spoke hosts (hubHostSet — the same allowance
-// internalRouteFinding/isKnownGoodInternalRoute apply to body links) or it
-// is rejected outright, never silently reduced to its pathname.
-// Codex P2: this used to be its OWN, weaker origin check (hostname-only —
-// ftp://, a non-standard port, or embedded credentials all still reduced to
-// an allowlisted pathname). It now defers to content-guardrails'
-// safeFleetUrlPath, the SAME fleet-origin contract (HTTP(S) only, a
-// standard port, no credentials, an explicitly allowed fleet host) every
-// other absolute-URL check in this codebase already uses, instead of a
-// second, parallel normalizer that could silently drift from it.
-function normalizeFrontmatterPath(value) {
-  if (!value) return null;
-  const { hubHostSet, safeFleetUrlPath } = require('./content-guardrails');
-  let candidate = String(value);
-  let isAbsolute = true;
-  try { new URL(candidate); } catch { isAbsolute = false; }
-  if (isAbsolute) {
-    const path = safeFleetUrlPath(candidate, hubHostSet());
-    if (!path) return null; // off-site, non-standard port, credentials, or a non-http(s) scheme
-    candidate = path;
-  }
-  if (!candidate.startsWith('/')) candidate = `/${candidate}`;
-  candidate = candidate.toLowerCase();
-  if (!candidate.endsWith('/')) candidate += '/';
-  return candidate;
-}
-// Verified-route predicate shared by both fields below: a value counts only
-// when it is one of the brief's own verified related-post paths, one of its
-// internal_links_to_add, or a route the static allowlist/city-service
-// pattern already proves (isKnownGoodInternalRoute) — the same closed-set
-// posture internalRouteFinding applies to body links.
-function buildFrontmatterRouteVerifier(brief) {
-  const briefRelated = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
-  const briefRelatedPaths = new Set(
-    briefRelated.map((r) => normalizeFrontmatterPath(typeof r === 'string' ? r : r?.path)).filter(Boolean),
-  );
-  const briefLinks = new Set(
-    (Array.isArray(brief?.internal_links_to_add) ? brief.internal_links_to_add : [])
-      .map(normalizeFrontmatterPath)
-      .filter(Boolean),
-  );
-  return (value) => {
-    const norm = normalizeFrontmatterPath(value);
-    return Boolean(norm) && (briefRelatedPaths.has(norm) || briefLinks.has(norm) || isKnownGoodInternalRoute(value));
-  };
-}
-
-// Codex P2: related_posts is NOT a general internal-route field — the
-// Astro contract (rankRelatedPosts) reads it as the brief's own hand-
-// picked blog id/slug list and silently drops anything it doesn't
-// recognize (never a build failure there), so a value this gate accepted
-// only via the broader route verifier (a generic allowlisted route like
-// /contact/, or a case-changed related-post path) would pass HERE but
-// render as nothing there — the hand-picked rail the writer thought it
-// set never ships. related_posts is validated against ONLY the brief's
-// own voice_constraints.related_posts values, exact string match
-// (case-preserving, no normalization) — never internal_links_to_add,
-// never isKnownGoodInternalRoute. next_steps keeps the broader verifier
-// (buildFrontmatterRouteVerifier) — it points at a real, arbitrary Waves
-// page, not a blog-id lookup.
-function isVerifiedRelatedPost(value, brief) {
-  const briefRelated = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
-  return briefRelated.some((r) => (typeof r === 'string' ? r : r?.path) === value);
-}
-function firstUnverifiedRelatedPost(relatedPosts, brief) {
-  for (const value of relatedPosts) {
-    if (typeof value !== 'string' || !value.trim()) return { ok: false, reason: 'related_posts_entry_not_a_string' };
-    if (!isVerifiedRelatedPost(value, brief)) return { ok: false, reason: `related_posts_entry_not_verified:${value}` };
-  }
-  return null;
-}
-
-function firstUnverifiedNextStep(nextSteps, isVerified) {
-  for (const step of nextSteps) {
-    if (!step || typeof step.label !== 'string' || !step.label.trim() || typeof step.href !== 'string' || !step.href.trim()) {
-      return { ok: false, reason: 'next_steps_entry_missing_label_or_href' };
-    }
-    if (!isVerified(step.href)) return { ok: false, reason: `next_steps_entry_not_verified:${step.href}` };
-  }
-  return null;
-}
-
-function checkNextStepsRelatedPostsClosedSet(draft, brief) {
-  const fm = draft.frontmatter || {};
-  // Codex P1: coercing any non-array value to [] via Array.isArray(...) ? x
-  // : [] made a malformed field (a single {label,href} object, a string) a
-  // silent no-op — same fail-open class the photo gate was fixed for
-  // (round above). A PRESENT (not null/undefined) non-array value is now a
-  // hard failure of its own, never silently skipped.
-  if (fm.next_steps != null && !Array.isArray(fm.next_steps)) return { ok: false, reason: 'next_steps_not_an_array' };
-  if (fm.related_posts != null && !Array.isArray(fm.related_posts)) return { ok: false, reason: 'related_posts_not_an_array' };
-  const nextSteps = Array.isArray(fm.next_steps) ? fm.next_steps : [];
-  const relatedPosts = Array.isArray(fm.related_posts) ? fm.related_posts : [];
-  if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
-  if (nextSteps.length > 4) return { ok: false, reason: 'next_steps_exceeds_max_4' };
-
-  const badRelatedPost = firstUnverifiedRelatedPost(relatedPosts, brief);
-  if (badRelatedPost) return badRelatedPost;
-  const isVerified = buildFrontmatterRouteVerifier(brief);
-  const badNextStep = firstUnverifiedNextStep(nextSteps, isVerified);
-  if (badNextStep) return badNextStep;
   return { ok: true };
 }
 
@@ -1613,6 +1511,6 @@ module.exports._internals = {
   checkNoRawMarkdownTables,
   checkBodySyntaxSupported,
   checkVerdictBoxFirst, checkCtaAfterVerdictBox,
-  checkPhotoSlotsLicensedOnly, checkNextStepsRelatedPostsClosedSet,
+  checkPhotoSlotsLicensedOnly, isIdentificationOrQuestionDraft, effectiveFrontmatter,
   collectBodyImageOccurrences,
 };

@@ -1009,6 +1009,20 @@ class AutonomousRunner {
             });
           if (prior) ctx.previousVersion = prior;
         }
+        // publishRefresh ships the LIVE frontmatter, so the gate classifies
+        // the refresh (answer-first / licensed-photo checks) by the live
+        // post_type, not the draft's (Codex r2 on #5216). A load failure
+        // leaves it unset — the gate falls back to the draft, and gate 3c's
+        // fail-closed live-frontmatter load already ran for this refresh.
+        if (publisher?.getLiveFrontmatter) {
+          const liveFm = await publisher
+            .getLiveFrontmatter(brief.target_url || brief.page_url || draft.url)
+            .catch((err) => {
+              logger.warn(`[autonomous-runner] live frontmatter load for the quality gate failed: ${err.message}`);
+              return null;
+            });
+          if (liveFm && typeof liveFm === 'object') ctx.liveFrontmatter = liveFm;
+        }
         // Same resolved-target derivation as the metadata lane: page_type
         // 'refresh' says nothing about the target, and a refresh that
         // rewrites a blog post's meta_description must keep the full blog
