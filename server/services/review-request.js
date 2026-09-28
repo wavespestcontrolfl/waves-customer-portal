@@ -1787,9 +1787,9 @@ const ReviewService = {
         seriesFinal: resolved.seriesFinal === true,
         customerRequested: customerRequested || null,
         // GATE_REVIEW_DAY0_CONTEXT (dark): run by startReviewSequence only once
-        // its refusals have passed. Null off-gate, off the recurring plan, or on
-        // any lookup/model failure — never blocks or changes this enrollment
-        // (review-ask-topic.js). The visit's own completed_at anchors the
+        // this enrollment has won its insert. Null off-gate, off the recurring
+        // plan, or on any lookup/model failure — never blocks or changes this
+        // enrollment (review-ask-topic.js). The visit's own start anchors the
         // evidence window; completedAt is the fallback.
         resolveAskContext: () => resolveReviewTopicForEnrollment({
           customerId,
@@ -5971,12 +5971,6 @@ const ReviewService = {
       return { started: false, reason: "cooldown" };
     }
 
-    // GATE_REVIEW_DAY0_CONTEXT: classify only now that every refusal above has
-    // passed, so an enrollment about to be refused never sends evidence to a
-    // model, and before the insert's transaction, which a model call must
-    // never hold open.
-    const askContext = typeof resolveAskContext === "function" ? await resolveAskContext() : null;
-
     // Supersede any already-queued ASK (post-service auto, or a deferred
     // retry): otherwise processScheduled() would fire it AND the cadence's
     // Day-0 touch → a duplicate review request. Only ASKS are superseded — a
@@ -6089,12 +6083,6 @@ const ReviewService = {
           started_by: startedBy || null,
           started_at: new Date(),
           customer_requested: customerRequested ? JSON.stringify(customerRequested) : null,
-          // GATE_REVIEW_DAY0_CONTEXT topic, written once here and never by
-          // the step runner — `decision` is rewritten on every deferral.
-          // Gate off = no topic = the insert is unchanged. A deferred-final
-          // park never carries one: parks are series finals only, and the
-          // resolver is null for every plan but the recurring one.
-          ...(askContext ? { ask_context: JSON.stringify(askContext) } : {}),
           decision: decision || sequenceDecision({
             reason: customerRequested ? "customer_requested" : firstTouchAt ? "operator_timing" : "immediate",
             plannedAt: firstTouchAt || new Date(),
@@ -6136,6 +6124,24 @@ const ReviewService = {
         return this._alreadyActive(existing, customerRequested, retryEnrollment);
       } else {
         throw err;
+      }
+    }
+
+    // GATE_REVIEW_DAY0_CONTEXT: classify only once this enrollment has won its
+    // insert — the one-active unique index is the serialization point, so a
+    // refused or racing duplicate trigger (completion + paid webhook) never
+    // sends evidence to a model — and outside the insert's transaction. The
+    // topic lands on its own column (the step runner rewrites `decision` on
+    // every deferral) while nothing has been sent; a Day-0 that goes out
+    // first just uses the fixed text. updated_at is the runner's claim stamp
+    // and is left alone. Never fails the start.
+    if (typeof resolveAskContext === "function") {
+      const askContext = await resolveAskContext();
+      if (askContext) {
+        await db("review_sequences")
+          .where({ id: sequence.id, status: "active", touches_sent: 0 })
+          .update({ ask_context: JSON.stringify(askContext) })
+          .catch((err) => logger.warn(`[review] Day-0 topic not stored (sequenceId=${sequence.id}): ${err.message}`));
       }
     }
 

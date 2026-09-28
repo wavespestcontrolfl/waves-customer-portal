@@ -135,14 +135,11 @@ function visitServiceLine(serviceLine, serviceType) {
   return serviceFamilyOf(serviceLine || (serviceType ? detectServiceLine(serviceType) : null));
 }
 
-// The visit, its grouped-visit members (scheduled_services.visit_id — one
-// physical stop), the service lines done there, and what the customer told
-// the technician: customerConcernText ONLY, from every member's record (each
-// member has its own completion form; enrollment names only the first).
-// `observations` / `customerRecap` are the technician's own findings (see
-// module header). windowEnd is the visit's real start, else its
-// completed_at: a closeout submitted hours after the stop must not turn a
-// post-visit text into a pre-visit topic.
+// The visit, the service line done there, and what the customer told the
+// technician: customerConcernText ONLY — `observations` / `customerRecap`
+// are the technician's own findings (see module header). windowEnd is the
+// visit's real start, else its completed_at: a closeout submitted hours
+// after the stop must not turn a post-visit text into a pre-visit topic.
 async function loadVisit({ serviceRecordId, scheduledServiceId }) {
   const sr = serviceRecordId
     ? await db("service_records").where({ id: serviceRecordId })
@@ -153,30 +150,16 @@ async function loadVisit({ serviceRecordId, scheduledServiceId }) {
     ? await db("scheduled_services").where({ id: visitId })
       .select("id", "visit_id", "completed_at", "service_type", ...VISIT_START_FIELDS).first()
     : null;
-  const members = visit?.visit_id
-    ? await db("scheduled_services").where({ visit_id: visit.visit_id }).select("id", "service_type")
-    : [];
-  const memberIds = members.map((m) => m.id);
-  const memberRecords = memberIds.length
-    ? await db("service_records").whereIn("scheduled_service_id", memberIds)
-      .select("structured_notes", "scheduled_service_id", "service_line", "service_type")
-    : [];
-  const concerns = [...new Set([sr, ...memberRecords].map((r) => concernTextOf(r?.structured_notes)).filter(Boolean))];
-  const serviceLines = new Set([
-    visitServiceLine(sr?.service_line, sr?.service_type || visit?.service_type),
-    ...members.map((m) => {
-      const rec = memberRecords.find((r) => r.scheduled_service_id === m.id);
-      return visitServiceLine(rec?.service_line, rec?.service_type || m.service_type);
-    }),
-  ]);
-  serviceLines.delete(null);
+  const concernText = concernTextOf(sr?.structured_notes);
+  const serviceLine = visitServiceLine(sr?.service_line, sr?.service_type || visit?.service_type);
   return {
+    id: visit?.id || null,
+    grouped: !!visit?.visit_id,
     // Same redact-then-cap as the texts: free-text concerns can carry a gate
     // or lockbox code.
-    concernText: concerns.length ? redactAccessCodes(concerns.join(" / ")).slice(0, MAX_TEXT_CHARS) : null,
+    concernText: concernText ? redactAccessCodes(concernText).slice(0, MAX_TEXT_CHARS) : null,
     windowEnd: visit ? earliestDate(VISIT_START_FIELDS.map((f) => visit[f])) || earliestDate([visit.completed_at]) : null,
-    sameStopIds: visit ? [...new Set([visit.id, ...memberIds])] : [],
-    serviceLines: [...serviceLines],
+    serviceLines: serviceLine ? [serviceLine] : [],
   };
 }
 
@@ -188,12 +171,16 @@ async function loadVisit({ serviceRecordId, scheduledServiceId }) {
  * visit's own real start (else its completed_at) — never the enrollment
  * time, which runs after the visit is completed (and, on the paid-invoice
  * path, days later) — and at the caller's `completedAt` only when the visit
- * row has neither; with none of them, no texts are read. The previous visit
- * is never this visit or a member of its grouped visit. Throws on a lookup
- * failure — the replay reports it; live callers use collectTopicEvidence.
+ * row has neither; with none of them, no texts are read. A visit that is
+ * part of a grouped stop (scheduled_services.visit_id) reads nothing: its
+ * boundary, performed members and records belong to the packet closeout
+ * (visit-completion-packets.js), and none completed in the 60 days before
+ * this lane — it gets the fixed Day-0 text. Throws on a lookup failure;
+ * live callers use collectTopicEvidence.
  */
 async function readTopicEvidence({ customerId, serviceRecordId = null, scheduledServiceId = null, completedAt = null } = {}) {
   const visit = await loadVisit({ serviceRecordId, scheduledServiceId });
+  if (visit.grouped) return { completion: { concernText: null }, texts: [], serviceLines: [] };
   const completion = { concernText: visit.concernText };
   const { serviceLines } = visit;
   const at = visit.windowEnd || (completedAt ? new Date(completedAt) : null);
@@ -202,7 +189,7 @@ async function readTopicEvidence({ customerId, serviceRecordId = null, scheduled
   let prevQuery = db("scheduled_services")
     .where({ customer_id: customerId, status: "completed" })
     .where("completed_at", "<", at);
-  if (visit.sameStopIds.length) prevQuery = prevQuery.whereNotIn("id", visit.sameStopIds);
+  if (visit.id) prevQuery = prevQuery.whereNotIn("id", [visit.id]);
   const prevVisit = await prevQuery
     .orderBy("completed_at", "desc")
     .select("completed_at")

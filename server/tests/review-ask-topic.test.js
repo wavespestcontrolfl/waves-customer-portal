@@ -134,13 +134,12 @@ describe('collectTopicEvidence', () => {
     expect(floor.getTime()).toBeLessThan(new Date(NOW.getTime() - 10 * 86400000).getTime() + 1);
   });
 
-  test('anchors on the visit itself: a live enrollment (after markComplete) still reads pre-visit texts, and a grouped sibling at the same stop is not the previous visit', async () => {
+  test('anchors on the visit itself: a live enrollment (after markComplete) still reads pre-visit texts', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [
         { id: 'ss-prev', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 10 * 86400000) },
-        { id: 'ss-sibling', customer_id: 'c1', status: 'completed', visit_id: 'v-stop', completed_at: new Date(NOW.getTime() - 30 * 60000) },
         // markComplete stamped THIS visit two minutes before enrollment ran.
-        { id: 'ss-now', customer_id: 'c1', status: 'completed', visit_id: 'v-stop', completed_at: new Date(NOW.getTime() - 2 * 60000) },
+        { id: 'ss-now', customer_id: 'c1', status: 'completed', completed_at: new Date(NOW.getTime() - 2 * 60000) },
       ],
       service_records: [],
       sms_log: [
@@ -186,21 +185,23 @@ describe('collectTopicEvidence', () => {
     expect(evidence.texts.map((t) => t.id)).toEqual(['s-before']);
   });
 
-  test('a grouped visit reads the concern from every member\'s completion, not just the one enrollment names', async () => {
+  test('a visit in a grouped stop reads nothing (the fixed Day-0 text): no texts, no concern, no service line, so no model call', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [
-        { id: 'ss-pest', customer_id: 'c1', status: 'completed', visit_id: 'v-1', completed_at: NOW },
-        { id: 'ss-lawn', customer_id: 'c1', status: 'completed', visit_id: 'v-1', completed_at: NOW },
+        { id: 'ss-pest', customer_id: 'c1', status: 'completed', visit_id: 'v-1', service_type: 'Quarterly Pest Control Service', completed_at: NOW },
       ],
       service_records: [
-        { id: 'sr-pest', scheduled_service_id: 'ss-pest', structured_notes: { customerConcernText: '' } },
-        { id: 'sr-lawn', scheduled_service_id: 'ss-lawn', structured_notes: { customerConcernText: 'brown patch by the driveway' } },
+        { id: 'sr-pest', scheduled_service_id: 'ss-pest', service_line: 'pest', structured_notes: { customerConcernText: 'ants by the door' } },
       ],
-      sms_log: [],
+      sms_log: [
+        { id: 's-1', customer_id: 'c1', direction: 'inbound', message_body: 'Ants all over the kitchen again', created_at: new Date(NOW.getTime() - 3600000) },
+      ],
     }));
 
     const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-pest', scheduledServiceId: 'ss-pest' });
-    expect(evidence.completion.concernText).toBe('brown patch by the driveway');
+    expect(evidence).toEqual({ completion: { concernText: null }, texts: [], serviceLines: [] });
+    await expect(classifyTopic(evidence)).resolves.toMatchObject({ status: 'no_evidence' });
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   test('texts after the visit\'s own completion are never evidence (paid-invoice enrollment days later, visit found through its service record)', async () => {
@@ -233,20 +234,21 @@ describe('collectTopicEvidence', () => {
     expect(evidence.texts).toEqual([]);
   });
 
-  test('service lines come from the record\'s stamped line, else the service name; a grouped stop carries every member\'s line', async () => {
+  test('the visit\'s service line is its record\'s stamped line, else its service name (a visit with no record yet)', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [
-        { id: 'ss-pest', customer_id: 'c1', status: 'completed', visit_id: 'v-2', service_type: 'Quarterly Pest Control Service', completed_at: NOW },
-        { id: 'ss-lawn', customer_id: 'c1', status: 'completed', visit_id: 'v-2', service_type: 'Every 6 Weeks Lawn Care Service', completed_at: NOW },
+        { id: 'ss-stamped', customer_id: 'c1', status: 'completed', service_type: 'Every 6 Weeks Lawn Care Service', completed_at: NOW },
+        { id: 'ss-norecord', customer_id: 'c2', status: 'completed', service_type: 'Every 6 Weeks Lawn Care Service', completed_at: NOW },
       ],
       service_records: [
-        { id: 'sr-pest', scheduled_service_id: 'ss-pest', service_line: 'pest', service_type: 'Quarterly Pest Control Service', structured_notes: null },
+        // The completion stamped the line; it wins over the name.
+        { id: 'sr-stamped', scheduled_service_id: 'ss-stamped', service_line: 'pest', service_type: 'Every 6 Weeks Lawn Care Service', structured_notes: null },
       ],
       sms_log: [],
     }));
 
-    const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-pest', scheduledServiceId: 'ss-pest' });
-    expect([...evidence.serviceLines].sort()).toEqual(['lawn', 'pest']);
+    expect((await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-stamped' })).serviceLines).toEqual(['pest']);
+    expect((await collectTopicEvidence({ customerId: 'c2', scheduledServiceId: 'ss-norecord' })).serviceLines).toEqual(['lawn']);
   });
 
   test('an unknown service line reads as none (never the name-less "pest" default), so nothing is sent to the model', async () => {

@@ -2550,9 +2550,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
     db.mockImplementation(mock);
 
-    const result = await ReviewService.startReviewSequence({ customerId: 'rc-1', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, decision: { reason: 'customer_requested' } });
+    // GATE_REVIEW_DAY0_CONTEXT: the insert is the serialization point, so the
+    // enrollment that loses it never sends the customer's evidence to a model.
+    const resolveAskContext = jest.fn(async () => ({ topic: 'ants' }));
+    const result = await ReviewService.startReviewSequence({ customerId: 'rc-1', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, decision: { reason: 'customer_requested' }, resolveAskContext });
 
     expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    expect(resolveAskContext).not.toHaveBeenCalled();
     const winner = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-winner');
     expect(JSON.parse(winner.customer_requested)).toEqual(requested);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
