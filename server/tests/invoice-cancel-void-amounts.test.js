@@ -41,3 +41,28 @@ test('unparseable or missing line items read as no deposit', () => {
   expect(amounts({ total: 20, credit_applied: 0, line_items: '{not json' }).deposit_credit).toBe(0);
   expect(amounts({ total: null, credit_applied: 0 })).toEqual({ total: null, credit_applied: 0, deposit_credit: 0 });
 });
+
+// The ONE post-void scope (fee gate, credit-reversal guard, plan-cancel
+// manual-review list, IB preview): an invoice linked only through a service
+// record must count, not just a direct scheduled_service_id link.
+test('unresolvedInvoicesForCancelledService matches the direct link OR a service-record link, excluding resolved statuses', () => {
+  const InvoiceService = require('../services/invoice');
+  const calls = [];
+  const builder = (table) => {
+    const b = {};
+    for (const m of ['where', 'orWhereIn', 'whereNotIn', 'select']) {
+      b[m] = (...args) => { calls.push({ table, m, args }); return b; };
+    }
+    return b;
+  };
+  InvoiceService.unresolvedInvoicesForCancelledService(builder, 'svc-1');
+  const grouped = calls.find((c) => c.table === 'invoices' && c.m === 'where' && typeof c.args[0] === 'function');
+  expect(grouped).toBeTruthy();
+  grouped.args[0](builder('group'));
+  expect(calls).toEqual(expect.arrayContaining([
+    { table: 'group', m: 'where', args: [{ scheduled_service_id: 'svc-1' }] },
+    expect.objectContaining({ table: 'group', m: 'orWhereIn', args: ['service_record_id', expect.anything()] }),
+    { table: 'service_records', m: 'where', args: [{ scheduled_service_id: 'svc-1' }] },
+    { table: 'invoices', m: 'whereNotIn', args: ['status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES] },
+  ]));
+});

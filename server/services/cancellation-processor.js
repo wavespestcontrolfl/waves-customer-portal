@@ -1328,10 +1328,7 @@ async function processCancellationRequest({
     try {
       const InvoiceService = require('./invoice');
       await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-      const unresolved = await db('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-        .select('id');
+      const unresolved = await InvoiceService.unresolvedInvoicesForCancelledService(db, svc.id).select('id');
       for (const inv of unresolved) {
         errors.push(`invoice_review:${inv.id}`);
         logger.error(`[cancellation-processor] invoice ${inv.id} for visit ${svc.id} still needs money handling — manual review`);

@@ -62,11 +62,19 @@ jest.mock('../services/churn-classifier', () => ({
   classifyChurnReason: jest.fn().mockResolvedValue({ code: 'unclassified', source: 'none' }),
 }));
 
-jest.mock('../services/invoice', () => ({
-  voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
+jest.mock('../services/invoice', () => {
   // Mirrors the real exported list — the processor post-checks with it.
-  CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'],
-}));
+  const RESOLVED = ['void', 'refunded', 'canceled', 'cancelled'];
+  return {
+    voidOpenInvoicesForCancelledService: jest.fn().mockResolvedValue([]),
+    CANCELLED_SERVICE_RESOLVED_STATUSES: RESOLVED,
+    // The shared post-void scope, run against this suite's db mock (the
+    // direct-or-service-record SQL itself is covered where it lives).
+    unresolvedInvoicesForCancelledService: (conn, id) => conn('invoices')
+      .where({ scheduled_service_id: id })
+      .whereNotIn('status', RESOLVED),
+  };
+});
 
 jest.mock('../services/estimate-card-holds', () => ({
   handleCardHoldCancellation: jest.fn().mockResolvedValue({ handled: false, reason: 'no_hold' }),
