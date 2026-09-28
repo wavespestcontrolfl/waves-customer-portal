@@ -7,6 +7,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const { createDeepMessage } = require('./llm/deep');
 const { etDateString } = require('../utils/datetime-et');
+const { costLineFromUsage, countUnitsCompatible, parsePackCount } = require('./product-costing');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -165,35 +166,82 @@ async function flagIsFromAIAudit(entry, conn = db) {
 // ══════════════════════════════════════════════════════════════
 // CORE CRUD
 // ══════════════════════════════════════════════════════════════
-// One COGS line per usage row, mirroring product-costing's
-// usageAmountForArea: a row with usage_per_1000sf scales with the treated
-// area (plus or at least its flat amount when the notes say so), so the
-// write-up states the per-1,000 sq ft rate instead of the flat fallback.
+// One COGS line per usage row. The per-unit cost comes from
+// product-costing.costLineFromUsage (cost_per_unit, or the package price
+// scaled by unit_size_oz) so the write-up never prices an ounce at the whole
+// jug; usage counted in whole containers (1 bottle, 2 bags) prices at the
+// package. The amount mirrors usageAmountForArea: a usage_per_1000sf row
+// scales with the treated area, plus its flat amount on base-plus rows, and
+// at least its flat amount on max rows (kept as its own term, never folded
+// into a linear total).
+const CONTAINER_USAGE_UNITS = new Set(['bottle', 'bottles', 'jug', 'jugs', 'container', 'containers', 'can', 'cans', 'bag', 'bags', 'pail', 'pails', 'box', 'boxes', 'case', 'cases', 'each', 'ea', 'unit', 'units']);
+
+// How many usage units one catalog package holds when both are counts:
+// "1 trap" for traps, "4 x 30g tubes" for tubes. Null when the pack is
+// measured by weight/volume ("500 g" of packets, an "18 lb pail" of blocks).
+function packCountForUsage(containerSize, usageUnit) {
+  const singular = (w) => String(w || '').trim().toLowerCase().replace(/s$/, '');
+  const pack = parsePackCount(containerSize);
+  if (pack && countUnitsCompatible(pack.unit, singular(usageUnit))) return pack.count;
+  const multi = String(containerSize || '').trim().toLowerCase().match(/^(\d+)\s*x\s.*?([a-z]+)$/);
+  if (multi && Number(multi[1]) > 0 && singular(multi[2]) === singular(usageUnit)) return Number(multi[1]);
+  return null;
+}
+
+function cogsUnitCost(p) {
+  const one = costLineFromUsage({ ...p, usage_amount: 1, usage_per_1000sf: null, notes: '' }, 0);
+  if (!one.warning && Number.isFinite(one.cost)) return one.cost;
+  const price = parseFloat(p.best_price);
+  if (!Number.isFinite(price) || price < 0) return null;
+  if (CONTAINER_USAGE_UNITS.has(String(p.usage_unit || '').trim().toLowerCase())) return price;
+  const count = packCountForUsage(p.container_size, p.usage_unit);
+  return count ? price / count : null;
+}
+
 function cogsLineForUsage(p) {
-  const price = parseFloat(p.best_price || 0);
   const base = parseFloat(p.usage_amount || 0) || 0;
   const rate = parseFloat(p.usage_per_1000sf || 0) || 0;
   const unit = p.usage_unit || '';
-  const head = `- ${p.product_name} (${p.active_ingredient || 'n/a'}):`;
-  const at = `@ $${price.toFixed(2)}`;
   const n = (x) => Number(x.toFixed(4));
-  if (rate > 0) {
-    const notes = String(p.notes || '');
-    const areaCost = price * rate;
-    if (notes.includes('[usage:base_plus_per_1000]')) {
-      return { fixed: price * base, per1000: areaCost, line: `${head} ${n(base)} ${unit} + ${n(rate)} ${unit} per 1,000 sq ft ${at} = $${(price * base).toFixed(2)} + $${areaCost.toFixed(2)} per 1,000 sq ft` };
-    }
-    const floor = notes.includes('[usage:max_base_or_per_1000]') ? `, at least ${n(base)} ${unit} ($${(price * base).toFixed(2)})` : '';
-    return { fixed: 0, per1000: areaCost, line: `${head} ${n(rate)} ${unit} per 1,000 sq ft${floor} ${at} = $${areaCost.toFixed(2)} per 1,000 sq ft` };
-  }
-  const cost = price && base ? price * base : 0;
-  return { fixed: cost, per1000: 0, line: `${head} ${p.usage_amount || '?'} ${unit} ${at} = $${cost.toFixed(2)}` };
+  const $ = (x) => `$${x.toFixed(2)}`;
+  const head = `- ${p.product_name} (${p.active_ingredient || 'n/a'}):`;
+  const notes = String(p.notes || '');
+  const kind = rate <= 0 ? 'flat'
+    : notes.includes('[usage:base_plus_per_1000]') ? 'base_plus'
+      : notes.includes('[usage:max_base_or_per_1000]') ? 'max' : 'area';
+  const amount = kind === 'flat' ? `${p.usage_amount || '?'} ${unit}`
+    : kind === 'base_plus' ? `${n(base)} ${unit} + ${n(rate)} ${unit} per 1,000 sq ft`
+      : kind === 'max' ? `greater of ${n(base)} ${unit} or ${n(rate)} ${unit} per 1,000 sq ft`
+        : `${n(rate)} ${unit} per 1,000 sq ft`;
+  const unitCost = cogsUnitCost(p);
+  if (unitCost == null) return { term: null, line: `${head} ${amount} — cost unavailable (no normalized price)` };
+  const at = `@ ${$(unitCost)}/${unit || 'unit'}`;
+  const fixed = base * unitCost;
+  const per1000 = rate * unitCost;
+  if (kind === 'flat') return { term: { fixed, per1000: 0 }, line: `${head} ${amount} ${at} = ${$(fixed)}` };
+  if (kind === 'base_plus') return { term: { fixed, per1000 }, line: `${head} ${amount} ${at} = ${$(fixed)} + ${$(per1000)} per 1,000 sq ft` };
+  if (kind === 'max') return { term: { floor: fixed, per1000 }, line: `${head} ${amount} ${at} = greater of ${$(fixed)} or ${$(per1000)} per 1,000 sq ft` };
+  return { term: { fixed: 0, per1000 }, line: `${head} ${amount} ${at} = ${$(per1000)} per 1,000 sq ft` };
 }
 
-function cogsTotalLine(fixedTotal, per1000Total) {
-  if (per1000Total > 0 && fixedTotal > 0) return `Total COGS per application: $${fixedTotal.toFixed(2)} + $${per1000Total.toFixed(2)} per 1,000 sq ft`;
-  if (per1000Total > 0) return `Total COGS per application: $${per1000Total.toFixed(2)} per 1,000 sq ft`;
-  return `Total COGS per application: $${fixedTotal.toFixed(2)}`;
+function cogsTotalLine(terms) {
+  const $ = (x) => `$${x.toFixed(2)}`;
+  let fixed = 0;
+  let per1000 = 0;
+  const maxes = [];
+  let missing = 0;
+  for (const t of terms) {
+    if (!t) { missing++; continue; }
+    if (t.floor != null) { maxes.push(t); continue; }
+    fixed += t.fixed;
+    per1000 += t.per1000;
+  }
+  const parts = [];
+  if (fixed > 0 || (per1000 === 0 && maxes.length === 0)) parts.push($(fixed));
+  if (per1000 > 0) parts.push(`${$(per1000)} per 1,000 sq ft`);
+  for (const m of maxes) parts.push(`the greater of ${$(m.floor)} or ${$(m.per1000)} per 1,000 sq ft`);
+  const suffix = missing ? ` (excludes ${missing} product${missing === 1 ? '' : 's'} with no normalized price)` : '';
+  return `Total COGS per application: ${parts.join(' + ')}${suffix}`;
 }
 
 const KnowledgeBaseService = {
@@ -855,7 +903,9 @@ const KnowledgeBaseService = {
       const usage = await db('service_product_usage')
         .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
         .select('service_product_usage.*', 'products_catalog.name as product_name',
-          'products_catalog.best_price', 'products_catalog.active_ingredient')
+          'products_catalog.best_price', 'products_catalog.active_ingredient',
+          'products_catalog.unit_size_oz', 'products_catalog.cost_per_unit', 'products_catalog.cost_unit',
+          'products_catalog.container_size')
         .orderBy('service_type');
 
       const grouped = {};
@@ -866,15 +916,13 @@ const KnowledgeBaseService = {
 
       for (const [svcType, products] of Object.entries(grouped)) {
         const lines = [`**${svcType} — Cost of Goods**\n`];
-        let fixedTotal = 0;
-        let per1000Total = 0;
+        const terms = [];
         for (const p of products) {
           const c = cogsLineForUsage(p);
-          fixedTotal += c.fixed;
-          per1000Total += c.per1000;
+          terms.push(c.term);
           lines.push(c.line);
         }
-        lines.push(`\n${cogsTotalLine(fixedTotal, per1000Total)}`);
+        lines.push(`\n${cogsTotalLine(terms)}`);
         const slug = `cogs-${slugify(svcType)}`;
         await upsert(slug, `${svcType} — COGS Breakdown`, lines.join('\n'), 'pricing', ['cogs', svcType.toLowerCase()]);
       }
