@@ -915,14 +915,17 @@ describe("CustomerGeocodeReviewPanel", () => {
     await act(async () => pendingSave.resolve(await response({ enabled: true, ...record(), review: { status: "verified" } })));
   });
 
-  it("clears the active draft and its disabled-warning signal when a refresh reports the queue disabled", async () => {
+  it.each([
+    ["reports the queue disabled", () => response({ enabled: false })],
+    ["answers 404 because the route went away", () => response({ error: "Not found" }, 404)],
+  ])("clears the active draft and its disabled-warning signal when a refresh %s", async (_label, disabledResponse) => {
     const onDraftActiveChange = vi.fn();
     let reads = 0;
     vi.stubGlobal("fetch", vi.fn(() => {
       reads += 1;
       return reads === 1
         ? response({ enabled: true, records: [record()], total: 1 })
-        : response({ enabled: false });
+        : disabledResponse();
     }));
 
     const view = render(<CustomerGeocodeReviewPanel refreshToken={1} onDraftActiveChange={onDraftActiveChange} />);

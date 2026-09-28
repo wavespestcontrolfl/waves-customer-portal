@@ -286,9 +286,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
     } catch (loadFailure) {
       if (loadFailure.name === "AbortError" || request !== requestRef.current || !current()) return;
       if (loadFailure.status === 404) {
-        setState({ enabled: false, records: [], total: 0 });
-        setLoadError("");
-        setError("");
+        disablePanel();
         return false;
       }
       setLoadError(loadFailure.message || "Address review could not load.");
@@ -299,7 +297,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken, onDraftActiveC
         setDetailLoading(false);
       }
     }
-  }, [customerId, offset, acceptLoad]);
+  }, [customerId, offset, acceptLoad, disablePanel]);
 
   useEffect(() => {
     mountedRef.current = true;
