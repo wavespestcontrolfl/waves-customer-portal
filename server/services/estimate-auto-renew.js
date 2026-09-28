@@ -20,7 +20,7 @@ const EmailTemplateAutomationExecutor = require('./email-template-automation-exe
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
-const { isEnabled } = require('../config/feature-gates');
+const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
@@ -170,7 +170,14 @@ const EstimateAutoRenew = {
               };
               if (sendgrid.isConfigured()) {
                 try {
-                  if (isEnabled('emailTemplateAutomations')) {
+                  // Shadow must never change a LIVE send: only handing this
+                  // send to the executor at mode==='live' preserves today's
+                  // direct sendTemplate fallback below in shadow (and off) —
+                  // a shadow run finalizes 'shadow' (nothing dispatched), so
+                  // routing here on the boolean gate alone (true in shadow
+                  // too) would silently drop the customer's extension notice
+                  // (codex/coordinator finding on #5154).
+                  if (emailTemplateAutomationsMode() === 'live') {
                     const result = await EmailTemplateAutomationExecutor.processTrigger({
                       triggerEventKey: 'estimate.auto_renewed',
                       triggerEventId: `estimate_auto_renew:${est.id}`,

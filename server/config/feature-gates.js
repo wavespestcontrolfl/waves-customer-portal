@@ -1734,9 +1734,36 @@ const gates = {
   // finalized as would_send with NOTHING dispatched — for checking volumes
   // for two weeks before anything goes live; 'true' = live sends. This
   // boolean entry only decides whether the executor runs AT ALL (shadow
-  // counts as on, same as live) — logGateStatus and existing callers that
-  // gate on/off read it; the shadow-vs-live SEND decision is
+  // counts as on, same as live) — logGateStatus and every reader BELOW this
+  // rule reads it; the shadow-vs-live SEND decision is
   // emailTemplateAutomationsMode()'s alone.
+  //
+  // SHADOW NEVER CHANGES A LIVE SEND. Two existing producers ALREADY sent a
+  // customer email/SMS on this boolean alone before shadow mode existed —
+  // routing them into the executor on the boolean (true in shadow too)
+  // would have shadow silently REPLACE their live send with a would_send
+  // no-op. Both now gate on `emailTemplateAutomationsMode() === 'live'`
+  // instead, so shadow leaves them byte-identical to today's gate-off
+  // behavior:
+  //   - server/services/estimate-auto-renew.js (~line 173): 'live' only ⇒
+  //     routes to the executor; off/shadow ⇒ falls straight to the direct
+  //     EmailTemplateLibrary.sendTemplate('estimate.extension_notice') it
+  //     always used before this executor existed.
+  //   - server/services/appointment-tagger.js (~line 657,
+  //     triggerPrepEmailGuide): 'live' only ⇒ queues through the executor;
+  //     off/shadow ⇒ returns { queued:false, reason:'gate_off' }, same as
+  //     today, so the caller's companion-SMS branch never promises a guide
+  //     email shadow mode won't actually send.
+  // Every OTHER reader keeps reading this boolean (shadow counts as on,
+  // same as live) because none of them sends anything outside the executor
+  // itself: the scheduler tick (scheduler.js ~line 3196, processDueRuns),
+  // the admin trigger/process-due test routes (admin-email-templates.js
+  // ~lines 850, 873), and the new estimate.expired / review.linked_5star
+  // emitters (email-template-automation-emitters.js) — all of them route
+  // INTO the executor, which is where the shadow-vs-live decision actually
+  // lives (executeRun's dispatch chokepoint). A producer must read this
+  // boolean ONLY when every one of its own sends already goes exclusively
+  // through the executor with no direct-send fallback of its own.
   emailTemplateAutomations: isProd
     ? ['shadow', 'true'].includes(String(process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS || '').trim().toLowerCase())
     : true,
