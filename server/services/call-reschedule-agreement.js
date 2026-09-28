@@ -527,7 +527,11 @@ const DAY_WORDS = new Set([
 // week"): a commitment using them names a day too.
 const RELATIVE_DAY_WORDS = new Set(['day', 'days', 'week', 'weeks', 'weekend', 'next', 'following', 'after', 'yesterday']);
 function namesAnyDay(quote) {
-  return normalize(quote).split(' ').some((t) => DAY_WORDS.has(t) || RELATIVE_DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t));
+  const toks = normalize(quote).split(' ');
+  return toks.some((t, i) => DAY_WORDS.has(t) || RELATIVE_DAY_WORDS.has(t) || /^\d{1,2}(?:st|nd|rd|th)$/.test(t)
+    // "May 3" (the month, not the verb), and a written date "9/24".
+    || (t === 'may' && /^\d/.test(toks[i + 1] || ''))
+    || (/^\d{1,2}$/.test(t) && /^\d{1,2}$/.test(toks[i + 1] || '') && toks[i + 1] !== '00'));
 }
 
 // The halves of the day this quote's am/pm and part-of-day words state

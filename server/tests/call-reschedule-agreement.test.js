@@ -438,6 +438,16 @@ describe('groundRescheduleAgreement', () => {
         quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
       ],
     }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see them in two days at 9.")).toMatchObject({ ok: false });
+    for (const commit of ["We'll see them May 3 at 9.", "We'll see them 9/25 at 9."]) {
+      expect([commit, ground(v2({
+        scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', commit),
+          quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+          quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+        ],
+      }), `Caller: Okay, 9 o'clock tomorrow.\nAgent: ${commit}`).ok]).toEqual([commit, false]);
+    }
     // A bound before "o'clock" is still a bound.
     for (const said of ["We will be there tomorrow before 9 o'clock.", "We will be there tomorrow by 9 o'clock."]) {
       expect([said, agreedAt('2026-09-24T09:00:00-04:00', said, { day: 'tomorrow', hour: '9', period: null }).ok]).toEqual([said, false]);
