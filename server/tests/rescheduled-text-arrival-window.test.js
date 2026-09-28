@@ -25,7 +25,7 @@ test('both senders pass {window}', () => {
   const path = require('path');
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   expect(read('routes/admin-schedule.js')).toMatch(/renderRequiredSmsTemplate\('appointment_rescheduled',[\s\S]{0,500}window: spokenArrivalWindow\(start\)/);
-  expect(read('services/appointment-reminders.js')).toMatch(/renderRequiredTemplate\('appointment_rescheduled',[\s\S]{0,400}window: formatArrivalWindow\(newApptTime\)/);
+  expect(read('services/appointment-reminders.js')).toMatch(/renderRequiredTemplate\('appointment_rescheduled',[\s\S]{0,700}formatArrivalWindow\(newApptTime\)/);
 });
 
 test('adds window to the variables list once', () => {
@@ -50,6 +50,32 @@ function fakeKnex(rows) {
   k.fn = { now: () => 'now()' };
   return k;
 }
+
+test('an office-edited base row keeps its wording but still gains window in its variables', async () => {
+  const allowlist = require('../models/migrations/20260928131000_rescheduled_window_variable_allowlist');
+  const rows = [
+    { table: 'sms_templates', id: 1, template_key: 'appointment_rescheduled', body: 'Office wording {date}.', variables: ['first_name', 'date'] },
+    { table: 'sms_template_variants', id: 2, template_key: 'appointment_rescheduled', body: 'Variant wording {date}.', variables: ['first_name', 'date'] },
+  ];
+  await migration.up(fakeKnex(rows));
+  await allowlist.up(fakeKnex(rows));
+  expect(rows[0].body).toBe('Office wording {date}.');
+  expect(JSON.parse(rows[0].variables)).toEqual(['first_name', 'date', 'window']);
+  expect(rows[1]).toMatchObject({ body: 'Variant wording {date}.', variables: ['first_name', 'date'] });
+  // A seeded row the first migration already swapped is left as it is.
+  const swapped = [{ table: 'sms_templates', id: 3, template_key: 'appointment_rescheduled', body: before, variables: ['first_name', 'time'] }];
+  await migration.up(fakeKnex(swapped));
+  const variablesAfterSwap = swapped[0].variables;
+  await allowlist.up(fakeKnex(swapped));
+  expect(swapped[0].variables).toBe(variablesAfterSwap);
+});
+
+test('a windowless reschedule says the reminders\' unknown-window phrase, not a made-up 8-10 AM', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+  expect(src).toMatch(/window: resolved\?\.windowless\s*\?\s*require\('\.\.\/utils\/sms-time-format'\)\.UNKNOWN_ARRIVAL_WINDOW\s*:\s*formatArrivalWindow\(newApptTime\)/);
+  expect(render(after, { ...vars, window: require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW }))
+    .toContain("is now Thursday, October 2, at a time we'll confirm.");
+});
 
 test('swaps the exact live body and leaves an edited one alone', async () => {
   const rows = [

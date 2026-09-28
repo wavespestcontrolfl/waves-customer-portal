@@ -4292,8 +4292,13 @@ const AppointmentReminders = {
               day,
               date,
               time,
-              // The 2-hour arrival window, same phrase as the reminders.
-              window: formatArrivalWindow(newApptTime),
+              // The 2-hour arrival window, same phrase as the reminders. A
+              // windowless visit resolves to a bookkeeping 08:00 slot, so it
+              // gets the reminders' unknown-window phrase, never a window
+              // nobody chose.
+              window: resolved?.windowless
+                ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW
+                : formatArrivalWindow(newApptTime),
             }, {
               workflow: 'appointment_rescheduled',
               entity_type: 'scheduled_service',
