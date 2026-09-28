@@ -2233,8 +2233,36 @@ async function assertBodyImagesAtHead(args) {
     return { ok: false, reason: err.message, transient: err?.code !== 'BLOG_BODY_IMAGES_FAILED' };
   }
 }
+// With GATE_BLOG_BODY_IMAGES off only identification posts are checked at
+// merge time (their licensed-library photos must still be committed as the
+// merge carries them — Codex r9 on #5216). A new post is known from its own
+// frontmatter; a refresh ships the LIVE frontmatter, so its file on the
+// branch is read. A read error counts as identification (the full check
+// then decides); a target that cannot be found keeps the gate-off pass.
+async function identificationPostAtHead({ frontmatter, branch, actionType, targetUrl, filePath }) {
+  if (isIdentificationPost(frontmatter)) return true;
+  if (actionType !== 'refresh_existing_page' && !filePath) return false;
+  try {
+    let content = null;
+    if (actionType === 'refresh_existing_page') {
+      const found = filePath
+        ? await resolveExistingAstroFile(filePath, { ref: branch })
+        : await resolveExistingAstroFileForTarget(targetUrl, { ref: branch });
+      content = found?.file?.content || null;
+    } else {
+      content = (await gh.getFile(filePath, branch))?.content || null;
+    }
+    if (!content) return false;
+    return isIdentificationPost(fm.parse(content)?.data);
+  } catch {
+    return true;
+  }
+}
+
 async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
-  if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
+  if (!bodyImagesEnabled() && !(await identificationPostAtHead({ frontmatter, branch, actionType, targetUrl, filePath }))) {
+    return { ok: true, reason: 'gate_off' };
+  }
   if (!branch) return { ok: false, reason: 'PR head branch unknown' };
   // Assets are validated as the MERGE will carry them: a path the PR did
   // not change resolves to the default branch's current blob (that is what

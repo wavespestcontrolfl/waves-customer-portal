@@ -715,3 +715,23 @@ describe('Codex r7: a legacy .md target is read like the publisher reads it', ()
   });
 });
 
+// ── Codex r9 on #5216 ────────────────────────────────────────────────
+describe('Codex r9: page_type "diagnostic" alone is an identification draft', () => {
+  test('an unrelated committed image on a page_type-only diagnostic draft fails', () => {
+    const r = checkPhotoSlotsLicensedOnly({ frontmatter: { page_type: 'diagnostic' }, body: 'Intro.\n\n![a picture](/images/blog/other/x.webp)' }, brief());
+    expect(r).toEqual({ ok: false, reason: 'unlicensed_or_unknown_identification_photo:/images/blog/other/x.webp' });
+  });
+  test('the verdict box is required on it too', () => {
+    expect(checkVerdictBoxFirst({ frontmatter: { page_type: 'diagnostic' }, body: 'Fire ants sting.' }, brief()).reason).toBe('verdict_box_not_first_block');
+  });
+});
+
+describe('Codex r9: four-letter nouns survive beside a long qualifier', () => {
+  const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+  const q = { target_keyword: 'What do fire ants look like in Florida?' };
+  const box = (v) => `<BottomLineBox verdict="${v}" recommendation="Keep kids off the mound." />\n\nMore.`;
+  test('"Fire ants are small and reddish-brown" answers it', () => {
+    expect(checkAnswerInFirstParagraph({ body: box('Fire ants are small and reddish-brown.') }, q)).toEqual({ ok: true });
+  });
+});
+

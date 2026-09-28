@@ -250,3 +250,23 @@ describe('identification phrasing with an ordinary qualifier', () => {
   });
 });
 
+// Codex r9 on #5216 ("Honor the publisher's page_type diagnostic fallback"):
+// the shared predicate judges the post type the publisher ships.
+describe('isIdentificationPost matches the publisher\'s normalized post_type', () => {
+  jest.mock('../models/db', () => jest.fn());
+  const { isIdentificationPost } = require('../services/content/licensed-photo-library');
+  const { normalizeAutonomousBlogFrontmatter } = require('../services/content-astro/astro-publisher')._internals;
+  test.each([
+    [{ post_type: 'diagnostic' }],
+    [{ page_type: 'diagnostic' }],
+    [{ post_type: '', page_type: 'diagnostic' }],
+    [{ post_type: 'how-to', page_type: 'diagnostic' }],
+    [{ post_type: 'Diagnostic' }],
+    [{ post_type: 'decision' }],
+    [{}],
+  ])('%j', (fmIn) => {
+    const shipped = normalizeAutonomousBlogFrontmatter({ title: 'T', meta_description: 'x', ...fmIn }, {}).post_type;
+    expect(isIdentificationPost(fmIn)).toBe(shipped === 'diagnostic');
+  });
+});
+

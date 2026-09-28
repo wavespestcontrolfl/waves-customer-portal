@@ -175,7 +175,10 @@ describe('assertBodyImagesAtHead — diagnostic exemption from the image minimum
   test('publisher and merge-time check share one predicate', () => {
     const { isIdentificationPost } = require('../services/content/licensed-photo-library');
     expect(isIdentificationPost({ post_type: 'diagnostic' })).toBe(true);
-    expect(isIdentificationPost({ post_type: ' Diagnostic ' })).toBe(true);
+    // Exact-case, like the publisher's normalizePostType (Codex r9): a
+    // capitalized value ships as 'location', so it is not identification.
+    expect(isIdentificationPost({ post_type: ' Diagnostic ' })).toBe(false);
+    expect(isIdentificationPost({ page_type: 'diagnostic' })).toBe(true);
     expect(isIdentificationPost({ post_type: 'how-to' })).toBe(false);
     expect(isIdentificationPost(null)).toBe(false);
   });

@@ -268,9 +268,13 @@ function htmlAttrValue(attrs, name) {
 
 // ONE predicate for "this post is an identification post": the publisher
 // (no AI art), the merge-time image check (minimum exemption) and the
-// quality gate all read post_type through here.
+// quality gate all read it here. It judges the post type the publisher
+// will SHIP — normalizeAutonomousBlogFrontmatter takes
+// normalizePostType(post_type || page_type), exact-case — so a draft that
+// names the type only as page_type: "diagnostic" is held to the same checks
+// it will publish under (Codex r9 on #5216).
 function isIdentificationPost(frontmatter) {
-  return String(frontmatter?.post_type || '').trim().toLowerCase() === 'diagnostic';
+  return String(frontmatter?.post_type || frontmatter?.page_type || '').trim() === 'diagnostic';
 }
 
 // The EXACT attribution line a library photo carries: credit and license

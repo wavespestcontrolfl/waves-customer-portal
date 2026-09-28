@@ -63,3 +63,17 @@ test('with the gate OFF a non-identification post is untouched and unchecked', a
 test('the merge-time check stays a no-op with the gate OFF', async () => {
   expect(await assertBodyImagesAtHead({ frontmatter: {}, branch: 'b' })).toEqual({ ok: true, reason: 'gate_off' });
 });
+
+// Codex r9 on #5216 ("Revalidate pinned diagnostic photos at merge time"):
+// with the gate off, identification posts still get the as-merged check.
+describe('merge-time check with the gate OFF', () => {
+  test('a non-identification post stays a no-op', async () => {
+    expect(await assertBodyImagesAtHead({ frontmatter: { post_type: 'how-to' }, branch: 'b' })).toEqual({ ok: true, reason: 'gate_off' });
+  });
+  test('an identification post runs the full as-merged check (here: its file is missing on the branch)', async () => {
+    const r = await assertBodyImagesAtHead({ frontmatter: { post_type: 'diagnostic', title: 'Fire ants', slug: 'fire-ant-id', category: 'pest-control' }, branch: 'b' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).not.toBe('gate_off');
+  });
+});
+

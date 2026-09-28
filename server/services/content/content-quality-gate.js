@@ -699,8 +699,9 @@ const DIRECT_ANSWER_WORD_RE = /^\s*(yes|no|usually|rarely|sometimes|often|genera
 const QUESTION_SCAFFOLD_WORDS = new Set(['what', 'when', 'where', 'which', 'whose', 'does', 'look', 'looks', 'like', 'with', 'that', 'this', 'have', 'your', 'they', 'them', 'from', 'into', 'there', 'their', 'about', 'should', 'would', 'could']);
 function questionKeywords(question) {
   const words = String(question || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter((w) => w && !QUESTION_SCAFFOLD_WORDS.has(w));
-  const long = words.filter((w) => w.length > 4);
-  return long.length ? long : words.filter((w) => w.length === 4);
+  // Four letters and up: "fire ants" must survive beside "florida"
+  // (Codex r9).
+  return words.filter((w) => w.length >= 4);
 }
 // Whole words only (Codex r7: "plants" contained "ants"); a plain plural
 // on either side still matches ("ant" / "ants", "cockroach" / "cockroaches").
