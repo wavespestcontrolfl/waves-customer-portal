@@ -6401,6 +6401,10 @@ const InvoiceService = {
       // credit, so this send behaves exactly as with the autoApplyAccountCredit
       // gate off — no credit is applied (the balance stays on the account).
       skipAccountCreditAutoApply = false,
+      // IB closeout repair: the total its approval showed. Checked on the
+      // CLAIMED row (a claimed invoice is no longer an editable draft); a
+      // mismatch restores the claim and sends nothing.
+      expectedTotal = null,
       // Internal-only: retries this same call once more after a
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
@@ -6412,7 +6416,7 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
@@ -6500,6 +6504,16 @@ const InvoiceService = {
     // without ever reaching a provider handoff's own assertion — so the
     // renewal gate is re-asserted here first. A lost gate restores the send
     // claim and throws; nothing was applied, nothing was sent.
+    if (expectedTotal !== null
+      && Math.round(Number(claim.invoice.total) * 100) !== Math.round(Number(expectedTotal) * 100)) {
+      await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+      return {
+        ok: false,
+        code: "total_changed",
+        error: `Invoice total is $${Number(claim.invoice.total).toFixed(2)}, not the approved $${Number(expectedTotal).toFixed(2)} — not sent`,
+        sms: { ok: false }, email: { ok: false },
+      };
+    }
     if (_underRenewalGate) {
       try {
         assertRenewalGateAlive();

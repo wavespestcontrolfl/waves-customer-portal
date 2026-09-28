@@ -500,6 +500,8 @@ const STEP_RUNNERS = {
         // Enforced inside the send itself: no account credit is consumed,
         // even if some appeared after the pre-send check below.
         skipAccountCreditAutoApply: true,
+        // Re-checked on the claimed row inside the send (no edit can follow).
+        expectedTotal: step.total ?? null,
       });
       return { ...invoiceSendOutcome(result), invoice_id: disposition.invoice_id };
     } catch (err) {
