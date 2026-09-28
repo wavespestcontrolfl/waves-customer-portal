@@ -261,6 +261,26 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
+  test('route-level: /PHOTOS (Express is case-insensitive) is guarded exactly like /photos — dark gate and malformed token both 404 before any DB read', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'false';
+    await withServer(async (baseUrl) => {
+      const form = new FormData();
+      form.append('photos', new Blob([JPEG_BYTES], { type: 'image/jpeg' }), 'photo.jpg');
+      const dark = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/PHOTOS`, { method: 'POST', body: form });
+      expect(dark.status).toBe(404);
+      expect(await dark.json()).toEqual({ error: 'Not found' });
+    });
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    await withServer(async (baseUrl) => {
+      const form = new FormData();
+      form.append('photos', new Blob([JPEG_BYTES], { type: 'image/jpeg' }), 'photo.jpg');
+      const upper = await fetch(`${baseUrl}/api/public/appointment/${TOKEN.toUpperCase()}/Photos`, { method: 'POST', body: form });
+      expect(upper.status).toBe(404);
+      expect(await upper.json()).toEqual({ error: 'Not found' });
+      expect(dbState.loadByTokenCalls).toBe(0);
+    });
+  });
+
   test('malformed token: 404 before any DB read', async () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { token: 'not-a-real-token', files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
@@ -615,6 +635,17 @@ describe('visitPrepPreParserGuard — mounted by index.js AHEAD of the shared bo
     process.env.GATE_VISIT_PREP_PHOTOS = 'false';
     await withGuardApp(async (baseUrl) => {
       const res = await post(baseUrl, TOKEN);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+    });
+  });
+
+  test('path casing: Express routes are case-insensitive, so /PHOTOS is guarded exactly like /photos', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'false';
+    await withGuardApp(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/PHOTOS`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: bigJson,
+      });
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: 'Not found' });
     });

@@ -1190,8 +1190,11 @@ const visitPrepLimiter = rateLimit(VISIT_PREP_LIMITER_OPTIONS);
 // step so the router stays correct on its own. Both answer the SAME
 // generic 404 the router-level gate gives, BEFORE the route's limiter
 // (AGENTS.md: a dark GATE_* route skips its limiter so a probe never sees
-// a revealing 429). `req.path` is mount-relative in both places.
-const VISIT_PREP_PHOTOS_PATH_RE = /^\/([^/]+)\/photos\/?$/;
+// a revealing 429). `req.path` is mount-relative in both places. Express
+// matches routes case-insensitively, so the path test is too — otherwise
+// `/<token>/PHOTOS` would reach the route (and the shared parsers) while
+// slipping past this guard (pre-push audit P0).
+const VISIT_PREP_PHOTOS_PATH_RE = /^\/([^/]+)\/photos\/?$/i;
 function visitPrepPreParserGuard(req, res, next) {
   const match = VISIT_PREP_PHOTOS_PATH_RE.exec(req.path || '');
   if (!match) return next();
