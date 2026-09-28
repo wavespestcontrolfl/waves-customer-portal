@@ -2046,7 +2046,7 @@ describe('#5194 round 4', () => {
     if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
     jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
   });
-  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', pest_general_quarterly: 'General Pest Control (Quarterly)' };
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', rodent_trapping: 'Rodent Trapping', rodent_exclusion: 'Rodent Exclusion & Trapping', pest_general_quarterly: 'General Pest Control (Quarterly)' };
   const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
 
   test('serviceIdentityFor: a named service picks the MATCHING scheduled visit, not the first one; several visits with none named is uncertain', async () => {
@@ -2079,7 +2079,8 @@ describe('#5194 round 4', () => {
     mockCatalog();
     const drafter = require('../services/sms-shadow-drafter');
     await expect(drafter.requestedServiceType('Can you book rodent exclusion Tuesday?')).resolves.toBe('Rodent Exclusion Only');
-    await expect(drafter.requestedServiceType('We need rat trapping at the house')).resolves.toBe('Rodent Exclusion Only');
+    await expect(drafter.requestedServiceType('We need rat trapping at the house')).resolves.toBe('Rodent Trapping'); // trapping ≠ exclusion
+    await expect(drafter.requestedServiceType('We need rodent exclusion and trapping')).resolves.toBe('Rodent Exclusion & Trapping');
   });
 
   test('amount guard: an unparseable priced clause cannot ride along with a grounded figure ("balance is $95, and the fee is fifty dollars")', () => {

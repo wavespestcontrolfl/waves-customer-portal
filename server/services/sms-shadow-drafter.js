@@ -497,8 +497,17 @@ async function requestedServiceType(inboundMessage) {
       ? 'pest_initial_cleanout' : null;
     // Rodent exclusion / trapping (Codex #5194 r4): the pricing resolver's
     // special-intent branch returns null for rodent work.
-    const rodentWork = !inspection && !oneTimePest && /\b(?:exclusion|trapping|traps?)\b/i.test(text) && /\b(?:rodent|rats?|mice|mouse)\b/i.test(text)
-      ? ['rodent_exclusion_only', 'rodent_exclusion', 'rodent_trapping'] : null;
+    // Trapping and exclusion are distinct catalog services with different
+    // durations (audit P1): trapping alone → the trapping row; exclusion
+    // alone → exclusion-only; both named → the combined exclusion & trapping.
+    const rodentWords = /\b(?:rodent|rats?|mice|mouse)\b/i.test(text);
+    const wantsTrapping = /\b(?:trapping|traps?)\b/i.test(text);
+    const wantsExclusion = /\bexclusion\b/i.test(text);
+    const rodentWork = !inspection && !oneTimePest && rodentWords && (wantsTrapping || wantsExclusion)
+      ? (wantsTrapping && wantsExclusion ? ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping']
+        : wantsTrapping ? ['rodent_trapping', 'rodent_exclusion']
+          : ['rodent_exclusion_only', 'rodent_exclusion'])
+      : null;
     const { serviceKeyFromText } = require('./customer-pricing-ai');
     const explicit = inspection || oneTimePest;
     const key = explicit || rodentWork ? null : serviceKeyFromText(text);
