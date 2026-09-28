@@ -224,10 +224,13 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       metadata: {
         opsKey: key,
         subject,
-        kind: fields.kind,
-        audience: fields.audience,
         ...(fallOff ? { fallOff: true } : {}),
         ...metadata,
+        // kind/audience/feed are the seam's classification, written after the
+        // sender's own metadata so it can't shadow them (an override goes
+        // through the `audience` param, which feeds all three consistently).
+        kind: fields.kind,
+        audience: fields.audience,
         // Written LAST and unconditionally (never spread-omitted): a sender
         // whose kind flips between runs under the SAME dedupeKey (gbp-sync-
         // health's FIX <-> ACT) must have notifyAdmin's refresh
