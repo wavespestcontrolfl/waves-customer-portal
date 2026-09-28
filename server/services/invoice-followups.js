@@ -772,6 +772,26 @@ async function initializeAdoptedAutopayHold(row, customerId) {
  * count); oldest-sent-first either way, same selection so the count the ops
  * script prints matches what the sweep would adopt.
  */
+// A legacy checker email leg still awaiting retry when the ladder adopts
+// its invoice is settled as superseded: the checker is retired, the ladder's
+// next step emails on its own, and a later revival of the checker must not
+// re-send it.
+async function supersedePendingLegacyEmail(candidate) {
+  const { emailLedgerId, tierDays } = candidate.pending_legacy_email;
+  try {
+    await db('collections_contact_ledger')
+      .where({ id: emailLedgerId })
+      .update({
+        metadata: db.raw("coalesce(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+          resolved: true, resolved_reason: 'superseded_by_ladder_adoption', resolved_at: new Date().toISOString(),
+        })]),
+      });
+    logger.info(`[invoice-followups] adopted invoice ${candidate.invoice_id} — pending legacy ${tierDays}d email retry superseded (ledger ${emailLedgerId})`);
+  } catch (err) {
+    logger.warn(`[invoice-followups] could not settle the pending legacy email for invoice ${candidate.invoice_id} (ledger ${emailLedgerId}): ${err.message}`);
+  }
+}
+
 async function adoptOrphanInvoices({ dryRun = false } = {}) {
   // Lazy require (matches late-payment-checker.js's own lazy require of
   // this module): a top-level require in either direction would deadlock
@@ -831,24 +851,34 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
       logger.warn(`[invoice-followups] adoption pending-email check failed for invoice ${candidate.invoice_id} — skipping this sweep: ${err.message}`);
       episode = { unavailable: true };
     }
-    if (episode) {
-      skipped.push({ invoice_id: candidate.invoice_id, reason: 'pending_legacy_email' });
-      logger.info(`[invoice-followups] adoption skipped invoice ${candidate.invoice_id} — pending_legacy_email`);
+    if (episode?.unavailable) {
+      skipped.push({ invoice_id: candidate.invoice_id, reason: 'pending_legacy_email_unreadable' });
+      logger.info(`[invoice-followups] adoption skipped invoice ${candidate.invoice_id} — pending_legacy_email_unreadable`);
       continue;
     }
     candidates.push({
       ...candidate,
       days_since_sent: Math.floor((now - new Date(candidate.sent_at).getTime()) / 86400000),
+      // The checker is retired whenever adoption runs, so a pending legacy
+      // email retry can never drain on its own: adoption supersedes it (the
+      // ladder's next step carries its own email leg) and settles the
+      // legacy row so nothing retries it later.
+      ...(episode ? { pending_legacy_email: { tierDays: episode.tierDays, emailLedgerId: episode.emailLedgerId } } : {}),
     });
   }
 
   if (dryRun) return { candidates, skipped };
 
+  if (!latePaymentCheckerRetiredLive()) {
+    logger.warn('[invoice-followups] adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live — the sweep (and the script\'s --execute) only run once the legacy checker is retired');
+    return { adopted: 0, invoiceIds: [], skipped, refused: 'checker_running' };
+  }
   const adoptedIds = [];
   for (const candidate of candidates) {
     try {
       let armed = await scheduleForInvoice(candidate.invoice_id);
       if (!armed) continue;
+      if (candidate.pending_legacy_email?.emailLedgerId) await supersedePendingLegacyEmail(candidate);
       // Recorded the moment the row exists: a failure in the mapping or the
       // autopay seeding below still leaves a row this run must not send
       // (the next sweep re-selects nothing — the row exists — so the run

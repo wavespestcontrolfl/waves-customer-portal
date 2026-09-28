@@ -131,6 +131,8 @@ function setupFullDb({
   const batchQueue = [...batchReads];
   const joinedBatch = [];
   const seqUpdates = [];
+  const ledgerUpdates = [];
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   const insertCalls = [];
   const seenInvoiceIds = new Set();
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
@@ -179,7 +181,9 @@ function setupFullDb({
       return qq;
     }
     if (table === 'collections_contact_ledger') {
-      const qq = { where: jest.fn(() => qq), whereRaw: jest.fn(() => qq) };
+      const qq = { wheres: [], whereRaw: jest.fn(() => qq) };
+      qq.where = jest.fn((cond) => { qq.wheres.push(cond); return qq; });
+      qq.update = jest.fn(async (patch) => { ledgerUpdates.push({ wheres: qq.wheres, patch }); return 1; });
       qq.then = (resolve, reject) => Promise.resolve(legacyLedgerRows).then(resolve, reject);
       return qq;
     }
@@ -190,7 +194,7 @@ function setupFullDb({
     throw new Error(`unexpected table in test: ${table}`);
   });
   return {
-    orphanQuery, joinedBatch, seqUpdates, insertCalls,
+    orphanQuery, joinedBatch, seqUpdates, ledgerUpdates, insertCalls,
   };
 }
 
@@ -254,6 +258,7 @@ describe('adoptOrphanInvoices selection', () => {
   });
 
   test('live mode arms an eligible orphan through scheduleForInvoice and logs its id', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const oldSent = tenAmET('2026-06-21');
     const previewInvoice = {
       id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
@@ -279,6 +284,7 @@ describe('adoptOrphanInvoices selection', () => {
   });
 
   test('a fully-credited orphan (amount due 0) is never handed to scheduleForInvoice', async () => {
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const oldSent = tenAmET('2026-06-21');
     setupFullDb({
       orphanRows: [{
@@ -297,6 +303,7 @@ describe('adoptOrphanInvoices selection', () => {
 describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', () => {
   test('a delivered 30-day tier (>24h ago) maps straight to the Day 60 step, no send', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const oldSent = tenAmET('2026-06-21');
     const previewInvoice = {
@@ -334,6 +341,7 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
 
   test('a delivery inside the last 7 days delays the landing step to a week after it — never skips a further step', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const oldSent = tenAmET('2026-06-01'); // Day 60 by the anchor = 2026-07-31, already past
     const previewInvoice = {
@@ -372,6 +380,7 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
 
   test('a non-delivered (send_failed) ledger row is ignored — no mapping', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const oldSent = tenAmET('2026-06-21');
     const previewInvoice = {
       id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
@@ -402,79 +411,68 @@ describe('adoptOrphanInvoices maps past the legacy checker\'s delivered tier', (
 });
 
 // Codex pre-push P0 (B).
-describe('adoptOrphanInvoices holds a candidate with a pending legacy email episode', () => {
-  test('live mode: skipped, not scheduled, reason recorded', async () => {
+describe('adoptOrphanInvoices and a pending legacy email episode', () => {
+  const oldSent = tenAmET('2026-06-21');
+  const orphan = () => ({
+    orphanRows: [{
+      invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
+    }],
+    previewInvoice: { id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent },
+    customer: { id: 'cust-1' },
+    insertedRow: { id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-24') },
+  });
+
+  test('live mode: adopted, and the legacy email leg is settled as superseded (the checker is retired, nothing else would drain it)', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-    });
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    const { ledgerUpdates } = setupFullDb(orphan());
     recoverPendingEmailEpisode.mockResolvedValueOnce({ tierDays: 7, ledgerIds: ['led-1'], emailLedgerId: 'led-1' });
-
-    const result = await adoptOrphanInvoices({ dryRun: false });
-
-    expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [{ invoice_id: 'inv-1', reason: 'pending_legacy_email' }] });
-    expect(db.transaction).not.toHaveBeenCalled();
-  });
-
-  test('dryRun: excluded from candidates, reported in skipped', async () => {
-    const oldSent = tenAmET('2026-06-21');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-    });
-    recoverPendingEmailEpisode.mockResolvedValueOnce({ tierDays: 7, ledgerIds: [], emailLedgerId: 'led-1' });
-
-    const result = await adoptOrphanInvoices({ dryRun: true });
-
-    expect(result.candidates).toHaveLength(0);
-    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', reason: 'pending_legacy_email' }]);
-  });
-
-  test('once the episode resolves (recoverPendingEmailEpisode returns null again), the invoice is adopted', async () => {
-    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    const previewInvoice = {
-      id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null, customer_id: 'cust-1', sent_at: oldSent,
-    };
-    const insertedRow = {
-      id: 'seq-new', invoice_id: 'inv-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: tenAmET('2026-06-24'),
-    };
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-      previewInvoice,
-      customer: { id: 'cust-1' },
-      insertedRow,
-    });
-    // Default mock (beforeEach) already resolves null — the "no episode" state.
     customerOnAutopay.mockResolvedValue(false);
 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result.adopted).toBe(1);
-    expect(result.invoiceIds).toEqual(['inv-1']);
+    expect(result.skipped).toEqual([]);
+    expect(ledgerUpdates).toHaveLength(1);
+    expect(ledgerUpdates[0].wheres).toEqual([{ id: 'led-1' }]);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('pending legacy 7d email retry superseded (ledger led-1)'));
   });
 
-  test('an unreadable episode check fails closed — skipped, not adopted', async () => {
+  test('dryRun: still a candidate, flagged with the pending episode, nothing written', async () => {
+    const { ledgerUpdates } = setupFullDb(orphan());
+    recoverPendingEmailEpisode.mockResolvedValueOnce({ tierDays: 7, ledgerIds: [], emailLedgerId: 'led-1' });
+
+    const result = await adoptOrphanInvoices({ dryRun: true });
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0].pending_legacy_email).toEqual({ tierDays: 7, emailLedgerId: 'led-1' });
+    expect(result.skipped).toEqual([]);
+    expect(ledgerUpdates).toHaveLength(0);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable episode check fails closed — skipped this sweep, not adopted', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
-    const oldSent = tenAmET('2026-06-21');
-    setupFullDb({
-      orphanRows: [{
-        invoice_id: 'inv-1', customer_id: 'cust-1', total: '150.00', credit_applied: '0', sent_at: oldSent, sms_sent_at: null, created_at: oldSent,
-      }],
-    });
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    setupFullDb(orphan());
     recoverPendingEmailEpisode.mockResolvedValueOnce({ unavailable: true });
 
     const result = await adoptOrphanInvoices({ dryRun: false });
 
     expect(result.adopted).toBe(0);
-    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', reason: 'pending_legacy_email' }]);
+    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', reason: 'pending_legacy_email_unreadable' }]);
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('live mode with the checker still running is refused before any write', async () => {
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    setupFullDb(orphan());
+
+    const result = await adoptOrphanInvoices({ dryRun: false });
+
+    expect(result).toEqual({ adopted: 0, invoiceIds: [], skipped: [], refused: 'checker_running' });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('adoption refused: GATE_LATE_PAYMENT_CHECKER_OFF is not live'));
   });
 });
 
@@ -499,6 +497,7 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
 
   test('a customer already at the failure threshold is released immediately, at the correct (tier-mapped) step', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const c = autopayCandidate();
     const { seqUpdates } = setupFullDb({
       orphanRows: c.orphanRows,
@@ -522,6 +521,7 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
 
   test('a customer with SOME prior failures below threshold has the counter seeded, still held', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const c = autopayCandidate();
     const { seqUpdates } = setupFullDb({
       orphanRows: c.orphanRows,
@@ -543,6 +543,7 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
 
   test('no prior failures — row is left exactly as scheduleForInvoice created it (regression)', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const c = autopayCandidate();
     const { seqUpdates } = setupFullDb({
       orphanRows: c.orphanRows,
@@ -585,6 +586,7 @@ describe('runPending and the orphan sweep', () => {
 
   test('gate on: an adopted orphan sent 45 days ago lands on its Day 60 step in the same run, without sending', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     const anchor = tenAmET('2026-06-21'); // 45 days before NOW (2026-08-05)
@@ -639,6 +641,7 @@ describe('runPending and the orphan sweep', () => {
   // step genuinely due today — the send still waits for the next run.
   test('an orphan whose skip-forward lands on a step due today is NOT fired this run — fires next run', async () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     const anchor = tenAmET('2026-07-06'); // 30 days before NOW
     const previewInvoice = {
