@@ -58,16 +58,27 @@ const { randomUUID } = require('node:crypto');
 const callBookingLinkText = require('../services/call-booking-link-text');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
+// codex #5196 P1-A: required at module scope, not inside the test that uses
+// it — routes/admin-customers.js's own require graph is large enough that
+// loading it for the first time costs several real seconds under Jest's
+// transform, which blew past that one test's own timeout when the require
+// sat inside its body. Paying that cost once here, during this file's
+// normal module-load phase, keeps it out of any individual test's budget.
+const { ensureCustomerAccount } = require('../routes/admin-customers');
 
 const connection = process.env.CALL_BOOKING_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `call_booking_link_${randomUUID().replaceAll('-', '')}`;
 // call_booking_link_text_handoffs (codex #5018 r13 P1, migration
-// 20260927160000) is the ONE table this lane adds — the throwaway database
-// this file runs against must be FULLY migrated (never the possibly-stale
-// waves_test template alone) for it to exist in `public` before the clone
-// below runs.
-const TABLES = ['customers', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'estimates'];
+// 20260927160000) and consultation_link_send_attempts (codex #5196
+// follow-up, migration 20260928130000) are the two tables this lane adds —
+// the throwaway database this file runs against must be FULLY migrated
+// (never the possibly-stale waves_test template alone) for either to exist
+// in `public` before the clone below runs.
+// customer_accounts (codex #5196 P1-A): ensureCustomerAccount's own account
+// row — needed once the quick-add lock-fence test below drives that real
+// function, not merely a `customers` insert.
+const TABLES = ['customers', 'customer_accounts', 'leads', 'call_log', 'system_settings', 'scheduled_services', 'short_codes', 'sms_log', 'activity_log', 'call_booking_link_text_handoffs', 'consultation_link_send_attempts', 'estimates'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -366,6 +377,15 @@ postgres('call-booking-link-text against PostgreSQL', () => {
   // have discarded it right along with the throw; before THIS round's
   // fix, writing it to call_log at all — even via a separate connection —
   // would have deadlocked against dbi's own FOR UPDATE lock on that row.
+  // codex #5196 P1 scenario: the SAME rollback also proves
+  // consultation_link_send_attempts — written in the SAME markerDb()
+  // transaction as the handoff marker — survives too, and that a QUEUED
+  // WAITER's own linkSentRecently read (on a genuinely separate connection,
+  // never mockPg's own trx) sees it despite the outer transaction's
+  // rollback. This is the durable evidence that closes the gap twilio.js's
+  // own comment describes: an accepted send whose outer transaction then
+  // fails to commit releases lockSmsPhone before a competing sender can see
+  // either the rolled-back sms_log row or a marker.
   test('a thrown error inside the real withSmsHandoff transaction rolls that transaction back, but the handoff marker — on its own table, never call_log — survives', async () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550444' });
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
@@ -395,6 +415,19 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.metadata.call_booking_link_text.handoff_started_at).toBeUndefined(); // never written to call_log at all
     const marker = await mockPg(callBookingLinkText.HANDOFF_MARKER_TABLE).where({ call_log_id: callId }).first();
     expect(marker).toBeTruthy(); // the marker row survived the rollback
+
+    // codex #5196 P1: the shared attempt row survived the SAME rollback,
+    // and a queued waiter's own linkSentRecently read (its own connection,
+    // never mockPg's trx) sees it — the exact evidence the P1 finding says
+    // a competing sender needs.
+    const attempt = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: callId }).first();
+    expect(attempt).toMatchObject({ lead_id: leadId, to_phone: '+15555550444', source: 'call_booking_link_text' });
+    // The attempt row is stamped with the real clock (started_at: new
+    // Date(), as in production), not this file's fixed NOW, so the waiter's
+    // read uses the real clock too.
+    const readAt = new Date();
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt)).resolves.toBe(true);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550444' })).resolves.toBe(true);
 
     const outcome = await callBookingLinkText.recoverAbandonedClaim(mockPg, { ...call, metadata: row.metadata }, NOW);
     expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this marker exists to prove
@@ -691,6 +724,138 @@ postgres('call-booking-link-text against PostgreSQL', () => {
 
     const result = await handoffPromise;
     expect(result).toEqual({ sent: false, skipped: 'booked_since_call' });
+  }, 10000);
+
+  // codex #5018 r15/r16 P1 follow-up: the phone-match candidate ids
+  // withSmsHandoff locks with lockCustomerComms are read BEFORE any of its
+  // own locks — a customer quick-added for this exact destination phone in
+  // the gap between that read and the handoff's own lockSmsPhone
+  // acquisition is never locked at all, so a booking committed for it could
+  // race straight past bookedSinceCall's own fenced read. Proof a mocked
+  // knex cannot give: hold the REAL phone lock before the handoff starts
+  // (forcing it to block AFTER its own initial, empty candidate read but
+  // BEFORE its post-lock re-check), insert the new customer while it waits,
+  // then release — the re-check must see the widened set and defer through
+  // the ordinary retry rail rather than sending to someone the handoff
+  // never actually fenced.
+  test('a customer inserted for this destination phone while the handoff waits on the phone lock defers to the next sweep, never sending unfenced', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555551050', customer_id: null });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555551050',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-9c', line: 'Pick a time.\n\n', phone: '+15555551050' });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck, onDispatchStart }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const v = await providerPreSendCheck({ dbi: trx });
+        if (v.ok) await onDispatchStart();
+        return v;
+      });
+      // deliveryOutcome: 'not_sent' (real twilio.js's own mapping for a
+      // withSmsHandoff verdict that never reached dispatch — see its
+      // `preSendBlocked` branch) — without it, isAmbiguousProviderOutcome's
+      // OWN real implementation (unmocked in this file) reads a bare
+      // `retryable: true` with no deliveryOutcome as ambiguous, not
+      // retryable, the same way a genuinely uncertain provider outcome
+      // would. The candidate-set-changed verdict below is never ambiguous
+      // — dispatch was never entered at all.
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest000000000000000000000000c' }
+        : { sent: false, deliveryOutcome: 'not_sent', ...verdict };
+    });
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releasePhoneHold;
+    const phoneHoldHeld = new Promise((resolve) => { releasePhoneHold = resolve; });
+    const phoneHoldTx = mockPg.transaction(async (trx) => {
+      await lockSmsPhone(trx, '+15555551050');
+      await phoneHoldHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the phone-hold transaction a moment to actually acquire the
+    // lock before the handoff starts — its own initial (empty) candidate
+    // read runs BEFORE it ever reaches lockSmsPhone, so this only blocks
+    // the handoff AFTER that first read has already found nothing.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const handoffPromise = callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    // The handoff is now genuinely blocked on lockSmsPhone. Quick-add the
+    // matching customer WHILE it waits — landing squarely in the gap this
+    // follow-up closes.
+    await new Promise((r) => setTimeout(r, 200));
+    const quickAddedCustomerId = randomUUID();
+    await mockPg('customers').insert({
+      id: quickAddedCustomerId, first_name: 'Quick', last_name: 'Added', phone: '+15555551050',
+      address_line1: '9 Example St', city: 'Bradenton', zip: '34205',
+    });
+    releasePhoneHold();
+    await phoneHoldTx;
+
+    const result = await handoffPromise;
+    expect(result).toEqual({ sent: false, skipped: 'candidate_customer_set_changed', deferred: true });
+    expect(sendCustomerMessage).toHaveBeenCalled();
+    // The row requeues as pending rather than a permanent skip — the next
+    // sweep tick re-resolves the full candidate set, quick-added customer
+    // included, under its own fresh locks.
+    const refreshed = await mockPg('call_log').where({ id: callId }).first('metadata');
+    expect(refreshed.metadata.call_booking_link_text.status).toBe('pending');
+  }, 10000);
+
+  // codex #5196 P1-A: the structural fix for the race the test above proves
+  // — quick-add's own customer CREATION (routes/admin-customers.js
+  // ensureCustomerAccount, lockPhone: true) now takes this SAME lockSmsPhone
+  // key as the first statement of its own insert transaction, before its
+  // own duplicate/phone lookup. Proof a mocked knex cannot give: hold the
+  // real phone lock, start quick-add's own ensureCustomerAccount against a
+  // SEPARATE real connection, and show it genuinely blocks — never even
+  // reaching its duplicate lookup or insert — until the phone lock releases.
+  test('quick-add customer creation blocks on the SAME phone lock a handoff holds, and only lands once it releases', async () => {
+    const phone = '+15555551090';
+
+    const { lockSmsPhone } = require('../utils/customer-comms-lock');
+    let releasePhoneHold;
+    const phoneHoldHeld = new Promise((resolve) => { releasePhoneHold = resolve; });
+    const phoneHoldTx = mockPg.transaction(async (trx) => {
+      await lockSmsPhone(trx, phone);
+      await phoneHoldHeld; // held open until this test explicitly releases it
+    });
+
+    // Give the phone-hold transaction a moment to actually acquire the lock
+    // before quick-add starts.
+    await new Promise((r) => setTimeout(r, 100));
+
+    let quickAddSettled = false;
+    const quickAddPromise = mockPg.transaction(async (trx) => {
+      // The exact call quick-add's own route makes (routes/admin-customers.js
+      // POST /quick-add): lockPhone: true, before findAccountByContact's own
+      // duplicate/phone lookup.
+      const account = await ensureCustomerAccount(trx, {
+        firstName: 'Quick', lastName: 'Added', phone, email: null, lockPhone: true, fenceAttach: true,
+      });
+      const [created] = await trx('customers').insert({
+        account_id: account.accountId, is_primary_profile: true, profile_label: 'Primary',
+        first_name: 'Quick', last_name: 'Added', phone, address_line1: '9 Example St', city: 'Bradenton', zip: '34205',
+      }).returning('*');
+      return created;
+    }).then((row) => { quickAddSettled = true; return row; });
+
+    // Give quick-add's own transaction a moment to reach — and genuinely
+    // block on — the same phone lock (pg_advisory_xact_lock waits, it does
+    // not error).
+    await new Promise((r) => setTimeout(r, 200));
+    expect(quickAddSettled).toBe(false);
+
+    releasePhoneHold();
+    await phoneHoldTx;
+    const created = await quickAddPromise;
+
+    expect(quickAddSettled).toBe(true);
+    expect(created.phone).toBe(phone);
+    const row = await mockPg('customers').where({ id: created.id }).first();
+    expect(row).toBeTruthy();
   }, 10000);
 
   // codex #5018 r15 P2: proof a mocked knex/sendCustomerMessage cannot give
@@ -1159,6 +1324,70 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(recentMarker).toBeTruthy(); // kept — still meaningful to recoverAbandonedClaim
   });
 
+  // codex #5196: same housekeeping proof for consultation_link_send_attempts
+  // — CONSULTATION_ATTEMPT_RETENTION_MS (15 days) is longer than
+  // LINK_SENT_RECENTLY_DEFAULT_WINDOW_MS (14 days), so a row is never
+  // pruned while a dedupe read could still consult it.
+  test('pruneConsultationLinkAttempts deletes only attempt rows older than CONSULTATION_ATTEMPT_RETENTION_MS', async () => {
+    const leadId = await insertLead(mockPg);
+    const oldStamp = new Date(NOW.getTime() - callBookingLinkText.CONSULTATION_ATTEMPT_RETENTION_MS - 60 * 60 * 1000);
+    const recentStamp = new Date(NOW.getTime() - 60 * 60 * 1000);
+    await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).insert({ lead_id: leadId, to_phone: '+15555550991', source: 'test', started_at: oldStamp });
+    await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).insert({ lead_id: leadId, to_phone: '+15555550992', source: 'test', started_at: recentStamp });
+
+    const deleted = await callBookingLinkText.pruneConsultationLinkAttempts(mockPg, NOW);
+    expect(deleted).toBe(1);
+    const oldRow = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ to_phone: '+15555550991' }).first();
+    expect(oldRow).toBeUndefined(); // pruned
+    const recentRow = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ to_phone: '+15555550992' }).first();
+    expect(recentRow).toBeTruthy(); // kept — still inside the dedupe window
+  });
+
+  // codex #5196 P2 scenario: an automated attempt to phone A, then staff
+  // correct the lead's phone to B — a manual send to B must NOT be refused
+  // by the stale attempt evidence at A. Exercises insertConsultationLinkAttempt
+  // (the shared writer every sender uses) and linkSentRecently's own
+  // matchPhone scoping together, against a real Postgres connection.
+  test('a manual send to a corrected phone B is not refused by an automated attempt recorded against the OLD phone A', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550601' });
+    await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550601', source: 'call_booking_link_text' },
+      mockPg,
+    );
+
+    // Real clock, not NOW: insertConsultationLinkAttempt stamps started_at
+    // with new Date(), as in production.
+    const readAt = new Date();
+    // Lead-wide (the automated lane's own 14-day dedupe call) still sees it.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt)).resolves.toBe(true);
+    // Phone-scoped to the OLD number A also sees it.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550601' })).resolves.toBe(true);
+    // Phone-scoped to the NEW, corrected number B does not — the manual
+    // send to B must be allowed through.
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550602' })).resolves.toBe(false);
+  });
+
+  // codex #5196 P2 scenario, extended: with insertConsultationLinkAttempt's
+  // returned id deleted (the same cleanup an onDispatchAbort/definite-
+  // failure path runs), the row is gone entirely — proving deleteConsultationLinkAttempt
+  // genuinely removes it, not merely masks it.
+  test('deleteConsultationLinkAttempt removes exactly the row its id names', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550701' });
+    const keptId = await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550701', source: 'admin_leads_send_sms' },
+      mockPg,
+    );
+    const deletedId = await callBookingLinkText.insertConsultationLinkAttempt(
+      { leadId, toPhone: '+15555550702', source: 'admin_communications_manual_sms' },
+      mockPg,
+    );
+    await callBookingLinkText.deleteConsultationLinkAttempt(deletedId);
+    const kept = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ id: keptId }).first();
+    const deleted = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ id: deletedId }).first();
+    expect(kept).toBeTruthy();
+    expect(deleted).toBeUndefined();
+  });
+
   // codex #5018 P2: leads.estimate_id is only the FK RESCUED at send/view
   // (admin-estimates.js's own "Prefer the FK... fall back to the public-
   // quote mirror" comment) — a quote-wizard draft the lead never opened
@@ -1342,15 +1571,22 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.v2_extraction_status).toBeNull();
   });
 
-  // codex #5018 P2: twilio.js's accepted-send sms_log recovery insert
-  // (services/twilio.js, the "Authority guard failed after provider
-  // acceptance" branch) now serializes its own check-then-insert with a
-  // transaction-scoped advisory lock keyed on the twilio_sid, because
-  // twilio_sid carries no UNIQUE constraint. This pair proves the SQL
-  // primitive itself — hand-replicated here exactly as twilio.js derives
-  // it (never re-exported for tests) — the same mechanism/fix methodology
-  // this file's own lock-ordering tests above already use, since a mocked
-  // knex cannot prove a real Postgres lock is genuinely held.
+  // codex #5018 P2, closed further by its own r15/r16 follow-up: twilio.js's
+  // accepted-send sms_log recovery insert (services/twilio.js, the
+  // "Authority guard failed after provider acceptance" branch) serializes
+  // its own check-then-insert with a transaction-scoped advisory lock keyed
+  // on the twilio_sid, because twilio_sid carries no UNIQUE constraint. The
+  // "fix" test's tx1 below is no longer a hypothetical stand-in — the
+  // ORIGINAL in-handoff insert (dispatch()'s own `if (options.logInHandoff)`
+  // block, on its own held trx) now takes this SAME lock for real, right
+  // before it inserts, so this test genuinely proves both sides of the
+  // real mechanism: a recovery attempt racing a still-open original
+  // transaction blocks on this exact key until that original commits or
+  // rolls back, and only then re-checks — hand-replicated here exactly as
+  // twilio.js derives it (never re-exported for tests), the same
+  // mechanism/fix methodology this file's own lock-ordering tests above
+  // already use, since a mocked knex cannot prove a real Postgres lock is
+  // genuinely held.
   describe('twilio.js sms_log recovery: an advisory lock serializes concurrent check-then-insert for the SAME twilio_sid (codex #5018 P2)', () => {
     async function acquireRecoveryLock(trx, sid) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`sms_log_sid:${sid}`]);

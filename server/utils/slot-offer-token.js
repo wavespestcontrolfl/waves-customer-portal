@@ -61,6 +61,22 @@ const EXP_SKEW_MS = 60 * 1000;
 // offers, whose canonical string is unchanged.
 const CAPACITY_OFFER_POLICY = 'capacity_2026_09_09';
 
+// Same mechanism, for /book self-serve offers that may be inserted BETWEEN a
+// day's existing stops (owner 2026-09-28, PR #5231 round 2): a gate flip
+// (rollback, mixed rolling deploy) during the 45-minute offer lifetime can
+// then never confirm an insertion-based offer append-only, or an
+// append-only offer as if it had been insertion-verified — either mismatch
+// fails the signature and falls back to the existing "pick your time again"
+// 409, the same accepted trade CAPACITY_OFFER_POLICY already makes for the
+// estimate surface.
+const BOOK_INSERTION_OFFER_POLICY = 'book_insertion_2026_09_28';
+
+// The one mapping /book minting (buildBookingAvailability) and /book
+// verification (createSelfBooking) share, so the two sides cannot drift.
+function bookInsertionOfferPolicy(insertion) {
+  return insertion === true ? BOOK_INSERTION_OFFER_POLICY : undefined;
+}
+
 function canonicalOfferString(payload = {}) {
   return [
     // v2: serviceKey + locationKey joined the signed scope (round 3). The tag
@@ -185,6 +201,8 @@ function generateConfirmationCode() {
 
 module.exports = {
   CAPACITY_OFFER_POLICY,
+  BOOK_INSERTION_OFFER_POLICY,
+  bookInsertionOfferPolicy,
   SLOT_OFFER_TTL_MS,
   signSlotOffer,
   verifySlotOffer,

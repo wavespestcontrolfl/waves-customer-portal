@@ -12212,6 +12212,47 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? existingAppointmentRow.id
             : null,
         });
+        // Durable combined-invoice provenance for the INVOICE-MODE mint
+        // above (Codex round-9 P1 on #5021): that invoice is created BEFORE
+        // this convertEstimate() call, so any same-day sibling program it
+        // promotes (reservedAcceptPerVisitSplit) does not exist yet at
+        // invoice-mode's own mint time — the stamp can only run here, after
+        // the siblings are in place, keyed off the invoice already minted
+        // (invoiceIdResult) and the same reserved anchor
+        // (acceptLinkedSsId) that invoice was attached to. memberIds is
+        // convertEstimate's own additive combinedInvoiceMemberIds — the
+        // ids it just promoted for THIS accept (Codex round-12 P2) — never
+        // a same-date guess that could also catch an unrelated,
+        // pre-existing same-day program. No-ops (via the stamper's own
+        // single-program guard) when there is no sibling to cover, and does
+        // nothing at all when invoice-mode wasn't used or the invoice-mode
+        // invoice was never attached to a scheduled row.
+        //
+        // Codex r15 P1 (PR #5021): acceptLinkedSsId is deliberately null for
+        // a NEW slotId and for a no-slot estimate with no pre-existing
+        // visit, so the invoice-mode invoice above was minted with no
+        // scheduled_service_id at all and this stamp never ran; the
+        // converter then created the anchor (firstScheduledServiceId) and
+        // its same-day members, all invisible to the sweep and to the
+        // stamped completion lookup. Use the converter's anchor when the
+        // pre-conversion link is absent: attach the invoice to it (same
+        // column every other first-application mint site sets, same
+        // transaction) and stamp. A pre-linked invoice keeps its own anchor
+        // and this changes nothing for it.
+        if (invoiceModeResult && invoiceIdResult) {
+          const invoiceModeAnchorId = acceptLinkedSsId || standardConversionResult?.firstScheduledServiceId || null;
+          if (invoiceModeAnchorId) {
+            if (!acceptLinkedSsId) {
+              await trx('invoices').where({ id: invoiceIdResult }).whereNull('scheduled_service_id')
+                .update({ scheduled_service_id: invoiceModeAnchorId });
+            }
+            await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
+              invoiceId: invoiceIdResult,
+              anchorId: invoiceModeAnchorId,
+              memberIds: standardConversionResult?.combinedInvoiceMemberIds,
+            });
+          }
+        }
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch
         // builds (same gates, line items, title, notes, deposit credit),
@@ -12382,6 +12423,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             standardInvoiceMinted = true;
             standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
+            // Durable combined-invoice provenance (Codex round-9 P1 on
+            // #5021): the public accept path mints this standard
+            // first-application invoice itself (the converter ran with
+            // skipSetupInvoice above) and, unlike estimate-converter.js's
+            // own standard branch, never called the stamper — so a
+            // multi-program public acceptance was invisible to the
+            // sibling-split sweep. memberIds is convertEstimate's own
+            // additive combinedInvoiceMemberIds — the ids it actually
+            // created for THIS accept and shares the combined invoice with
+            // (Codex round-12 P2 for a reserved-slot accept's promoted
+            // siblings; Codex round-13 P1-B for a PLAIN auto-scheduled
+            // accept's own same-day recurring parents, e.g. pest + lawn
+            // both auto-scheduled with no slot reservation at all) — never
+            // a same-date guess. Same transaction the invoice itself
+            // commits in; no-ops (via the stamper's own single-program
+            // guard) when only one program shares this invoice.
+            if (attachScheduledServiceId) {
+              await EstimateConverter.stampCombinedFirstApplicationInvoiceCoverage(trx, {
+                invoiceId: inv.id,
+                anchorId: attachScheduledServiceId,
+                memberIds: standardConversionResult?.combinedInvoiceMemberIds,
+              });
+            }
             // Immutable ledger for the setup this invoice bills (codex #3591
             // r68 P1) — the same setup_fee_claims record the prepay and
             // completion mints write, so a later void/refund of a renamed

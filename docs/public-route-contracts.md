@@ -529,7 +529,30 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Existing stops are planned at the owner planning
 minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
-window span; the visit being offered keeps its own resolved allowance. Detour
+window span; the visit being offered keeps its own resolved allowance.
+`/book`'s self-booking offers (`/api/booking/availability`, `/find-slots`,
+the `/capture-intent` revalidation, public re-service, and inspection
+booking) evaluate the new visit at every position in the technician's route,
+including BETWEEN two existing stops, not only appended after the stored
+order, only while `GATE_BOOK_CAPACITY_COMMIT` AND `GATE_SCHEDULING_CAPACITY`
+are both live (`bookInsertionOffersLive()`, routes/booking.js) — the same
+condition the estimate routes' own insertion already required (owner
+2026-09-28). That commit (`createSelfBooking`) re-verifies with live traffic
+and saves the certified route order, so an inserted offer it confirms is
+exactly what gets persisted. Public reschedule and the voice agent keep
+append-only offers because their own commits do not save a route order:
+public reschedule (`SmartRebooker.reschedule`/`rescheduleSeries`) clears
+`route_order` on any day or technician move, and the voice agent inserts the
+new row with no `route_order` at all — either way an inserted offer would
+commit as an unnumbered stop sorted after the route, not at the position it
+was offered at. `/book` offers minted with mid-route insertion carry a
+signed policy tag (`BOOK_INSERTION_OFFER_POLICY`, `utils/slot-offer-token.js`)
+inside their `slot_sig`, so an offer can't be confirmed under a different
+`GATE_BOOK_CAPACITY_COMMIT`/`GATE_SCHEDULING_CAPACITY` state than the one it
+was minted under (a rollback or a mixed rolling deploy inside the 45-minute
+offer window) — the customer gets the standard "pick your time again" 409
+instead of a silently mis-ordered commit. The staff save probe
+(`checkArrivalPlacement`) stays append-only too. Detour
 cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
@@ -957,81 +980,37 @@ multi-property account's report can never list another property's visits.
 Gate off (default): the field is absent and the payload is byte-identical
 to today.
 
-Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
-rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
-from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
-off unless exactly `true`, read at call time; inert unless
-`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
-without it) layers a priority on top of the existing `crossSell` offer
-ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
-On, the payload's existing `crossSell` object may additionally carry
-`reason` — one short, honest, reason-tied FIXED sentence rendered above
-the CTA button, one per branch below, never composed from or naming a
-location or severity the structured field itself doesn't state (roach:
-"We noted roach activity during this visit — our cockroach control
-program is a focused two-treatment cleanout."; rodent: "We noted signs of
-rodent activity during this visit — …"; termite: "We noted possible
-termite activity during this visit — …" ("during this visit", never
-"today" — reopening an older report recomputes these reasons from the
-same visit's saved snapshot, so a same-day claim would misdate historical
-findings as current); season-mosquito: "Mosquito season is here in SW Florida — …";
-season-termite: "It's termite swarm season in SW Florida — …") — and
-`serviceKey` may resolve to two targets the ladder itself never picks:
-`rodent_bait` and `mosquito`, priced through the SAME
-`buildCustomerPricingResponse` estimator path and per-application-only
-serialization rule as the existing ladder targets. Their prompts/labels
-live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
-deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
-vocabulary the portal offer card and the photo-triage lane
-(`buildPortalOffer`, `buildOfferForFamily`) also read by
-`requestedTargetKey` — those two surfaces are unaffected by this gate and
-still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
-may also resolve to `cockroach_control` — the one target priced OUTSIDE
-the estimator (a fixed one-time catalog price; `mode` is always
-`quote_cta`, `option` is always `null`) — gated on the live `services`
-catalog row (`is_active`, `!is_archived`, `customer_visible`,
-`booking_enabled`) and on the customer having no already-open
-(pending/confirmed/en_route/on_site) visit linked to it.
-
-Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
-visit's typed report snapshots (`service_records.service_data`'s
-`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
-`server/services/project-types.js` is the one source of truth for these
-keys/options) — free-text parsing of `service_findings`
-(category/title/detail/recommendation) and any negation handling over it
-was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
-rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
-observation, text no regex could reliably separate from an actual finding.
-`technician_notes` was never read (raw notes must never egress on a
-customer surface) and still isn't. An UNTYPED (general pest) visit carries
-no typed snapshot at all — no findings signal, season/ladder decides. The
-surviving structured checks, each "unknown/empty value → no signal": roach
-— a COMPANION (never the primary — a primary cockroach report means the
-customer is already mid-program today) typed `cockroach` snapshot's
-`activity_level` is anything other than `'None observed'`; rodent — a
-`rodent_trapping` snapshot's `captures` count is > 0, OR a
-`rodent_bait_station` snapshot's `bait_consumption` is anything other than
-`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
-`'Yes'` (primary or companion, no exclusion); termite — a
-`termite_bait_station` snapshot's `termite_activity` is `'Active termites
-present'` or `'Previous feeding noted'`, OR a `termite_inspection`
-snapshot's `activity_status` is `'Active infestation'` (primary or
-companion, no exclusion; a merely historical `'Old / inactive damage'`
-value is NOT current activity and is not a signal). Mosquito has NO
-findings branch at all (removed 2026-09-28, a prior round: a mention count
-in short structured text could not be tied reliably to genuine severity)
-— it is offered ONLY by season (America/New_York May–Oct) or the
-unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
-runs only when no findings branch fired; May favors mosquito when neither
-is already owned. Never offers a family the customer already owns —
-reuses the ladder's own property-scoped ownership + plan-rate evidence,
-including the `termite_bait` → `termite` ownership mapping (this also
-covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
-visit's own family is already counted owned by the ladder's existing
-report-identity corroboration, so no separate primary-exclusion rule is
-needed for rodent/termite the way roach's is). Gate off (default):
-`crossSell` is byte-identical to today's unchanged ladder pick and carries
-no `reason` field.
+Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
+`services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
+report payload's `crossSell` object offers the ONE next family the
+customer doesn't have, walking `OFFER_LADDER` =
+`pest_control → lawn_care → tree_shrub` (owner ruling 2026-09-28: report
+offers push the three pillars only — termite left the ladder). A customer
+owning pest, lawn, AND tree & shrub gets no card at all. The SAME owner
+ruling applies to EVERY offer surface, not only the report ("three
+pillars is fine for now, yes applies there too"): the portal offer card
+and the photo-triage lane (`buildPortalOffer` / `buildPortalPurchaseBasis`
+/ `resolvePortalOfferTarget`, and `buildOfferForFamily`) share the
+identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning all
+three pillars gets no ladder-picked offer on any surface, and the
+portal's one-tap termite purchase path is gone with it. `termite`/
+`termite_bait` ownership still counts as "has a plan, not the anchor" via
+the ownership vocabulary's mapping — it is simply never the offered rung.
+An explicit `requestedTargetKey: 'termite'` (e.g. a photo-triage
+identification of termite activity) is a DIFFERENT, deliberate code path
+— never the ladder's own pick — and is unaffected: `OFFER_PROMPTS`/
+`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite` so that
+request still prices normally. Never offers a family the customer already
+owns — the ladder's own property-scoped ownership + plan-rate evidence
+decide it (this also covers a typed rodent/termite report's OWN identity —
+a `rodent_trapping` visit's own family is already counted owned by the
+ladder's existing report-identity corroboration). A recent, uncorroborated
+report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
+(`OFFER_LADDER` plus `termite`, kept there for exactly this ambiguity even
+though termite left the ladder itself) fails the WHOLE report card closed
+— the unseeded-next-visit gap and a just-cancelled plan are
+indistinguishable, so offering the family and advancing past it are each
+wrong in one of those worlds.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
@@ -1064,15 +1043,27 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. A current watering snapshot can originate from
+retain their existing behavior.
+Lawn `reportV2.aftercare` permits a watering-in credit only when
+`creditableWaterIn` is exactly `true`, `evidenceSource` is
+`product_instruction`, and neither `wateringHold` nor `needsReview` is true.
+That same rule governs the live plan, insight actions, report assistant,
+narrative overlay, and PDF. A historical non-neutral watering object without
+evidence provenance is normalized to review-required: its recorded note remains
+visible beside confirmation guidance, while the former inferred “normal watering
+within 24 hours” instruction is removed. Historical neutral fallbacks retain
+their existing shape and wording.
+A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,
 plan-week and service-premise checks. Unpublished drafts remain unavailable.
 The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
-is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
-older cached PDFs to match this evidence rule),
+is retained before narrative cache/model access. Review-required or restricted
+aftercare also keeps the deterministic report before cache/model access. Lawn
+PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +
@@ -2786,7 +2777,7 @@ reader and hands a third party an identity they were never told. Do not
 reintroduce it. window_end is never returned — customer surfaces quote
 start + 2h only, and the range is derived server-side with
 `arrivalWindowRange()` so the page cannot drift from the reminders.
-The ONLY write is the confirm: a status-only `pending -> confirmed`
+The confirm write is a status-only `pending -> confirmed`
 transition guarded on the status AND the date/window that were read, plus
 a `job_status_history` row. The client posts the slot it rendered and the
 server confirms ONLY that slot — the office bulk reschedule moves
@@ -2794,7 +2785,138 @@ date/window while LEAVING the row pending, so a status-only guard would
 bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
-than duplicates).
+than duplicates.
+`POST /:token/photos` (dark server foundation, `GATE_VISIT_PREP_PHOTOS`,
+layered on `GATE_APPOINTMENT_PAGE` — this route rides the same router, so
+BOTH must be on): lets the customer attach up to 3 photos + a short note to
+THIS specific upcoming visit before the tech arrives (`server/services/
+visit-prep.js` owns storage). Guard order: the router-level gate/noStore/
+60-per-min limiter, then `visitPrepPreParserGuard` — ONE function mounted
+twice: by `server/index.js` on the `/api/public/appointment` prefix AHEAD
+of the shared `express.json`/`urlencoded` parsers (so a dark or malformed
+photos request 404s before a parser can answer an oversized or malformed
+`application/json` body with its own 413/400), and again as the route's
+own first step. It applies the SAME `TOKEN_RE` format check the GET uses,
+the sub-gate, and a multipart-only body rule (the route accepts nothing
+else, so a JSON / urlencoded / other body never reaches the shared parsers
+even for a well-formed token it cannot yet know is unknown — Codex r4 P0);
+any of them failing answers the identical generic 404, BEFORE
+this route's own limiter runs (the house dark-`GATE_*` contract: a probe
+never sees a revealing 429). THEN a dedicated 6-per-min limiter keyed by
+the shared `/64`-collapsing `unauthenticatedAuthLimitKey` (never the raw
+IP), THEN `loadByToken` (additionally selects `s.property_id`) with the
+same missing-row/deleted-customer 404, THEN eligibility — the SAME generic
+404 again (an ineligible valid token is deliberately indistinguishable from
+an unknown one: this route has no 409 for a past, inactive, one-time, or
+office-owned visit; the GET already tells a legitimate holder whether
+photos can be added) unless the SAME
+grouped/ungrouped state the GET computes is `'upcoming'`, the token's
+membership is known (not `visitUnknown`), `customers.active === true`, the
+visit is recurring-lineage (a one-time visit is out of scope for this lane),
+and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
+it yet — same invariant the confirm write enforces; the eligibility RULE
+is one function, `visitPrepEligibility`, that both this pre-check and the
+late recheck below feed — only the way `state` is READ differs, see below).
+The photo CAP is deliberately NOT pre-checked before the body is parsed: it
+is decided only under the lock, after dedupe (below), so a retry of an
+already-stored submission on a visit that is now full still answers the
+idempotent 200 rather than a misleading "limit reached". ONLY THEN does `multer`
+(memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field size, 10 parts)
+parse the body — a multer size limit is 413, every other multer limit is
+400, both customer-safe and generic. Each file's declared mimetype AND its
+magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree on
+JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF goes through `convertHeicToJpeg` first
+(converter saturation is a retryable 503 `PREP_CONVERTER_BUSY`, a genuine
+conversion failure a 400 `PREP_INVALID_PHOTO`); then EVERY accepted image
+is fully decoded and re-encoded as JPEG through `sharp` (25 MP input
+ceiling, longest edge bounded to 2560 px, EXIF orientation applied,
+metadata dropped) — a payload sharp cannot decode end to end (a truncated
+file, header-only bytes) is refused 400 `PREP_INVALID_PHOTO` rather than
+stored as something the technician cannot render; an unrecognized `topic`/`locationOnProperty`
+is its own code, `PREP_INVALID_FIELD`. Within-request duplicates (the same
+photo attached twice in one submission) fold to one candidate before upload.
+
+The write is NEVER trusted to the pre-check alone. `uploadFunnelPhotoToS3`
+runs first — storage must succeed for the request to succeed (a failure is
+503 `PREP_STORAGE_UNAVAILABLE`, no rows written, any already-uploaded
+objects for that request deleted) — and ONLY THEN does the write take the
+CANONICAL stop lock (`visit-groups.js`'s `lockStopForRow`, the same
+advisory lock every other stop writer takes, retried up to twice on a
+concurrent stop move before answering the generic 404) and re-run,
+under that lock, on FRESH state: (1) a late recheck, run ENTIRELY on the
+write's own transaction connection (never the global pool — a locked
+writer already holds a connection plus the stop's advisory lock, and a
+second pool checkout from inside that hold is how concurrent uploads
+exhaust the pool), and holding ROW locks as well as the advisory lock:
+the token row is taken `FOR UPDATE` first, then reloaded with
+`loadByToken(token, trx)`, and a grouped visit's live members are read
+with `visit-groups.js`'s `openMembers(trx, visit_id, { forUpdate: true })`
+(the confirm path's own locked-membership read) — status writers such as
+`transitionJobStatus` update `scheduled_services` WITHOUT the advisory
+lock, so only the row locks make an en-route tap or a cancellation wait
+for this transaction instead of landing between the recheck and the
+insert — and judged by the SAME pure rules the page applies
+(`membersOneStop`, `groupedState`, `pageState` precedence) — NOT via
+`visitServicesFor`, which resolves member labels through other
+global-pool services the recheck needs none of — and the result feeds the
+same `visitPrepEligibility` rule; refused (the generic 404, nothing
+written) if the row is gone, its
+customer deleted, it is no longer the row the pre-check saw, or it is no
+longer eligible (a status change — en route, cancelled, a grouped sibling
+moving the stop's state — landing between the two reads); (2) the dedupe
+check itself, by `sha256` of the STORED bytes per `scheduled_service_id` —
+run HERE, not before upload, so two concurrent identical submissions can
+both upload and the loser is recognized under the lock rather than racing
+the unique index; a photo found to already exist is dropped and its
+just-uploaded object deleted — an all-duplicate resubmit stores no photo and
+answers 200 (idempotent), but any non-empty `note`/`topic`/`locationOnProperty`
+it carries is written onto the submission that owns the first duplicate
+photo (there is no separate note endpoint, so a corrected note must not be
+silently dropped); (3) the real cap re-count (`capReached()` again,
+with the actual number of new photos), which a GROUPED visit computes
+across every `scheduled_services` row CURRENTLY sharing the stop's
+`visit_id` — membership is resolved fresh from `scheduled_services` at
+count time, never from the `visit_id` stored on a submission (visit-groups
+attaches, detaches and regroups rows without rewriting old submissions, so
+that column is a point-in-time record only) — so two members racing to
+add photos to the same stop can never together exceed the cap, photos added
+before a visit was grouped still count against the stop, and a member moved
+out of a stop takes its photos with it — the loser
+gets 409 `PREP_CAP_REACHED` (the visit already has 3 submissions, or the new
+photos would push it past 6) and its uploaded object is deleted. `property_id`,
+`customer_id`, and `visit_id` on the inserted rows come from the RECHECKED
+row, never the pre-lock read and never the request body. The response is
+`{ ok: true, prepPhotos: { eligible, photoCount, photosRemaining } }` — 201
+when a submission was created, 200 on the idempotent duplicate-only case —
+and NEVER carries a photo URL, an S3 key, the note, or any customer
+identity: the token is shared with whoever received the visit text, so
+nothing submitted through it is ever shown back. The counts in the
+response are computed INSIDE the write transaction — no post-commit read
+can turn a durably stored submission into a 500 that invites a retry.
+Only the route's OWN
+errors (visit-prep.js's `prepError`, marked internally so the route can
+tell them apart) are ever echoed to the caller; any other error — a library
+error that happens to carry a `statusCode` included — goes to the generic
+error handler, never its raw message. On a NEW submission only (never a
+duplicate-only resubmit), the route writes ONE admin in-app notification —
+a detached, best-effort `NotificationService.notifyAdmin` call written after
+the response is sent (never awaited, so a slow or stalled insert cannot hold
+the customer's request open), category
+`visit_prep_photos`, direct (never through the `notification-triggers.js`
+registry, so it never pushes), linking to the customer; the category is on
+`notification-bell-policy.js`'s `DEFAULT_ON_CATEGORIES` (rings by default,
+owner-silenceable from Settings → Notifications) and a failed insert is
+caught and logged, never surfaced to the caller. This is STILL nothing to
+the customer or the technician — no SMS, email, native push, or socket
+event, to either, ever — and the route still never touches
+`scheduled_services.status`, date, window, or technician. Additive on the
+existing GET: gate on adds a
+top-level `prepPhotos: { eligible, photoCount, photosRemaining }` (the same
+shape, computed whether or not the visit is currently eligible, so the
+client can render the right empty/full state); gate off, the key is absent
+and the GET payload is byte-identical to before this lane. A prepPhotos
+lookup failure on GET fails soft — the key is omitted and a warning is
+logged, never a 500).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`

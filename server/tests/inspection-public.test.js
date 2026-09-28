@@ -58,6 +58,13 @@ jest.mock('../routes/booking', () => ({
     loadBookingConfig: (...args) => mockBookingConfig(...args),
     buildBookingAvailability: (...args) => mockBuildAvailability(...args),
     createSelfBooking: (...args) => mockCreateSelfBooking(...args),
+    // GATE_BOOK_CAPACITY_COMMIT + GATE_SCHEDULING_CAPACITY (owner 2026-09-28,
+    // PR #5231 round 2): buildAvailabilityForLead reads this to decide
+    // whether an offer may be inserted between existing stops. Off by
+    // default here — this file is not about that gate, and false matches
+    // this route's pre-existing (append-only) behavior for every test that
+    // doesn't override it.
+    bookInsertionOffersLive: jest.fn(() => false),
   },
 }));
 

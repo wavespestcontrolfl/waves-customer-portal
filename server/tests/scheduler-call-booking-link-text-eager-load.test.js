@@ -35,4 +35,25 @@ describe('scheduler.js loads call-booking-link-text.js eagerly, not lazily insid
     // The old lazy-require shape must not reappear.
     expect(src).not.toMatch(/require\('\.\/call-booking-link-text'\)\.sweep\(\)/);
   });
+
+  // codex round-3 P2: sweep() itself owns pruning stale manual-send
+  // consultation-link attempt rows regardless of GATE_CALL_BOOKING_LINK_TEXT
+  // (the two manual routes write them unconditionally) — that housekeeping
+  // must actually run, so the tick can no longer return before ever calling
+  // sweep() when the gate is off. A source-text pin, same convention as the
+  // tests above: the tick body must not contain a top-level
+  // `if (!isEnabled('callBookingLinkText')) return;` guard ahead of the
+  // runExclusive/sweep() call.
+  test('the cron tick body runs sweep() unconditionally — no gate check short-circuits it before the call', () => {
+    const src = schedulerSource();
+    const sweepCallIndex = src.indexOf('callBookingLinkText.sweep()');
+    expect(sweepCallIndex).toBeGreaterThan(-1);
+    // The nearest cron.schedule(...) BEFORE the sweep() call is this tick's
+    // own — several other lanes share the same '0 */5 * * * *' cadence, so
+    // this walks back to the closest one rather than the first in the file.
+    const tickStart = src.lastIndexOf('cron.schedule(', sweepCallIndex);
+    expect(tickStart).toBeGreaterThan(-1);
+    const tickBody = src.slice(tickStart, sweepCallIndex);
+    expect(tickBody).not.toMatch(/isEnabled\('callBookingLinkText'\)/);
+  });
 });

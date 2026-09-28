@@ -450,6 +450,18 @@ const PROMISE_DEFAULT_DEADLINE_HOURS = 48;
 // would otherwise have filled in — it fires only where R5's table already
 // would have — so it reuses 'default_kind' rather than add a migration and
 // an enum value for a rendering distinction no surface asks for.
+// End of the business day on an ET calendar date (8 PM ET matches the
+// follow-up SLA's 8 AM–8 PM ET window). Less than an hour after the text
+// (it lands after ~7 PM ET) pushes the deadline to 9 AM ET the next morning
+// instead of bell-in-an-hour. parseETDateTime does the DST-correct
+// wall-clock -> instant conversion; never hand-roll the offset here.
+function endOfBusinessDay(day, messageDate) {
+  const endOfDay = parseETDateTime(`${day}T20:00`);
+  return endOfDay.getTime() - messageDate.getTime() < 3600000
+    ? parseETDateTime(`${etDateString(addETDays(endOfDay, 1))}T09:00`)
+    : endOfDay;
+}
+
 function resolveDueDeadline(item, messageCreatedAt) {
   if (item.due_at) return { due_at: item.due_at, due_basis: 'stated' };
   // Defaults are Waves' own service windows. A customer-owned promise ("I'll
@@ -470,6 +482,13 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // this obligation only when its own quote states a clock ("Call me at 3
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
+  // A staff promise naming a day but no clock ("I'll stop by today",
+  // "tomorrow", "Wednesday", "this weekend"): the extraction names the day
+  // and groundExtraction checked it (due_date). Due at the end of that
+  // business day (owner-approved staff-promise plan, 2026-09-28).
+  if (item.basis === 'promise' && item.due_date && !unresolvedClock) {
+    return { due_at: endOfBusinessDay(item.due_date, new Date(messageCreatedAt)).toISOString(), due_basis: 'default_kind' };
+  }
   // Quotes are short excerpts; the cap keeps the timing regexes bounded.
   const strippedQuote = withoutTopics(String(item.quote || '').slice(0, 500));
   if (item.due_text || unresolvedClock || STATED_TIMING.test(strippedQuote)) {
@@ -494,17 +513,7 @@ function resolveDueDeadline(item, messageCreatedAt) {
       && sameDayRemainderClear(item.due_text);
     if (!sameDayOnly) return { due_at: null, due_basis: null };
     const messageDate = new Date(messageCreatedAt);
-    // End of the business day on the message's own ET calendar date (8 PM
-    // ET matches the follow-up SLA's 8 AM–8 PM ET window). Less than an
-    // hour away (the text lands after ~7 PM ET) pushes the deadline to 9 AM
-    // ET the next morning instead of bell-in-an-hour. parseETDateTime does
-    // the DST-correct wall-clock -> instant conversion; never hand-roll the
-    // offset here.
-    const endOfDay = parseETDateTime(`${etDateString(messageDate)}T20:00`);
-    const dueAt = endOfDay.getTime() - messageDate.getTime() < 3600000
-      ? parseETDateTime(`${etDateString(addETDays(messageDate, 1))}T09:00`)
-      : endOfDay;
-    return { due_at: dueAt.toISOString(), due_basis: 'default_kind' };
+    return { due_at: endOfBusinessDay(etDateString(messageDate), messageDate).toISOString(), due_basis: 'default_kind' };
   }
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
@@ -577,15 +586,9 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           // admissibility and the event page read it, since an ask's words
           // never change after intake (Codex #4996 r6).
           ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
-          // Whether a plain human staff reply can answer this ask at all
-          // (owner ruling 2026-09-28, partly reversing R3 2026-09-24): the
-          // extraction's own judgement (answered_by_reply), stamped once
-          // here exactly like money_answerable (Codex #5088 precedent) — an
-          // unstamped row (extracted before this lane, or any kind other
-          // than 'other') is never reply-answerable, so it keeps R3: only a
-          // visit event or a payment landing closes it (sms-commitment-
-          // fulfillment.js witnessTypes).
-          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { reply_answerable: item.answered_by_reply === true } : {}) },
+          // The day a staff promise named (groundExtraction checked it): the
+          // completion check reads it, since due_at alone is a UTC instant.
+          ...(item.basis === 'promise' && item.due_date ? { due_date: item.due_date } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -738,6 +741,9 @@ const KIND_LABELS = {
   send_appointment_confirmation: 'A promised appointment confirmation needs attention',
   other: 'An SMS request needs follow-up',
 };
+// A promise staff texted (basis 'promise') carries its own title, whatever its
+// kind (owner-approved staff-promise plan, 2026-09-28).
+const PROMISE_LABEL = 'A promise texted to a customer needs follow-up';
 
 // Only the customer profile opts into SMS rows. Call queues and workers
 // continue using their call-scoped reader and implicit deadline rules.
@@ -880,7 +886,8 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey }) {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
   const body = (OVERDUE_BELL_BODY[verdict.verdict] || OVERDUE_BELL_BODY.open)(when);
-  const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+  const title = row.sms_context?.basis === 'promise' ? PROMISE_LABEL : (KIND_LABELS[row.kind] || KIND_LABELS.other);
+  const notification = await NotificationService.notifyAdmin('alert', title, body,
     { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
       metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
