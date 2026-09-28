@@ -14,13 +14,13 @@ const path = require('path');
 const {
   VISIT_FACTS_CONTRACT,
   EXCLUDED_SERVICE_LINES,
+  RETIRED_CATALOG_KEYS,
 } = require('../config/visit-facts-contract');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 const DOC_PATH = path.join(REPO_ROOT, 'docs', 'design', 'visit-facts-contract.md');
 const CAPTURES = new Set(['tap', 'voice', 'prefill', 'derived', 'photo']);
 const WHEN_MISSING = new Set(['hidden', 'fallback', 'filler', 'required']);
-const KEY_CHECKED_PREFIXES = ['structured_notes.', 'service_data.', 'service_products.'];
 
 const fileCache = new Map();
 function readRepoFile(rel) {
@@ -34,6 +34,11 @@ function readRepoFile(rel) {
 /** The last dotted segment of a storage path, without a `[]` suffix. */
 function storageKey(storage) {
   return storage.split('.').pop().replace(/\[\]$/, '');
+}
+
+/** A writer entry is a path (names the storage key) or { file, writerSymbol }. */
+function writerFile(writer) {
+  return typeof writer === 'string' ? writer : writer && writer.file;
 }
 
 const allFacts = Object.entries(VISIT_FACTS_CONTRACT).flatMap(([line, def]) => (
@@ -64,10 +69,16 @@ describe('visit facts contract registry', () => {
         if (fact.status !== undefined && fact.status !== 'gap') problems.push(`${id}: status`);
         if (fact.storage === null) {
           if (fact.status !== 'gap') problems.push(`${id}: null storage without status gap`);
-        } else if (typeof fact.storage !== 'string' || !/^[a-z_]+(\.[A-Za-z_]+(\[\])?)+$/.test(fact.storage)) {
+        } else if (typeof fact.storage !== 'string' || !/^[a-z_]+(\.[A-Za-z0-9_]+(\[\])?)+$/.test(fact.storage)) {
           problems.push(`${id}: storage must be one dotted path`);
         }
         if (fact.status !== 'gap' && !(fact.writers || []).length) problems.push(`${id}: no writers`);
+        for (const writer of fact.writers || []) {
+          const ok = typeof writer === 'string'
+            || (writer && typeof writer.file === 'string'
+              && typeof writer.writerSymbol === 'string' && writer.writerSymbol.trim());
+          if (!ok) problems.push(`${id}: writer shape`);
+        }
         for (const reader of fact.readers || []) {
           if (!reader || typeof reader.file !== 'string' || typeof reader.section !== 'string' || !reader.section) {
             problems.push(`${id}: reader shape`);
@@ -81,7 +92,7 @@ describe('visit facts contract registry', () => {
   test('every writer and reader path exists on disk', () => {
     const missing = [];
     for (const entry of allFacts) {
-      const files = [...entry.fact.writers, ...entry.fact.readers.map((r) => r.file)];
+      const files = [...entry.fact.writers.map(writerFile), ...entry.fact.readers.map((r) => r.file)];
       for (const rel of files) {
         if (readRepoFile(rel) === null) missing.push(`${label(entry)}: ${rel}`);
       }
@@ -89,14 +100,20 @@ describe('visit facts contract registry', () => {
     expect(missing).toEqual([]);
   });
 
-  test('structured_notes / service_data / service_products keys appear in a writer', () => {
+  // Every declared writer edge is checked on its own, for every storage
+  // family: a stale writer entry (a client surface that stopped submitting
+  // the fact) fails even while another writer still names the key.
+  test('every declared writer names the storage key or its declared writerSymbol', () => {
     const unwritten = [];
     for (const entry of allFacts) {
       const { storage, writers } = entry.fact;
-      if (!storage || !KEY_CHECKED_PREFIXES.some((p) => storage.startsWith(p))) continue;
-      const key = storageKey(storage);
-      if (!writers.some((rel) => (readRepoFile(rel) || '').includes(key))) {
-        unwritten.push(`${label(entry)}: "${key}" in none of ${writers.join(', ')}`);
+      if (!storage) continue;
+      for (const writer of writers) {
+        const needle = typeof writer === 'string' ? storageKey(storage) : writer.writerSymbol;
+        const file = writerFile(writer);
+        if (!(readRepoFile(file) || '').includes(needle)) {
+          unwritten.push(`${label(entry)}: "${needle}" not in ${file}`);
+        }
       }
     }
     expect(unwritten).toEqual([]);
@@ -131,6 +148,21 @@ describe('visit facts contract registry', () => {
     for (const entry of allFacts) {
       if (!entry.fact.readers.length && entry.fact.status !== 'gap') {
         problems.push(`${label(entry)}: no readers but not status gap`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('no line lists a retired catalog key; each retirement names its migration', () => {
+    const problems = [];
+    for (const [key, migration] of Object.entries(RETIRED_CATALOG_KEYS)) {
+      const src = readRepoFile(migration);
+      if (src === null) problems.push(`${key}: ${migration} missing`);
+      else if (!src.includes(`'${key}'`)) problems.push(`${key}: not named in ${migration}`);
+    }
+    for (const [line, def] of Object.entries(VISIT_FACTS_CONTRACT)) {
+      for (const key of def.catalogKeys) {
+        if (RETIRED_CATALOG_KEYS[key]) problems.push(`${line}: lists retired catalog key ${key}`);
       }
     }
     expect(problems).toEqual([]);
