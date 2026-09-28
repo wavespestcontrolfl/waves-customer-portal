@@ -15,6 +15,7 @@ const {
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
   rawOneTimeWarrantyEvidenceItems,
+  reconcilePricedPreSlabWarrantyEvidence,
   reconcileTrenchingWarrantyEvidence,
   reconcilePricedTrenchingWarrantyEvidence,
   trenchingServiceIdentity,
@@ -507,12 +508,17 @@ function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
 // preSlabSelectedWarrantyPart reads the selection, never stale detail text
 // that still names the removed extended warranty (pre-push audit P1 on
 // 5c8876e256). Other rows carry nothing extra.
-function preSlabProjectionFields(item = {}) {
+// `evidence` is the row whose warranty decision governs (the priced row
+// itself, or the saved row reconcilePricedPreSlabWarrantyEvidence matched
+// it to when the priced row carries no decision), so the stated terms and
+// the kept detail part agree.
+function preSlabProjectionFields(item = {}, evidence = item) {
   if (!isPreSlabTreatmentItem(item)) return {};
+  const decided = evidence && typeof evidence === 'object' ? evidence : item;
   return {
-    warrantyTerms: preSlabWarrantyTerms(item),
-    ...(typeof item.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: item.warrantyExtendedSelected } : {}),
-    ...(cleanText(item.warrantyStatus) ? { warrantyStatus: cleanText(item.warrantyStatus) } : {}),
+    warrantyTerms: preSlabWarrantyTerms(decided),
+    ...(typeof decided.warrantyExtendedSelected === 'boolean' ? { warrantyExtendedSelected: decided.warrantyExtendedSelected } : {}),
+    ...(cleanText(decided.warrantyStatus) ? { warrantyStatus: cleanText(decided.warrantyStatus) } : {}),
   };
 }
 
@@ -530,6 +536,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
       const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
+      const preSlabEvidence = reconcilePricedPreSlabWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
       return {
         service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
@@ -538,7 +545,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         ...(trenchingServiceIdentity(item) === 'termite_trenching'
           ? { purchasedTerms: purchasedTermsForRow(evidence) }
           : {}),
-        ...preSlabProjectionFields(item),
+        ...preSlabProjectionFields(item, preSlabEvidence),
         ...(item.isCommercial === true ? { isCommercial: true } : {}),
         oneTime: true,
       };
@@ -901,7 +908,7 @@ function buildEstimateAssistantContext({
   // The plan selector must not hide the purchased scope of a billed add-on.
   const hasAssistantVisibleOneTimeAddOn = oneTimeServices.some(
     (row) => isGermanRoachCleanoutContextRow(row) || isBoraCareContextRow(row)
-      || row.purchasedTerms?.length > 0,
+      || row.purchasedTerms?.length > 0 || row.warrantyTerms?.length > 0,
   );
   const exposeOneTimeContext = !quoteRequired
     && (oneTimeAvailable || hasAssistantVisibleOneTimeAddOn)

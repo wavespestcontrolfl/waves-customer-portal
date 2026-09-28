@@ -236,11 +236,63 @@ function preSlabSelectedWarrantyPart(item = {}) {
   return (part) => /\bextended\b/i.test(part) && /\bwarrant/i.test(part);
 }
 
+function preSlabWarrantyDecision(item = {}) {
+  if (!isPreSlabTreatmentItem(item)) return 'unset';
+  if (Object.prototype.hasOwnProperty.call(item, 'warrantyExtendedSelected')) {
+    return item.warrantyExtendedSelected === true ? 'extended' : 'basic';
+  }
+  const raw = [item.warrantyStatus, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (raw.includes('no extended') || raw.includes('basic warranty')) return 'basic';
+  if (raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr')) return 'extended';
+  return 'unset';
+}
+
+function matchingPreSlabWarrantyRow(target, rows = [], targets = [target]) {
+  if (!isPreSlabTreatmentItem(target)) return null;
+  const candidates = rows.filter(isPreSlabTreatmentItem);
+  if (candidates.includes(target)) return target;
+  const peers = targets.filter(isPreSlabTreatmentItem);
+  const labelFor = (row) => String(row?.label || row?.displayName || row?.name || '').trim().toLowerCase();
+  const label = labelFor(target);
+  const sameLabel = candidates.filter((row) => labelFor(row) === label);
+  if (label && sameLabel.length === 1 && peers.filter((row) => labelFor(row) === label).length === 1) {
+    return sameLabel[0];
+  }
+  const amountFor = (row) => row?.amount ?? row?.price ?? row?.total;
+  const amount = Number(amountFor(target));
+  const sameAmount = candidates.filter((row) => amountFor(row) !== '' && amountFor(row) != null
+    && Number(amountFor(row)) === amount);
+  const peerAmountCount = peers.filter((row) => amountFor(row) !== '' && amountFor(row) != null
+    && Number(amountFor(row)) === amount).length;
+  if (Number.isFinite(amount) && sameAmount.length === 1 && peerAmountCount === 1) return sameAmount[0];
+  if (candidates.length === 1 && peers.length === 1) return candidates[0];
+  return null;
+}
+
+function reconcilePricedPreSlabWarrantyEvidence(target, evidenceGroups = [], pricing = {}, targets = [target]) {
+  const liveEnginePricing = pricing.source === 'engine_invocation' && pricing.snapshotHit !== true;
+  const ordered = liveEnginePricing ? [[target], ...evidenceGroups] : [...evidenceGroups, [target]];
+  let fallback = target;
+  for (const rows of ordered) {
+    const match = matchingPreSlabWarrantyRow(target, rows, targets);
+    if (!match) continue;
+    fallback = match;
+    if (preSlabWarrantyDecision(match) !== 'unset') return match;
+  }
+  return fallback;
+}
+
 module.exports = {
   collapseMirroredRows,
   isPreSlabTreatmentItem,
+  matchingPreSlabWarrantyRow,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,
+  preSlabWarrantyDecision,
+  reconcilePricedPreSlabWarrantyEvidence,
   hasPurchasedTrenchingWarranty,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,

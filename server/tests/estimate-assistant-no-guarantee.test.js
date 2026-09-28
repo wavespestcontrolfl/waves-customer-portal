@@ -644,6 +644,27 @@ describe('estimate assistant no-guarantee context', () => {
   });
 
   test.each([
+    ['unpaid-unpaid-paid', ['none', 'none', 'one_year_retreat']],
+    ['paid-paid-unpaid', ['one_year_retreat', 'one_year_retreat', 'none']],
+  ])('identical current jobs retain their source multiplicity: %s', (_name, tiers) => {
+    const rows = tiers.map((warrantyTier) => ({
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier, warrantyAdder: 0,
+    }));
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 2700 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 2700, oneTimeBreakdown: { total: 2700, items: rows } },
+    });
+    expect(context.oneTime.items).toHaveLength(3);
+    expect(context.guarantees.serviceTerms).toEqual(tiers.map((tier, index) => ({
+      service: `Termite Trenching job ${index + 1} of 3 at $900`,
+      terms: [tier === 'none' ? 'No guarantee.' : 'Annual inspection during the warranty period'],
+    })));
+  });
+
+  test.each([
     ['paid-first', false],
     ['removed-first', true],
   ])('every wording of a guarantee question gets the same per-service answer: %s', (_name, reverse) => {
@@ -753,6 +774,50 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answer).not.toMatch(/satisfaction guaranteed/i);
     expect(answer).toContain('Termite Service: No guarantee.');
     expect(answer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+  });
+
+  test('a hidden priced pre-slab add-on still exposes its selected warranty terms', () => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55, visitsPerYear: 4 };
+    const extended = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: false },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: { result: { recurring: { services: [recurring] }, oneTime: { items: [extended] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [extended] } },
+    });
+    expect(context.serviceMode).toBe('recurring');
+    expect(context.oneTime.items).toHaveLength(1);
+    expect(context.guarantees.serviceTerms).toEqual([{
+      service: 'Pre-Slab Termiticide Treatment',
+      terms: ['Extended 5-year warranty selected. Warranty terms depend on the selected warranty option.'],
+    }]);
+  });
+
+  test.each([
+    ['snapshot current basic beats stale extended',
+      { warrantyExtendedSelected: false, warrantyStatus: 'No extended warranty selected' },
+      { warrantyExtendedSelected: true, warrantyStatus: 'Extended 5-year warranty selected' }, true],
+    ['explicit false beats stale positive status',
+      null,
+      { warrantyExtendedSelected: false, warrantyStatus: 'Extended 5-year warranty selected' }, false],
+  ])('%s', (_name, currentWarranty, pricedWarranty, snapshotHit) => {
+    const recurring = { service: 'pest_control', name: 'Pest Control', mo: 55 };
+    const base = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950 };
+    const priced = { ...base, ...pricedWarranty };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55, onetime_total: 950, show_one_time_option: true },
+      serviceMode: 'recurring', noGuaranteeClaims: true,
+      estData: currentWarranty ? { result: { recurring: { services: [recurring] },
+        oneTime: { items: [{ ...base, ...currentWarranty }] } } } : {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit, anchorOneTimePrice: 950,
+        oneTimeBreakdown: { total: 950, items: [priced] } },
+    });
+    expect(context.guarantees.serviceTerms).toEqual([{
+      service: 'Pre-Slab Termiticide Treatment',
+      terms: ['Warranty terms depend on the selected warranty option. No extended warranty selected.'],
+    }]);
   });
 
   test('a hand-built context lists each row under its own name', () => {
