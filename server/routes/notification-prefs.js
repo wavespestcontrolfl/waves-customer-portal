@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 router.use(authenticate);
 
@@ -112,30 +113,42 @@ router.put('/', async (req, res, next) => {
       return res.status(400).json({ error: 'No valid fields provided' });
     }
 
-    const existing = await db('notification_prefs').where({ customer_id: req.customerId }).first();
+    // Serialize with every other comms-affecting writer for this customer
+    // (customer-comms-lock.js) — in particular newsletter-list-reconcile.js's
+    // per-customer import, whose final consent decision FOR SHAREs this
+    // exact row under the SAME lock, so a marketing_offers opt-out written
+    // here can never land in the gap between that decision and its insert.
+    // Taken FIRST, before the row is even read, per the lock's own order
+    // contract. Response shape/content is unchanged; only the write path
+    // moved onto a locked transaction.
+    await db.transaction(async (trx) => {
+      await lockCustomerComms(trx, req.customerId);
 
-    for (const column of Object.values(fieldMap)) {
-      if (column.endsWith('_channel') && existing?.[column] === 'push' && updates[column] === 'sms') delete updates[column];
-    }
-    dropRoundTrippedMarketingFlags(updates, existing);
+      const existing = await trx('notification_prefs').where({ customer_id: req.customerId }).first();
 
-    if (Object.keys(updates).length === 0) {
-      // Nothing left to write (e.g. an untouched round-trip of unconsented
-      // marketing flags) — a successful no-op, not a client error.
-      return res.json({ success: true });
-    }
+      for (const column of Object.values(fieldMap)) {
+        if (column.endsWith('_channel') && existing?.[column] === 'push' && updates[column] === 'sms') delete updates[column];
+      }
+      dropRoundTrippedMarketingFlags(updates, existing);
 
-    updates.updated_at = new Date();
-    if (existing) {
-      await db('notification_prefs').where({ customer_id: req.customerId }).update(updates);
-    } else {
-      // Canonical helper first (marketing flags NULL) — a bare insert
-      // would take the legacy true defaults, turning an unrelated
-      // preference update into minted marketing consent.
-      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
-      await createDefaultCustomerRows(db, req.customerId);
-      await db('notification_prefs').where({ customer_id: req.customerId }).update(updates);
-    }
+      if (Object.keys(updates).length === 0) {
+        // Nothing left to write (e.g. an untouched round-trip of unconsented
+        // marketing flags) — a successful no-op, not a client error.
+        return;
+      }
+
+      updates.updated_at = new Date();
+      if (existing) {
+        await trx('notification_prefs').where({ customer_id: req.customerId }).update(updates);
+      } else {
+        // Canonical helper first (marketing flags NULL) — a bare insert
+        // would take the legacy true defaults, turning an unrelated
+        // preference update into minted marketing consent.
+        const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+        await createDefaultCustomerRows(trx, req.customerId);
+        await trx('notification_prefs').where({ customer_id: req.customerId }).update(updates);
+      }
+    });
 
     res.json({ success: true });
   } catch (err) { next(err); }

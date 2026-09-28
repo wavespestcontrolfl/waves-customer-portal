@@ -211,6 +211,51 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     }
   });
 
+  test('the customer row is locked (FOR SHARE) through the whole import — a concurrent FOR UPDATE (customer-email-write.js\'s own lock) genuinely blocks until commit', async () => {
+    const cust = await (async () => {
+      const c = synthCustomer();
+      await db('customers').insert(c);
+      await db('notification_prefs').insert({ customer_id: c.id, marketing_offers: true, email_enabled: true });
+      return c;
+    })();
+    const lc = cust.email.toLowerCase();
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    const other = knexFactory({ client: 'pg', connection, pool: POOL });
+    try {
+      // Pause connA's import right after fetchLiveCandidateNow's SELECT ...
+      // FOR SHARE has already run (notification_prefs occurrence #2 is
+      // importOneCustomer's own FOR SHARE, taken immediately after that
+      // customer-row read) — the customer row lock is held from this point
+      // until connA's transaction commits or rolls back.
+      const { conn: pausedA, reached, release } = pauseNthTableRead(connA, 'notification_prefs', 2);
+      const resultAPromise = reconcileCustomers({ dryRun: false, conn: pausedA });
+      await reached; // connA now holds FOR SHARE on the customers row
+
+      // A genuinely separate connection tries the SAME lock
+      // customer-email-write.js takes before writing customers.email
+      // (`.forUpdate()`) — this must be a real, provable block.
+      let otherResolved = false;
+      const otherPromise = other.transaction(async (trx2) => {
+        await trx2('customers').where({ id: cust.id }).forUpdate().first();
+      }).then(() => { otherResolved = true; });
+
+      await new Promise((resolve) => { setTimeout(resolve, 200); });
+      expect(otherResolved).toBe(false); // genuinely blocked, not a coincidence of timing
+
+      release();
+      const result = await resultAPromise;
+      await otherPromise; // now unblocks once connA's transaction has committed
+      expect(otherResolved).toBe(true);
+      expect(result.imported).toBe(1);
+    } finally {
+      await other.destroy();
+      await connA.destroy();
+      await db('newsletter_subscribers').where({ email: lc }).del();
+      await db('notification_prefs').where({ customer_id: cust.id }).del();
+      await db('customers').where({ id: cust.id }).del();
+    }
+  });
+
   test.each([
     ['at_risk', true], // canonical CUSTOMER_STAGES member — a candidate
     [null, false], // NULL pipeline_stage is no longer a candidate (owner ruling 2026-09-28)
@@ -224,6 +269,31 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     // row from beforeAll, so the only possible candidate in this rolled-back
     // transaction is this test's own synthetic customer.
     expect(result.candidates).toBe(expected ? 1 : 0);
+  }));
+
+  test('a padded legacy unsubscribed row (real Postgres) still blocks a new active row for the same address', () => rollbackTest(async (trx) => {
+    const cust = synthCustomer();
+    await trx('customers').insert(cust);
+    await trx('notification_prefs').insert({ customer_id: cust.id, marketing_offers: true, email_enabled: true });
+    // A legacy row with surrounding whitespace — LOWER(TRIM(...)) on BOTH
+    // sides (existingSubscriberStatus and the candidate NOT EXISTS check)
+    // is what makes this still resolve to the same address.
+    await trx('newsletter_subscribers').insert({ email: ` ${cust.email.toUpperCase()} `, status: 'unsubscribed', source: 'legacy' });
+
+    const dry = await reconcileCustomers({ conn: trx });
+    // The legacy row isn't ACTIVE, so it's still a fetchCandidateRows
+    // candidate — the normalization fix matters at CLASSIFICATION, where
+    // existingSubscriberStatus must find the unsubscribed row despite the
+    // whitespace/case difference.
+    expect(dry.candidates).toBe(1);
+    expect(dry.importable).toBe(0);
+    expect(dry.excluded.previously_unsubscribed).toBe(1);
+
+    const write = await reconcileCustomers({ dryRun: false, conn: trx });
+    expect(write.imported).toBe(0);
+    const rows = await trx('newsletter_subscribers').whereRaw('LOWER(TRIM(email)) = ?', [cust.email.toLowerCase()]);
+    expect(rows).toHaveLength(1); // still just the legacy row — nothing new inserted
+    expect(rows[0].status).toBe('unsubscribed');
   }));
 
   test('an imported customer is not enrolled in any automation and no email is sent', () => rollbackTest(async (trx) => {

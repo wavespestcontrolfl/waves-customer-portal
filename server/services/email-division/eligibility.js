@@ -411,4 +411,9 @@ async function eligibleForEmail({
 
 module.exports = {
   eligibleForEmail, resolveMarketingClass, REASONS, groupKeyFor,
+  // Exported for callers outside the eligibility pipeline that need the
+  // SAME channel-resolution semantics against a notification_prefs row
+  // they've already read (e.g. newsletter-list-reconcile.js's SMS-only
+  // marketing-channel exclusion) — never a re-derived copy of this rule.
+  channelFor,
 };

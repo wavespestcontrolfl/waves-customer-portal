@@ -7,16 +7,34 @@
  * active_customer/won/at_risk; a NULL pipeline_stage is NOT a candidate) —
  * with a non-empty, minimally-valid email ("@" present, matching
  * subscribeOrResubscribe's own strict:false floor) and no ACTIVE subscriber
- * row (by customer_id or lower(email)). Every exclusion is checked in ONE
+ * row (by customer_id or LOWER(TRIM(email)) on both sides — a padded legacy
+ * row must still block a new one). Every exclusion is checked in ONE
  * fixed priority order —
  * an existing subscriber-state row always outranks a preference/suppression
- * check, so a both-unsubscribed-AND-marketing-off customer counts once, under the higher reason:
+ * check, so a both-unsubscribed-AND-opted-out customer counts once, under the higher reason:
  *   1. existing non-active row: unsubscribed / pending / inactive+waitlist
  *   2. an active suppression, global or group 'marketing_newsletter'
  *      (activeSuppressionsFor is the single source of truth here)
  *   3. notification_prefs.email_enabled === false -> email_switch_off
- *   4. marketing_offers !== true (null/false/no row) -> marketing_flag_not_on
- *   5. otherwise -> importable
+ *   4. marketing_offers === false (an EXPLICIT opt-out) -> marketing_opted_out
+ *   5. the resolved marketing_channel is 'sms' (channelFor — the SAME
+ *      resolution email-division/eligibility.js uses) -> marketing_sms_only
+ *   6. otherwise -> importable
+ *
+ * CONSENT BASIS (owner-approved plan, ~/email-division-final-plan-20260927.md
+ * rows 2 and 11 — cited in full in this PR's body): this import's authority
+ * to subscribe someone is "add the active customers who are not subscribed,
+ * tagged customer_import, [with] double opt-in skipped for imported
+ * customers" — an OPT-OUT gate, never an opt-in requirement. marketing_offers
+ * is therefore read ONLY for an explicit `false`; a missing row, a NULL, or a
+ * legacy-migration-defaulted `true` (20260401000104_notification_prefs_enhanced.js's
+ * column default, backfilled by 20260504000009_backfill_customer_default_rows.js
+ * without overriding it) is "no opt-out on file", not fabricated consent, and
+ * does NOT exclude — the plan's own authority to import is what makes that
+ * true, not the column's value. Do not read this as a general precedent:
+ * every OTHER email-division sender still requires marketing_offers === true
+ * (an opt-IN) via the canonical eligibility pipeline; this import alone is
+ * the plan's one-time, owner-approved exception.
  *
  * The write is a plain INSERT with `ON CONFLICT (email) DO NOTHING` (backed
  * by newsletter_subscribers.email's real UNIQUE constraint, from the
@@ -53,6 +71,12 @@ const { activeSuppressionsFor } = require('./email-template-library');
 const { linkToCustomer } = require('./newsletter-subscribers');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { lockCustomerComms, lockCustomerEmail } = require('../utils/customer-comms-lock');
+// The SAME channel-resolution rule the email-division sender pipeline
+// uses (server/services/email-division/eligibility.js) — never a
+// re-derived copy: a missing row / null / unrecognised value reads as the
+// column's schema default ('email' for marketing_channel); only a
+// RESOLVED 'sms' means "email is unwanted".
+const { channelFor } = require('./email-division/eligibility');
 
 // A minimal address shape — the same floor subscribeOrResubscribe's own
 // strict:false path enforces ("@" present). SQL-side so a malformed address
@@ -81,7 +105,7 @@ async function fetchCandidateRows(conn) {
        AND ${HAS_AT('c')}
        AND NOT EXISTS (
              SELECT 1 FROM newsletter_subscribers ns
-              WHERE (ns.customer_id = c.id OR LOWER(ns.email) = LOWER(TRIM(c.email)))
+              WHERE (ns.customer_id = c.id OR LOWER(TRIM(ns.email)) = LOWER(TRIM(c.email)))
                 AND ns.status = 'active'
            )
   `, [CUSTOMER_STAGES]);
@@ -104,7 +128,7 @@ async function countInvalidEmailCandidates(conn) {
        AND NOT ${HAS_AT('c')}
        AND NOT EXISTS (
              SELECT 1 FROM newsletter_subscribers ns
-              WHERE (ns.customer_id = c.id OR LOWER(ns.email) = LOWER(TRIM(c.email)))
+              WHERE (ns.customer_id = c.id OR LOWER(TRIM(ns.email)) = LOWER(TRIM(c.email)))
                 AND ns.status = 'active'
            )
   `, [CUSTOMER_STAGES]);
@@ -115,6 +139,15 @@ async function countInvalidEmailCandidates(conn) {
 // fetchCandidateRows) and returns its CURRENT email/name/city — closes the
 // gap where an archive, pipeline-stage change, or email edit mid-batch would
 // otherwise leave a stale row importable.
+//
+// FOR SHARE holds the customers row through classification, the insert, and
+// the link — not just this one read: it's a real Postgres row lock, taken
+// inside importOneCustomer's transaction, so it stays held until that
+// transaction commits or rolls back. That serializes against any writer
+// that takes FOR UPDATE on the SAME row before committing an email/archive/
+// stage change — customer-email-write.js's `customers row FOR UPDATE` is
+// exactly that writer — so it can never commit mid-import and leave a
+// stale address active underneath us.
 async function fetchLiveCandidateNow(conn, customerId) {
   const result = await conn.raw(
     `SELECT c.id AS customer_id, c.email, c.first_name, c.last_name, c.city
@@ -125,7 +158,8 @@ async function fetchLiveCandidateNow(conn, customerId) {
         AND ${candidateStageSql('c')}
         AND c.email IS NOT NULL
         AND TRIM(c.email) <> ''
-        AND ${HAS_AT('c')}`,
+        AND ${HAS_AT('c')}
+        FOR SHARE`,
     [customerId, CUSTOMER_STAGES],
   );
   return result.rows?.[0] || null;
@@ -137,7 +171,7 @@ async function fetchLiveCandidateNow(conn, customerId) {
 async function existingSubscriberStatus(conn, customerId, email) {
   const result = await conn.raw(
     `SELECT status FROM newsletter_subscribers
-      WHERE customer_id = ? OR LOWER(email) = LOWER(TRIM(?))
+      WHERE customer_id = ? OR LOWER(TRIM(email)) = LOWER(TRIM(?))
       ORDER BY CASE status
                  WHEN 'active' THEN 0
                  WHEN 'unsubscribed' THEN 1
@@ -167,7 +201,17 @@ async function classifyCustomer(conn, row) {
 
   const prefs = await conn('notification_prefs').where({ customer_id: row.customer_id }).first();
   if (prefs && prefs.email_enabled === false) return 'email_switch_off';
-  if (!(prefs && prefs.marketing_offers === true)) return 'marketing_flag_not_on';
+  // OPT-OUT gate, never an opt-in requirement (see the module header's
+  // "CONSENT BASIS" — owner-approved plan rows 2 & 11, cited in the PR
+  // body): only an EXPLICIT false excludes. A missing row, a NULL, or a
+  // legacy-migration-defaulted true is "no opt-out on file", not consent —
+  // this import's authority to subscribe someone comes from the plan, not
+  // from this column reading true.
+  if (prefs && prefs.marketing_offers === false) return 'marketing_opted_out';
+  // The SAME channel-resolution rule email-division/eligibility.js uses
+  // (channelFor): a missing row / null / unrecognised value reads as the
+  // schema default ('email'); only a RESOLVED 'sms' means email is unwanted.
+  if (channelFor(prefs, 'marketing_channel') === 'sms') return 'marketing_sms_only';
 
   return null;
 }
@@ -336,8 +380,8 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   const write = dryRun === false;
   const excluded = {
     previously_unsubscribed: 0, pending_confirmation: 0, inactive_subscriber: 0,
-    suppressed: 0, marketing_flag_not_on: 0, email_switch_off: 0, row_appeared: 0,
-    no_longer_live: 0, invalid_email: 0,
+    suppressed: 0, marketing_opted_out: 0, marketing_sms_only: 0, email_switch_off: 0,
+    row_appeared: 0, no_longer_live: 0, invalid_email: 0,
   };
   const errors = [];
 

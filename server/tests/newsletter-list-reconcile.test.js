@@ -86,7 +86,7 @@ function makeConn(state) {
   };
 
   const hasActive = (c) => state.subscribers.some((s) => s.status === 'active'
-    && (s.customer_id === c.id || (s.email || '').toLowerCase() === c.email.trim().toLowerCase()));
+    && (s.customer_id === c.id || (s.email || '').trim().toLowerCase() === c.email.trim().toLowerCase()));
   const key = (v) => String(v).trim().toLowerCase();
 
   conn.raw = jest.fn(async (sql, bindings = []) => {
@@ -126,7 +126,7 @@ function makeConn(state) {
     }
     if (sql.includes('ORDER BY CASE status')) {
       const [customerId, email] = bindings;
-      const matches = state.subscribers.filter((s) => s.customer_id === customerId || (s.email || '').toLowerCase() === key(email));
+      const matches = state.subscribers.filter((s) => s.customer_id === customerId || (s.email || '').trim().toLowerCase() === key(email));
       const best = matches.reduce((acc, m) => {
         const p = PRIORITY[m.status] ?? 4;
         return !acc || p < acc.p ? { status: m.status, p } : acc;
@@ -193,7 +193,13 @@ test.each([
   ['inactive_subscriber', [{ status: 'inactive' }], [{ marketing_offers: true }], false],
   ['suppressed', [], [{ marketing_offers: false }], true],
   ['email_switch_off', [], [{ marketing_offers: true, email_enabled: false }], false],
-  ['marketing_flag_not_on', [], [], false],
+  // OPT-OUT gate, never opt-in (owner-approved plan — see module header
+  // "CONSENT BASIS"): only an EXPLICIT false excludes.
+  ['marketing_opted_out', [], [{ marketing_offers: false }], false],
+  // channelFor (the SAME resolution email-division/eligibility.js uses):
+  // only a RESOLVED 'sms' excludes — marketing_offers is true here, so this
+  // proves the channel check is independent of the opt-out check above.
+  ['marketing_sms_only', [], [{ marketing_offers: true, marketing_channel: 'sms' }], false],
 ])('%s wins, and (write mode) is NEVER subscribed', async (reason, subs, prefs, suppressed) => {
   activeSuppressionsFor.mockResolvedValue(suppressed ? [{ suppression_type: 'bounce' }] : []);
   const state = {
@@ -257,6 +263,51 @@ test('an archived customer (deleted_at set) is never a candidate and is never (r
   expect(write.imported).toBe(0);
   expect(linkToCustomer).not.toHaveBeenCalled();
   expect(state.subscribers).toHaveLength(0);
+});
+
+// CONSENT BASIS regression guard (owner-approved plan rows 2 & 11, module
+// header): marketing_offers is an OPT-OUT gate, never an opt-in
+// requirement, for THIS import specifically. A customer with no prefs row
+// at all — the common case for the plan's "305 active customers who are
+// not subscribed" — has no opt-out on file and IS imported.
+test('a customer with NO notification_prefs row at all has no opt-out on file and IS imported (opt-out gate, not opt-in requirement)', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'never-asked@example.com', city: 'Venice' })],
+    subscribers: [],
+    prefs: [], // no row — NOT the same as marketing_offers: false
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  expect(dry.importable).toBe(1);
+  expect(dry.excluded.marketing_opted_out).toBe(0);
+  expect(dry.excluded.marketing_sms_only).toBe(0);
+
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(1);
+  const created = state.subscribers.find((s) => s.email === 'never-asked@example.com');
+  expect(created).toMatchObject({ status: 'active', source: 'customer_import' });
+});
+
+// Finding #4 regression guard: the canonical link/relink queries already
+// normalize both sides (LOWER(TRIM(...))); existingSubscriberStatus and the
+// candidate NOT EXISTS check must match, or a padded legacy row's
+// unsubscribe silently stops blocking a re-import.
+test('a padded legacy unsubscribed row (" user@example.com ") still blocks a new active row for the same address', async () => {
+  const state = {
+    customers: [cust({ id: 'c1', email: 'user@example.com' })],
+    subscribers: [{ id: 's0', customer_id: null, email: ' user@example.com ', status: 'unsubscribed' }],
+    prefs: [{ customer_id: 'c1', marketing_offers: true }],
+  };
+  const dry = await reconcileCustomers({ conn: makeConn(state) });
+  // The padded row isn't ACTIVE, so it's still a fetchCandidateRows
+  // candidate — the normalization fix matters at CLASSIFICATION, where the
+  // unsubscribed status must be found despite the whitespace.
+  expect(dry.candidates).toBe(1);
+  expect(dry.importable).toBe(0);
+  expect(dry.excluded.previously_unsubscribed).toBe(1);
+  const write = await reconcileCustomers({ dryRun: false, conn: makeConn(state) });
+  expect(write.imported).toBe(0);
+  expect(linkToCustomer).not.toHaveBeenCalled();
+  expect(state.subscribers).toHaveLength(1); // nothing new inserted
 });
 
 test.each(['unsubscribed', 'pending', 'inactive'])(
