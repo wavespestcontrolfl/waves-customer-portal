@@ -61,6 +61,37 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d90_final_notice: 'invoice.followup_90_day',
 };
 
+// Combined dunning message, narrow rebuild (dunning unification PR 2b,
+// GATE_DUNNING_COMBINED_MESSAGE): keyed by the SAME step id
+// FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID uses, stable across the Day 90 ladder
+// gate. No new send path — fireTouch (the single-invoice path, unchanged)
+// selects one of these instead of its usual template when
+// resolveCombinedVariant finds 2+ open invoices for the customer; see
+// runPending's anchor/sibling grouping below for why only one row per
+// customer fires per run.
+const COMBINED_SMS_TEMPLATE_BY_STEP_ID = {
+  d3_friendly: 'invoice_followup_combined_3day',
+  d7_reminder: 'invoice_followup_combined_10day',
+  d14_firmer: 'invoice_followup_combined_17day',
+  d30_final: 'invoice_followup_combined_30day',
+  d60_reminder: 'invoice_followup_combined_60day',
+  d90_final_notice: 'invoice_followup_combined_90day',
+};
+const COMBINED_EMAIL_TEMPLATE_BY_STEP_ID = {
+  d3_friendly: 'invoice.followup_combined_3_day',
+  d7_reminder: 'invoice.followup_combined_10_day',
+  d14_firmer: 'invoice.followup_combined_17_day',
+  d30_final: 'invoice.followup_combined_30_day',
+  d60_reminder: 'invoice.followup_combined_60_day',
+  d90_final_notice: 'invoice.followup_combined_90_day',
+};
+
+// GATE_DUNNING_COMBINED_MESSAGE, read at call time (strict 'true'). Ships
+// DARK — wording awaits owner approval (see the seed migration).
+function combinedMessageLive() {
+  return process.env.GATE_DUNNING_COMBINED_MESSAGE === 'true';
+}
+
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
 // Delivered statuses, the whitelist late-payment-checker.js's own candidate
@@ -218,8 +249,10 @@ async function logFollowupEmailAttempt({
   }
 }
 
-async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
-  const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+async function sendFollowupEmail({
+  row, customer, step, ctx, enforceBillingPreference = true, combinedVariant = null,
+}) {
+  const templateKey = combinedVariant?.emailTemplateKey || FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
   const latestInvoice = await db('invoices').where({ id: row.invoice_id }).first().catch(() => null);
@@ -256,8 +289,20 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
     service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
     service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
-    pay_url: ctx.payUrl,
+    // The combined touch's own pay-balance link (covers every included
+    // invoice), never the anchor's own /pay/:token — see
+    // resolveCombinedVariant.
+    pay_url: combinedVariant?.payUrl || ctx.payUrl,
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+    ...(combinedVariant ? {
+      invoice_count: combinedVariant.invoiceCount,
+      total_due: combinedVariant.totalDue,
+      // One line per included invoice — email-template-library.js's
+      // rowsFromVariable/rowTemplate renders these into the combined
+      // template's details block. Built from resolveCombinedVariant's own
+      // buildPayBalanceLink snapshot, never re-derived here.
+      invoices: combinedVariant.invoices,
+    } : {}),
   };
 
   const log = (fields) => logFollowupEmailAttempt({
@@ -289,6 +334,93 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
   }
 }
 
+/**
+ * GATE_DUNNING_COMBINED_MESSAGE (narrow rebuild): does THIS customer's
+ * touch render as the combined "N open invoices, $X total" copy instead of
+ * its usual single-invoice template? Reuses buildPayBalanceLink
+ * (composer-customer-links.js) — the SAME balance the linked pay page
+ * itself will show and charge — rather than deriving a separate count/
+ * total, so the text can never quote a figure the page won't also honor.
+ *
+ * Returns null (fall back to the normal single-invoice template, on BOTH
+ * legs — never a mismatched combined-text/single-email pair) when: the
+ * gate is off, either combined template is missing/inactive, the link
+ * can't be built, it covers fewer than 2 invoices, or its per-invoice
+ * lines don't reconcile to its own total (a payment/edit landing between
+ * two reads inside buildPayBalanceLink itself — defensive; the same call
+ * supplies both).
+ */
+async function resolveCombinedVariant(customer, step) {
+  if (!combinedMessageLive()) return null;
+  const smsTemplateKey = COMBINED_SMS_TEMPLATE_BY_STEP_ID[step.id];
+  const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+  if (!smsTemplateKey || !emailTemplateKey) return null;
+  try {
+    const [smsRow, emailRow] = await Promise.all([
+      db('sms_templates').where({ template_key: smsTemplateKey, is_active: true }).first('id'),
+      db('email_templates').where({ template_key: emailTemplateKey, status: 'active' }).first('id'),
+    ]);
+    if (!smsRow || !emailRow) return null;
+
+    const { buildPayBalanceLink } = require('./composer-customer-links');
+    const link = await buildPayBalanceLink([customer.id]);
+    const coveredIds = (link?.coveredInvoiceIds || []).map(String);
+    if (!link?.url || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
+
+    // The itemized lines come from the SAME read as the total and must add
+    // up to it exactly, or this touch is not rendered combined.
+    const lineCents = link.coveredInvoiceCents || {};
+    const linesTotal = coveredIds.reduce(
+      (sum, id) => sum + (Number.isInteger(lineCents[id]) ? lineCents[id] : NaN), 0,
+    );
+    if (!Number.isInteger(linesTotal) || linesTotal !== Math.round(link.balance.total * 100)) return null;
+
+    const invoiceRows = await db('invoices').whereIn('id', coveredIds)
+      .select('id', 'invoice_number', 'title', 'service_type');
+    const invoices = coveredIds.map((id) => {
+      const inv = invoiceRows.find((r) => String(r.id) === id);
+      return {
+        invoice_number: inv?.invoice_number || '',
+        invoice_title: inv?.title || inv?.service_type || 'your service',
+        amount_due: currency((lineCents[id] || 0) / 100),
+      };
+    });
+
+    return {
+      smsTemplateKey,
+      emailTemplateKey,
+      payUrl: link.url,
+      totalDue: link.balance.total.toFixed(2),
+      invoiceCount: coveredIds.length,
+      invoices,
+    };
+  } catch (err) {
+    logger.warn(`[invoice-followups] combined variant resolution failed for customer ${customer.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// The SMS/push body for a follow-up touch: the combined copy when
+// combinedVariant resolved one (its own template render is attempted
+// first, since smsTemplatesRouter.getTemplate itself returns null for a
+// missing/disabled row — the same fallback contract resolveBody already
+// has), else the ordinary single-invoice body, byte-identical to before.
+async function resolveFollowupSmsBody(step, ctx, combinedVariant) {
+  if (combinedVariant?.smsTemplateKey) {
+    const body = await smsTemplatesRouter.getTemplate(combinedVariant.smsTemplateKey, {
+      first_name: ctx.name || 'there',
+      invoice_count: String(combinedVariant.invoiceCount),
+      total_due: combinedVariant.totalDue,
+      pay_url: combinedVariant.payUrl,
+    }, {
+      workflow: 'invoice_followup_combined',
+      entity_type: 'customer',
+      entity_id: ctx.customerId || null,
+    });
+    if (body) return body;
+  }
+  return resolveBody(step, ctx);
+}
 
 /**
  * Compute the timestamp at which step `index` should fire for a given invoice.
@@ -865,6 +997,16 @@ async function runPending() {
     );
 
   let sent = 0, skipped = 0;
+  // GATE_DUNNING_COMBINED_MESSAGE: rows due this run are collected instead
+  // of fired immediately, so a customer with 2+ of them can be grouped —
+  // see fireGroupedRows. Gate off takes the exact original path (fire as
+  // each row is decided), byte-identical to before this lane.
+  const combined = combinedMessageLive();
+  const toFire = [];
+  const fireNow = combined
+    ? async (row) => { toFire.push(row); }
+    : async (row) => { await fireStep(row); sent++; };
+
   for (const batchRow of rows) {
     let row = batchRow;
     try {
@@ -889,19 +1031,95 @@ async function runPending() {
         if (skip.updated && skip.nextAt
             && skip.nextAt.getTime() <= now.getTime()
             && !isStaleTouch(skip.nextAt, now)) {
-          await fireStep({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
-          sent++;
+          await fireNow({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
         }
         continue;
       }
-      await fireStep(row);
-      sent++;
+      await fireNow(row);
     } catch (err) {
       logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
       skipped++;
     }
   }
+  if (combined && toFire.length) {
+    const fired = await fireGroupedRows(toFire);
+    sent += fired.sent;
+    skipped += fired.skipped;
+  }
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
+  return { sent, skipped };
+}
+
+/**
+ * GATE_DUNNING_COMBINED_MESSAGE: fires every row due this run, grouping a
+ * customer's 2+ due rows so only one touch goes out. The ANCHOR is the
+ * oldest invoice (by the ladder's own cadence anchor — sequenceAnchor);
+ * it fires through the UNCHANGED fireStep/fireTouch path, which renders
+ * the combined copy on its own when resolveCombinedVariant finds 2+ open
+ * invoices for the customer. The rest ("siblings") wait for it — ONLY
+ * when the anchor actually sent (a fresh delivered/accepted send, per
+ * fireTouch's own `sent` — never a held/skipped/errored touch) and are no
+ * further along their OWN cadence than the anchor. A sibling that fires
+ * normally goes through this exact same fireStep call a singleton row
+ * would use — no new send path, no new guard, no new transaction.
+ */
+async function fireGroupedRows(toFire) {
+  let sent = 0, skipped = 0;
+  const fireOne = async (row) => {
+    try {
+      const outcome = await fireStep(row);
+      sent++;
+      return outcome;
+    } catch (err) {
+      logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
+      skipped++;
+      return undefined;
+    }
+  };
+
+  const groups = new Map();
+  for (const row of toFire) {
+    const key = String(row.customer_id);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  for (const groupRows of groups.values()) {
+    if (groupRows.length === 1) {
+      await fireOne(groupRows[0]);
+      continue;
+    }
+    const sorted = [...groupRows].sort(
+      (a, b) => new Date(sequenceAnchor(a)).getTime() - new Date(sequenceAnchor(b)).getTime(),
+    );
+    const [anchor, ...siblings] = sorted;
+    const anchorOutcome = await fireOne(anchor);
+    const anchorSent = anchorOutcome?.sent === true;
+    for (const sibling of siblings) {
+      // A sibling already further along its OWN cadence than the anchor —
+      // rare, but never deferred: it fires exactly as it would ungrouped.
+      if (sibling.step_index > anchor.step_index || !anchorSent) {
+        await fireOne(sibling);
+        continue;
+      }
+      // The anchor's combined reminder covered this invoice this run —
+      // re-time the sibling to the anchor's own new next_touch_at (or
+      // +7 days if the anchor's ladder just finished with no next touch)
+      // and leave its step untouched, guarded on the row still being
+      // active (a concurrent payment/pause since the batch select is left
+      // alone, not revived).
+      try {
+        const nextAt = anchorOutcome.nextTouchAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        const updated = await db('invoice_followup_sequences')
+          .where({ id: sibling.id, status: 'active' })
+          .update({ updated_at: db.fn.now(), next_touch_at: nextAt });
+        if (updated) skipped++;
+      } catch (err) {
+        logger.error(`[invoice-followups] could not re-time sibling sequence ${sibling.id} after combined anchor send: ${err.message}`);
+        skipped++;
+      }
+    }
+  }
   return { sent, skipped };
 }
 
@@ -1309,7 +1527,11 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated });
+    // Passed straight through to the caller (runPending's fireGroupedRows,
+    // GATE_DUNNING_COMBINED_MESSAGE) — see fireTouch's own return-value
+    // comment. Every OTHER caller (sendNextTouchNow) already ignores
+    // fireStep's return value, so this is additive.
+    return await fireTouch(row, { operatorInitiated });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1390,6 +1612,11 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
     return;
   }
+  // GATE_DUNNING_COMBINED_MESSAGE (narrow rebuild): null on every path
+  // below except the one that renders the combined copy — computed once,
+  // ahead of the mdPending diversion, which never uses it (a bank-
+  // verification nudge is not a dunning message).
+  const combinedVariant = await resolveCombinedVariant(customer, step);
   const mdPending = gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
@@ -1520,6 +1747,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     serviceDate,
     payUrl,
     invoiceId: row.invoice_id,
+    customerId: customer.id,
   };
 
   // Divert micro-deposit-blocked invoices to a verification re-nudge: the customer
@@ -1579,7 +1807,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
               touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
               enforceBillingPreference: !operatorInitiated,
             })
-          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
+          : await sendFollowupEmail({
+              row, customer, step, ctx, enforceBillingPreference: !operatorInitiated, combinedVariant,
+            });
         const attemptHeld = await settleFollowupEmailLedger(
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
@@ -1617,7 +1847,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await renderSmsTemplate('bank_verification_incomplete', {
             first_name: ctx.name, billing_url: `${publicPortalUrl()}/?tab=billing`,
           }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
-        : await resolveBody(step, ctx);
+        : await resolveFollowupSmsBody(step, ctx, combinedVariant);
     }
     for (const channel of nonEmailChannels) {
       if (!channelPolicy[channel]) { smsSkipReason = 'collections_policy_denied'; continue; }
@@ -1695,7 +1925,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           first_name: ctx.name,
           billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
-      : await resolveBody(step, ctx);
+      : await resolveFollowupSmsBody(step, ctx, combinedVariant);
     if (!body) {
       smsSkipReason = 'missing_template';
       logger.warn(`[invoice-followups] template ${step.template_key} missing/disabled for sequence ${row.id}`);
@@ -1918,7 +2148,13 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
 
   // An already delivered leg advances its step without a new outbound touch.
-  if (!freshDelivery) return;
+  // The return value below (sent/nextTouchAt) is read by GATE_DUNNING_
+  // COMBINED_MESSAGE callers (runPending's fireGroupedRows) to decide
+  // whether a sibling invoice's touch this run should wait for this one —
+  // fireStep passes it straight through. Every other early `return;` above
+  // is equivalent to { sent: false }; callers that don't check it (the
+  // existing sendNextTouchNow) are unaffected.
+  if (!freshDelivery) return { sent: false, nextTouchAt: nextAt };
 
   // Log to customer_interactions for the 360 view
   try {
@@ -1939,6 +2175,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }),
     });
   } catch { /* non-critical */ }
+  return { sent: true, nextTouchAt: nextAt };
 }
 
 /**

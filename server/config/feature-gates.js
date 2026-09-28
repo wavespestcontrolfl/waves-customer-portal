@@ -3297,6 +3297,18 @@ const gates = {
   // services/previsit-balance-reminder.js's leadDays() reads
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
+
+  // Combined dunning message, narrow rebuild (dunning unification PR 2b):
+  // when a customer has 2+ open overdue invoices, the oldest one's OWN
+  // scheduled touch — fired through the unchanged fireTouch path, every
+  // guard intact — renders the combined copy (invoice_count, total_due,
+  // the pay-balance link) instead of its usual single-invoice template;
+  // the rest wait for that one reminder instead of each firing their own.
+  // No separate send path. Ships DARK: off unless exactly 'true'. This
+  // entry is for logGateStatus only: services/invoice-followups.js reads
+  // GATE_DUNNING_COMBINED_MESSAGE at call time. Wording awaits owner
+  // approval — do not flip until it is signed off.
+  dunningCombinedMessage: process.env.GATE_DUNNING_COMBINED_MESSAGE === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
