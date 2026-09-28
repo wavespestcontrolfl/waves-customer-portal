@@ -14,7 +14,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
 }));
 jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
-jest.mock('../services/invoice', () => ({ explicitBillingAppSelected: jest.fn(async () => false) }));
+jest.mock('../services/invoice', () => ({ explicitBillingAppSelected: jest.fn(async () => false), receiptAmountFor: jest.fn(async () => '129.00') }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -331,7 +331,7 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
 
 describe('queue_receipt — the receipt worker, with its own recipient resolution on the card', () => {
   const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
-  const PAID = { id: 'inv-1', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
 
   test('names the resolved receipt email and a conditional text; the worker resolver gets the payment_receipt category', async () => {
     getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
@@ -345,7 +345,7 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
     const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
     expect(contract.notifies_customer).toBe(true);
     expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({
-      kind: 'comms', label: expect.stringMatching(/email to b\*\*\*@example\.com; may also send text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
+      kind: 'comms', label: expect.stringMatching(/receipt for invoice INV-00042, \$129\.00 paid — email to b\*\*\*@example\.com; may also send text \*\*\*0100, per the customer's receipt settings \(texts wait for 8 AM–8 PM\)/),
     })]));
   });
 

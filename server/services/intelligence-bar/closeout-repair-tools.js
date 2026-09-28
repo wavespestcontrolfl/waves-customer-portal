@@ -164,12 +164,15 @@ async function receiptRecipients(invoiceId, knex) {
     : (resolved.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
   const app = !payerBilled && await require('../invoice').explicitBillingAppSelected(invoice.customer_id, 'payment_receipt');
   if (!email && !phone && !app) return { blocker: resolved.ok ? 'no receipt recipient on file' : String(resolved.error).replace(/\.$/, '') };
-  return { email, phone, app, payerBilled };
+  // Which receipt, for how much — the amount the receipt itself states.
+  const amount = await require('../invoice').receiptAmountFor(invoice);
+  return { email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
 }
 
 // The card's plain-words description of where a queued receipt can go.
 function receiptReach(s) {
-  const email = `email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}`;
+  const which = `receipt for ${s.invoice_number ? `invoice ${s.invoice_number}` : 'the paid invoice'}, $${s.amount} paid — `;
+  const email = `${which}email to ${s.recipients.length ? s.recipients.join(', ') : 'nobody (no receipt email on file)'}`;
   if (s.payer_billed) return `${email} (the payer's billing inbox — a payer-billed receipt is never texted)`;
   const legs = [s.text_to && `text ${s.text_to}`, s.app && 'a Waves app notification'].filter(Boolean);
   if (!legs.length) return `${email}; no text (no phone on file)`;
@@ -259,6 +262,8 @@ async function planReceiptStep(status, knex) {
       fact: 'invoiceDelivery',
       reason: invDelivery.reason,
       invoice_id: invDelivery.invoiceId,
+      invoice_number: who.invoiceNumber,
+      amount: who.amount,
       recipients: who.email ? [maskEmail(who.email)] : [],
       text_to: maskPhone(who.phone),
       app: who.app === true,
@@ -373,7 +378,7 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 }
 
 function stepsKey(steps) {
-  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null]));
+  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null, s.recipients_key || null, s.amount ?? null]));
 }
 
 function previewFromPlan(serviceId, status, plan) {

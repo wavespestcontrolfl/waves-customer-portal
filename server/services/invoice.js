@@ -7405,6 +7405,15 @@ const InvoiceService = {
         })
       : "";
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
+    const amount = await InvoiceService.receiptAmountFor(invoice);
+    return { amount, cardLine, receiptUrl };
+  },
+
+  // The amount a receipt states, read-only: net cash kept when a refund is
+  // recorded on the payment row, otherwise the amount due. Shared by the
+  // receipt SMS and the IB closeout repair card (which must not mint the
+  // short link receiptSmsFacts does).
+  async receiptAmountFor(invoice) {
     const receiptPayment = await db("payments")
       .where({ customer_id: invoice.customer_id })
       .whereIn("status", ["paid", "refunded"])
@@ -7416,10 +7425,9 @@ const InvoiceService = {
     const receiptAmount = receiptRefunded > 0
       ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
       : invoiceAmountDue(invoice);
-    const amount = Number.isFinite(receiptAmount)
+    return Number.isFinite(receiptAmount)
       ? receiptAmount.toFixed(2)
       : "0.00";
-    return { amount, cardLine, receiptUrl };
   },
 
   async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
