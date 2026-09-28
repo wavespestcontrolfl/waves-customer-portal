@@ -66,3 +66,15 @@ test('unresolvedInvoicesForCancelledService matches the direct link OR a service
     { table: 'invoices', m: 'whereNotIn', args: ['status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES] },
   ]));
 });
+
+// Customer-wide visit-money checks (signup-cancel eligibility and the
+// pre-refund re-scan in customer-offboarding.js) count an invoice tied to a
+// visit by EITHER link — most completion invoices carry only service_record_id.
+test('whereVisitLinked matches a direct visit link OR a service-record link', () => {
+  const InvoiceService = require('../services/invoice');
+  const calls = [];
+  const qb = {};
+  for (const m of ['whereNotNull', 'orWhereNotNull']) qb[m] = (...args) => { calls.push([m, ...args]); return qb; };
+  InvoiceService.whereVisitLinked(qb);
+  expect(calls).toEqual([['whereNotNull', 'scheduled_service_id'], ['orWhereNotNull', 'service_record_id']]);
+});

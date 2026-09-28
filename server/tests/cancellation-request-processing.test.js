@@ -422,7 +422,11 @@ describe('processCancellationRequest', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(AppointmentReminders.handleCancellation).toHaveBeenCalledWith('s1', { sendNotification: false });
     expect(InvoiceService.voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('s1');
-    expect(CardHolds.handleCardHoldCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1' });
+    // inv1 still holds money after the void, so the late-cancel fee goes to
+    // office review: no card rail runs beside it (same rule as the
+    // follow-through), and the skip is reported.
+    expect(CardHolds.handleCardHoldCancellation).not.toHaveBeenCalled();
+    expect(result.errors).toContain('card_fee_held:s1');
     // Track layer repaired this time.
     const s1 = db.__tables.scheduled_services.find((r) => r.id === 's1');
     expect(s1.track_state).toBe('cancelled');
@@ -515,7 +519,8 @@ describe('processCancellationRequest', () => {
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req6' });
 
     expect(result.cancelledCount).toBe(1);
-    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4', 'invoice_review:inv6']);
+    expect(result.errors).toEqual(['invoice_review:inv1', 'invoice_review:inv4', 'invoice_review:inv6', 'card_fee_held:s1']);
+    expect(require('../services/estimate-card-holds').handleCardHoldCancellation).not.toHaveBeenCalled();
     expect(result.ok).toBe(false);
     expect(require('../services/invoice').unresolvedInvoicesForCancelledService).toHaveBeenCalledWith(db, 's1');
   });

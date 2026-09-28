@@ -11368,6 +11368,16 @@ const InvoiceService = {
     return Boolean(await query.first("id"));
   },
 
+  // Query-builder clause: an invoice tied to a visit — directly
+  // (scheduled_service_id) or through its service record (service_record_id,
+  // how most post-completion invoices link). For customer-wide visit-money
+  // checks (the signup-cancel eligibility and pre-refund scans in
+  // customer-offboarding.js); per-visit gates use
+  // unresolvedInvoicesForCancelledService below.
+  whereVisitLinked(qb) {
+    qb.whereNotNull("scheduled_service_id").orWhereNotNull("service_record_id");
+  },
+
   /**
    * The invoices of a cancelled scheduled service that still hold money
    * (outside CANCELLED_SERVICE_RESOLVED_STATUSES), linked directly OR through
@@ -11375,9 +11385,10 @@ const InvoiceService = {
    * post-completion invoices carry only service_record_id. The ONE query for
    * every post-void gate: the follow-through's fee gate, the inspection-credit
    * reversal's invoice guard, the plan-cancel processor's manual-review list,
-   * and the Intelligence Bar preview. The direct link alone let an invoice
-   * still holding money go unseen, so a late-cancel fee could be charged and
-   * a credit reversed beside it. Returns a query builder.
+   * offboarding's per-visit check, and the Intelligence Bar preview. The
+   * direct link alone let an invoice still holding money go unseen, so a
+   * late-cancel fee could be charged and a credit reversed beside it.
+   * Returns a query builder.
    */
   unresolvedInvoicesForCancelledService(conn, scheduledServiceId) {
     return conn("invoices")
