@@ -67,4 +67,26 @@ function followupPromiseIsStale({ inputSnapshot, promptVersion = null, body, now
   return draftPromisedFollowup(inputSnapshot, promptVersion) && slaPhraseStatus(body, now) === 'stale';
 }
 
-module.exports = { SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus, draftPromisedFollowup, followupPromiseIsStale };
+// Follow-up #1 (Codex r6): an operator can keep the promise while editing
+// its timing into wording the phrase list does not know ("within 60
+// minutes"), which would otherwise read as "no promise" and send at any
+// hour. On a draft that recorded a promised follow-up, an edit that removes
+// every recognized timing phrase the drafted reply had is unsendable.
+function followupPromiseEdited({ inputSnapshot, promptVersion = null, originalBody, body }) {
+  if (!draftPromisedFollowup(inputSnapshot, promptVersion)) return false;
+  if (originalBody == null) return false;
+  return slaPhraseStatus(originalBody, new Date()) !== 'none' && slaPhraseStatus(body, new Date()) === 'none';
+}
+
+// Both send seams ask one question: may this escalated draft's follow-up
+// promise go out as written? null when yes, else the reason.
+function followupPromiseBlockReason({ inputSnapshot, promptVersion = null, originalBody = null, body, now = new Date() }) {
+  if (followupPromiseIsStale({ inputSnapshot, promptVersion, body, now })) return 'sla_phrase_stale';
+  if (followupPromiseEdited({ inputSnapshot, promptVersion, originalBody, body })) return 'sla_phrase_edited';
+  return null;
+}
+
+module.exports = {
+  SLA_PHRASES, FOLLOWUP_PROMISED_NOTE, realAnswersGateOn, replyPromisesFollowup, slaPhraseStatus,
+  draftPromisedFollowup, followupPromiseIsStale, followupPromiseEdited, followupPromiseBlockReason,
+};

@@ -601,7 +601,7 @@ describe('examOneItem — v12 facts-compatibility exclusion (Codex r3)', () => {
     expect(judge.judgeOne).not.toHaveBeenCalled();
     const result = dbi.state.results.find((r) => r.run_id === 'r1' && r.item_id === 'i1');
     expect(result).toMatchObject({ verdict: 'ungradable' });
-    expect(result.notes).toMatch(/predates GATE_SMS_REAL_ANSWERS/);
+    expect(result.notes).toMatch(/lacks the fact contract of house_voice_v12_real_answers \(needs FOLLOW-UP SLA RIGHT NOW:\)/);
     const finalPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'complete');
     expect(finalPatch).toBeTruthy();
     // Excluded — never counted as graded (same rule the terminal no-progress
@@ -951,5 +951,37 @@ describe('evaluateExamGate — graded-coverage fail-closed', () => {
       summaryFn: summaryWith({ unsafeRate: 0.5, itemsJudged: 39, itemsTotal: 41, significance: null }),
     });
     expect(unsafe).toEqual([expect.stringMatching(/anthropic.*unsafe rate/)]);
+  });
+});
+
+
+// PR #5119 follow-up #4: compatibility is the full fact contract of the
+// prompt version — a category tag requires that category's fact line too.
+describe('category-aware sealed compatibility', () => {
+  const { requiredFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const RS = 'FREE RE-SERVICE: not eligible';
+
+  test('requiredFactMarkers: v11 none; v12 the SLA line; +c adds the FREE RE-SERVICE line; other tags add nothing', () => {
+    expect(requiredFactMarkers('house_voice_v11')).toEqual([]);
+    expect(requiredFactMarkers('house_voice_v12_real_answers')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+c')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+bclm')).toEqual(['FOLLOW-UP SLA RIGHT NOW:', 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers('house_voice_v12_real_answers+bl')).toEqual(['FOLLOW-UP SLA RIGHT NOW:']);
+  });
+
+  test('itemCompatibleWith: an item frozen under plain v12 is compatible with v12 but NOT with +c; one frozen under +c is compatible with both', () => {
+    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers')).toBe(true);
+    expect(itemCompatibleWith(`X\n${SLA}\n`, 'house_voice_v12_real_answers+c')).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers+c')).toBe(true);
+    expect(itemCompatibleWith(`X\n${SLA}\n${RS}\n`, 'house_voice_v12_real_answers')).toBe(true);
+    expect(itemCompatibleWith('CUSTOMER: old', 'house_voice_v11')).toBe(true);
+  });
+
+  test('createExamRun under +c refuses when the pool was sealed under plain v12 (no FREE RE-SERVICE line)', async () => {
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers+c');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1', { facts_block: `FROZEN\n${SLA}` }), item('i2', { facts_block: `FROZEN\n${SLA}` })] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', dbi }))
+      .rejects.toThrow(/only 0 of 2 active items carry "FOLLOW-UP SLA RIGHT NOW:" \+ "FREE RE-SERVICE:"/);
   });
 });

@@ -219,6 +219,18 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(dbi.updates).toHaveLength(0);
   });
 
+  test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+c');
+    const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
+    await sealEvalItems({ target: 100, dbi });
+    const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
+    expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
+    for (const [, args] of likeRaws) {
+      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+    }
+    expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
+  });
+
   test('v11: no compatibility count, no candidate restriction, no retirement (unchanged)', async () => {
     versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v11');
     const dbi = makeV12FakeDb({ activeCount: 98, compatibleCount: 0, candidates: [cand('a', 'GENERAL', '2026-08-01'), cand('b', 'GENERAL', '2026-08-02'), cand('c', 'GENERAL', '2026-08-03')] });

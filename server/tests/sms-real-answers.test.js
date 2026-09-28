@@ -1782,3 +1782,27 @@ describe('round-7 deterministic guards (gate on)', () => {
     expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', paid)).toBe(false);
   });
 });
+
+
+describe('follow-up #1: an edited follow-up promise with unrecognized timing is unsendable', () => {
+  const { followupPromiseEdited, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const DAY = new Date('2026-09-29T14:00:00Z'); // 10:00 ET
+  const NIGHT = new Date('2026-09-30T01:00:00Z'); // 21:00 ET
+  const original = 'Sorry about that — someone will follow up within the hour.';
+
+  test('the drafted phrase edited into "within 60 minutes" → edited (the promise stayed, the timing left the phrase list)', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.' })).toBe(true);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.', now: DAY })).toBe('sla_phrase_edited');
+  });
+  test('kept verbatim → not edited; unrelated wording edits → not edited; stale beats edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: original })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'So sorry about that — someone will follow up within the hour. Thank you!' })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: DAY })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: NIGHT })).toBe('sla_phrase_stale');
+  });
+  test('no recorded promise, or no original body known → never edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: { intended_actions: [] }, originalBody: original, body: 'within 60 minutes' })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: null, body: 'within 60 minutes' })).toBe(false);
+  });
+});

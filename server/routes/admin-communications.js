@@ -233,11 +233,29 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // fresh look, not a silent substitution.
     // Scoped to drafts that recorded an escalation (Codex r5): the phrases
     // are ordinary English, so wording alone never refuses a send.
-    const { followupPromiseIsStale } = require('../services/sms-followup-sla');
-    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version, body: outgoingBody })) {
-      logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
+    const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
+    const followupBlock = followupPromiseBlockReason({
+      inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version,
+      originalBody: decision.suggested_message, body: outgoingBody,
+    });
+    if (followupBlock) {
+      logger.info(`[agent-review] decision ${decision.id} follow-up promise unsendable (${followupBlock}) — refusing send`);
       await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       return null;
+    }
+    // Amount revalidation at the IMMEDIATE send (PR #5119 follow-up #2):
+    // a real-answers card may carry exact balance/invoice/dues figures and
+    // can wait through a payment; the scheduler already re-reads billing at
+    // fire time, so the same shared check runs here for real-answers
+    // decisions. Older-prompt decisions are untouched.
+    if (typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12') && decision.customer_id) {
+      const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+      const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody });
+      if (amounts.stale) {
+        logger.info(`[agent-review] decision ${decision.id} amount no longer authorized (${amounts.reason}) — refusing send`);
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+        return null;
+      }
     }
     return decision;
   } catch (verifyErr) {
