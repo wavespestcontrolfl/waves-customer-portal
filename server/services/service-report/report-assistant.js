@@ -79,9 +79,10 @@ const WATERING_REQUEST_RE = new RegExp(
 // irrigation to twice this week", "Water deeply before noon", "Avoid
 // overwatering"), including controller language with no watering noun ("Run
 // each zone for 20 minutes", "Add another cycle this week", "Resume the
-// normal schedule tomorrow"). Standing or pooling water, water damage and a
-// pest's life cycle are not watering changes.
-const WATERING_RECOMMENDATION_RE = /(?<!\b(?:standing|pooling|pooled|surface)\s)\b(?:(?:over|under)-?)?(?:water(?:ing|ed|s)?|irrigat\w*|sprinklers?|run\s?times?)\b(?!\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?)\b)|\bzones?\b|(?<!\blife\s)\bcycles?\b|\b(?:normal|regular|usual|weekly)\s+schedule\b|\b(?:controller|timer|rain\s+sensor)s?\b/i;
+// normal schedule tomorrow"). A zone or cycle counts only in that controller
+// sense, so "Treat the weed zone" or a pest's life cycle stays. Standing or
+// pooling water and water damage are not watering changes either.
+const WATERING_RECOMMENDATION_RE = /(?<!\b(?:standing|pooling|pooled|surface)\s)\b(?:(?:over|under)-?)?(?:water(?:ing|ed|s)?|irrigat\w*|sprinklers?|run\s?times?)\b(?!\s+(?:damage|stains?|meters?|leaks?|bills?|pooling|puddles?)\b)|\b(?:run|water|each|every|per|all)\s+(?:(?:the|each|every|your)\s+)?zones?\b|\bzones?\b[^.;]{0,24}\bmin(?:ute)?s?\b|\b(?:another|extra|additional|one|two|second|irrigation|watering|sprinkler)\s+cycles?\b|\b(?:normal|regular|usual|weekly)\s+schedule\b|\b(?:controller|timer|rain\s+sensor)s?\b/i;
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they

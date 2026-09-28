@@ -414,9 +414,11 @@ describe('watering questions answer with the weekly plan when the report carries
     const answer = answerServiceReportQuestion({ question: 'What should I do next?', data });
     expect(answer).not.toMatch(/each zone|another cycle|normal schedule/);
     expect(answer).toContain('Keep mowing at 3.5 inches.');
-    // A pest's life cycle is not a watering directive.
-    const pest = { ...withAftercare(HELD, 'recommendation'), recommendations: ['A second visit breaks the flea life cycle.'] };
-    expect(answerServiceReportQuestion({ question: 'What should I do next?', data: pest })).toContain('flea life cycle');
+    // A zone or cycle outside the controller sense is not a watering directive.
+    for (const keep of ['A second visit breaks the flea life cycle.', 'Treat the weed zone by the fence.', 'Mow on a 5-day cycle.', 'Resume your normal mowing schedule.']) {
+      const other = { ...withAftercare(HELD, 'recommendation'), recommendations: [keep] };
+      expect(answerServiceReportQuestion({ question: 'What should I do next?', data: other })).toContain(keep);
+    }
   });
 
   test.each([
