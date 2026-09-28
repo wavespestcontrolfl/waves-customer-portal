@@ -306,12 +306,7 @@ function extractedEventDedupKeys(title, start, urlKey) {
   const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
   const legacyStartKey = start ? start.toISOString() : '';
   const legacyExternalId = `${titleKey}|${legacyStartKey}|${urlKey}`.slice(0, 256);
-  // Pre-fix rows extracted from a naive time were stored with the ET wall
-  // clock read as UTC (e.g. 7:30 PM ET -> 19:30Z), so their legacy key embeds
-  // that shifted instant, not the corrected one.
-  const tzDroppedStartKey = start ? `${etDateString(start)}T${etWallClockHHMM(start)}:00.000Z` : '';
-  const tzDroppedExternalId = `${titleKey}|${tzDroppedStartKey}|${urlKey}`.slice(0, 256);
-  return { externalId, legacyExternalId, tzDroppedExternalId };
+  return { externalId, legacyExternalId };
 }
 
 // Allowlist URL protocols. RSS data is external/untrusted; rendering a
@@ -780,7 +775,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // don't have a UID/guid, so we key on the post-normalization fields.
   // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
   // "BOAT PARADE") doesn't create duplicates either.
-  const { externalId, legacyExternalId, tzDroppedExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
+  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -810,9 +805,6 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
       image_url: imageUrl,
     },
     legacyExternalId,
-    legacyExternalIds: [...new Set([legacyExternalId, tzDroppedExternalId])]
-      .filter((key) => key && key !== externalId),
-    tzDroppedExternalId: tzDroppedExternalId && tzDroppedExternalId !== externalId ? tzDroppedExternalId : null,
   };
 }
 
@@ -828,15 +820,13 @@ async function finalSurvivorId(id) {
   return null;
 }
 
-// Move an existing row stored under an older dedup-key shape onto the current
-// key, so this pull updates it instead of minting a duplicate. Two older
-// shapes exist: the full UTC instant (legacyExternalId) and that instant as
-// the pre-fix naive-time bug stored it (tzDroppedExternalId). When a row
-// already holds the current key (a rolling deploy, or a correct pull and a
-// timezone-dropped pull of the same event), the pair is merged instead:
+// Move an existing row stored under the older dedup-key shape (the full UTC
+// instant) onto the current key, so this pull updates it instead of minting a
+// duplicate. When a row already holds the current key (a rolling deploy), the
+// pair is merged instead:
 // pickSurvivor's featured > approved > pending precedence decides which row
 // lives, and a merged-away current-key row sends the legacy row to its final
-// survivor. The upsert that follows then writes the corrected start time.
+// survivor.
 async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
   const renamed = await db('events_raw')
     .where({ source_id: sourceId, external_id: legacyKey })
@@ -885,19 +875,17 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   let upserted = 0;
   let dropped = 0;
 
-  const normalizedEvents = claudeEvents.map((ev) => normalizeExtractedEvent(source, ev, nowMs, opts));
-  // Every legacy-shaped key this pull's own listings claim with their
-  // corrected times. A timezone-dropped key is ambiguous on its own (in EDT a
-  // 7 PM event's shifted key equals a real 3 PM showtime's correct key), so it
-  // is reconciled only when the page does NOT also list that showtime.
-  const listedLegacyKeys = new Set(normalizedEvents.filter(Boolean).map((n) => n.legacyExternalId));
-
-  for (const normalized of normalizedEvents) {
+  for (const ev of claudeEvents) {
+    const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row, legacyExternalIds, tzDroppedExternalId } = normalized;
-    for (const legacyKey of legacyExternalIds) {
-      if (legacyKey === tzDroppedExternalId && listedLegacyKeys.has(legacyKey)) continue;
-      await reconcileLegacyKey(source.id, row.external_id, legacyKey);
+    const { row, legacyExternalId } = normalized;
+    // Only the exact-instant legacy key is migrated automatically. Rows the
+    // pre-fix naive-time bug stored at a shifted instant are NOT matched: in
+    // EDT a 7 PM event's shifted key equals a real 3 PM showtime's correct
+    // key, so no single pull can prove which one a stored row is. Those rows
+    // are repaired once, by reviewed data cleanup.
+    if (legacyExternalId && legacyExternalId !== row.external_id) {
+      await reconcileLegacyKey(source.id, row.external_id, legacyExternalId);
     }
 
     await db('events_raw')

@@ -102,13 +102,6 @@ describe('extractedEventDedupKeys — stable dedup key across TZ-format drift', 
     expect(legacyExternalId).toBe(`boat parade|${start.toISOString()}|https://x.co/parade`);
   });
 
-  test('the timezone-dropped key reproduces how the pre-fix naive-time bug stored the instant', () => {
-    // 7:30 PM EDT is 23:30Z; the bug stored the naive "19:30" as 19:30Z.
-    const start = parseExtractedStartAt('2026-09-19T19:30:00-04:00');
-    const { tzDroppedExternalId } = extractedEventDedupKeys('Soccer Match', start, 'https://x.co/m');
-    expect(tzDroppedExternalId).toBe('soccer match|2026-09-19T19:30:00.000Z|https://x.co/m');
-  });
-
   test('a null start produces an empty startKey segment in both shapes (undated events)', () => {
     const { externalId, legacyExternalId } = extractedEventDedupKeys('Ongoing Market', null, '');
     expect(externalId).toBe('ongoing market||');

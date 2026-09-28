@@ -233,49 +233,6 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(await db('events_raw').where({ source_id: sourceId, title: otherTitle })).toHaveLength(1);
   });
 
-  test('a row stored at the old timezone-dropped time is updated in place to the corrected time', async () => {
-    const source = { id: sourceId, coverage_geo: [] };
-    const title = 'TEST Timezone Dropped Row';
-    const url = 'https://test.invalid/tz-dropped-row/';
-    const startIso = daysFromNowIso(36, 23); // 23:00Z = 7:00 PM EDT / 6:00 PM EST
-    const start = parseExtractedStartAt(startIso);
-    const { tzDroppedExternalId } = extractedEventDedupKeys(title, start, url);
-    const wrongStart = new Date(tzDroppedExternalId.split('|')[1]);
-    const [wrong] = await db('events_raw').insert({
-      source_id: sourceId, external_id: tzDroppedExternalId, title, start_at: wrongStart, event_url: url,
-    }).returning(['id']);
-    const wrongId = wrong.id || wrong;
-
-    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
-
-    const rows = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].id).toBe(wrongId);
-    expect(new Date(rows[0].start_at).toISOString()).toBe(start.toISOString());
-  });
-
-  test('a wrong-time copy next to a correct copy collapses to one live row at the corrected time', async () => {
-    const source = { id: sourceId, coverage_geo: [] };
-    const title = 'TEST Wrong And Right Copies';
-    const url = 'https://test.invalid/wrong-and-right-copies/';
-    const startIso = daysFromNowIso(37, 23);
-    const start = parseExtractedStartAt(startIso);
-    const { legacyExternalId, tzDroppedExternalId } = extractedEventDedupKeys(title, start, url);
-    await db('events_raw').insert({
-      source_id: sourceId, external_id: legacyExternalId, title, start_at: start, event_url: url,
-    });
-    await db('events_raw').insert({
-      source_id: sourceId, external_id: tzDroppedExternalId, title,
-      start_at: new Date(tzDroppedExternalId.split('|')[1]), event_url: url,
-    });
-
-    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url }]);
-
-    const live = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
-    expect(live).toHaveLength(1);
-    expect(new Date(live[0].start_at).toISOString()).toBe(start.toISOString());
-  });
-
   test('a legacy row follows a two-hop merge chain to the final survivor', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Two Hop Merge Chain';
@@ -308,7 +265,7 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(legacy.merged_into).toBe(finalId);
   });
 
-  test('a real matinee whose correct key equals the evening show\'s shifted key is left alone', async () => {
+  test('a real matinee whose correct key equals the evening show\'s shifted key is never touched, even when only the evening is pulled', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Matinee And Evening';
     const url = 'https://test.invalid/matinee-and-evening/';
@@ -316,27 +273,28 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     // UTC, which is exactly the matinee's correct instant on the same day.
     const eveningIso = daysFromNowIso(39, 23);
     const evening = parseExtractedStartAt(eveningIso);
-    const { tzDroppedExternalId } = extractedEventDedupKeys(title, evening, url);
-    const matineeIso = tzDroppedExternalId.split('|')[1];
+    // The pre-fix bug would have stored the evening at its ET wall clock read
+    // as UTC — which is exactly this matinee's correct instant.
+    const shifted = evening.toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T');
+    const matineeIso = `${shifted}Z`;
     const matinee = parseExtractedStartAt(matineeIso);
     const { legacyExternalId: matineeLegacyKey } = extractedEventDedupKeys(title, matinee, url);
-    expect(matineeLegacyKey).toBe(tzDroppedExternalId);
 
     const [matineeRow] = await db('events_raw').insert({
       source_id: sourceId, external_id: matineeLegacyKey, title, start_at: matinee, event_url: url,
     }).returning(['id']);
     const matineeId = matineeRow.id || matineeRow;
 
-    // Evening first: without the guard, its shifted key would grab the
-    // matinee row before the matinee listing is processed.
+    // Even when a pull returns only the evening show (a capped or partial
+    // extraction), the matinee row must not be matched or moved.
     await upsertExtractedEvents(source, [
       { title, startAt: eveningIso, eventUrl: url },
-      { title, startAt: matineeIso, eventUrl: url },
     ]);
 
     const live = await db('events_raw').where({ source_id: sourceId, title }).whereNull('merged_into');
     expect(live).toHaveLength(2);
     const kept = live.find((r) => r.id === matineeId);
+    expect(kept.external_id).toBe(matineeLegacyKey);
     expect(new Date(kept.start_at).toISOString()).toBe(matinee.toISOString());
   });
 
