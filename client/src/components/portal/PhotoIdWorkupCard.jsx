@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
 import Icon from '../Icon';
@@ -68,12 +69,17 @@ function ObservedSection({ observed }) {
 
 // Tapping a possibility opens a bottom sheet with its `what_it_means` —
 // same modal mechanics (focus trap + body scroll lock) as the parent
-// PhotoIdSheet; reference-counted, so nesting is safe.
+// PhotoIdSheet; reference-counted, so nesting is safe. Portaled to
+// document.body (codex round-0 P1): the parent PhotoIdSheet's own outer
+// scrim has `backdrop-filter`, which establishes a containing block for
+// `position: fixed` descendants — left un-portaled, this sheet would be
+// positioned within, and clipped/scrolled by, that ancestor instead of the
+// viewport (same pattern as ConsultationOutcomeSheet / ServiceRecapModal).
 function PossibilitySheet({ possibility, onClose }) {
   useLockBodyScroll(!!possibility);
   const dialogRef = useModalFocus(!!possibility, onClose);
   if (!possibility) return null;
-  return (
+  return createPortal((
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       data-glass-scrim=""
@@ -110,7 +116,7 @@ function PossibilitySheet({ possibility, onClose }) {
         )}
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 function PossibilityRow({ possibility, isLast, onOpen }) {
