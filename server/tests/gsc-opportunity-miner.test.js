@@ -3238,9 +3238,12 @@ describe('aeo_question_gap bucket', () => {
       expect(await miner.persistAll([decay], trx)).toBe(1);
       expect(queue[0]).toMatchObject({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit' });
       expect(upserts).toEqual([decay.dedupe_key]);
-      // A CLAIMED question write instead makes the incoming edit wait.
+      // A CLAIMED question write instead makes the incoming edit wait —
+      // with the mining gate OFF too: the gate stops new questions, not the
+      // protection of rows already queued.
       queue[0].status = 'claimed';
       upserts.length = 0;
+      delete process.env.GATE_AEO_QUESTION_GAP_MINING;
       expect(await miner.persistAll([decay], trx)).toBe(0);
       expect(upserts).toEqual([]);
       expect(queue[0].status).toBe('claimed');

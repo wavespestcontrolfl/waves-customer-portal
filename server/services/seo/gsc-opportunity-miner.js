@@ -4208,13 +4208,14 @@ class GscOpportunityMiner {
   //     re-read here (the mine-time fence ran before the transaction, so a
   //     same-route write committed since — another producer, or an
   //     overlapping mine's question — rejects them).
-  // Runs only while the bucket's gate is on, after _revalidateFamilyBatch
-  // took the page-edit advisory lock. The rows are read FOR UPDATE:
+  // Runs regardless of the mining gate — the gate stops NEW questions, but
+  // rows already queued keep their page protection — after
+  // _revalidateFamilyBatch took the page-edit advisory lock. The rows are
+  // read FOR UPDATE:
   // claimNext skips locked rows (SKIP LOCKED), so a pending row cannot be
   // claimed between this classification and its expiry.
   async _reconcileAeoQuestionPages(runner, arbitrated, opportunities = []) {
     const result = { busyPages: new Set(), rejectedKeys: new Set() };
-    if (!isEnabled('aeoQuestionGapMining')) return result;
     const incoming = opportunities.filter((o) => o.bucket === AEO_QUESTION_GAP_BUCKET);
     if (incoming.length) {
       const holders = await this._aeoQuestionPageFence(envIntAtLeast('AEO_QUESTION_GAP_COOLDOWN_DAYS', 28, 0), runner);
@@ -4223,12 +4224,26 @@ class GscOpportunityMiner {
         if (keys && [...keys].some((k) => k !== o.dedupe_key)) result.rejectedKeys.add(o.dedupe_key);
       }
     }
-    const rows = await runner('opportunity_queue')
-      .where({ bucket: AEO_QUESTION_GAP_BUCKET })
-      .whereIn('status', ['pending', 'claimed', 'pending_review'])
-      .whereNotNull('page_url')
-      .forUpdate()
-      .select('id', 'page_url', 'status');
+    // Only a non-question page edit in the batch can collide with queued
+    // question rows.
+    const otherPageEdits = opportunities.some((o) => o.bucket !== AEO_QUESTION_GAP_BUCKET && o.page_url
+      && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type));
+    if (!otherPageEdits) return result;
+    let rows;
+    try {
+      rows = await runner('opportunity_queue')
+        .where({ bucket: AEO_QUESTION_GAP_BUCKET })
+        .whereIn('status', ['pending', 'claimed', 'pending_review'])
+        .whereNotNull('page_url')
+        .forUpdate()
+        .select('id', 'page_url', 'status');
+    } catch (err) {
+      // Same posture as _arbitratedRefreshPages. Inside the persist
+      // transaction a failed read aborts it, so nothing persists unguarded;
+      // only a transaction-less caller proceeds without the protection.
+      logger.warn(`[gsc-opp-miner] aeo_question_gap reconciliation read failed: ${err.message}`);
+      return result;
+    }
     const busy = result.busyPages;
     const losers = [];
     for (const r of rows) {
