@@ -203,3 +203,19 @@ it('does not prompt under a picker that stays open on a visible page (iPad popov
   await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
   expect(authenticateBiometric).toHaveBeenCalledTimes(2);
 });
+
+it('runs the deferred Face ID prompt when a picker never reports back', async () => {
+  await renderUnlocked();
+  vi.useFakeTimers();
+  try {
+    fireEvent.click(screen.getByTestId('camera')); // older iOS: no cancel will come
+    appState(false);
+    appState(true);
+    expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+    await act(async () => { vi.advanceTimersByTime(3 * 60 * 1000 + 100); });
+    expect(authenticateBiometric).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});

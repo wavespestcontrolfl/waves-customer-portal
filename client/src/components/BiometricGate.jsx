@@ -167,11 +167,18 @@ export default function BiometricGate({ children }) {
     };
     document.addEventListener('visibilitychange', onVisibility);
     const isFileInput = (el) => el?.tagName === 'INPUT' && el.type === 'file';
-    const pickerOpened = () => { pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS; };
+    // Older iOS sends no `cancel`: when the cap lapses, run any deferred prompt.
+    let graceTimer = null;
+    const pickerOpened = () => {
+      pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS;
+      clearTimeout(graceTimer);
+      graceTimer = setTimeout(unlockAfterPicker, PICKER_GRACE_MS + 50);
+    };
     // A pick/cancel can land while the sheet is still hiding the page: the deferred
     // unlock then waits for the page to become visible.
     const pickerDone = () => {
       pickerOpenUntilRef.current = 0;
+      clearTimeout(graceTimer);
       unlockAfterPicker();
     };
     const onPickerOpen = (e) => { if (isFileInput(e.target)) pickerOpened(); };
@@ -214,6 +221,7 @@ export default function BiometricGate({ children }) {
       document.removeEventListener('change', onPickerDone, true);
       document.removeEventListener('cancel', onPickerDone, true);
       document.removeEventListener(NATIVE_PICKER_EVENT, onNativePicker);
+      clearTimeout(graceTimer);
       try { listener?.remove?.(); } catch { /* noop */ }
     };
   }, [attempt]);
