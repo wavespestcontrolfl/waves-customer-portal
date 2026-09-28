@@ -2883,6 +2883,10 @@ describe('owner competitor list', () => {
     expect(gate.evaluate({ body: T(['What to weigh', 'Orkin (national)', 'Local SWFL company', 'Waves']), title: 'x' }, OPTS).namedCompetitors).toEqual(['Orkin']);
     // A pure category table names no provider at all.
     expect(gate.evaluate({ body: T(['What to weigh', 'National chain', 'Local SWFL company', 'DIY']), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+    // Recognized category columns beside Waves stay categories (pre-push r10).
+    for (const cols of [['What to weigh', 'Waves', 'DIY'], ['What to weigh', 'Waves', 'National Chain', 'Local Company'], ['What to weigh', 'Waves', 'Professional Pest Control'], ['What to weigh', 'Waves', 'Do-It-Yourself']]) {
+      expect(gate.evaluate({ body: T(cols), title: 'x' }, OPTS).namedCompetitors).toEqual([]);
+    }
   });
 
   test('a verdict without recorded names fails closed', () => {
