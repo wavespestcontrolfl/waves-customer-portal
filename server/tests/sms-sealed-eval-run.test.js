@@ -8,6 +8,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocked: true })));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
+  // This file never manipulates GATE_SMS_REAL_ANSWERS — currentPromptVersion()
+  // is what createExamRun/resume/summary actually call now, so it must match
+  // PROMPT_VERSION here for every existing "same version" fixture to hold.
+  currentPromptVersion: jest.fn(() => 'house_voice_v9_test'),
   generateGroundedDraft: jest.fn(),
   // effective profile = none unless a test overrides — keeps the pin inert
   resolveEffectiveVoiceProfile: jest.fn(async () => null),
@@ -159,6 +163,11 @@ const goodDraft = (reply = 'Happy to check on that for you!') => ({
   passes: 1,
   converged: true,
   model: 'test-model',
+  // Matches the mocked PROMPT_VERSION/currentPromptVersion() above — every
+  // run fixture actually reaching examOneItem in this file is pinned to
+  // 'house_voice_v9_test', so this must agree or the new prompt-version
+  // mismatch guard (pre-push audit P1) would refuse every item.
+  promptVersion: 'house_voice_v9_test',
 });
 
 const judgment = (verdict, scores) => ({
@@ -231,6 +240,25 @@ describe('createExamRun — guards and stamps', () => {
     expect(run.voice_profile_version).toBeNull(); // effective profile = none in the default mock
   });
 
+  test('stamps currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit P1)', async () => {
+    // Prove the create path reads the DYNAMIC resolver, not the frozen
+    // constant: point currentPromptVersion() at a different value than
+    // PROMPT_VERSION and confirm the run stamps (and baselines against)
+    // the DYNAMIC one — exactly what happens for real once
+    // GATE_SMS_REAL_ANSWERS flips PROMPT_VERSION and currentPromptVersion()
+    // apart.
+    drafter.currentPromptVersion.mockReturnValueOnce('house_voice_v12_real_answers');
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r-v11', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' }],
+      items: [item('i1')],
+    });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
+    expect(run.prompt_version).toBe('house_voice_v12_real_answers');
+    // the v9_test run is a DIFFERENT version from the dynamic current one,
+    // so it's a valid default baseline
+    expect(run.baseline_run_id).toBe('r-v11');
+  });
+
   test('stamps the EFFECTIVE voice-profile version at creation (Codex r2 pin)', async () => {
     drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 4, profile_text: 'Warm.' });
     const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
@@ -283,6 +311,37 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
     expect(out.status).toBe('failed');
     // no result row was recorded under the phantom profile
     expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('a run whose draft used a DIFFERENT prompt version than the run is pinned to fails instead of mixing evidence (pre-push audit P1)', async () => {
+    // Same "static per run" contract as the voice-profile pin above, but for
+    // the prompt version itself: generateGroundedDraft reads
+    // GATE_SMS_REAL_ANSWERS live on every call, so a gate flip mid-sitting
+    // could otherwise draft a later item under a version the run's own
+    // prompt_version column disagrees with — mixing v11 and v12 evidence
+    // inside one run.
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test' }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), promptVersion: 'house_voice_v12_real_answers' });
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    // no result row was recorded under the mismatched version
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('a run whose draft used the SAME prompt version as the run completes normally', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test' }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(1);
   });
 
   test('createExamRun refuses when the effective profile moved past the caller\'s expected pin (codex r4 sweep freeze)', async () => {

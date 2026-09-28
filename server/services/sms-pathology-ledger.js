@@ -329,7 +329,12 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
     client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   const { createDeepMessage } = require('./llm/deep');
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): this labels the drafter version IN THE PROPOSER'S OWN PROMPT
+  // ("drafter version ${currentVersion}") and later filters evidence rows
+  // by it — both are "what's live now" questions, and PROMPT_VERSION never
+  // moves once GATE_SMS_REAL_ANSWERS goes live.
+  const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
 
   let proposed = 0;
   for (const cell of eligible) {
@@ -425,7 +430,11 @@ async function proposePatches({ dbi = db, anthropicClient, minEvidence = PROPOSA
  * version), recent entry summaries, pending proposals.
  */
 async function getPathologySummary({ dbi = db } = {}) {
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): "current drafter version" per the docstring above means whichever
+  // prompt is ACTUALLY live, so this dashboard readout tracks a real-
+  // answers gate flip instead of reporting v11 forever.
+  const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
   const [cells, recent, pendingProposals, acceptedProposals] = await Promise.all([
     dbi('sms_pathology_entries')
       .groupBy('surface', 'failure_mode')

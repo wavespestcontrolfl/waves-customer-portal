@@ -185,6 +185,10 @@ describe('sms gratitude qualification', () => {
     expect(store.rows[0]).not.toHaveProperty('suggested_message');
     expect(snapshot(store.rows[0]).pins).toMatchObject({
       policyVersion: 'gratitude_v1',
+      // Gate off (default here): currentPromptVersion() === PROMPT_VERSION
+      // (pre-push audit P1) — see the dedicated boundary test below for the
+      // gate-on case.
+      promptVersion: 'house_voice_v11',
       fixtureSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sourceFiles: expect.arrayContaining(['server/services/sms-gratitude-grading.js']),
@@ -835,6 +839,12 @@ describe('sms gratitude qualification', () => {
       const afterHoursPins = snapshot(afterHoursStore.rows[0]).pins;
       expect(inHoursPins.systemPromptSha256).toMatch(/^[a-f0-9]{64}$/);
       expect(inHoursPins.systemPromptSha256).toBe(afterHoursPins.systemPromptSha256);
+      // The pins.promptVersion LABEL must agree with the gate too (pre-push
+      // audit P1, second finding): it comes from currentPromptVersion(),
+      // not the static PROMPT_VERSION, which never moves once the gate goes
+      // live and would otherwise stamp every pin "v11" forever.
+      expect(inHoursPins.promptVersion).toBe('house_voice_v12_real_answers');
+      expect(afterHoursPins.promptVersion).toBe('house_voice_v12_real_answers');
     } finally {
       Date.now = realNow;
       if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;

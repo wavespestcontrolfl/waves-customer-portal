@@ -621,7 +621,7 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -644,7 +644,13 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
       return null;
     }
-    return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
+    // The version THIS draft actually used (pre-push audit P1) — resolved
+    // per call inside generateGroundedDraft off the ACTUAL gate state, not
+    // the static drafter.PROMPT_VERSION (which stays house_voice_v11
+    // forever once GATE_SMS_REAL_ANSWERS goes live). Persisted onto
+    // agent_decisions.prompt_version below (processInboundSms), so this
+    // must record what generated THIS row, not a label that never moves.
+    return { reply: parsed.reply, model, promptVersion, passes };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
     return null;

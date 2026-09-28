@@ -120,6 +120,10 @@ describe('processInboundSms — grounded LLM review draft', () => {
       passes: 2,
       converged: true,
       model: MODELS.OPENAI_SMS_DRAFT,
+      // The version THIS draft actually used (pre-push audit P1) —
+      // generateLlmReviewDraft now persists this per-draft value instead of
+      // the static drafter.PROMPT_VERSION.
+      promptVersion: 'house_voice_v8',
     });
 
     const row = await processInboundSms({
@@ -149,6 +153,31 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
+  });
+
+  test('persists the PER-DRAFT promptVersion generateGroundedDraft actually returned, not a hardcoded constant (pre-push audit P1)', async () => {
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help — here is what I have.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      // A value the mocked drafter.PROMPT_VERSION ('house_voice_v8' in this
+      // file's module mock) does NOT match — proves the persisted value
+      // came from THIS call's own result, never the static import.
+      promptVersion: 'house_voice_v12_real_answers',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'Hello what happened this morning',
+      smsLogId: 'sms-in-9',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.prompt_version).toBe('house_voice_v12_real_answers');
   });
 
   test('LLM failure falls back to the deterministic template', async () => {

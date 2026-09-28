@@ -124,6 +124,33 @@ describe('proposePatches — threshold + cap + ordering', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toMatch(/facts_block_gap/);
   });
 
+  test('the proposer prompt names the LIVE drafter version via currentPromptVersion(), not the frozen PROMPT_VERSION (pre-push audit P1)', async () => {
+    const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      const offDbi = makeProposerDb({
+        cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }],
+        entries: entryRows,
+      });
+      await proposePatches({ dbi: offDbi, anthropicClient: {} });
+      const offPrompt = createDeepMessage.mock.calls[0][1].messages[0].content;
+      expect(offPrompt).toContain('drafter version house_voice_v11');
+
+      createDeepMessage.mockClear();
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      const onDbi = makeProposerDb({
+        cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }],
+        entries: entryRows,
+      });
+      await proposePatches({ dbi: onDbi, anthropicClient: {} });
+      const onPrompt = createDeepMessage.mock.calls[0][1].messages[0].content;
+      expect(onPrompt).toContain('drafter version house_voice_v12_real_answers');
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    }
+  });
+
   test('repeat proposals fetch only evidence classified after the last proposal (fresh cohort)', async () => {
     const dbi = makeProposerDb({
       cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '6', last_proposed_at: '2026-07-11T00:00:00Z' }],

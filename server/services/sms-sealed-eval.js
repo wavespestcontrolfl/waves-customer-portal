@@ -301,7 +301,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   const judge = require('./sms-shadow-judge');
 
   const intent = { intent: item.intent || 'GENERAL' };
-  const { parsed, passes, converged, model, voiceProfileVersion } = await drafter.generateGroundedDraft({
+  const { parsed, passes, converged, model, voiceProfileVersion, promptVersion } = await drafter.generateGroundedDraft({
     client,
     inboundMessage: item.inbound_message,
     intent,
@@ -322,6 +322,20 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // text is static per run, so this fails the sitting fast rather than mixing.
   if ((voiceProfileVersion ?? null) !== (run.voice_profile_version ?? null)) {
     logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under profile ${voiceProfileVersion ?? 'none'} but run ${String(run.id).slice(0, 8)} is pinned to ${run.voice_profile_version ?? 'none'} — refusing result`);
+    return false;
+  }
+  // Same "static per run" rule, for the prompt version itself (pre-push
+  // audit P1): generateGroundedDraft reads GATE_SMS_REAL_ANSWERS LIVE on
+  // every call, so a gate flip mid-sitting (rare, but the createExamRun/
+  // resume guards above already treat it as a real event) could otherwise
+  // draft a later item under a DIFFERENT version than the run's own stamped
+  // `prompt_version` — mixing v11 and v12 evidence inside one run, which is
+  // exactly "counting an exam pass as evidence for the wrong version," just
+  // at the per-item grain instead of the whole-run grain. Refuse rather
+  // than record a mismatched result; the item stays pending for a resume,
+  // which (via the same guard) retires the run instead of continuing to mix.
+  if (promptVersion !== run.prompt_version) {
+    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under prompt ${promptVersion} but run ${String(run.id).slice(0, 8)} is pinned to ${run.prompt_version} — refusing result`);
     return false;
   }
 
@@ -439,7 +453,11 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 
 /**
  * Create one exam-run row (no processing). Stamps the RUNNING drafter's
- * PROMPT_VERSION — an exam always examines the code that is live; "comparing
+ * EFFECTIVE prompt version (currentPromptVersion(), not the static
+ * PROMPT_VERSION — see that function's own comment: PROMPT_VERSION stays
+ * house_voice_v11 forever once GATE_SMS_REAL_ANSWERS goes live, so pinning
+ * to it would stamp every run "v11" even while the drafter is actually
+ * examining v12) — an exam always examines the code that is live; "comparing
  * versions" means comparing two runs recorded before and after a prompt
  * bump, on the same frozen items. Refuses while any run is status='running':
  * exam processing is serialized behind one advisory lock, so a second row
@@ -449,6 +467,10 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
   if (!EXAM_LEG_ROUTES[providerLeg]) throw new Error(`unknown sealed-eval provider leg: ${providerLeg}`);
   const drafter = require('./sms-shadow-drafter');
+  // The version THIS run examines — currentPromptVersion(), not the static
+  // PROMPT_VERSION (see the docstring above and currentPromptVersion's own
+  // comment in sms-shadow-drafter.js).
+  const currentVersion = drafter.currentPromptVersion();
 
   const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id', 'provider_leg');
   if (inFlight) {
@@ -488,7 +510,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
-      .whereNot('prompt_version', drafter.PROMPT_VERSION)
+      .whereNot('prompt_version', currentVersion)
       .orderBy('started_at', 'desc')
       .first('id');
     baseline = prior?.id || null;
@@ -514,7 +536,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
-        prompt_version: drafter.PROMPT_VERSION,
+        prompt_version: currentVersion,
         provider_leg: providerLeg,
         status: 'running',
         items_total: Number(activeCount),
@@ -661,9 +683,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       throw new Error(`sealed-eval run ${runId} is ${run.status}, not resumable`);
     }
     // A run only ever contains ONE drafter version. Resuming after a prompt
-    // bump would draft the remaining items under the NEW code and record
-    // them beneath the old label — refuse and start a fresh run instead.
-    const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+    // bump — OR a GATE_SMS_REAL_ANSWERS flip, which currentPromptVersion()
+    // reflects the same way a code-level bump would — would draft the
+    // remaining items under the NEW version and record them beneath the old
+    // label; refuse and start a fresh run instead.
+    const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
     if (run.prompt_version !== currentVersion) {
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
@@ -877,7 +901,12 @@ function shapeRun(run) {
  */
 async function getSealedExamSummary({ dbi = db } = {}) {
   const drafter = require('./sms-shadow-drafter');
-  const currentVersion = drafter.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): the headline run this function picks out per leg — the one
+  // evaluateExamGate accepts as GRAD_REQUIRE_SEALED_EXAM evidence — must
+  // match whichever prompt is ACTUALLY live, or a stale v11 run would keep
+  // satisfying the gate forever after GATE_SMS_REAL_ANSWERS flips to v12.
+  const currentVersion = drafter.currentPromptVersion();
   // Voice-profile pin (Codex r2): a leg's HEADLINE run — the one
   // evaluateExamGate accepts and the auto-sweep short-circuits on — must
   // have been drafted under the CURRENTLY effective profile, not merely the
@@ -987,7 +1016,12 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
   const drafterMod = require('./sms-shadow-drafter');
-  const currentVersion = drafterMod.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): with it pinned to v11, this sweep would keep confirming v11 is
+  // "already examined" forever and never create a v12 exam once
+  // GATE_SMS_REAL_ANSWERS goes live — the live version would simply never
+  // get swept.
+  const currentVersion = drafterMod.currentPromptVersion();
   // Profile-aware coverage (Codex r2): "already examined" means a complete
   // run under the current (version, effective-profile) pair — after a weekly
   // profile approval the sweep re-baselines both legs under the new profile,
