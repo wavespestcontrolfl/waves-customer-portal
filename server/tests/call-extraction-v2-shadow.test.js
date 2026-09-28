@@ -102,8 +102,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v13');
-    expect(PROMPT_HASH).toMatch(/^v13-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v14');
+    expect(PROMPT_HASH).toMatch(/^v14-[a-f0-9]{12}$/);
   });
 
   test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
@@ -115,6 +115,17 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('scheduling.caller_accepted_slot (when true');
     expect(prompt).toContain('ONE speaker\'s words from ONE turn');
     expect(prompt).toContain('quote only the words that state the agreed day and time');
+  });
+
+  test('includes the agreed-slot and moved-appointment verbatim-words rules (schema 1.17.0)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('agreed_slot_words: set ONLY when confirmed_start_at is set');
+    expect(prompt).toContain('only the hour, no minutes, no AM/PM');
+    expect(prompt).toContain('never take a part of the day that describes the OLD appointment');
+    expect(prompt).toContain('null for noon/midnight');
+    expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
+    expect(prompt).toContain('null whenever moved_appointment_date is null');
+    expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -274,7 +285,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.16.0');
+    expect(SCHEMA_VERSION).toBe('1.17.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
