@@ -103,12 +103,13 @@ const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-ga
 const getGithubClient = lazy('github-client', '../content-astro/github-client');
 
 // Bounds for the session-level page-edit lock held across a citability
-// publish. Waiting past ACQUIRE fails closed (PAGE_EDIT_OWNERSHIP_LOST);
-// GitHub calls inside the locked section stop at HOLD so a hung request
-// cannot keep every page-edit producer waiting.
+// refresh's GitHub write phase. Waiting past ACQUIRE fails closed
+// (PAGE_EDIT_OWNERSHIP_LOST); GitHub calls inside the locked section stop at
+// HOLD so a hung request cannot keep every page-edit producer waiting. A
+// write cut off at HOLD is reconciled by the publisher before any retry.
 const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
 const PAGE_EDIT_LOCK_POLL_MS = 250;
-const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 10 * 60_000;
+const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
 
 async function releasePageEditLockConnection(lockConn, unlockError) {
   // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
@@ -1429,6 +1430,18 @@ class AutonomousRunner {
         await this._skipClaimOrThrow(queue, opp.id, 'superseded_by_ordinary_page_edit', { claimToken });
         return finalized;
       }
+      if (err.code === 'REFRESH_PUBLISH_UNRECONCILED') {
+        // A timed-out GitHub write may have landed and could not be ruled out.
+        // Never retry into a duplicate PR: park it for a person to check.
+        const finalized = await finalize(run, t0, {
+          outcome: 'completed_pending_review',
+          skip_reason: 'refresh_publish_unreconciled',
+          failure_message: err.message,
+          reviewer_notes: `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`,
+        });
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'refresh_publish_unreconciled', { claimToken }, err);
+        return finalized;
+      }
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
@@ -1674,6 +1687,30 @@ class AutonomousRunner {
       try { await lockConn.query('SELECT pg_advisory_unlock($1)', [ENGINE_PUBLISH_LOCK_KEY]); }
       catch (err) { logger.warn(`[autonomous-runner] ${label}: advisory unlock failed (${err.message}); lock auto-clears on session end`); }
       try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    }
+  }
+
+  // Under the page-edit lock: the backfill must still hold its queue claim
+  // and must not have been superseded by an ordinary page edit.
+  async _assertBackfillPageOwnership(lockConn, run) {
+    let ownership = db('opportunity_queue')
+      .connection(lockConn)
+      .where('id', run.opportunity_id)
+      .where('status', 'claimed')
+      .where('claimed_at', run.queue_claimed_at);
+    ownership = run.queue_claim_id == null
+      ? ownership.whereNull('claim_id')
+      : ownership.where('claim_id', run.queue_claim_id);
+    const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+    if (!locked || locked.bucket !== 'citability_backfill') {
+      const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
+      err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+      throw err;
+    }
+    if (pageEditSuperseded(locked)) {
+      const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
+      err.code = 'PAGE_EDIT_SUPERSEDED';
+      throw err;
     }
   }
 
@@ -4125,35 +4162,26 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const publish = () => usePublish(draft, brief, { humanApproved });
+      const publish = (opts = {}) => usePublish(draft, brief, { humanApproved, ...opts });
       // Serialize the last ownership read with ordinary page-edit producers.
       // If an ordinary enqueue won while the lane was off, its marker is
       // visible here before any branch/commit/PR side effect. If this worker
       // wins while the lane is open, producers re-read the active reservation
-      // after the lock and yield to it.
-      const r = latestOpportunity?.bucket === 'citability_backfill'
-        ? await this._withPageEditLock(async (lockConn) => {
-          let ownership = db('opportunity_queue')
-            .connection(lockConn)
-            .where('id', run.opportunity_id)
-            .where('status', 'claimed')
-            .where('claimed_at', run.queue_claimed_at);
-          ownership = run.queue_claim_id == null
-            ? ownership.whereNull('claim_id')
-            : ownership.where('claim_id', run.queue_claim_id);
-          const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
-          if (!locked || locked.bucket !== 'citability_backfill') {
-            const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
-            err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
-            throw err;
-          }
-          if (pageEditSuperseded(locked)) {
-            const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
-            err.code = 'PAGE_EDIT_SUPERSEDED';
-            throw err;
-          }
-          return publish();
-        })
+      // after the lock and yield to it. publishRefresh runs only its GitHub
+      // write phase under the guard, so validation and image generation never
+      // hold the page-edit lock.
+      const ownedWrite = (write) => this._withPageEditLock(async (lockConn) => {
+        await this._assertBackfillPageOwnership(lockConn, run);
+        return write();
+      });
+      const backfill = latestOpportunity?.bucket === 'citability_backfill';
+      if (backfill && !(brief.action_type === 'refresh_existing_page' && publisher?.publishRefresh)) {
+        const err = new Error('Citability backfill can only publish through publishRefresh, which honors the page-edit guard');
+        err.code = 'CITABILITY_BACKFILL_NOT_REFRESH';
+        throw err;
+      }
+      const r = backfill
+        ? await publish({ commitGuard: ownedWrite })
         : await publish();
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
@@ -4737,6 +4765,9 @@ function countsTowardTrustBuild(row) {
 
 function isDeterministicPublishError(err) {
   if (err?.code === 'BLOG_FRONTMATTER_INVALID') return true;
+  // A backfill row routed to a publisher that cannot take the page-edit guard
+  // would write without owning the page; retrying cannot change the route.
+  if (err?.code === 'CITABILITY_BACKFILL_NOT_REFRESH') return true;
   // Fact-check P0/P1 is edit-required: the content must change, so park it for
   // review instead of releasing the claim and retrying the same unpublishable
   // draft. (Guardrails don't run on the autonomous publish path, so the

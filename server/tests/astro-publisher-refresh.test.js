@@ -14,6 +14,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
   deleteRef: jest.fn(),
+  findOpenPrByHead: jest.fn(),
+  retireBranch: jest.fn(),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -146,6 +148,80 @@ describe('publishRefresh frontmatter freeze', () => {
     } finally {
       gates.citabilityBackfill = previous;
     }
+  });
+
+  describe('commitGuard and timed-out writes', () => {
+    const deadline = () => Object.assign(new Error('GitHub POST x → request deadline exceeded (timeout)'), { code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+
+    test('the guard wraps only the GitHub write phase, after every pre-commit check', async () => {
+      const events = [];
+      businessNameConfirmer.extractCompanyNames.mockImplementation(async () => {
+        events.push('owner_list_check');
+        return { ok: true, key: 'k', companies: [] };
+      });
+      gh.createBranch.mockImplementation(async () => { events.push('createBranch'); return {}; });
+      gh.createPr.mockImplementation(async () => {
+        events.push('createPr');
+        return { number: 77, html_url: 'https://github.com/x/y/pull/77', head: { sha: 'h' } };
+      });
+      const commitGuard = jest.fn(async (write) => {
+        events.push('guard_enter');
+        const out = await write();
+        events.push('guard_exit');
+        return out;
+      });
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF, { commitGuard })).resolves.toMatchObject({ status: 'pr_open' });
+      expect(commitGuard).toHaveBeenCalledTimes(1);
+      expect(events).toEqual(['owner_list_check', 'guard_enter', 'createBranch', 'createPr', 'guard_exit']);
+    });
+
+    test('a createPr that timed out but landed is recovered as this attempt\'s PR', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockResolvedValueOnce({ number: 88, html_url: 'https://github.com/x/y/pull/88', head: { sha: 'landed-sha' } });
+
+      const res = await pub.publishRefresh(refreshDraft(), BRIEF);
+      expect(res).toMatchObject({ status: 'pr_open', pr_number: 88, commit_sha: 'new-sha' });
+      expect(gh.findOpenPrByHead).toHaveBeenCalledWith(res.branch);
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+    });
+
+    test('with no PR and the branch provably gone, the deadline error surfaces for an ordinary retry', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockResolvedValueOnce(null);
+      gh.retireBranch.mockResolvedValueOnce(true);
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      expect(gh.retireBranch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a timed-out commit skips the PR lookup and retires the branch', async () => {
+      gh.putFile.mockRejectedValueOnce(deadline());
+      gh.retireBranch.mockResolvedValueOnce(true);
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'GITHUB_REQUEST_DEADLINE_EXCEEDED' });
+      expect(gh.findOpenPrByHead).not.toHaveBeenCalled();
+      expect(gh.createPr).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the PR lookup fails', () => gh.findOpenPrByHead.mockRejectedValueOnce(new Error('503'))],
+      ['the branch cannot be deleted', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockRejectedValueOnce(new Error('500')); }],
+      ['the branch survives deletion', () => { gh.findOpenPrByHead.mockResolvedValueOnce(null); gh.retireBranch.mockResolvedValueOnce(false); }],
+    ])('an unproven outcome is REFRESH_PUBLISH_UNRECONCILED when %s', async (_label, arrange) => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      arrange();
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({
+        code: 'REFRESH_PUBLISH_UNRECONCILED', branch: expect.stringMatching(/^content\/refresh-/),
+      });
+    });
+
+    test('a non-deadline write failure is not reconciled', async () => {
+      gh.createPr.mockRejectedValueOnce(Object.assign(new Error('GitHub POST → 422'), { status: 422 }));
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ status: 422 });
+      expect(gh.findOpenPrByHead).not.toHaveBeenCalled();
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+    });
   });
 
   // Refreshes auto-merge too, so the owner-list chokepoint runs on the final

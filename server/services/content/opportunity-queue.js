@@ -32,7 +32,7 @@ const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
 const RECONCILIATION_HOLD_REASONS = [
   'astro_pr_audit_failed', 'published_audit_failed',
   'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
-  'named_competitor_publish_interrupted',
+  'named_competitor_publish_interrupted', 'refresh_publish_unreconciled',
 ];
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.

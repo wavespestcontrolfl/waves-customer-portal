@@ -3806,7 +3806,39 @@ function assertRefreshLaneEnabled(brief) {
   }
 }
 
-async function publishRefresh(draft, brief = {}, { humanApproved = false } = {}) {
+// A refresh write that hit the caller's GitHub request deadline may still
+// have landed. Resolve it outside that deadline: a PR GitHub opened is this
+// attempt's PR; with no PR, a provably-deleted branch leaves nothing behind
+// and the ordinary retry is safe. Anything unproven is REFRESH_PUBLISH_UNRECONCILED
+// so the caller parks it for a person instead of retrying into a duplicate.
+async function reconcileTimedOutRefreshWrite(branch, { prCreateAttempted }, cause) {
+  const unreconciled = (why) => {
+    const err = new Error(`refresh write to ${branch} timed out and ${why}; check GitHub for this branch and any PR before retrying (${cause.message})`);
+    err.code = 'REFRESH_PUBLISH_UNRECONCILED';
+    err.branch = branch;
+    return err;
+  };
+  if (prCreateAttempted) {
+    let pr;
+    try { pr = await gh.findOpenPrByHead(branch); } catch (lookupErr) {
+      throw unreconciled(`the PR lookup failed (${lookupErr.message})`);
+    }
+    if (pr) {
+      logger.warn(`[astro-publisher] recovered refresh PR #${pr.number} for ${branch} after a timed-out write`);
+      // The branch name is this attempt's own random one, so its head is the
+      // commit this attempt wrote.
+      return { pr, fileCommit: pr.head?.sha ? { commit: { sha: pr.head.sha } } : null };
+    }
+  }
+  let gone = false;
+  try { gone = await gh.retireBranch(branch); } catch (cleanupErr) {
+    throw unreconciled(`the branch could not be deleted (${cleanupErr.message})`);
+  }
+  if (!gone) throw unreconciled('the branch still exists after deletion');
+  throw cause;
+}
+
+async function publishRefresh(draft, brief = {}, { humanApproved = false, commitGuard = null } = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
@@ -4022,65 +4054,86 @@ async function publishRefresh(draft, brief = {}, { humanApproved = false } = {})
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
-  assertRefreshLaneEnabled(brief);
-  await gh.createBranch(branch);
-  // Optimistic lock on the multi-file path: the tree write replaces paths
-  // unconditionally (no per-file SHA like putFile), and image generation
-  // ran BEFORE the branch was cut — a main-branch edit landing in between
-  // would be carried into the branch and silently overwritten by markdown
-  // diffed against the older read (then auto-merged). Re-read the target on
-  // the fresh branch and require the SHA the draft was diffed against; a
-  // mismatch is transient — the run retries against the new live content.
-  // The lock covers EVERY path the commit writes: the post must still carry
-  // the SHA it was diffed against, and each generated asset path (allocated
-  // as ABSENT from main — resolveBodyImages never overwrites a committed
-  // picture) must still be absent, or a concurrent write would be lost.
-  if (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
-    const conflicts = [];
-    const onBranch = await gh.getFile(filePath, branch);
-    if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
-    conflicts.push(...await bodyImageCommitConflicts(refreshImages, branch));
-    if (conflicts.length) {
-      // No PR references the branch yet — drop it, or every collision
-      // (the runner retries with a fresh shortId) leaves an orphan ref.
-      await dropUnreferencedBranch(branch, 'a refresh lock mismatch');
-      throw new Error(`refresh target changed since it was read on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+  // The GitHub write phase. A caller that must own the page while writing
+  // (the citability backfill's page-edit lock) wraps only this section, so
+  // the validation and image work above never holds that lock.
+  let branchCreateAttempted = false;
+  let prCreateAttempted = false;
+  let committed = null;
+  const writePhase = async () => {
+    assertRefreshLaneEnabled(brief);
+    branchCreateAttempted = true;
+    await gh.createBranch(branch);
+    // Optimistic lock on the multi-file path: the tree write replaces paths
+    // unconditionally (no per-file SHA like putFile), and image generation
+    // ran BEFORE the branch was cut — a main-branch edit landing in between
+    // would be carried into the branch and silently overwritten by markdown
+    // diffed against the older read (then auto-merged). Re-read the target on
+    // the fresh branch and require the SHA the draft was diffed against; a
+    // mismatch is transient — the run retries against the new live content.
+    // The lock covers EVERY path the commit writes: the post must still carry
+    // the SHA it was diffed against, and each generated asset path (allocated
+    // as ABSENT from main — resolveBodyImages never overwrites a committed
+    // picture) must still be absent, or a concurrent write would be lost.
+    if (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
+      const conflicts = [];
+      const onBranch = await gh.getFile(filePath, branch);
+      if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
+      conflicts.push(...await bodyImageCommitConflicts(refreshImages, branch));
+      if (conflicts.length) {
+        // No PR references the branch yet — drop it, or every collision
+        // (the runner retries with a fresh shortId) leaves an orphan ref.
+        await dropUnreferencedBranch(branch, 'a refresh lock mismatch');
+        throw new Error(`refresh target changed since it was read on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+      }
     }
-  }
-  // New image bytes ride the SAME commit as the post (atomic, like the
-  // autonomous lane); with nothing to add the single-file put stays.
-  try {
-    assertRefreshLaneEnabled(brief);
-  } catch (err) {
-    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
-    throw err;
-  }
-  const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
-    ? await gh.commitFiles({
-      branch,
-      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
-      files: [...refreshImages.files, { path: filePath, content: markdown }, ...editorialFiles],
-      deletes: refreshImages.deletes || [],
-    })
-    : await gh.putFile({
-      path: filePath,
-      content: markdown,
-      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
-      branch,
-      sha: existing.sha,
-    });
+    // New image bytes ride the SAME commit as the post (atomic, like the
+    // autonomous lane); with nothing to add the single-file put stays.
+    try {
+      assertRefreshLaneEnabled(brief);
+    } catch (err) {
+      await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+      throw err;
+    }
+    const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
+      ? await gh.commitFiles({
+        branch,
+        message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+        files: [...refreshImages.files, { path: filePath, content: markdown }, ...editorialFiles],
+        deletes: refreshImages.deletes || [],
+      })
+      : await gh.putFile({
+        path: filePath,
+        content: markdown,
+        message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+        branch,
+        sha: existing.sha,
+      });
 
+    try {
+      assertRefreshLaneEnabled(brief);
+    } catch (err) {
+      await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+      throw err;
+    }
+    committed = fileCommit;
+    prCreateAttempted = true;
+    const pr = await gh.createPr({
+      head: branch,
+      title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
+      body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }),
+    });
+    return { pr, fileCommit };
+  };
+  let written;
   try {
-    assertRefreshLaneEnabled(brief);
+    written = commitGuard ? await commitGuard(writePhase) : await writePhase();
   } catch (err) {
-    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
-    throw err;
+    if (err?.code !== 'GITHUB_REQUEST_DEADLINE_EXCEEDED' || !branchCreateAttempted) throw err;
+    const recovered = await reconcileTimedOutRefreshWrite(branch, { prCreateAttempted }, err);
+    written = { pr: recovered.pr, fileCommit: committed || recovered.fileCommit };
   }
-  const pr = await gh.createPr({
-    head: branch,
-    title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }),
-  });
+  const { pr, fileCommit } = written;
   await requestCodexReview({
     pr,
     headSha: pr.head?.sha || fileCommit?.commit?.sha,
