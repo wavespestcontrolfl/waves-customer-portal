@@ -105,8 +105,10 @@ const SHADOW_STATUS = 'shadow';
  * with the gate off; with it on, REAL_ANSWERS_PROMPT_VERSION, PLUS a suffix
  * naming every per-category gate (GATE_SMS_AGENT_COMPLAINTS/
  * _BILLING_DISPUTES/_CHEMICAL_MEDICAL/_LEGAL) that is ALSO on — e.g.
- * 'house_voice_v12_real_answers+billing_disputes,complaints' (sorted, so the
- * flip order never changes the identity). Pre-push audit P1 (round 2):
+ * 'house_voice_v12_real_answers+bc' for billing disputes + complaints
+ * (single-char tags, sorted, so the flip order never changes the identity —
+ * see the varchar(40) column-length note by REAL_ANSWERS_HANDOFF_CATEGORIES
+ * below for why they're single characters). Pre-push audit P1 (round 2):
  * flipping a category gate changes the RENDERED prompt (realAnswersHandoffBullets
  * moves that category off the HELD-FOR-A-PERSON list and swaps in its own
  * instruction) without this suffix, every category-gate combination would
@@ -126,15 +128,32 @@ const SHADOW_STATUS = 'shadow';
  * identical to PROMPT_VERSION, so today's call sites are unaffected either
  * way.
  */
+// prompt_version columns are varchar(40) (message_drafts, agent_decisions,
+// shadow_draft_judgments, sms_pathology_entries, sms_sealed_eval_runs) — a
+// Postgres insert/update THROWS past that, which would drop drafts and
+// break exam creation the moment a category gate joined the master one
+// (pre-push audit P1 round 3). No separator between tags (concatenated,
+// not joined by comma) keeps the worst case (all four) short; this bound
+// is enforced defensively below rather than trusted to stay true by eye.
+const PROMPT_VERSION_COLUMN_MAX = 40;
 function currentPromptVersion() {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return PROMPT_VERSION;
   const activeCategoryTags = REAL_ANSWERS_HANDOFF_CATEGORIES
     .filter((c) => gateEnvValue(c.gate))
     .map((c) => c.tag)
     .sort();
-  return activeCategoryTags.length
-    ? `${REAL_ANSWERS_PROMPT_VERSION}+${activeCategoryTags.join(',')}`
+  const version = activeCategoryTags.length
+    ? `${REAL_ANSWERS_PROMPT_VERSION}+${activeCategoryTags.join('')}`
     : REAL_ANSWERS_PROMPT_VERSION;
+  if (version.length > PROMPT_VERSION_COLUMN_MAX) {
+    // Fail closed to the bare identity rather than risk a DB write erroring
+    // out mid-draft — a truncated-to-the-wrong-thing label is a smaller
+    // problem than losing the draft entirely, and this can only happen if a
+    // future category tag is added without keeping it a single character.
+    logger.error(`[sms-shadow] currentPromptVersion() would exceed the varchar(${PROMPT_VERSION_COLUMN_MAX}) prompt_version columns (${version.length} chars: ${version}) — falling back to the bare identity`);
+    return REAL_ANSWERS_PROMPT_VERSION;
+  }
+  return version;
 }
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -164,12 +183,20 @@ const INTENDED_ACTION_TYPES = [
 // effective version string when a category gate is on (see below) — kept
 // separate from `label` (the human-readable prompt text) so a future
 // wording tweak to `label` can never silently change what graduation/
-// sealed-eval treat as "the same version".
+// sealed-eval treat as "the same version". Single characters ON PURPOSE
+// (pre-push audit P1 round 3): prompt_version is varchar(40) across
+// message_drafts, agent_decisions, shadow_draft_judgments,
+// sms_pathology_entries and sms_sealed_eval_runs, and REAL_ANSWERS_PROMPT_VERSION
+// alone is 28 chars — a full-word tag like 'billing_disputes' would already
+// overflow the column with just ONE category gate on. Concatenated with no
+// separator (currentPromptVersion() sorts them, so order is still
+// deterministic) every one of these codes must stay a single character, or
+// the worst case (all four gates on) must still fit in `28 + 1 + N` chars.
 const REAL_ANSWERS_HANDOFF_CATEGORIES = [
-  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'complaints' },
-  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'billing_disputes' },
-  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns', tag: 'chemical_medical' },
-  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats', tag: 'legal' },
+  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints', tag: 'c' },
+  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes', tag: 'b' },
+  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns', tag: 'm' },
+  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats', tag: 'l' },
 ];
 
 // 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads

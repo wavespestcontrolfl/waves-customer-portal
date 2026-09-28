@@ -233,22 +233,37 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     // genuinely different behaviors.
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
     const complaintsOnly = currentPromptVersion();
-    expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+complaints`);
+    // Single-char tags (pre-push audit P1 round 3): prompt_version is
+    // varchar(40) across message_drafts/agent_decisions/shadow_draft_
+    // judgments/sms_pathology_entries/sms_sealed_eval_runs, and the bare
+    // REAL_ANSWERS_PROMPT_VERSION is already 28 chars — a full-word tag
+    // would overflow the column with just one category gate on.
+    expect(complaintsOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+c`);
+    expect(complaintsOnly.length).toBeLessThanOrEqual(40);
 
     process.env.GATE_SMS_AGENT_BILLING_DISPUTES = 'true';
     const complaintsAndBilling = currentPromptVersion();
     // sorted, so flip ORDER never changes the identity
-    expect(complaintsAndBilling).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+billing_disputes,complaints`);
+    expect(complaintsAndBilling).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bc`);
     expect(complaintsAndBilling).not.toBe(complaintsOnly);
+    expect(complaintsAndBilling.length).toBeLessThanOrEqual(40);
 
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     const billingOnly = currentPromptVersion();
-    expect(billingOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+billing_disputes`);
+    expect(billingOnly).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+b`);
     expect(billingOnly).not.toBe(complaintsOnly);
     expect(billingOnly).not.toBe(complaintsAndBilling);
 
     delete process.env.GATE_SMS_AGENT_BILLING_DISPUTES;
     expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION); // back to the bare identity
+  });
+
+  test('the worst case (all four category gates on) still fits the varchar(40) prompt_version columns (pre-push audit P1 round 3)', () => {
+    for (const g of CATEGORY_GATES) process.env[g] = 'true';
+    const allFour = currentPromptVersion();
+    expect(allFour).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+bclm`);
+    expect(allFour.length).toBe(33);
+    expect(allFour.length).toBeLessThanOrEqual(40);
   });
 
   test('generateGroundedDraft stamps the SAME category-aware identity currentPromptVersion() would compute', async () => {
@@ -267,7 +282,7 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
       intent: { intent: 'GENERAL' }, schedulingIntent: false, voiceProfile: null,
     });
     expect(result.promptVersion).toBe(drafter.currentPromptVersion());
-    expect(result.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+legal`);
+    expect(result.promptVersion).toBe(`${REAL_ANSWERS_PROMPT_VERSION}+l`);
     delete process.env.SHADOW_DRAFT_VERIFY;
     jest.dontMock('../services/llm/call');
     jest.dontMock('@anthropic-ai/sdk');
