@@ -485,6 +485,42 @@ postgres('pending SMS conversation query (PostgreSQL)', () => {
     });
   });
 
+  test('a since window over the raw scans matches full history filtered to since', async () => {
+    const since = new Date('2026-09-25T12:00:00.000Z');
+    const at = (offsetMs) => { tick = new Date(since.getTime() + offsetMs); };
+    const hour = 60 * 60 * 1000;
+
+    at(-30 * hour); // Old unanswered question: before since, never counts.
+    await seed({ phone: '+19415550100', body: 'Old question?' });
+    at(-48 * hour); // Old STOP cannot suppress a question after since.
+    await seed({ phone: '+19415550105', body: 'STOP', messageType: 'opt_out' });
+    at(-2 * hour); // Pre-since outbound still gives a post-since closer its context.
+    await seed({ phone: '+19415550101', direction: 'outbound', body: 'The work is complete. Reply STOP to opt out.' });
+
+    at(1000);
+    await seed({ phone: '+19415550101', body: 'Thanks!' });
+    await seed({ phone: '+19415550102', body: 'Can you come Tuesday?' });
+    await seed({ phone: '+19415550102', direction: 'outbound', body: 'Yes, Tuesday works.' });
+    await seed({ phone: '+19415550104', body: 'Can you call me?' });
+    await seed({ phone: '+19415550104', body: 'STOP', messageType: 'opt_out' });
+    const afterOldStop = await seed({ phone: '+19415550105', body: 'Actually, can you come out?' });
+    const twin = await seed({ phone: '+19415550106', customerId: 'new', body: 'Thanks' });
+    await mockTrx('messages').where({ id: twin.messageId }).update({ twilio_sid: null, metadata: '{}' });
+    await mockTrx('sms_log').where({ id: twin.smsLogId })
+      .update({ twilio_sid: null, metadata: JSON.stringify({ courtesyOnly: true }) });
+    await seed({ phone: '+19415550107', body: 'Is the tech on the way?' });
+    const legacyReply = await seed({ phone: '+19415550107', direction: 'outbound', body: 'Yes, ten minutes.' });
+    await mockTrx('messages').where({ twilio_sid: legacyReply.sid }).del();
+    const plain = await seed({ phone: '+19415550108', body: 'What time tomorrow?' });
+
+    const ids = (rows) => rows.map((row) => row.id).sort();
+    const full = await loadPendingSmsConversations();
+    const bounded = await loadPendingSmsConversations({ since: since.toISOString() });
+    expect(ids(bounded)).toEqual(ids(full.filter((row) => new Date(row.created_at) >= since)));
+    expect(ids(bounded)).toEqual([afterOldStop.messageId, plain.messageId].sort());
+    expect(full).toHaveLength(3);
+  });
+
   test('planner materializes outbound history once', async () => {
     const conversations = [];
     const messages = [];
