@@ -7791,7 +7791,9 @@ async function sendExplicitPaymentReminderChannels({
 
   const { sendReminderChannels } = require('./billing-reminder-delivery');
   const source = 'annual_prepay_payment_reminder';
-  const eventKey = `annual-prepay-payment:${claimedTerm.id}:${daysOut}`;
+  // A moved first visit is a new promise. Its ledger episode must not count
+  // a leg that quoted the superseded visit date as already delivered.
+  const eventKey = `annual-prepay-payment:${claimedTerm.id}:${daysOut}:${firstVisitDate}`;
   let reachedNow = false;
 
   let result;

@@ -631,10 +631,10 @@ describe('explicit annual payment reminder channels', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
   });
 
-  function arm(channel, creditApplied = 0) {
+  function arm(channel, creditApplied = 0, term = BASE_TERM) {
     setDbQueues({
       annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }),
-        query({ returning: [{ ...BASE_TERM }] }), query()],
+        query({ returning: [{ ...term }] }), query()],
       invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE, credit_applied: creditApplied } })],
       invoice_followup_sequences: [query({ first: undefined })],
       customers: [query({ first: { ...CUSTOMER } })],
@@ -655,7 +655,7 @@ describe('explicit annual payment reminder channels', () => {
 
     expect(sendReminderChannels).toHaveBeenCalledWith(expect.objectContaining({
       invoiceId: null, invoiceIds: ['inv-1'], policyInvoiceIds: [],
-      offLedgerBalanceCents: 39204, eventKey: 'annual-prepay-payment:term-1:1',
+      offLedgerBalanceCents: 39204, eventKey: 'annual-prepay-payment:term-1:1:2026-07-11',
     }));
     const input = sendCustomerMessage.mock.calls[0][0];
     expect(input.metadata).toMatchObject({
@@ -712,7 +712,7 @@ describe('explicit annual payment reminder channels', () => {
     arm('push', 40);
     autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
     reminderProgress.mockResolvedValueOnce([{
-      metadata: { notificationEventKey: 'annual-prepay-payment:term-1:1' },
+      metadata: { notificationEventKey: 'annual-prepay-payment:term-1:1:2026-07-11' },
       delivered: new Set(['sms']),
     }]);
     sendReminderChannels.mockResolvedValueOnce({ complete: false, deliveredNow: [], results: {} });
@@ -721,6 +721,30 @@ describe('explicit annual payment reminder channels', () => {
       .resolves.toEqual({ sent: false, termId: 'term-1', complete: false });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+  });
+
+  test('a moved promised visit starts a different ledger episode from a partly delivered reminder', async () => {
+    arm('email');
+    sendReminderChannels.mockImplementationOnce(async (args) => {
+      await args.send('email', { id: 'old-ledger' });
+      return { complete: false, deliveredNow: ['email'], results: {} };
+    });
+    await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    const oldKey = sendReminderChannels.mock.calls[0][0].eventKey;
+
+    _private.resetCachesForTests();
+    const movedTerm = { ...BASE_TERM, first_visit_date: '2026-07-12' };
+    arm('email', 0, movedTerm);
+    await AnnualPrepayRenewals.sendPaymentPendingReminder(movedTerm, 1);
+    const newKey = sendReminderChannels.mock.calls[1][0].eventKey;
+
+    expect(oldKey).toBe('annual-prepay-payment:term-1:1:2026-07-11');
+    expect(newKey).toBe('annual-prepay-payment:term-1:1:2026-07-12');
+    expect(newKey).not.toBe(oldKey);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(sendCustomerMessage.mock.calls[1][0].metadata).toMatchObject({
+      notificationEventKey: newKey, first_visit_date: '2026-07-12',
+    });
   });
 
   test('an unreadable stored choice retries without falling through to legacy Text', async () => {

@@ -278,7 +278,7 @@ describe('annual-prepay payment reminder replay', () => {
     customer_id: customerId,
     invoice_id: 'inv-annual',
     source_entry_point: 'annual_prepay_payment_reminder',
-    notificationEventKey: 'annual-prepay-payment:term-annual:1',
+    notificationEventKey: 'annual-prepay-payment:term-annual:1:2026-09-27',
     collections_ledger_id: 'ledger-email',
     annual_prepay_term_id: 'term-annual',
     first_visit_date: firstVisitDate,
@@ -300,6 +300,11 @@ describe('annual-prepay payment reminder replay', () => {
 
   test('accepts the bound unpaid term and current credited amount', async () => {
     await expect(billingEmailReplayEligible(meta, database())).resolves.toEqual({ eligible: true });
+  });
+
+  test('rejects a queued event whose key names a different promised visit', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, first_visit_date: '2026-09-28' }, database()))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-reminder-pin-missing' });
   });
 
   test.each([

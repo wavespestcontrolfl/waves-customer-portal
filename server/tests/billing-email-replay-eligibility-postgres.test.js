@@ -168,7 +168,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       customer_id: customerId,
       invoice_id: invoiceId,
       source_entry_point: 'annual_prepay_payment_reminder',
-      notificationEventKey: `annual-prepay-payment:${termId}:1`,
+      notificationEventKey: `annual-prepay-payment:${termId}:1:${firstVisitDate}`,
       collections_ledger_id: ownId,
       annual_prepay_term_id: termId,
       first_visit_date: firstVisitDate,
@@ -229,7 +229,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       prepay_invoice_id: invoiceId, status: 'payment_pending', term_start: firstVisitDate });
     const replay = { customer_id: customerId, invoice_id: invoiceId,
       source_entry_point: 'annual_prepay_payment_reminder',
-      notificationEventKey: `annual-prepay-payment:${termId}:1`,
+      notificationEventKey: `annual-prepay-payment:${termId}:1:${firstVisitDate}`,
       annual_prepay_term_id: termId, first_visit_date: firstVisitDate,
       days_out: 1, rendered_amount: '392.04' };
     await mockPg.transaction(async (held) => {
@@ -272,7 +272,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     const check = require('../services/annual-prepay-renewals')._private.invoiceStillOwedAsQuoted({
       customer_id: customerId, invoice_id: invoiceId,
       source_entry_point: 'annual_prepay_payment_reminder',
-      notificationEventKey: `annual-prepay-payment:${termId}:${daysOut}`,
+      notificationEventKey: `annual-prepay-payment:${termId}:${daysOut}:${firstVisitDate}`,
       annual_prepay_term_id: termId, first_visit_date: firstVisitDate,
       days_out: daysOut, rendered_amount: '392.04', delivery_channel: 'email',
     });

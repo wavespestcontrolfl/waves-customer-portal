@@ -177,7 +177,7 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
     const delivery = require('../services/billing-reminder-delivery');
     const progress = jest.spyOn(delivery, 'reminderProgress').mockResolvedValue([]);
     const dispatch = jest.spyOn(delivery, 'sendReminderChannels').mockImplementation(async (args) => {
-      expect(args.eventKey).toBe(`annual-prepay-payment:${f.id}:${daysOut}`);
+      expect(args.eventKey).toBe(`annual-prepay-payment:${f.id}:${daysOut}:${firstVisit}`);
       const outcome = await args.send('email', { id: randomUUID() });
       return { complete: false, deliveredNow: [], results: { email: outcome } };
     });

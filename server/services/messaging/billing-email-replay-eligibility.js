@@ -148,7 +148,7 @@ function validAnnualPrepayReminderPin(meta) {
   return !!meta.annual_prepay_term_id
     && /^\d{4}-\d{2}-\d{2}$/.test(meta.first_visit_date || '')
     && [1, 3].includes(daysOut)
-    && meta.notificationEventKey === `annual-prepay-payment:${meta.annual_prepay_term_id}:${daysOut}`;
+    && meta.notificationEventKey === `annual-prepay-payment:${meta.annual_prepay_term_id}:${daysOut}:${meta.first_visit_date}`;
 }
 
 function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, term, now) {

@@ -92,7 +92,7 @@ function complete(context) {
   if (context.source_entry_point === 'annual_prepay_payment_reminder') {
     return has('invoice_id', 'rendered_amount', 'collections_ledger_id', 'annual_prepay_term_id',
       'first_visit_date', 'days_out')
-      && context.notificationEventKey === `annual-prepay-payment:${context.annual_prepay_term_id}:${context.days_out}`;
+      && context.notificationEventKey === `annual-prepay-payment:${context.annual_prepay_term_id}:${context.days_out}:${context.first_visit_date}`;
   }
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');

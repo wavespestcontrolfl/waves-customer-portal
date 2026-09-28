@@ -148,7 +148,7 @@ describe('billing channel email adapter', () => {
   });
 
   test('retains the complete annual-prepay quote and term pins', () => {
-    const eventKey = 'annual-prepay-payment:term-1:1';
+    const eventKey = 'annual-prepay-payment:term-1:1:2026-09-28';
     const context = {
       schema_version: 1,
       customer_id: 'cust-1',
@@ -164,6 +164,7 @@ describe('billing channel email adapter', () => {
     };
     expect(sanitizeBillingReplayContext(context))
       .toMatchObject({ annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-28', days_out: 1 });
+    expect(sanitizeBillingReplayContext({ ...context, first_visit_date: '2026-09-29' })).toBeNull();
     expect(sanitizeBillingReplayContext({ ...context, days_out: undefined })).toBeNull();
   });
 

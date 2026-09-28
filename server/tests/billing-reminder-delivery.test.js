@@ -130,7 +130,7 @@ describe('billing reminder per-channel delivery progress', () => {
       ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
       await sendReminderChannels({
         customerId: 'customer-1', invoiceId: null, invoiceIds: ['draft-invoice'], policyInvoiceIds: [], offLedgerBalanceCents: 4900,
-        source: 'annual_prepay_payment_reminder', purpose: 'balance_reminder', eventKey: 'annual-prepay-payment:term-1:3', channels: ['sms'], send,
+        source: 'annual_prepay_payment_reminder', purpose: 'balance_reminder', eventKey: 'annual-prepay-payment:term-1:3:2026-09-30', channels: ['sms'], send,
       });
       expect(send).toHaveBeenCalledTimes(1);
       expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['draft-invoice'] }));
