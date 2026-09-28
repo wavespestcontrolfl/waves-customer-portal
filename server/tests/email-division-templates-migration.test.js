@@ -314,6 +314,23 @@ describe('seed migration 20260928220000 (re-cut of #5160)', () => {
     expect(untouched.name).toBe('Lawn Care · Why 91 Days');
   });
 
+  test('up() re-running never overwrites an existing fixture (no created_by/updated_by column to guard on, so insert-once instead — local pre-push audit P1 round 2)', async () => {
+    const knex = fakeKnex(TABLES);
+    await migration.up(knex);
+
+    const pestTemplate = knex.__store.email_templates.find((t) => t.template_key === 'lc.first_visit_pest');
+    const fullFixture = knex.__store.email_template_fixtures.find((f) => f.template_id === pestTemplate.id && f.name === 'full');
+    const edited = { ...JSON.parse(fullFixture.payload), pet_advisory_sentence: 'An operator edited this fixture by hand.' };
+    fullFixture.payload = JSON.stringify(edited);
+
+    await migration.up(knex); // re-run
+
+    const reread = knex.__store.email_template_fixtures.find((f) => f.id === fullFixture.id);
+    expect(JSON.parse(reread.payload).pet_advisory_sentence).toBe('An operator edited this fixture by hand.');
+    // Still exactly 8 fixtures — a re-run neither duplicates nor drops any.
+    expect(knex.__store.email_template_fixtures).toHaveLength(8);
+  });
+
   test("sendTemplate refuses each seeded template in its seeded ('draft') status, undisguised", async () => {
     mockDb = await seededKnex();
     for (const t of migration.TEMPLATES) {

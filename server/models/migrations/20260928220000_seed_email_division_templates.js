@@ -41,13 +41,21 @@
  *    the same address after the first's follow-up would dedupe away.
  *  - P2: the three lc.* templates' `purpose` is 'pest' (was 'lawn_care') —
  *    they are structural pest-control lifecycle emails, not lawn care.
- *  - P1 (local pre-push audit, Codex out of quota / claude fallback):
- *    up() re-running (e.g. a manually cleared knex_migrations row) must
- *    never overwrite a template/version/automation row an operator has
- *    since drafted or published — upsertTemplate/upsertAutomation now
- *    read-modify-write, skipping the overwrite whenever created_by /
- *    last_published_by / published_by is non-null (only an authenticated
- *    admin action ever sets those; this migration's own inserts never do).
+ *  - P1 (local pre-push audit round 1, Codex out of quota / claude
+ *    fallback): up() re-running (e.g. a manually cleared knex_migrations
+ *    row) must never overwrite a template/version/automation row an
+ *    operator has since drafted or published — upsertTemplate/
+ *    upsertAutomation now read-modify-write, skipping the overwrite
+ *    whenever created_by / last_published_by / published_by is non-null
+ *    (only an authenticated admin action ever sets those; this migration's
+ *    own inserts never do).
+ *  - P1 (local pre-push audit round 2, same fallback): the fixtures loop
+ *    inside upsertTemplate had the identical unconditional-overwrite bug
+ *    the round-1 fix above was written to close, and email_template_fixtures
+ *    carries no created_by/updated_by column to build a touchedByHuman()
+ *    check from — fixtures ARE admin-editable (admin-email-templates.js
+ *    POST/PUT .../fixtures) all the same, so the fix is insert-once-only:
+ *    a re-run never touches a fixture row that already exists.
  *  - P2: nurture.expired_1's content_sensitivity is 'normal' (was 'lead',
  *    not in the admin API's enum: normal | financial | account |
  *    health_safety | property_sensitive).
@@ -427,15 +435,22 @@ async function upsertTemplate(knex, t) {
   // publishVersion) — leave its content alone.
 
   if (await knex.schema.hasTable('email_template_fixtures')) {
+    // email_template_fixtures carries no created_by/updated_by column (fixed
+    // set: id, template_id, name, payload, is_default, timestamps), so
+    // unlike templates/versions/automations there is no provenance field to
+    // build a touchedByHuman() check from — but fixtures ARE admin-editable
+    // (admin-email-templates.js POST/PUT .../fixtures), so "no column to
+    // check" is not "safe to overwrite" (local pre-push audit P1, round 2).
+    // Insert-once-only closes the same gap without a schema change: a
+    // re-run never touches a fixture that already exists, seeded or since
+    // edited by an operator.
     for (const [name, payload] of Object.entries(t.fixtures || {})) {
       const isDefault = name === 'full';
       const existingFixture = await knex('email_template_fixtures')
         .where({ template_id: template.id, name })
         .first();
-      const fields = { name, payload: JSON.stringify(payload), is_default: isDefault, updated_at: new Date() };
-      if (existingFixture) {
-        await knex('email_template_fixtures').where({ id: existingFixture.id }).update(fields);
-      } else {
+      if (!existingFixture) {
+        const fields = { name, payload: JSON.stringify(payload), is_default: isDefault, updated_at: new Date() };
         await knex('email_template_fixtures').insert({ template_id: template.id, created_at: new Date(), ...fields });
       }
     }
