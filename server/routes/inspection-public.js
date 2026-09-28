@@ -534,6 +534,11 @@ async function loadAssessmentCatalog() {
 async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   const supplied = suppliedAddressFields(suppliedAddress);
   if (supplied) {
+    if (custRow?.geocode_review_blocked
+      && Boolean(custRow.address_line1)
+      && !profileAffirmativelyDiffers(custRow, supplied)) {
+      return { location: null, address: null, source: null, unresolved: true };
+    }
     const location = await geocodeServiceAddress(supplied);
     return location
       ? { location, address: supplied, source: 'supplied', unresolved: false }
@@ -1137,7 +1142,10 @@ async function matchExistingAccountProfile(dbConn, account, address, location) {
     .orderBy('created_at', 'asc');
   const rows = profiles.length ? profiles : [account.existingCustomer];
   if (!address?.line1) return rows[0];
-  return rows.find((row) => profileMatchesAddress(row, address, location)) || null;
+  for (const row of rows) {
+    if (await profileMatchesOrQuarantined(dbConn, row, address, location)) return row;
+  }
+  return null;
 }
 
 // Whether ONE customer profile is the lead's validated property: the same
@@ -1212,6 +1220,29 @@ function profileAffirmativelyDiffers(row, address) {
   return knownCities.has(suppliedCity);
 }
 
+// Whether a supplied/validated address should be treated as belonging to
+// this profile for account-property matching purposes: either it
+// geometrically matches (profileMatchesAddress), or the profile is
+// QUARANTINED by a blocking geocode review and the address is not proven
+// to be a different property (profileAffirmativelyDiffers) — the same rule
+// provisionLinkedCustomer's commit-time check enforces for an already
+// trusted linked profile (Codex P0). Without this, an incomplete copy of a
+// quarantined profile's address (e.g. missing ZIP) — which
+// profileMatchesAddress alone can't recognize once staff clear the row's
+// stored pin — falls through every account profile as "no match" and a
+// caller mints a fresh sibling profile at fresh, unreviewed coordinates,
+// silently bypassing the quarantine the commit path would otherwise
+// enforce. Only asks the review store when the geometric match already
+// failed and the address doesn't affirmatively differ, so this is a no-op
+// query in the ordinary (unquarantined) case.
+async function profileMatchesOrQuarantined(dbConn, row, address, location) {
+  if (profileMatchesAddress(row, address, location)) return true;
+  if (!address?.line1 || !row?.address_line1 || profileAffirmativelyDiffers(row, address)) return false;
+  const review = require('../services/customer-geocode-review');
+  const reviewed = await review.reviewedCustomerLocation(row, dbConn);
+  return Boolean(reviewed?.geocode_review_blocked);
+}
+
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
 // ensureCustomerAccount exactly once (it can WRITE — attaching a legacy
 // row's account, or minting a fresh customer_accounts row — so it must never
@@ -1266,7 +1297,7 @@ async function uniqueProfileAcrossAccounts(dbConn, households, resolved) {
   const matches = [];
   for (const household of households) {
     if (household.legacy) {
-      if (profileMatchesAddress(household.legacy, resolved.address, resolved.location)) matches.push(household.legacy);
+      if (await profileMatchesOrQuarantined(dbConn, household.legacy, resolved.address, resolved.location)) matches.push(household.legacy);
       continue;
     }
      
@@ -2621,6 +2652,9 @@ router._test = {
   profileAffirmativelyDiffers,
   reuseMatchedProfile,
   provisionLinkedCustomer,
+  // Test hooks (geocode review quarantine round 3 P0 fixes, PR #5064).
+  profileMatchesOrQuarantined,
+  resolveOrLinkCustomerForLead,
 };
 
 module.exports = router;

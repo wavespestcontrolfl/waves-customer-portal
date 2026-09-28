@@ -48,6 +48,18 @@ const CUSTOMER_ID = 'cust-1';
 function makeFakeDb({ customerRow, reviewRow = null, primaryRow = null } = {}) {
   const updateCalls = [];
   const resolve = (v) => (typeof v === 'function' ? v() : v);
+  // Projects onto exactly the fields the production code asks `.first(...)`
+  // for — a real knex `.first('a', 'b')` never returns a column that
+  // wasn't selected, so a test that fixed a row with every field present
+  // regardless of the select list could never catch a production SELECT
+  // that quietly dropped one (Codex P1: address_line2 omitted from this
+  // route's own customer reads).
+  const project = (row, fields) => {
+    if (!row || !fields.length) return row;
+    const out = {};
+    fields.forEach((f) => { out[f] = row[f]; });
+    return out;
+  };
   const chain = (table) => {
     const q = { table, conds: {} };
     q.where = (cond) => { if (cond && typeof cond === 'object') Object.assign(q.conds, cond); return q; };
@@ -58,8 +70,8 @@ function makeFakeDb({ customerRow, reviewRow = null, primaryRow = null } = {}) {
     q.noWait = () => q;
     q.select = () => q;
     q.whereNotExists = () => q;
-    q.first = async () => {
-      if (table === 'customers') return resolve(customerRow);
+    q.first = async (...fields) => {
+      if (table === 'customers') return project(resolve(customerRow), fields);
       if (table === 'customer_geocode_reviews') return resolve(reviewRow);
       if (table === 'customer_properties') return resolve(primaryRow);
       return null;
@@ -181,4 +193,80 @@ test('an ordinary customer (no review at all) still gets stamped — GATE_GEOCOD
 
   const visitUpdate = db.updateCalls.find((c) => c.table === 'scheduled_services');
   expect(visitUpdate.payload).toEqual({ lat: 27.4, lng: -82.5 });
+});
+
+// Codex P1, PR #5064 round 3: "Load the unit field before rechecking the
+// quarantine". Both customer reads this function issues must select
+// address_line2 — a reviewed address with a nonempty unit whose read omits
+// that field makes reviewedCustomerLocation's sameAddress() compare the
+// review's real snapshot against an undefined address_line2 and treat it
+// as a DIFFERENT (never-reviewed) address, silently clearing a
+// needs_pin/needs_details/outside_area quarantine on exactly the
+// customers it exists to protect.
+test('a quarantined unit (nonempty address_line2) stays blocked — the customer read must select address_line2', async () => {
+  const customerRow = {
+    address_line1: '1 Main St', address_line2: 'Unit 5',
+    city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: null, longitude: null,
+  };
+  const reviewRow = {
+    customer_id: CUSTOMER_ID, status: 'needs_pin',
+    address_snapshot: ['1 Main St', 'Unit 5', 'Bradenton', 'FL', '34205'],
+    latitude: null, longitude: null, updated_at: new Date(),
+  };
+  const db = makeFakeDb({ customerRow, reviewRow });
+  mockGeocodeAddress
+    .mockResolvedValueOnce({ lat: 27.4, lng: -82.5 }) // the estimate address
+    // Only reached if a dropped address_line2 wrongly clears the
+    // quarantine and this function falls through to geocode the
+    // customer's own (still-blocked) address — proves the test actually
+    // discriminates the bug rather than passing via an early return for
+    // an unrelated reason.
+    .mockResolvedValueOnce({ lat: 27.9, lng: -82.9 });
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  // Blocked before ever reaching the visit write — a dropped address_line2
+  // would make sameAddress() see a mismatch and fall through to
+  // "effective" (not blocked), letting the unconditional update below
+  // restore coordinates staff quarantined.
+  expect(db.updateCalls).toEqual([]);
+});
+
+// Codex P1, PR #5064 round 3: "Revalidate the address before reusing
+// pre-lock coordinates". custCoords is geocoded for the address on the
+// PRE-LOCK read; if the customer's address is edited before the fenced
+// re-read runs, that pin describes a property this customer no longer
+// has — the fallback below must never carry it across the edit onto the
+// NEW address's visits/customer row.
+test('an address edited between the pre-lock read and the fence aborts instead of reusing the stale pre-lock coordinates', async () => {
+  let customerReads = 0;
+  const customerRow = () => {
+    customerReads += 1;
+    // Read 1: the pre-lock read custCoords is computed against.
+    if (customerReads === 1) {
+      return {
+        address_line1: '1 Main St', address_line2: null,
+        city: 'Bradenton', state: 'FL', zip: '34205',
+        latitude: null, longitude: null,
+      };
+    }
+    // Read 2: the fenced re-read, AFTER the customer edited their address —
+    // still no stored coordinates for the new address.
+    return {
+      address_line1: '99 Oak Ave', address_line2: null,
+      city: 'Bradenton', state: 'FL', zip: '34205',
+      latitude: null, longitude: null,
+    };
+  };
+  const db = makeFakeDb({ customerRow }); // no review row: not blocked either time
+  mockGeocodeAddress
+    .mockResolvedValueOnce({ lat: 27.4, lng: -82.5 }) // the estimate address
+    .mockResolvedValueOnce({ lat: 27.41, lng: -82.51 }); // pre-lock geocode of "1 Main St" (custCoords)
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  // Nothing is written — NOT custCoords (27.41/-82.51), which describes the
+  // OLD "1 Main St" address, not the customer's current "99 Oak Ave".
+  expect(db.updateCalls).toEqual([]);
 });

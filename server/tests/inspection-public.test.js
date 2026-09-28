@@ -1311,6 +1311,55 @@ describe('POST /:token/availability — address resolution (P1 :219)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.needs_address).toBe(false);
   });
+
+  // Codex P0, PR #5064 round 3: "Enforce quarantine before resolving
+  // supplied addresses". A linked customer blocked by a staff needs_pin/
+  // needs_details/outside_area/verified review must not be geocoded and
+  // offered selectable times just because the SAME quarantined address is
+  // re-typed into the page's address form — the commit path already
+  // refuses this exact case (provisionLinkedCustomer's
+  // explicitDifferentAddress), so /availability offering times the commit
+  // would then reject is its own bug.
+  describe('a linked customer blocked by a geocode review', () => {
+    beforeEach(() => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101',
+        address_line1: '123 Palm Ave', address_line2: null,
+        city: 'Bradenton', state: 'FL', zip: '34209',
+        latitude: null, longitude: null, // cleared by the quarantine
+      };
+      firstResults.customer_geocode_reviews = {
+        customer_id: 'cust-1', status: 'needs_pin',
+        address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+        latitude: null, longitude: null, updated_at: new Date(),
+      };
+    });
+
+    test('re-typing the SAME (incomplete) quarantined address never geocodes or offers times', async () => {
+      const token = mintLeadConsultationToken(LEAD_ID);
+      // Same street, no ZIP — an incomplete copy, never proven to be a
+      // different property (profileAffirmativelyDiffers).
+      const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL' });
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      // Never even attempts the network geocode for the blocked address.
+      expect(mockGeocode).not.toHaveBeenCalled();
+      expect(mockBuildAvailability).not.toHaveBeenCalled();
+    });
+
+    test('a supplied address PROVEN to be a different property still resolves and offers times', async () => {
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.41, lng: -82.51 } });
+      mockBuildAvailability.mockResolvedValueOnce({ slots: [], days: [{ date: '2027-01-10', slots: [] }] });
+      const token = mintLeadConsultationToken(LEAD_ID);
+      // A different ZIP is a decisive, affirmative difference.
+      const res = await callAvailability(token, { address: '123 Palm Ave, Bradenton, FL 34205' });
+      expect(res.statusCode).toBe(200);
+      expect(res.body.needs_address).toBe(false);
+      expect(mockGeocode).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe('POST /:token/find-slots (P1 :457)', () => {
@@ -2104,10 +2153,6 @@ describe('POST /:token commit', () => {
         latitude: null, longitude: null,
       };
       listResults.scheduled_services = [];
-      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.51, lng: -82.52 } });
-      mockBuildAvailability.mockResolvedValueOnce({
-        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
-      });
 
       const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
         date: FUTURE_DATE, time: '09:00', address,
@@ -2118,6 +2163,13 @@ describe('POST /:token commit', () => {
       expect(insertCalls.some(call => call.table === 'customers')).toBe(false);
       expect(updateCalls.some(call => call.table === 'customers' && call.payload.latitude != null)).toBe(false);
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      // Codex P0, PR #5064 round 3 ("Enforce quarantine before resolving
+      // supplied addresses"): the quarantine now rejects the address
+      // BEFORE any geocode or availability-build attempt, not just before
+      // the commit's own write — matches /availability and /find-slots,
+      // which must refuse to offer times for this same address too.
+      expect(mockGeocode).not.toHaveBeenCalled();
+      expect(mockBuildAvailability).not.toHaveBeenCalled();
     });
 
     test('a supplied copy of the verified address retains its reviewed pin', async () => {
@@ -2719,6 +2771,47 @@ describe('POST /:token commit', () => {
         expect(customerInsert.payload.address_line1).toBe('123 Palm Ave');
         expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.id).toBe('new-cust-2');
         expect(updateCalls.some((c) => c.table === 'leads' && c.payload.customer_id === 'new-cust-2')).toBe(true);
+      });
+
+      // Codex P0, PR #5064 round 3: "Apply the quarantine check when
+      // linking an unlinked lead". The matched account's ONE property is
+      // quarantined (a staff needs_pin review cleared its stored pin) and
+      // the supplied copy of its own address is missing a ZIP —
+      // profileMatchesAddress alone can no longer recognize it (no zip
+      // agreement, no coordinates to compare), so without the fix this
+      // fell through as "no match" and minted a fresh sibling profile at
+      // brand-new, unreviewed coordinates — exactly the quarantine an
+      // already-linked profile's commit-time check (provisionLinkedCustomer)
+      // would refuse. Must fail closed instead, never create a sibling.
+      test('the account\'s ONE property is quarantined and the supplied address is an incomplete copy of it → fails closed, no sibling minted', async () => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        firstResults.services = { id: 'svc-catalog-1', default_duration_minutes: 30 };
+        mockOneSlot();
+        // Staff cleared the stored pin (needs_pin) — the row's OWN address
+        // is unchanged, but it now carries geocode_review_blocked whenever
+        // it's read through reviewedCustomerLocation.
+        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude: null, longitude: null });
+        seedPhoneHousehold(existingCustomer);
+        listResults.scheduled_services = [];
+        listResults.customers = [existingCustomer];
+        firstResults.customer_geocode_reviews = {
+          customer_id: existingCustomer.id, status: 'needs_pin',
+          address_snapshot: ['123 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null, updated_at: new Date(),
+        };
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        // Same street as the quarantined profile, but NO zip — an
+        // incomplete copy, never proven to be a different property
+        // (profileAffirmativelyDiffers).
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL' });
+
+        expect(res.statusCode).toBe(422);
+        expect(res.body.error).toBe('address_unresolved');
+        expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+        expect(insertCalls.some((c) => c.table === 'customers')).toBe(false);
+        expect(updateCalls.some((c) => c.table === 'leads')).toBe(false);
       });
 
       // Codex #4737 r3 P1: a legacy matched profile with NO stored

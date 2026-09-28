@@ -9040,6 +9040,14 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 // construction. Called post-commit, fire-and-forget, fail-soft — extracted
 // to a named function (byte-identical logic) so it can be unit tested
 // without driving the whole accept transaction.
+// Every field the pre-lock/fenced-reread comparison below uses to decide
+// whether the customer's address moved out from under custCoords (Codex
+// P1): omitting address_line2 here made two customers.js reads disagree
+// with the review snapshot whenever a unit was on file (see
+// ADDRESS_SNAPSHOT_FIELDS' use below and customer-geocode-review.js's own
+// ADDRESS_FIELDS, which this must always mirror).
+const ADDRESS_SNAPSHOT_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+
 async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   const { geocodeAddress, buildAddress } = require('../services/geocoder');
   const { haversine } = require('../services/route-optimizer');
@@ -9047,7 +9055,7 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   if (!estCoords) return;
   const cust = await db('customers')
     .where({ id: customerId })
-    .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
+    .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
   if (!cust) return;
   const review = require('../services/customer-geocode-review');
   const reviewedCust = await review.reviewedCustomerLocation({ ...cust, id: customerId }, db);
@@ -9058,6 +9066,13 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
   if (!custCoords) return;
   const samePlaceMiles = haversine(estCoords.lat, estCoords.lng, custCoords.lat, custCoords.lng);
   if (!(samePlaceMiles <= 0.15)) return;
+  // The exact address custCoords was computed against, pre-lock (Codex
+  // P1): if the customer's address is edited before the fenced reread
+  // below sees it, custCoords describes a property that is no longer this
+  // customer's — the fenced reread must abort rather than carry it across
+  // the edit, never re-validate under the lock (a network geocode call is
+  // never made while holding this fence).
+  const addressSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => cust[field] ?? null);
   await review.withCustomerReviewWriteFence(customerId, db, async (conn) => {
     // No excludeCustomerAutomaticGeocodeForId fence on the visit write
     // (Codex P1 round 1): that fence exists to stop an automatic geocode
@@ -9077,8 +9092,17 @@ async function stampAcceptedVisitCoordinates({ estimate, customerId, db }) {
     // uses), and skip the write if the customer is blocked as of THIS read.
     const freshCust = await conn('customers')
       .where({ id: customerId })
-      .first('address_line1', 'city', 'state', 'zip', 'latitude', 'longitude');
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
     if (!freshCust) return;
+    // The address may have been edited after the pre-lock read while this
+    // fire-and-forget task waited for the fence (Codex P1): custCoords was
+    // geocoded for THAT snapshot, so a fresh row with a different address
+    // must never fall back to it below — abort instead of stamping the
+    // accepted visits (and possibly backfilling the customer) with a pin
+    // for a property this customer no longer has on file. A same-property
+    // edit (unchanged snapshot) proceeds exactly as before.
+    const freshSnapshot = ADDRESS_SNAPSHOT_FIELDS.map((field) => freshCust[field] ?? null);
+    if (JSON.stringify(freshSnapshot) !== JSON.stringify(addressSnapshot)) return;
     const freshReviewed = await review.reviewedCustomerLocation({ ...freshCust, id: customerId }, conn);
     if (freshReviewed.geocode_review_blocked) return;
     // A network geocode call is never made under this lock (this file's own
