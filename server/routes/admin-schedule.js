@@ -7171,21 +7171,37 @@ function callBookingConflictBody(existingVisits) {
 }
 
 // Every service line this create books — the primary and each add-on,
-// which persist on the same visit (codex #5183 r1 P1) — lowercased and
-// trimmed, the same normalization the match applies to stored names.
-function requestedServiceLineNames(serviceType, serviceAddons) {
-  const addonNames = Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.name || a?.serviceName) : [];
-  return [...new Set([serviceType, ...addonNames]
-    .map((n) => String(n || '').trim().toLowerCase())
-    .filter(Boolean))];
+// which persist on the same visit (codex #5183 r1 P1): catalog ids, every
+// normalized name, and the names of lines that carry NO id (legacy / ad-hoc
+// lines, matched by name alone).
+function requestedServiceLines(serviceType, serviceId, serviceAddons) {
+  const lines = [{ id: serviceId, name: serviceType }, ...(Array.isArray(serviceAddons)
+    ? serviceAddons.map((a) => ({ id: a?.serviceId, name: a?.name || a?.serviceName }))
+    : [])];
+  const norm = (n) => String(n || '').trim().toLowerCase();
+  const uniq = (xs) => [...new Set(xs.filter(Boolean))];
+  return {
+    ids: uniq(lines.map((l) => (l.id ? String(l.id) : null))),
+    names: uniq(lines.map((l) => norm(l.name))),
+    idlessNames: uniq(lines.filter((l) => !l.id).map((l) => norm(l.name))),
+  };
+}
+
+// One side of the service-line match (a visit's own service or one add-on):
+// the same catalog id — a renamed service keeps its id (codex #5183 r2 P1) —
+// or, where either side has no id, the same normalized name.
+function sameServiceLine(qb, idCol, nameCol, lines) {
+  if (lines.ids.length) qb.orWhereRaw(`${idCol}::text = ANY(?)`, [lines.ids]);
+  if (lines.names.length) qb.orWhereRaw(`${idCol} IS NULL AND LOWER(TRIM(${nameCol})) = ANY(?)`, [lines.names]);
+  if (lines.idlessNames.length) qb.orWhereRaw(`LOWER(TRIM(${nameCol})) = ANY(?)`, [lines.idlessNames]);
 }
 
 // Live, call-booked parent visits for this customer within ±1 day of the
-// date that share ANY service line with the request — by their own
-// service_type or one of their add-ons. `conn` is the booking transaction
-// for the locked re-check.
-async function findExistingCallBookings({ conn = db, customerId, serviceNames, scheduledDate, propertyId }) {
-  if (!serviceNames.length) return [];
+// date that share ANY service line with the request — by their own service
+// or one of their add-ons. `conn` is the booking transaction for the locked
+// re-check.
+async function findExistingCallBookings({ conn = db, customerId, lines, scheduledDate, propertyId }) {
+  if (!lines.names.length && !lines.ids.length) return [];
   const query = conn('scheduled_services as ss')
     .where('ss.customer_id', customerId)
     .whereNull('ss.parent_service_id')
@@ -7193,13 +7209,14 @@ async function findExistingCallBookings({ conn = db, customerId, serviceNames, s
     // or no-show call booking is not a visit the office could double-book.
     .whereIn('ss.status', require('../services/scheduled-service-statuses').NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
     .where((qb) => qb.where('ss.booking_source', 'phone_call').orWhereNotNull('ss.source_call_log_id'))
-    .where((qb) => qb
-      .whereRaw('LOWER(TRIM(ss.service_type)) = ANY(?)', [serviceNames])
-      .orWhereExists(function sharedAddonLine() {
+    .where((qb) => {
+      sameServiceLine(qb, 'ss.service_id', 'ss.service_type', lines);
+      qb.orWhereExists(function sharedAddonLine() {
         this.select(conn.raw('1')).from('scheduled_service_addons as a')
           .whereRaw('a.scheduled_service_id = ss.id')
-          .whereRaw('LOWER(TRIM(a.service_name)) = ANY(?)', [serviceNames]);
-      }))
+          .where((aq) => sameServiceLine(aq, 'a.service_id', 'a.service_name', lines));
+      });
+    })
     .whereRaw('ss.scheduled_date BETWEEN ?::date - 1 AND ?::date + 1', [scheduledDate, scheduledDate]);
   if (propertyId) {
     query.where((qb) => qb.where('ss.property_id', propertyId).orWhereNull('ss.property_id'));
@@ -7214,17 +7231,29 @@ async function findExistingCallBookings({ conn = db, customerId, serviceNames, s
     .orderBy('ss.window_start', 'asc');
 }
 
+// The property the guard scopes to: the operator's chosen address, else the
+// linked estimate's (a booking from a quote for another saved property is
+// not a duplicate of this one — codex #5183 r2 P2), else none.
+async function callBookingGuardPropertyId(conn, { bookingProperty, linkedEstimateId }) {
+  if (bookingProperty?.property_id) return bookingProperty.property_id;
+  if (!linkedEstimateId) return null;
+  const est = await conn('estimates').where({ id: linkedEstimateId }).first('property_id');
+  return est?.property_id || null;
+}
+
 // The guard's verdict for one create: the 409 body, or null to proceed (no
-// match, an explicit logged override, or — for the preflight only — a
-// failed lookup, which fails open).
-async function callBookingDuplicateConflict({ conn = db, failOpen = true, override, customerId, serviceNames, scheduledDate, bookingProperty }) {
+// match, an override that covers every match, or — preflight only — a
+// failed lookup, which fails open). The override covers only the visits the
+// operator reviewed: a match that arrived after the box was shown is a new
+// conflict (codex #5183 r2 P2).
+async function callBookingDuplicateConflict({ conn = db, failOpen = true, override, reviewedIds, customerId, lines, scheduledDate, bookingProperty, linkedEstimateId }) {
   try {
-    const existing = await findExistingCallBookings({
-      conn, customerId, serviceNames, scheduledDate, propertyId: bookingProperty?.property_id || null,
-    });
+    const propertyId = await callBookingGuardPropertyId(conn, { bookingProperty, linkedEstimateId });
+    const existing = await findExistingCallBookings({ conn, customerId, lines, scheduledDate, propertyId });
     if (!existing.length) return null;
-    if (!override) return callBookingConflictBody(existing);
-    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again alongside phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
+    const reviewed = new Set(override === true && Array.isArray(reviewedIds) ? reviewedIds.map(String) : []);
+    if (!existing.every((v) => reviewed.has(String(v.id)))) return callBookingConflictBody(existing);
+    logger.warn(`[schedule] allowCallBookingDuplicate override: booking customer ${customerId} again alongside reviewed phone-agent-booked visit(s) ${existing.map((v) => v.id).join(', ')}`);
     return null;
   } catch (guardErr) {
     if (!failOpen) throw guardErr;
@@ -7379,20 +7408,22 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     }
 
+    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     // Phone-agent double-booking guard: applies to one-off AND recurring
-    // creates alike (scheduledDate is the recurring series' first visit).
-    // A fast preflight; the locked re-check inside the booking transaction
-    // (right after the customer lock) is the race-safe backstop.
+    // creates alike (scheduledDate is the recurring series' first visit). A
+    // fast preflight; the locked re-check inside the booking transaction
+    // (right after the customer lock) is the race-safe backstop. The
+    // override is "Book another anyway" for exactly the visits it listed.
     const callBookingGuard = {
-      override: req.body.allowCallBookingDuplicate === true,
+      override: req.body.allowCallBookingDuplicate,
+      reviewedIds: req.body.callBookingReviewedIds,
       customerId,
-      serviceNames: requestedServiceLineNames(serviceType, serviceAddons),
+      lines: requestedServiceLines(serviceType, serviceId, serviceAddons),
       scheduledDate,
       bookingProperty,
+      linkedEstimateId,
     };
     await assertNoCallBookingConflict(callBookingGuard);
-
-    const linkedEstimateId = sourceEstimateId || req.body.source_estimate_id || null;
     // Optional: accept the linked open quote as annual prepay on book (creates
     // the pending prepay invoice + renewal term in the same step as the
     // booking). Only 'prepay_annual' is honored; anything else falls through

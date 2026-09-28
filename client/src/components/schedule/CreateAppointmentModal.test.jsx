@@ -673,12 +673,15 @@ describe('appointmentGroupRequestBody', () => {
   // (callBookingDuplicateOverrideRef, consumed once per submit) — unlike
   // separateProgram, appointmentGroupRequestBody itself does no key
   // matching for it.
-  it('carries allowCallBookingDuplicate only when the override is passed', () => {
-    expect(appointmentGroupRequestBody({ ...base, callBookingOverride: true })).toMatchObject({
+  it('carries the override with exactly the reviewed phone-agent visits, and nothing otherwise (codex #5183 r2 P2)', () => {
+    expect(appointmentGroupRequestBody({ ...base, callBookingReviewedIds: ['v1', 'v2'] })).toMatchObject({
       allowCallBookingDuplicate: true,
+      callBookingReviewedIds: ['v1', 'v2'],
     });
-    expect(appointmentGroupRequestBody({ ...base, callBookingOverride: false })).not.toHaveProperty('allowCallBookingDuplicate');
-    expect(appointmentGroupRequestBody(base)).not.toHaveProperty('allowCallBookingDuplicate');
+    for (const body of [appointmentGroupRequestBody({ ...base, callBookingReviewedIds: null }), appointmentGroupRequestBody(base)]) {
+      expect(body).not.toHaveProperty('allowCallBookingDuplicate');
+      expect(body).not.toHaveProperty('callBookingReviewedIds');
+    }
   });
 });
 
