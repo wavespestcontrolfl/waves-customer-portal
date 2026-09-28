@@ -339,9 +339,19 @@ async function cardNudge(tech, visits, etDate) {
 // assigned for redistribution) after the sweep read must not be listed or
 // sent. Nothing to nudge gives the slot back.
 async function deliverNudge(techId, etDate, now) {
-  const live = groupByTechnician(await findOpenVisitsToday(now, techId))
-    .find((g) => g.tech.id === String(techId));
-  const absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId] });
+  let live;
+  let absent;
+  try {
+    live = groupByTechnician(await findOpenVisitsToday(now, techId))
+      .find((g) => g.tech.id === String(techId));
+    absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId] });
+  } catch (err) {
+    // One tech's failed re-read must not end the run for the rest, nor keep
+    // a claim for a nudge that never went out.
+    logger.error(`[tech-open-visit-nudge] send-time re-read failed for ${techId}: ${errTag(err)}`);
+    await releaseClaim(techId, etDate);
+    return false;
+  }
   if (!live || !isAssignable(live.tech) || absent.size > 0) {
     logger.info(`[tech-open-visit-nudge] skip ${techId}: nothing to nudge at send time`);
     await releaseClaim(techId, etDate);

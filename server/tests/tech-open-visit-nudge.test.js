@@ -591,3 +591,26 @@ test('an uncommitted slot hold (no customer + reservation stamp) is filtered out
   expect(hold.whereNotNull).toHaveBeenCalledWith('s.customer_id');
   expect(hold.orWhereNull).toHaveBeenCalledWith('s.reservation_expires_at');
 });
+
+test('a failed send-time re-read for one tech releases its claim and the run carries on for the next', async () => {
+  process.env[GATE] = 'true';
+  const sweep = [
+    visitRow({ id: 'v1', techId: 'tech-a', custFirst: 'Ana', custLast: 'Ruiz' }),
+    visitRow({ id: 'v2', techId: 'tech-b', custFirst: 'Bo', custLast: 'Lee', techPhone: '941-555-0102' }),
+  ];
+  let reads = 0;
+  const notifChains = [];
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services as s') {
+      reads += 1;
+      if (reads === 2) return chain({ select: jest.fn().mockRejectedValue(Object.assign(new Error('pool timeout'), { code: 'ETIMEDOUT' })) });
+      return chain({ select: jest.fn().mockResolvedValue(sweep) });
+    }
+    if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+    return chain();
+  });
+  const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+  expect(r).toMatchObject({ sent: 1, skipped: 1 });
+  expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
+  expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+});
