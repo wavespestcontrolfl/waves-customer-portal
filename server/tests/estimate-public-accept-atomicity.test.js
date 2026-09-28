@@ -2007,6 +2007,23 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.last_name).toBe('Sample');
   });
 
+  test('a first name collected on its own (linked profile has a real surname) still lands on the estimate', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-22',
+      token: 'tok-contact-22-x0123456789',
+      customer_id: 'cust-noname',
+      customer_phone: null,
+      customer_name: 'Unknown caller',
+      customer_email: 'testy@example.com',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-noname', first_name: 'New', last_name: 'Sample', email: 'testy@example.com', phone: null }];
+    conversionOk('cust-noname');
+
+    const res = await putAccept('tok-contact-22-x0123456789', { contactFirstName: 'testy' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toBe('Testy Sample');
+  });
+
   test('a stale tab that sends only a surname for a nameless estimate applies nothing to the name', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-21',

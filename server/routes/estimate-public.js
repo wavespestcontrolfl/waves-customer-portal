@@ -8635,10 +8635,10 @@ async function handleEstimateView(req, res, next) {
     if (isEstimateAcceptActive(estimate)) {
       try {
         const linkedCustomerForGaps = estimate.customer_id
-          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
+          ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
           : null;
         const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
-        contactGapsForceReactView = !!(gaps.lastName || gaps.email);
+        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email);
       } catch (e) {
         logger.warn(`[estimate-view] contact-gap routing check skipped: ${e.message}`);
       }
@@ -10840,10 +10840,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           if (sanitizedContactEmail && lockedGaps.email) contactFillEmail = sanitizedContactEmail;
           const contactWrite = {};
-          if (contactFillLastName) {
+          if (contactFillLastName || contactFillFirstName) {
             // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
-            // row keeps no 'undefined' first name. varchar(100) column.
-            contactWrite.customer_name = `${patchFirstName} ${contactFillLastName}`.slice(0, 100);
+            // row keeps no 'undefined' first name. A first name collected on
+            // its own (the linked profile already has a real surname) still
+            // lands: surname = the one collected, else the linked profile's
+            // real one. varchar(100) column.
+            const linkedLast = String(linkedCustomerForGaps?.last_name ?? '').trim();
+            const patchLastName = contactFillLastName
+              || (linkedLast && !['customer', 'undefined', 'null'].includes(linkedLast.toLowerCase()) ? linkedLast : '');
+            contactWrite.customer_name = `${patchFirstName} ${patchLastName}`.trim().slice(0, 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
             // Same rule as customer-contact-fanout's name sync: a
@@ -26854,7 +26860,7 @@ async function composeEstimateDataPayload(estimate, {
     if (isEstimateAcceptActive(estimate) && !isPdfRenderPass) {
       try {
         const linkedCustomerForGaps = estimate.customer_id
-          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
+          ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
           : null;
         contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
       } catch (e) {
