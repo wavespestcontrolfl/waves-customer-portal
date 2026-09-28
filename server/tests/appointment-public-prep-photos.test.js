@@ -97,12 +97,19 @@ function chain(table) {
   api.leftJoin = () => api;
   api.join = () => api;
   api.forUpdate = () => { lockRead = true; return api; };
+  api.forShare = () => { lockRead = true; return api; };
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
   api.first = async () => {
     // The locked recheck's FOR UPDATE on the token row (Codex r1 P1) — a
     // lock read, not a loadByToken read, so it never advances the
     // first-vs-second loadByToken accounting below.
-    if (lockRead && table.startsWith('scheduled_services')) { dbState.lockReads += 1; return { id: dbState.svcRow?.id }; }
+    if (lockRead && table.startsWith('scheduled_services')) {
+      dbState.lockReads += 1;
+      dbState.lockOrder.push('scheduled_services');
+      return { id: dbState.svcRow?.id };
+    }
+    // The locked recheck's FOR SHARE on the customer row (Codex r3 P1).
+    if (lockRead && table === 'customers') { dbState.lockOrder.push('customers'); return dbState.customerLockRow; }
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
     if (table.startsWith('scheduled_services')) {
@@ -179,6 +186,8 @@ function resetDbState(overrides = {}) {
     existingHashes: [],
     membersThrow: false,
     lockReads: 0,
+    lockOrder: [],
+    customerLockRow: { id: 'cust-1' },
     groupedMembersForPreCheck: null,
     inserted: { submissions: [], photos: [] },
     ...overrides,
@@ -301,6 +310,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
 
   test.each([
     ['one-time visit', { is_recurring: false, recurring_parent_id: null, recurring_pattern: null }],
+    ['one_time pattern sentinel', { is_recurring: false, recurring_parent_id: null, recurring_pattern: 'one_time' }],
     ['in-progress visit', { status: 'en_route' }],
     ['completed visit', { status: 'completed' }],
     ['inactive customer', { customer_active: false }],
@@ -452,6 +462,37 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
+  test.each([
+    ['deactivated', { customer_active: false }],
+    ['soft-deleted', { customer_deleted_at: '2099-01-01T00:00:00Z' }],
+    ['moved to another customer', { customer_id: 'cust-2' }],
+  ])('customer %s between the pre-check and the locked write: generic 404, nothing stored, upload cleaned up', async (_label, change) => {
+    // The recheck holds the customer row FOR SHARE before re-reading it
+    // (Codex r3 P1), so the state it reads is the state the insert commits
+    // under.
+    resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), ...change } });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+      expect(dbState.lockOrder[0]).toBe('customers');
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(dbState.inserted.photos).toHaveLength(0);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('customer row gone at the lock: generic 404, nothing stored, upload cleaned up', async () => {
+    resetDbState({ customerLockRow: null });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+      expect(dbState.inserted.submissions).toHaveLength(0);
+      expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('grouped stop: a sibling going en_route between the pre-check and the write is refused under the lock, and the locked read uses the write connection only', async () => {
     const members = [
       { id: 'svc-1', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-01-01', window_start: '09:00:00', window_end: '10:00:00', technician_id: 'tech-1' },
@@ -528,6 +569,8 @@ describe('POST /api/public/appointment/:token/photos', () => {
       });
       expect(res.status).toBe(201);
       expect(dbState.lockReads).toBeGreaterThanOrEqual(1);
+      // Customer row before the visit rows (Codex r3 P1).
+      expect(dbState.lockOrder.slice(0, 2)).toEqual(['customers', 'scheduled_services']);
       const body = await res.json();
       expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);

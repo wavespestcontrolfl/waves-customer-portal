@@ -558,4 +558,38 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
       }
     });
   });
+
+  // Codex #5176 r3 P1: the route's locked recheck re-reads customers.active /
+  // deleted_at, so it must hold the customer row until the insert commits —
+  // otherwise a deactivation can land between that read and the write.
+  test('the route\'s locked recheck holds the customer row: a deactivation waits for the upload transaction', async () => {
+    const { reloadEligibleVisitPrepRow } = require('../routes/appointment-public')._test;
+    const token = crypto.randomBytes(32).toString('hex');
+    const prevGate = process.env.GATE_VISIT_PREP_PHOTOS;
+    let customerId; let svcId;
+    const setup = await database.transaction();
+    try {
+      ({ customerId, svcId } = await fixtureSvc(setup, { reschedule_token: token }));
+      await setup.commit();
+    } catch (err) {
+      await setup.rollback();
+      throw err;
+    }
+    const upload = await database.transaction();
+    try {
+      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+      expect((await reloadEligibleVisitPrepRow(token, svcId, customerId, upload))?.id).toBe(svcId);
+      await expect(database.transaction(async (other) => {
+        await other.raw("SET LOCAL lock_timeout = '300ms'");
+        await other('customers').where({ id: customerId }).update({ active: false });
+      })).rejects.toThrow(/lock timeout/i);
+    } finally {
+      await upload.rollback();
+      if (prevGate === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS;
+      else process.env.GATE_VISIT_PREP_PHOTOS = prevGate;
+      await database('scheduled_services').where({ id: svcId }).del();
+    }
+    // Once the upload transaction ends, the same deactivation goes through.
+    await database('customers').where({ id: customerId }).update({ active: false });
+  });
 });

@@ -131,6 +131,13 @@ describe('visitPrepEligibility', () => {
     expect(visitPrepEligibility({ svc, state: 'past', visitUnknown: false }).reason).toBe('not_upcoming');
     expect(visitPrepEligibility({ svc: { ...svc, customer_active: false }, state: 'upcoming', visitUnknown: false }).reason).toBe('customer_inactive');
     expect(visitPrepEligibility({ svc: { ...svc, is_recurring: false }, state: 'upcoming', visitUnknown: false }).reason).toBe('one_time_visit');
+    // The explicit `one_time` pattern sentinel is refused even though the
+    // shared lineage predicate reads any pattern as recurring, and even
+    // alongside other series evidence (Codex #5176 r3 P0).
+    for (const extra of [{ is_recurring: false }, {}, { recurring_parent_id: 'parent-1' }]) {
+      expect(visitPrepEligibility({ svc: { ...svc, ...extra, recurring_pattern: 'one_time' }, state: 'upcoming', visitUnknown: false }).reason).toBe('one_time_visit');
+    }
+    expect(visitPrepEligibility({ svc: { ...svc, is_recurring: false, recurring_pattern: 'quarterly' }, state: 'upcoming', visitUnknown: false }).eligible).toBe(true);
     expect(visitPrepEligibility({ svc, state: 'upcoming', visitUnknown: false, dispatchOwnedUnreviewed: true }).reason).toBe('dispatch_owned_unreviewed');
   });
 

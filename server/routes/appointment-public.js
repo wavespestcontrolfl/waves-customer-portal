@@ -1251,7 +1251,8 @@ async function deriveVisitPrepEligibility(svc) {
 // from groupedState(members) — fed through pageStateForGroup's own
 // row-state-outranks-the-group precedence, so a terminal/unknown token row
 // still wins exactly as it does on the page. Returns null when the row is
-// missing, its customer is deleted, it is no longer the SAME row
+// missing, its customer row is gone, deleted, or no longer the customer the
+// pre-check read, it is no longer the SAME row
 // `expectedId` names (this route never re-mints the token, so a mismatch
 // means something is badly wrong), or the resulting eligibility is false;
 // otherwise the current row. Passed to visit-prep.js as its `recheck(trx)` —
@@ -1259,7 +1260,16 @@ async function deriveVisitPrepEligibility(svc) {
 // visit can go en route, get cancelled, or a grouped sibling can push the
 // stop's state), and this is the one place that re-proves it, on the
 // connection that already owns the lock.
-async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
+async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx) {
+  // The customer row FIRST (Codex r3 P1): loadByToken re-reads
+  // customers.active / deleted_at, but without a lock a deactivation or
+  // soft-delete could commit after that read and before the insert. FOR
+  // SHARE makes such an UPDATE wait for this transaction (and, unlike FOR
+  // UPDATE, never blocks unrelated inserts that merely reference the
+  // customer); taking it before the scheduled_services locks keeps the
+  // customer-then-visits order a deactivation that cancels visits uses.
+  const customer = await trx('customers').where({ id: expectedCustomerId }).forShare().first('id');
+  if (!customer) return null;
   // ROW locks, not only the stop's advisory lock (Codex r1 P1): status
   // writers such as transitionJobStatus update scheduled_services WITHOUT
   // the advisory lock, so a plain read here could still race an en-route
@@ -1270,6 +1280,7 @@ async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
   const svc = await loadByToken(token, trx);
   if (!svc || svc.customer_deleted_at) return null;
   if (expectedId && String(svc.id) !== String(expectedId)) return null;
+  if (String(svc.customer_id) !== String(expectedCustomerId)) return null;
 
   let visitUnknown = false;
   let visitInfo = {};
@@ -1336,6 +1347,7 @@ router.post(
   async (req, res, next) => {
     const token = req.params.token;
     const expectedId = req.visitPrepSvc.id;
+    const expectedCustomerId = req.visitPrepSvc.customer_id;
     try {
       const result = await visitPrep.createVisitPrepSubmission({
         svc: req.visitPrepSvc,
@@ -1348,7 +1360,7 @@ router.post(
         // lock — the write's actual authority, not this pre-check. Called
         // with the write's own transaction (Finding 1) — never the global
         // pool.
-        recheck: (trx) => reloadEligibleVisitPrepRow(token, expectedId, trx),
+        recheck: (trx) => reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx),
       });
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing
