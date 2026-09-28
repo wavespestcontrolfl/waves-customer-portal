@@ -147,7 +147,8 @@ function maskPhone(phone) {
 // states it as conditional; payer-billed receipts never reach the homeowner.
 // A phone-less customer is still reachable when they chose App for payment
 // receipts (sendReceipt's own explicitBillingAppSelected admission).
-async function receiptRecipients(invoiceId, knex) {
+// A paid, unsent invoice with no receipt job — else why not.
+async function receiptInvoiceOrBlocker(invoiceId, knex) {
   const invoice = await knex('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { blocker: 'invoice not found' };
   if (String(invoice.status || '').toLowerCase() !== 'paid') return { blocker: `invoice is ${invoice.status}, not paid` };
@@ -157,23 +158,37 @@ async function receiptRecipients(invoiceId, knex) {
   const optOut = await receiptEmailOptOutState(invoice);
   if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
   if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
+  return { invoice };
+}
+
+// The email leg through the worker's resolver. Only the worker's own
+// expected skips (no email on file, opted out, Email not the chosen receipt
+// channel) mean "no email, on purpose". Any other refusal — a settings
+// lookup outage, an aborted resolution — is unknown, not "nobody": the
+// worker could still email someone the card didn't name.
+async function receiptEmailLeg(invoice) {
   const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: 'payment_receipt' });
-  // Only the worker's own expected skips (no email on file, opted out, Email
-  // not the chosen receipt channel) mean "no email, on purpose". Any other
-  // refusal — a settings lookup outage, an aborted resolution — is unknown,
-  // not "nobody": the worker could still email someone the card didn't name.
-  if (!resolved.ok && !expectedEmailSkip(resolved)) {
+  if (resolved.ok) return { email: String(resolved.recipient.email).trim().toLowerCase(), customer: resolved.customer };
+  if (!expectedEmailSkip(resolved)) {
     return { blocker: `the receipt email recipient could not be verified (${String(resolved.error || resolved.code || 'unknown').replace(/\.$/, '')})` };
   }
-  const email = resolved.ok ? String(resolved.recipient.email).trim().toLowerCase() : null;
+  return { email: null, customer: null, skipReason: String(resolved.error || '') };
+}
+
+async function receiptRecipients(invoiceId, knex) {
+  const eligible = await receiptInvoiceOrBlocker(invoiceId, knex);
+  if (eligible.blocker) return eligible;
+  const { invoice } = eligible;
+  const emailLeg = await receiptEmailLeg(invoice);
+  if (emailLeg.blocker) return emailLeg;
   const payerBilled = Boolean(invoice.payer_id);
   const phone = payerBilled ? null
-    : (resolved.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
+    : (emailLeg.customer?.phone || (await knex('customers').where({ id: invoice.customer_id }).first('phone'))?.phone || null);
   const app = !payerBilled && await require('../invoice').explicitBillingAppSelected(invoice.customer_id, 'payment_receipt');
-  if (!email && !phone && !app) return { blocker: resolved.ok ? 'no receipt recipient on file' : String(resolved.error).replace(/\.$/, '') };
+  if (!emailLeg.email && !phone && !app) return { blocker: emailLeg.skipReason || 'no receipt recipient on file' };
   // Which receipt, for how much — the amount the receipt itself states.
   const amount = await require('../invoice').receiptAmountFor(invoice);
-  return { email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
+  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
 }
 
 // The card's plain-words description of where a queued receipt can go.
