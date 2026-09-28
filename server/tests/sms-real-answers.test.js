@@ -2002,3 +2002,38 @@ describe('#5194 round 2', () => {
     expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T01:30:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
   });
 });
+
+
+describe('#5194 round 3', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+
+  test('an archived catalog row never prices a booking: the active replacement key is tried first, and an archived first hit is skipped', async () => {
+    const CATALOG = {
+      lawn_fertilization: { name: 'Lawn Fertilization & Weed Control', is_archived: true, is_active: false },
+      lawn_care_one_time: { name: 'One-Time Lawn Care Service', is_archived: false, is_active: true },
+      mosquito_event: { name: 'Mosquito Event Spray', is_archived: true, is_active: false },
+      mosquito_one_time: { name: 'One-Time Mosquito Treatment', is_archived: false, is_active: true },
+    };
+    const resolveServiceType = jest.fn(async (key) => CATALOG[key] || null);
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I get a one-time fungicide treatment?')).resolves.toBe('One-Time Lawn Care Service');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn_care_one_time');
+    await expect(drafter.requestedServiceType('Can you do an event spray for a party?')).resolves.toBe('One-Time Mosquito Treatment');
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBeNull(); // only archived rows → nothing
+  });
+
+  test('the pest family matches identity terms only: a "Quarterly Tree & Shrub Care Service" visit does not make pest control already scheduled', async () => {
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'pest_general_quarterly' ? { name: 'General Pest Control (Quarterly)', is_active: true, is_archived: false } : null) }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Tree & Shrub Care Service', date: '2026-10-01' }], customer: { id: 'c1' } };
+    await expect(drafter.newBookingServiceType('Can you add pest control?', ctx)).resolves.toBe('General Pest Control (Quarterly)');
+    const pestCtx = { ...ctx, upcomingServices: [{ type: 'Bi-Monthly Pest Control Service', date: '2026-10-01' }] };
+    await expect(drafter.newBookingServiceType('Can you add pest control?', pestCtx)).resolves.toBeNull();
+  });
+});

@@ -461,12 +461,16 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // termite row, not the bait system. Keys come from the service-library and
 // inspection-catalog migrations; the first that resolves to a real row wins,
 // so a catalog that predates a later key still resolves.
+// Active keys first (Codex #5194 r3): the service-library cleanup migration
+// archived lawn_fertilization, mosquito_event and the palm rows in favor of
+// lawn_care_one_time / mosquito_one_time; an archived row never wins
+// (requestedServiceType skips is_archived / is_active=false rows).
 const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
   pest_control: ['pest_general_quarterly', 'pest_control'],
-  lawn_care: ['lawn_fertilization', 'lawn_care'],
-  one_time_lawn: ['lawn_fertilization', 'lawn_care'],
+  lawn_care: ['lawn_care_recurring', 'lawn_care', 'lawn_fertilization'],
+  one_time_lawn: ['lawn_care_one_time', 'lawn_fertilization'],
   mosquito: ['mosquito_monthly', 'mosquito_seasonal', 'mosquito'],
-  one_time_mosquito: ['mosquito_event', 'mosquito_one_time'],
+  one_time_mosquito: ['mosquito_one_time', 'mosquito_event'],
   tree_shrub: ['tree_shrub_program', 'tree_shrub'],
   palm: ['palm_injection', 'palm_treatment'],
   termite: ['termite_bait'],
@@ -499,7 +503,9 @@ async function requestedServiceType(inboundMessage) {
     const { resolveServiceType } = require('./service-library');
     for (const catalogKey of candidates) {
       const row = await resolveServiceType(catalogKey);
-      if (row?.name) return String(row.name);
+      if (!row?.name) continue;
+      if (row.is_archived === true || row.is_active === false) continue; // retired rows never price a booking
+      return String(row.name);
     }
     return null;
   } catch (err) {
@@ -516,7 +522,7 @@ async function requestedServiceType(inboundMessage) {
 // to the customer's own visit.
 const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
 const SERVICE_FAMILY_ALIASES = Object.freeze({
-  pest: /\b(?:pest|bugs?|general|quarterly|bimonthly|cleanout|roach)\b/i,
+  pest: /\b(?:pest|bugs?|general pest|cleanout|roach(?:es)?|ants?|spiders?)\b/i, // identity terms only — never a cadence word (Codex #5194 r3)
   lawn: /\b(?:lawn|turf|grass|fert\w*|weed)\b/i,
   mosquito: /\bmosquito/i,
   tree_shrub: /\b(?:tree|shrub|ornamental)\b/i,

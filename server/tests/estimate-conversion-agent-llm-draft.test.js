@@ -572,3 +572,24 @@ describe('processInboundSms — estimate forwarded only when the message is link
     expect(calls[calls.length - 1][0]).toMatchObject({ estimateId: null });
   });
 });
+
+
+// #5194 r3: a conversational reply to an estimate ("Sounds good, can we do
+// Tuesday?") carries no keyword, but when the customer has no upcoming visit
+// the estimate is the only service context — it still prices availability.
+describe('generateLlmReviewDraft — estimate linkage from the conversation', () => {
+  const draft = () => ({ parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers' });
+  test('not explicitly linked + no upcoming visit → the estimate is forwarded; not linked + an upcoming visit → null; explicitly linked → forwarded regardless', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [] });
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Sounds good, can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'ctx', flags: [], upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] });
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'Sounds good, can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: false });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: null }));
+    generateGroundedDraft.mockResolvedValue(draft());
+    await _test.generateLlmReviewDraft({ customer: CUSTOMER, body: 'About my estimate — can we do Tuesday?', decision: { intent: 'service_scheduling_window_reply', confidence: 0.9 }, estimate: { id: 'estimate-42' }, estimateLinked: true });
+    expect(generateGroundedDraft).toHaveBeenLastCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
+  });
+});

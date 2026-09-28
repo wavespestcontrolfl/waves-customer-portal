@@ -610,7 +610,7 @@ function buildInputSnapshot({ body, customer, estimate, lead, from, to, shortCod
  * phone re-lookup could aggregate a DIFFERENT account's facts into the prompt
  * (shared numbers) — lead-only estimate threads keep the template.
  */
-async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
+async function generateLlmReviewDraft({ customer, body, decision, estimate, estimateLinked = true }) {
   if (process.env.AGENT_REVIEW_LLM_DRAFTS === 'false') return null;
   if (!customer) return null;
   try {
@@ -639,7 +639,12 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate }) {
       // above this call in processInboundSms) so the offered slots reflect
       // THAT estimate's own service minutes — the same second argument
       // check_availability itself passes to getAvailableSlots.
-      estimateId: estimate?.id || null,
+      // The estimate prices availability when the message is explicitly
+      // linked to it, or — for a conversational reply such as "Sounds
+      // good, can we do Tuesday?" (Codex #5194 r3) — when the customer has
+      // no upcoming visit the reply could be about instead, so the
+      // estimate is the only service context there is.
+      estimateId: estimate?.id && (estimateLinked || !(context?.upcomingServices || []).length) ? estimate.id : null,
     });
     // Only a verified-clean draft may replace the template: unconverged means
     // the reply still asserts facts the context doesn't support after the
@@ -729,7 +734,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     // (Codex #5194 r2): it carried the estimate's short code, or names the
     // estimate/quote — never merely because the customer has one open.
     const estimateLinked = Boolean(shortCode) || /\b(?:estimate|quote|proposal)\b/i.test(String(body || ''));
-    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW && estimateLinked ? estimate : null });
+    const llmDraft = await generateLlmReviewDraft({ customer, body, decision, estimate: workflow === WORKFLOW ? estimate : null, estimateLinked });
     // The house no-price rule applies to WHATEVER text lands in the composer
     // card — the deterministic scheduling templates echo raw inbound text, so
     // a customer's own "Tuesday for $50 works" would flow into the draft
