@@ -297,7 +297,14 @@ function classifyOwnedUrlHealth(requestedUrl, chain) {
     return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: `unexpected_status_${status}` } };
   }
 
-  // 2xx from here down.
+  // 2xx from here down. A truncated body (the ~1.5MB cap tripped, or the
+  // socket closed before 'end') is never enough evidence to call a page
+  // healthy — soft_404/challenge/noindex/canonical markers can all live past
+  // the cutoff point, so an incomplete read is reported as blocked rather
+  // than risking a false "ok" (or worse, retiring an existing FIX alert).
+  if (truncated) {
+    return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: 'response_truncated' } };
+  }
   const title = extractTitle(body);
   if (CHALLENGE_RE.test(body) || CHALLENGE_RE.test(title)) {
     return { verdict: 'challenge', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
@@ -355,7 +362,12 @@ async function runWithConcurrency(items, limit, worker) {
   return out;
 }
 
-const BAD_VERDICTS = new Set(['soft_404', 'not_found', 'server_error', 'canonical_elsewhere', 'fetch_blocked']);
+// Every verdict except a clean live page. noindex and challenge are included
+// deliberately: an engine-cited page that tells crawlers not to index it, or
+// that we could not get past a bot wall to verify, is neither confirmed
+// healthy nor something a clean run should ever retire a standing FIX alert
+// over (codex pre-push audit finding).
+const BAD_VERDICTS = new Set(['soft_404', 'not_found', 'server_error', 'canonical_elsewhere', 'fetch_blocked', 'noindex', 'challenge']);
 
 const OPS_DIGEST_KEY = 'owned-url-health';
 const digestEmail = () => process.env.OWNED_URL_HEALTH_DIGEST_EMAIL || 'contact@wavespestcontrol.com';

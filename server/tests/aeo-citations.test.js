@@ -124,6 +124,16 @@ test('missing never goes negative when every expected pair is observed', () => {
   expect(dashboard.benchmark).toMatchObject({ activeQuestions: 1, expectedObservations: 1, missing: 0 });
 });
 
+test('a deactivated question\'s historical observation cannot shrink the active cohort\'s missing count', () => {
+  const [q1, q2, q3] = benchmark.questions.map(q => q.query);
+  const managed = [{ query: q1, active: true }, { query: q3, active: true }]; // q2 is deactivated
+  const rows = [measured({ query: q2 })]; // only a (deactivated) q2 observation exists
+  const dashboard = buildDashboard(rows, managed);
+  // Both active questions (q1, q3) x 1 engine are unobserved — q2's leftover
+  // observation must not count toward either of them.
+  expect(dashboard.benchmark).toMatchObject({ activeQuestions: 2, expectedObservations: 2, missing: 2 });
+});
+
 test('Gemini attributes only supported chunks and ignores thinking text', async () => {
   process.env.GEMINI_API_KEY = 'test-key';
   global.fetch.mockResolvedValue({ ok: true, json: async () => ({ candidates: [{

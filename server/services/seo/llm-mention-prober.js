@@ -115,7 +115,11 @@ function buildDashboard(rows, queries) {
   // rather than a silent drop in the denominator.
   const activeQuestionCount = benchmark.questions.filter(q => managed.has(q.query)).length;
   const configuredEngines = [...new Set(grid.map(row => row.llm_platform))];
-  const observedFixedPairs = new Set(fixed.filter(isMeasuredAnswer).map(row => `${row.query}::${row.llm_platform}`));
+  // Restricted to currently-active questions: a deactivated benchmark
+  // question's historical observations must not subtract from the active
+  // cohort's gap (codex pre-push audit finding) — deactivating a question
+  // should never silently shrink `missing` toward zero.
+  const observedFixedPairs = new Set(fixed.filter(isMeasuredAnswer).filter(row => managed.has(row.query)).map(row => `${row.query}::${row.llm_platform}`));
   const expectedObservations = activeQuestionCount * configuredEngines.length;
   const missing = Math.max(0, expectedObservations - observedFixedPairs.size);
   return {

@@ -12,6 +12,7 @@ const {
   checkOwnedUrlHealth,
   collectCitedOwnedUrls,
   VERDICTS,
+  BAD_VERDICTS,
 } = require('../services/seo/owned-url-health');
 
 describe('normalizeOwnedUrl', () => {
@@ -145,6 +146,29 @@ describe('verdict classification', () => {
       finalUrl: 'https://wavespestcontrol.com/x/', status: 200, headers: {}, body, hops: [{ url: 'https://wavespestcontrol.com/x/', status: 200 }],
     });
     expect(result.verdict).toBe('ok');
+  });
+
+  // codex pre-push audit finding: a truncated 2xx body must never be
+  // classified as healthy — the soft-404/noindex/canonical markers it would
+  // otherwise be checked for can live past the cutoff point.
+  test('a truncated 2xx response (size cap tripped) classifies as fetch_blocked, not ok', () => {
+    const body = '<html><head><title>Pest control';  // cut mid-title
+    const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/x/', {
+      finalUrl: 'https://wavespestcontrol.com/x/', status: 200, headers: {}, body, truncated: true,
+      hops: [{ url: 'https://wavespestcontrol.com/x/', status: 200 }],
+    });
+    expect(result.verdict).toBe('fetch_blocked');
+    expect(result.detail.reason).toBe('response_truncated');
+  });
+
+  // codex pre-push audit finding: noindex and challenge must count as
+  // actionable (bad) results — neither is a confirmed-healthy page, and
+  // neither may silently retire a standing FIX alert on a clean run.
+  test('noindex and challenge are both bad verdicts, not clean', () => {
+    expect(BAD_VERDICTS.has('noindex')).toBe(true);
+    expect(BAD_VERDICTS.has('challenge')).toBe(true);
+    expect(BAD_VERDICTS.has('ok')).toBe(false);
+    expect(BAD_VERDICTS.has('redirect_ok')).toBe(false);
   });
 });
 
