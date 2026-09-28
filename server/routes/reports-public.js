@@ -1831,23 +1831,45 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
     // response the route already gives for no asset at all — this route has
     // no rebuild path of its own, so it does not invent one here; the next
     // completion/dispatch event rebuilds it.
-    const { RENDER_VERSION: currentPreviewRenderVersion } = require('../services/service-report/preview-image');
+    const {
+      RENDER_VERSION: currentPreviewRenderVersion,
+      hasPhotoContentSignatureColumn,
+    } = require('../services/service-report/preview-image');
     const currentPhotoGateOn = require('../config/feature-gates').reportPhotoContentLive();
-    const currentPhotoContentSignature = currentPhotoGateOn
-      ? `-pgon${await require('../services/service-report/photo-set-signature')
-        .reportPhotoSetPdfSignature(service.id, db).catch(() => '-phu')}`
-      : '';
-    const asset = await db('service_report_notification_assets')
+
+    // Rollout-window guard (owner pre-push P1, 2026-09-28), mirroring the
+    // writer's own: the query below references photo_content_signature
+    // unconditionally, which fails SQL entirely on the pre-migration schema.
+    // Column absent + gate ON: the writer refuses to store an unsigned
+    // gate-on row (see buildAndStoreSmsPreviewImage), so there is nothing
+    // correct to serve — 404 without querying, same response as "no asset".
+    // Column absent + gate OFF: query on service_record_id + asset_type +
+    // render_version only — every stored row is already a true gate-off
+    // image (the column simply doesn't exist yet), so no COALESCE predicate
+    // is needed.
+    const columnPresent = await hasPhotoContentSignatureColumn(db);
+    if (!columnPresent && currentPhotoGateOn) {
+      return res.status(404).json({ error: 'preview_not_found' });
+    }
+
+    let assetQuery = db('service_report_notification_assets')
       .where({
         service_record_id: service.id,
         asset_type: 'sms_preview_image',
         render_version: currentPreviewRenderVersion,
-      })
+      });
+    if (columnPresent) {
+      const currentPhotoContentSignature = currentPhotoGateOn
+        ? `-pgon${await require('../services/service-report/photo-set-signature')
+          .reportPhotoSetPdfSignature(service.id, db).catch(() => '-phu')}`
+        : '';
       // A legacy row from before photo_content_signature existed reads NULL;
       // COALESCE only matches it to today's identity when the gate is ALSO
       // off today (the safe direction this column's migration docstring
       // describes — never wrongly served, worst case an extra rebuild).
-      .andWhere(db.raw('COALESCE(photo_content_signature, ?) = ?', ['', currentPhotoContentSignature]))
+      assetQuery = assetQuery.andWhere(db.raw('COALESCE(photo_content_signature, ?) = ?', ['', currentPhotoContentSignature]));
+    }
+    const asset = await assetQuery
       .orderBy('created_at', 'desc')
       .first()
       .catch(() => null);

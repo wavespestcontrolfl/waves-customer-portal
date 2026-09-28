@@ -83,7 +83,14 @@ describe('buildAndStoreSmsPreviewImage — wires the gate + photo-set signature 
     reportPhotoContentLive.mockReturnValue(gateOn);
     reportPhotoSetPdfSignature.mockResolvedValue(photoSetSignature);
     const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
-    const lookupChain = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const lookupChain = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      // Column present, so hasPhotoContentSignatureColumn's rollout-window
+      // guard never short-circuits these lookup-key assertions — that guard
+      // has its own dedicated tests below.
+      columnInfo: jest.fn().mockResolvedValue({ photo_content_signature: {} }),
+    };
     const knex = jest.fn(() => lookupChain);
     // The render path itself throws (launchBrowser rejects) — buildAndStoreSmsPreviewImage
     // propagates that, but the lookup `where(...)` call (what we're asserting on)
@@ -118,6 +125,9 @@ describe('buildAndStoreSmsPreviewImage — wires the gate + photo-set signature 
 });
 
 describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on the stored row', () => {
+  let reportPhotoContentLive;
+  let logger;
+
   beforeEach(() => {
     jest.resetModules();
     jest.doMock('../config', () => ({ s3: { bucket: 'test-bucket', region: 'us-east-1' } }));
@@ -126,7 +136,9 @@ describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on t
       S3Client: jest.fn().mockImplementation(() => ({ send: jest.fn().mockResolvedValue({}) })),
       PutObjectCommand: jest.fn(),
     }));
-    jest.doMock('../config/feature-gates', () => ({ reportPhotoContentLive: jest.fn(() => true) }));
+    // Controllable (was a hardcoded `() => true` factory) — the rollout-
+    // window guard below needs to see both gate states.
+    jest.doMock('../config/feature-gates', () => ({ reportPhotoContentLive: jest.fn() }));
     jest.doMock('../services/service-report/photo-set-signature', () => ({
       reportPhotoSetPdfSignature: jest.fn().mockResolvedValue('-ph1-aaaa1111'),
     }));
@@ -147,11 +159,15 @@ describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on t
       launchBrowser: jest.fn().mockResolvedValue(fakeBrowser),
       serviceReportViewerUrl: jest.fn(() => 'https://example.test/report/token-1?mode=sms_preview'),
     }));
+
+    reportPhotoContentLive = require('../config/feature-gates').reportPhotoContentLive;
+    logger = require('../services/logger');
   });
 
   afterEach(() => jest.dontMock('../config/feature-gates'));
 
-  test('a fresh build (gate on) writes photo_content_signature matching the lookup key it used', async () => {
+  test('a fresh build (gate on, column present) writes photo_content_signature matching the lookup key it used', async () => {
+    reportPhotoContentLive.mockReturnValue(true);
     const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
     let insertedRow = null;
     const knex = jest.fn(() => ({
@@ -170,7 +186,8 @@ describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on t
     expect(result.photo_content_signature).toBe('-pgon-ph1-aaaa1111');
   });
 
-  test('the column-missing rollout window (columnInfo omits it) writes no photo_content_signature rather than throwing', async () => {
+  test('gate off + column absent (rollout window) → inserts without photo_content_signature, same as before this P1 fix', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
     const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
     let insertedRow = null;
     const knex = jest.fn(() => ({
@@ -182,7 +199,27 @@ describe('buildAndStoreSmsPreviewImage — persists photo_content_signature on t
         return { returning: jest.fn().mockResolvedValue([{ ...row, id: 'asset-1' }]) };
       }),
     }));
-    await buildAndStoreSmsPreviewImage({ recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex });
+    const result = await buildAndStoreSmsPreviewImage({ recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex });
     expect(insertedRow).not.toHaveProperty('photo_content_signature');
+    expect(result).not.toHaveProperty('photo_content_signature');
+  });
+
+  test('gate ON + column absent (rollout window) → skips the build entirely: no insert, no S3 upload, a gate-on image is never stored unsigned', async () => {
+    reportPhotoContentLive.mockReturnValue(true);
+    const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
+    const { S3Client } = require('@aws-sdk/client-s3');
+    const insert = jest.fn();
+    const knex = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+      columnInfo: jest.fn().mockResolvedValue({}), // pre-migration schema, gate now on
+      insert,
+    }));
+    const result = await buildAndStoreSmsPreviewImage({ recordId: 'record-1', token: 'token-1', dynamicContext: {}, knex });
+    expect(result).toBeNull();
+    expect(insert).not.toHaveBeenCalled();
+    const s3Instance = S3Client.mock.results[S3Client.mock.results.length - 1].value;
+    expect(s3Instance.send).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalled();
   });
 });

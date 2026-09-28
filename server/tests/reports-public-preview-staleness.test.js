@@ -14,6 +14,16 @@
  * preview_not_found 404 a missing asset already gets — this route has no
  * rebuild path of its own.
  *
+ * Rollout-window guard (owner pre-push P1, 2026-09-28): the query above
+ * references photo_content_signature unconditionally, which fails SQL on
+ * the pre-migration schema. The route probes the column first
+ * (hasPhotoContentSignatureColumn, exported from preview-image.js, same
+ * probe the writer uses): column absent + gate ON → 404 without querying
+ * the assets table at all (the writer refuses to store an unsigned gate-on
+ * row, so there's nothing correct to serve); column absent + gate OFF →
+ * queries on service_record_id + asset_type + render_version only, no
+ * andWhere/COALESCE (every stored row is already a true gate-off image).
+ *
  * These tests assert the QUERY identity (the where/andWhere/orderBy calls
  * the route builds) rather than post-filtering a row the mock hands back,
  * since the filtering now happens inside the query itself.
@@ -41,6 +51,10 @@ jest.mock('@aws-sdk/client-s3', () => ({
 }));
 jest.mock('../services/service-report/preview-image', () => ({
   RENDER_VERSION: 'sms_preview_v2',
+  // Default true (column present, the post-migration steady state) so every
+  // existing test's query shape is unaffected; the rollout-window tests
+  // below override this per test.
+  hasPhotoContentSignatureColumn: jest.fn().mockResolvedValue(true),
 }));
 jest.mock('../config/feature-gates', () => ({
   reportPhotoContentLive: jest.fn(),
@@ -62,6 +76,7 @@ const express = require('express');
 const db = require('../models/db');
 const { reportPhotoContentLive } = require('../config/feature-gates');
 const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
+const { hasPhotoContentSignatureColumn } = require('../services/service-report/preview-image');
 const reportsRouter = require('../routes/reports-public');
 
 function chain(overrides = {}) {
@@ -125,7 +140,13 @@ const MATCHING_ASSET = {
 };
 
 describe('GET /reports/:token/preview.jpg staleness', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // jest.clearAllMocks() only clears call history, not a mock's set
+    // implementation — restore the steady-state default explicitly so a
+    // prior test's override (column absent) never leaks into the next one.
+    hasPhotoContentSignatureColumn.mockResolvedValue(true);
+  });
 
   test('gate off, query returns a matching row → served, identity bound to render_version + empty signature', async () => {
     reportPhotoContentLive.mockReturnValue(false);
@@ -267,5 +288,44 @@ describe('GET /reports/:token/preview.jpg staleness', () => {
     });
 
     expect(assetChain.orderBy).toHaveBeenCalledWith('created_at', 'desc');
+  });
+
+  test('column absent (rollout window), gate off → query has no andWhere/COALESCE and still serves the matching row', async () => {
+    reportPhotoContentLive.mockReturnValue(false);
+    hasPhotoContentSignatureColumn.mockResolvedValue(false);
+    const assetChain = mockDb({ asset: MATCHING_ASSET });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/preview.jpg`);
+      expect(res.status).toBe(200);
+    });
+
+    expect(assetChain.where).toHaveBeenCalledWith({
+      service_record_id: 'service-1',
+      asset_type: 'sms_preview_image',
+      render_version: 'sms_preview_v2',
+    });
+    expect(assetChain.andWhere).not.toHaveBeenCalled();
+    expect(assetChain.orderBy).toHaveBeenCalledWith('created_at', 'desc');
+    expect(reportPhotoSetPdfSignature).not.toHaveBeenCalled();
+  });
+
+  test('column absent (rollout window), gate on → 404 preview_not_found without ever querying the assets table or reading the photo-set signature', async () => {
+    // The writer refuses to store an unsigned gate-on row (see
+    // preview-image-photo-content-signature.test.js), so there is no correct
+    // row to serve here — the route 404s immediately rather than run a query
+    // that references a column the schema doesn't have.
+    reportPhotoContentLive.mockReturnValue(true);
+    hasPhotoContentSignatureColumn.mockResolvedValue(false);
+    mockDb({ asset: MATCHING_ASSET });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/${VALID_TOKEN}/preview.jpg`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'preview_not_found' });
+    });
+
+    expect(db.mock.calls.some(([table]) => table === 'service_report_notification_assets')).toBe(false);
+    expect(reportPhotoSetPdfSignature).not.toHaveBeenCalled();
   });
 });

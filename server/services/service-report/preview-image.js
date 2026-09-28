@@ -165,6 +165,22 @@ async function buildAndStoreSmsPreviewImage({
   // storage key already carries; only read when the gate is on, so a
   // gate-off render never pays the extra query and never moves its key.
   const photoContentGateOn = reportPhotoContentLive();
+
+  // Rollout-window guard (owner pre-push P1, 2026-09-28): a gate-on image
+  // must never be stored without its photo_content_signature — the public
+  // reader (reports-public.js) keys its SELECT on that column, and an
+  // unsigned gate-on row would either 404 every read (column absent from
+  // its query) or, post-migration, wrongly satisfy a gate-off query (NULL
+  // coalesces to ''). The render happens via the live report page, so this
+  // writer can't force a gate-off render as a substitute — skipping the
+  // build (MMS falls back to plain text) is the correct move here. Gate off
+  // is unaffected: photoContentSignature is '' either way, a true gate-off
+  // identity, so an absent column just omits the row's own column below.
+  if (photoContentGateOn && !(await hasPhotoContentSignatureColumn(knex))) {
+    logger.warn('[service-report-preview] GATE_REPORT_PHOTO_CONTENT is on but photo_content_signature column is absent; skipping preview build');
+    return null;
+  }
+
   const photoContentSignature = photoContentGateOn
     ? `-pgon${await reportPhotoSetPdfSignature(recordId, knex).catch(() => '-phu')}`
     : '';
@@ -238,6 +254,7 @@ module.exports = {
   RENDER_VERSION,
   buildAndStoreSmsPreviewImage,
   computeSmsPreviewInputHash,
+  hasPhotoContentSignatureColumn,
   publicPreviewUrl,
   renderServiceReportSmsPreviewImage,
 };
