@@ -1670,6 +1670,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       // carrying a dispatcher-authored note — reads as system-generated in
       // the durable record (codex r2 P2).
       ...(actorUserId ? { adminUserId: actorUserId } : {}),
+      // The exact rung that rendered — same value as original_message_type
+      // here (both track renderedKey), kept as its own field since the two
+      // serve different readers (the ops kill switch vs. a template audit).
+      templateKey: renderedKey,
     },
   });
   if (result?.blocked || result?.sent === false) {

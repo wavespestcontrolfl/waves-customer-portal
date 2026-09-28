@@ -5873,6 +5873,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5906,6 +5910,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5922,6 +5927,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -5933,6 +5939,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -6110,6 +6117,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -7872,6 +7883,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.

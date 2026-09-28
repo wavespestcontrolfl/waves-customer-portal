@@ -3448,7 +3448,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, visit_id: svcVisitId, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined, templateKey: 'reminder_72h' }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
@@ -4318,6 +4318,7 @@ const AppointmentReminders = {
             // A windowless notice promised no window: the slot still guards
             // the send, but it is recorded as an unknown-window promise.
             ...(resolved?.windowless ? { window_unknown: true } : {}),
+            templateKey: 'appointment_rescheduled',
           }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
@@ -4801,7 +4802,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_cancelled' }, {
             sendOutcome,
             // Lease-ownership recheck AT the provider handoff (codex r6):
             // customer lookup, prefs, rendering, and the line lookup all
@@ -4977,7 +4978,7 @@ const AppointmentReminders = {
         // 'appointment_cancellation' profile (a no-show notice is the same
         // class of "your appointment isn't happening — let's rebook" comms,
         // and 'appointment_no_show' is not a registered MessagePurpose).
-      }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+      }, 'appointment_no_show', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId, templateKey: 'appointment_no_show' }, {
         // Authenticated dispatcher click with an explicit notify choice —
         // exempt from the send window (rain-out/quick-move contract).
         // options.operatorInitiated is threaded by the (only) route
@@ -5620,7 +5621,7 @@ const AppointmentReminders = {
         // Row-backed linkage (codex r13): record always has a reminder
         // row, so acceptance reconciliation can find the group through it
         // even when the preferred representative lacks one.
-        { scheduled_service_id: record.scheduled_service_id }, {
+        { scheduled_service_id: record.scheduled_service_id, templateKey: 'appointment_series_cancelled' }, {
           sendOutcome,
           // Ownership fence at the provider handoff (codex r7): if the
           // sweep reclaimed this series while we rendered, stand down —

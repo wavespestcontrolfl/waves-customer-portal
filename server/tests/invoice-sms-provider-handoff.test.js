@@ -148,6 +148,19 @@ describe('invoice SMS provider handoff', () => {
     ))).toBe(false);
   });
 
+  test('threads the rendered template key (invoice_sent, no prepay/upfront variant) through to sendCustomerMessage metadata', async () => {
+    sendCustomerMessage.mockResolvedValue({
+      sent: true, blocked: false, deliveryOutcome: 'accepted', providerMessageId: 'SM123',
+    });
+
+    await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+      original_message_type: 'invoice',
+      templateKey: 'invoice_sent',
+    });
+  });
+
   test('a combined send stamps its accepted Text leg without finalizing before Email starts', async () => {
     const invoiceQueries = [];
     db.mockImplementation((table) => {

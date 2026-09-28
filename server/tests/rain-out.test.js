@@ -449,6 +449,8 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         original_message_type: 'rain_out_moved_v2',
         reason_code: 'weather_rain',
+        // Same rung, threaded to the audit-mapping field too.
+        templateKey: 'rain_out_moved_v2',
       });
     });
 
@@ -695,6 +697,7 @@ describe('rain-out service', () => {
       expect(vars.forecast_clause).toBeUndefined();
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         original_message_type: 'rain_out_moved_v3',
+        templateKey: 'rain_out_moved_v3',
       });
     });
 

@@ -11865,7 +11865,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               identityTrustLevel: 'phone_matches_customer',
               // billing_mode_at_send: the owner autopay digest (#3607) classifies
               // the text against the lane that authorized it.
-              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
+              metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode, templateKey: 'payment_failed' },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
             const noticeLegs = (failResult.channelResults || failResult.deduped === true)
@@ -12598,7 +12598,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true, templateKey: sentSmsType };
           if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
