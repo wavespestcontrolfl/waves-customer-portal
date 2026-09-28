@@ -1649,6 +1649,78 @@ describe('email template automation executor', () => {
         delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
       }
     });
+
+    test('a concurrent promotion race: losing the conditional update dedupes against the row as it now stands, never a fabricated runnable row', async () => {
+      const existingShadowRun = run({ status: 'shadow' });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      // The conditional UPDATE (WHERE status='shadow') returns ZERO rows —
+      // another replay already won and advanced the row past 'shadow'.
+      const lostRaceUpdateQuery = chain({ returning: [] });
+      const currentRunQuery = chain({ first: { ...existingShadowRun, status: 'sent' } });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, lostRaceUpdateQuery, currentRunQuery],
+        email_template_automation_run_events: [dedupeLogQuery],
+      });
+
+      const result = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(result.results[0].run.status).toBe('sent');
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+  });
+
+  describe('off mode (GATE_EMAIL_TEMPLATE_AUTOMATIONS unset/false — fail closed)', () => {
+    test('processTrigger is a pure no-op: no automations query, no run created', async () => {
+      const savedNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      db.mockClear();
+      try {
+        const result = await AutomationExecutor.processTrigger({ triggerEventKey: 'estimate.auto_renewed', payload: { estimate_id: 'est-1' } });
+        expect(result).toEqual({ trigger_event_key: 'estimate.auto_renewed', automation_count: 0, results: [] });
+        expect(db).not.toHaveBeenCalled();
+        expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      } finally {
+        if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = savedNodeEnv;
+      }
+    });
+
+    test('executeRun never dispatches a run that is due while the gate reads off — marks it skipped instead', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      try {
+        const queuedRun = run({ entity_type: '', entity_id: '' });
+        const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+        const skippedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped' }] });
+        const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+        setDbQueues({
+          email_template_automation_runs: [runningRunQuery, skippedRunQuery],
+          email_template_automation_run_events: [attemptLogQuery, skippedLogQuery],
+        });
+
+        const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+        expect(result.status).toBe('skipped');
+        expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+        expect(skippedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+          message: 'email template automations gate is off',
+        }));
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
   });
 
   describe('unknown trigger keys', () => {

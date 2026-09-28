@@ -711,26 +711,45 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     // second row and no unique-constraint race: PROMOTE the same row back
     // to a fresh runnable state (this live attempt's status/run_after/
     // payload/context), rather than inserting a new row or deduping this
-    // one away. A shadow replay of an existing shadow row (mode still
-    // 'shadow') and any replay of an already-live/terminal row keep the
-    // ordinary dedupe path below.
-    if (existing.status === 'shadow' && mode && mode !== 'shadow') {
-      const [promoted] = await conn('email_template_automation_runs').where({ id: existing.id }).update({
-        status,
-        run_after: runAfter,
-        attempts: 0,
-        last_error: null,
-        exit_reason: exitReason || null,
-        payload: JSON.stringify(payload || {}),
-        context: JSON.stringify(context || {}),
-        completed_at: status === 'skipped' ? new Date() : null,
-        updated_at: new Date(),
-      }).returning('*');
-      await logRunEvent(existing.id, 'promoted_from_shadow', 'Prior shadow run promoted to a live attempt on the same idempotency key', {
+    // one away. Only a genuinely 'live' attempt promotes — a shadow replay
+    // (mode still 'shadow') and an off-mode replay (mode 'off': nothing
+    // should be created or dispatched at all) keep the ordinary dedupe path
+    // below, same as any replay of an already-live/terminal row.
+    if (existing.status === 'shadow' && mode === 'live') {
+      // The UPDATE's WHERE also re-checks status='shadow' (codex P1): two
+      // concurrent replays can both read this same 'shadow' row before
+      // either writes. An unconditional update here would let the SECOND
+      // replay blindly overwrite whatever the FIRST one already advanced
+      // the row to (running/sent) and re-arm it for a duplicate send.
+      // Zero rows back means this replay lost that race — fall through to
+      // an ordinary dedupe against the row as it now stands, never a
+      // fabricated runnable row.
+      const promotedRows = await conn('email_template_automation_runs')
+        .where({ id: existing.id, status: 'shadow' })
+        .update({
+          status,
+          run_after: runAfter,
+          attempts: 0,
+          last_error: null,
+          exit_reason: exitReason || null,
+          payload: JSON.stringify(payload || {}),
+          context: JSON.stringify(context || {}),
+          completed_at: status === 'skipped' ? new Date() : null,
+          updated_at: new Date(),
+        }).returning('*');
+      if (promotedRows.length) {
+        await logRunEvent(existing.id, 'promoted_from_shadow', 'Prior shadow run promoted to a live attempt on the same idempotency key', {
+          trigger_event_key: triggerEventKey,
+          trigger_event_id: triggerEventId || null,
+        }, conn);
+        return { run: promotedRows[0], deduped: false };
+      }
+      const current = await conn('email_template_automation_runs').where({ id: existing.id }).first();
+      await logRunEvent((current || existing).id, 'deduped', 'Automation trigger replay ignored by idempotency key (lost the shadow-promotion race)', {
         trigger_event_key: triggerEventKey,
         trigger_event_id: triggerEventId || null,
       }, conn);
-      return { run: promoted || { ...existing, status }, deduped: false };
+      return { run: current || existing, deduped: true };
     }
     // conn, never the global pool — see logRunEvent's contract (the parent
     // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
@@ -820,12 +839,20 @@ async function processTrigger({
   }
   const eventId = cleanString(triggerEventId || snakeTriggerEventId, '');
   const targetAutomationKey = cleanString(automationKey || snakeAutomationKey, '');
-  const automations = await loadAutomations(eventKey, targetAutomationKey);
-  const results = [];
   // Read once per trigger call — mode can only change process-wide anyway,
   // and every automation matched below needs the same answer for the
-  // shadow-promotion dedupe rule (createRunUnlocked).
+  // shadow-promotion dedupe rule (createRunUnlocked). Fail-closed FIRST:
+  // 'off' means no run is created, promoted, or dispatched — a caller that
+  // still reaches this function despite the gate being off (a stale
+  // frozen boolean, a caller that skipped its own isEnabled check) gets a
+  // pure no-op, not a live send (codex P1: the boolean gate alone does not
+  // stop dispatch once execution reaches the executor).
   const mode = emailTemplateAutomationsMode();
+  if (mode === 'off') {
+    return { trigger_event_key: eventKey, automation_count: 0, results: [] };
+  }
+  const automations = await loadAutomations(eventKey, targetAutomationKey);
+  const results = [];
   // DB hit only when something actually matched — an unknown/unwired
   // trigger key stays a pure, zero-write no-op (loadAutomations returns []).
   if (automations.length) {
@@ -1406,14 +1433,23 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (conditionFailure) {
       return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
     }
-    // Shadow-mode chokepoint: the run has cleared every guard a live send
+    // Shadow/off chokepoint: the run has cleared every guard a live send
     // would clear (exit conditions, conditions) and is exactly at the point
-    // dispatchRun would call the email library. In shadow, stop here
-    // instead — finalize as would_send. This single spot covers BOTH
-    // callers of executeRun (processTrigger's immediate path and
+    // dispatchRun would call the email library. This single spot covers
+    // BOTH callers of executeRun (processTrigger's immediate path and
     // processDueRuns' due-run sweep), since both funnel through here.
-    if (emailTemplateAutomationsMode() === 'shadow') {
+    const dispatchMode = emailTemplateAutomationsMode();
+    if (dispatchMode === 'shadow') {
       return finalizeShadowRun(claimedRun, resolvedAutomation);
+    }
+    // Fail-closed (codex P1): a run already sitting in the queue (created
+    // while the gate was on) must not dispatch a real email just because
+    // the gate read 'off' by the time this run became due — the boolean
+    // entry callers gate creation on is a load-time snapshot in non-prod
+    // (always true) and can be stale in prod too. Skipped, not silently
+    // dropped: the row + event stay as an audit trail of what didn't send.
+    if (dispatchMode === 'off') {
+      return markRunSkipped(claimedRun, 'email template automations gate is off', { guard: 'gate_off', attempt: attemptNumber });
     }
     const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
     if (outcome.skipReason) {
