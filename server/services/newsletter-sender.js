@@ -109,6 +109,43 @@ function excludeArchivedCustomers(query) {
   });
 }
 
+// Explicit marketing opt-out at send time — owner ruling 2026-09-28 (#5165),
+// for EVERY subscriber however it joined the list: exclude an active
+// subscriber when its linked customer, or any live (non-archived) profile
+// holding the same MAILBOX, has an EXPLICIT marketing opt-out on file —
+// marketing_offers = false, email_enabled = false, or a marketing_channel
+// that resolves to 'sms' (email-division/eligibility.js channelFor: only a
+// stored 'sms' resolves there; anything else reads as the 'email' default).
+// NULL / missing prefs are NOT an opt-out. Same mailbox = exact LOWER(TRIM),
+// or Google's mailbox identity (dots and '+tag' ignored, googlemail.com =
+// gmail.com) — the repo's one rule, customer-comms-lock.js GOOGLE_MAILBOX_SQL.
+// Because the check runs on every audience read (buildSubscriberQuery, the
+// resume refetch, the per-chunk re-check, the resume precheck), an opt-out
+// recorded after a subscriber joined — even while a reconcile held the
+// customer's lock — stops the next campaign, and a resume ledger row for
+// that recipient is terminalized through skipIneligibleDeliveries.
+// Every call site wraps excludeArchivedCustomers with this helper (pinned
+// by newsletter-sender-marketing-optout.test.js).
+const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
+const OPTOUT_SAME_MAILBOX_SQL = (() => {
+  const profile = 'TRIM(moc.email)';
+  const subscriber = 'TRIM(newsletter_subscribers.email)';
+  return `(LOWER(${profile}) = LOWER(${subscriber})
+    OR (${GOOGLE_MAILBOX_SQL.isGoogle(profile)} AND ${GOOGLE_MAILBOX_SQL.isGoogle(subscriber)}
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} <> ''
+      AND ${GOOGLE_MAILBOX_SQL.mailbox(profile)} = ${GOOGLE_MAILBOX_SQL.mailbox(subscriber)}))`;
+})();
+function excludeMarketingOptedOut(query) {
+  return query.whereNotExists(function () {
+    this.select(db.raw('1'))
+      .from('notification_prefs as mop')
+      .join('customers as moc', 'moc.id', 'mop.customer_id')
+      .whereNull('moc.deleted_at')
+      .whereRaw("(mop.marketing_offers = false OR mop.email_enabled = false OR LOWER(TRIM(mop.marketing_channel)) = 'sms')")
+      .whereRaw(`(moc.id = newsletter_subscribers.customer_id OR ${OPTOUT_SAME_MAILBOX_SQL})`);
+  });
+}
+
 // Keys that can't be expressed in SQL against newsletter_subscribers — they
 // depend on classifying each customer's active recurring services, so they are
 // resolved to a customer_id set by resolveSegmentCustomerIds() first.
@@ -258,7 +295,7 @@ async function countSegmentRecipients(segmentFilter) {
  *   resolveSegmentCustomerIds(); null = no service-line constraint.
  */
 function buildSubscriberQuery(segmentFilter, customerIds = null) {
-  let q = excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' })));
+  let q = excludeMarketingOptedOut(excludeArchivedCustomers(excludeGloballySuppressed(db('newsletter_subscribers').where({ status: 'active' }))));
 
   // Service-line / membership constraint, pre-resolved to customer ids.
   if (Array.isArray(customerIds)) q = q.whereIn('customer_id', customerIds);
@@ -364,8 +401,8 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
 
 /**
  * THE terminal-skip write. A recipient that fails the eligibility predicate
- * (status active + not globally suppressed + no archived customer link)
- * after selection must never be mailed AND must never stay retryable — a
+ * (status active + not globally suppressed + no archived customer link +
+ * no explicit marketing opt-out) after selection must never be mailed AND must never stay retryable — a
  * resume would otherwise re-queue it, and prepareResumeCampaign would keep
  * counting it as outstanding. Both eligibility gates land here: the
  * pre-dispatch resume sweep (rows still queued/failed) and the per-chunk
@@ -634,11 +671,11 @@ async function sendCampaign(sendId, opts = {}) {
       .map((d) => d.subscriber_id)
       .filter((id) => id !== null && id !== undefined)));
     subscribers = retryableSubscriberIds.length
-      ? await excludeArchivedCustomers(excludeGloballySuppressed(
+      ? await excludeMarketingOptedOut(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers')
           .where({ status: 'active' })
           .whereIn('id', retryableSubscriberIds),
-      )).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
+      ))).select('id', 'email', 'unsubscribe_token', 'customer_id', 'first_name')
       : [];
     logger.info(`[newsletter] send ${send.id} → ${subscribers.length} active retryable recipient(s) from original delivery ledger (globally-suppressed excluded)`);
 
@@ -798,9 +835,9 @@ async function sendCampaign(sendId, opts = {}) {
       // eligible — but the row we selected still carries the OLD (archived)
       // customer_id, which would personalize the email and file the customer
       // touchpoint against the archived profile.
-      const freshCustomerBySub = new Map((await excludeArchivedCustomers(excludeGloballySuppressed(
+      const freshCustomerBySub = new Map((await excludeMarketingOptedOut(excludeArchivedCustomers(excludeGloballySuppressed(
         db('newsletter_subscribers').where({ status: 'active' }).whereIn('id', chunkToSend.map((s) => s.id)),
-      ).select('id', 'customer_id'))).map((r) => [r.id, r.customer_id ?? null]));
+      ))).select('id', 'customer_id')).map((r) => [r.id, r.customer_id ?? null]));
       const stillEligible = freshCustomerBySub;
       const ineligible = chunkToSend.filter((s) => !stillEligible.has(s.id));
       if (ineligible.length) {
@@ -1110,12 +1147,12 @@ async function prepareResumeCampaign(sendId) {
     // actually send — otherwise a campaign whose only outstanding rows are
     // suppressed/archived would falsely report work remaining (and repeatedly
     // claim a resume that then selects nobody).
-    const outstanding = await excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
+    const outstanding = await excludeMarketingOptedOut(excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
       db('newsletter_send_deliveries')
         .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
         .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
       'newsletter_send_deliveries',
-    )))
+    ))))
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
@@ -1375,4 +1412,4 @@ async function markEventsFeatured(send) {
   }
 }
 
-module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
+module.exports = { sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, excludeMarketingOptedOut, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };
