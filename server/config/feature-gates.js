@@ -864,6 +864,11 @@ const gates = {
   // read at call time through askWavesTopicRoutingLive() (this entry is for
   // logGateStatus only).
   askWavesTopicRouting: process.env.GATE_ASK_WAVES_TOPIC_ROUTING === 'true',
+  // Ask Waves emergency second opinion (#4899) — a fast classifier asks only
+  // "is anyone in medical danger?" alongside every chat turn, and a yes turns
+  // a non-emergency answer into the emergency script. Dark everywhere; read at
+  // call time through askWavesEmergencyCheckLive() (logGateStatus only here).
+  askWavesEmergencyCheck: process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true',
 
   // Legacy SMS AI Drafts — creates message_drafts rows and owner "Approve"
   // alerts from inbound customer SMS. Off by default in prod until the
@@ -3328,6 +3333,11 @@ function askWavesTopicRoutingLive() {
   return process.env.GATE_ASK_WAVES_TOPIC_ROUTING === 'true';
 }
 
+// Same live-read convention for the #4899 emergency second opinion.
+function askWavesEmergencyCheckLive() {
+  return process.env.GATE_ASK_WAVES_EMERGENCY_CHECK === 'true';
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -3344,5 +3354,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914
