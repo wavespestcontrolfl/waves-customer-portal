@@ -173,6 +173,9 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         // one switch per CALL, not per socket.
         modelSwitch: [meta.relay_model_switch, ...legs.map((seg) => seg.versions && seg.versions.model_switch)]
           .find((sw) => sw && typeof sw === 'object' && sw.from && sw.to) || null,
+        // The model the latest earlier leg ran on — a leg that never switched
+        // is resumed on it while this session still allows it (codex r7).
+        priorModel: (latest && ((latest.versions && latest.versions.model) || latest.model)) || null,
       };
     });
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });

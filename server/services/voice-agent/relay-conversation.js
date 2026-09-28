@@ -379,13 +379,17 @@ function warnRejectedOverrideOnce(source, value, opts) {
  * OpenAI override whenever GATE_VOICE_RELAY_OPENAI_INBOUND is off, even
  * with GATE_VOICE_RELAY_OPENAI on, and vice versa for sandbox/eval.
  */
-function resolveSessionModel({ sandbox, evalHarness } = {}) {
+function sessionAllowOpts({ sandbox, evalHarness } = {}) {
   const sandboxOrEval = sandbox === true || evalHarness === true;
-  const allowOpts = {
+  return {
     openaiContext: sandboxOrEval,
     // Production inbound only — never set alongside openaiContext above.
     inboundOpenaiContext: !sandboxOrEval,
   };
+}
+
+function resolveSessionModel({ sandbox, evalHarness } = {}) {
+  const allowOpts = sessionAllowOpts({ sandbox, evalHarness });
   const candidates = [];
   if (sandbox === true) {
     const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
@@ -1026,11 +1030,14 @@ class RelayConversation {
     // provider-failure fallback) — { from, to, reason, turn } — null until
     // then. One switch per call: its presence is also the switch-used guard.
     this._modelSwitch = null;
-    // Bumped by every interrupt() (a barge-in frame, or end()'s own abort).
-    // _runModelRound compares it across a failed attempt to tell whether the
-    // caller moved on before a Claude retry — the controller's own signal
-    // cannot say so once a stream timeout has already aborted it.
-    this._interruptSeq = 0;
+    // Bumped by every interrupt() (a barge-in frame, or end()'s own abort)
+    // AND every caller prompt handlePrompt records — a caller who simply
+    // speaks again during a silent failed call arrives as a prompt, not an
+    // interrupt (codex r7). _runModelRound compares it across a failed
+    // attempt to tell whether the caller moved on before a Claude retry —
+    // the controller's own signal cannot say so once a stream timeout has
+    // already aborted it.
+    this._callerSeq = 0;
     // Which client this session's model rounds run on — resolved once here,
     // alongside the model itself, and never re-read mid-call (see the file
     // header + resolveSessionModel). voiceEffortFor already returns null for
@@ -2293,6 +2300,7 @@ class RelayConversation {
       return this._chain;
     }
     this._userTurns.push(t);
+    this._callerSeq += 1;
     // The caller-stop instant (from Twilio's speaker event) belongs to THIS
     // turn only if it is recent; it is consumed so no later turn reuses it.
     const stoppedAt = this._lastCallerSpeechStopAt;
@@ -2361,7 +2369,7 @@ class RelayConversation {
    * call is end()'s own abort and records nothing.
    */
   interrupt(detail) {
-    this._interruptSeq += 1;
+    this._callerSeq += 1;
     try {
       if (this._controller) this._controller.abort();
     } catch {
@@ -2957,10 +2965,10 @@ class RelayConversation {
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
-    // An earlier leg already switched this call from OpenAI to Claude (codex
-    // r1 P2 on #5209) — applied before this leg's first model round
-    // (_runLoop awaits _resumeReady first).
-    if (state.modelSwitch) this._adoptEarlierSwitch(state.modelSwitch);
+    // The model an earlier leg of this call ran on (codex r1, r7 on #5209) —
+    // applied before this leg's first model round (_runLoop awaits
+    // _resumeReady first).
+    this._adoptEarlierModel(state);
     // A segment may reveal its captured lead only after this leg booked.
     // Repair that existing card just as capture_lead and the capture floor do.
     if (this._leadId && this._bookingRequested) {
@@ -3241,12 +3249,35 @@ class RelayConversation {
    * the call already switched to when that is still an allowed Claude id,
    * so a reconnect on a process with newer settings never changes models
    * again mid-call (codex r4).
+   *
+   * An earlier leg that never switched: this leg keeps running that leg's
+   * model (codex r7) rather than whatever this process's settings resolve
+   * now — but only while that model is still allowed for this session under
+   * the CURRENT gates (turning GATE_VOICE_RELAY_OPENAI_INBOUND off still
+   * moves a reconnect to Claude), and only before this leg has run any
+   * model call, so a delayed reload never changes models mid-leg.
    */
-  _adoptEarlierSwitch(earlier) {
+  _adoptEarlierModel({ modelSwitch, priorModel } = {}) {
     if (this._modelSwitch) return;
-    this._pinClaudeFallback(earlier.to);
-    this._modelSwitch = earlier;
+    if (modelSwitch) {
+      this._pinClaudeFallback(modelSwitch.to);
+      this._modelSwitch = modelSwitch;
+    } else if (priorModel && priorModel !== this.model && !this._turnStats.some((t) => t.rounds > 0)
+      && isAllowedOverrideModel(priorModel, sessionAllowOpts({ sandbox: this.sandbox, evalHarness: this._evalHarness }))) {
+      this._pinModel(priorModel);
+    } else {
+      return;
+    }
     if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
+  }
+
+  /** Every per-model pin, derived from `model` exactly as the constructor derives them. */
+  _pinModel(model) {
+    this.model = model;
+    this._provider = providerFor(model);
+    this._effort = voiceEffortFor(model);
+    this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(model);
+    this._stampedEffort = stampedEffortFor(this._provider, model, this._effort);
   }
 
   /**
@@ -3257,16 +3288,12 @@ class RelayConversation {
    */
   _pinClaudeFallback(recordedModel = null) {
     const shared = ALLOWED_OVERRIDE_MODEL_IDS.has(recordedModel) ? { model: recordedModel, fallbackReason: null } : resolveSharedAnthropicChain(null);
-    this.model = shared.model;
     // A rejected VOICE_RELAY_MODEL / MODEL_VOICE is why the call runs on the
     // registry default now (codex r2 P2): keep that in the stamp.
     if (shared.fallbackReason && !String(this._modelFallbackReason || '').includes(shared.fallbackReason)) {
       this._modelFallbackReason = [this._modelFallbackReason, shared.fallbackReason].filter(Boolean).join('; ');
     }
-    this._provider = providerFor(this.model);
-    this._effort = voiceEffortFor(this.model);
-    this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
-    this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
+    this._pinModel(shared.model);
     stripOpenAIHistoryExtras(this.messages);
   }
 
@@ -3360,7 +3387,9 @@ class RelayConversation {
    *     (never spend a Claude retry on a stale socket — codex r2);
    *   - ends it as an interruption when the caller barged in or hung up at
    *     any point since the call started (a timeout already aborted the
-   *     controller, so `_interruptSeq` is the signal);
+   *     controller, so `_callerSeq` is the signal) or simply spoke again
+   *     (a new prompt queued behind this one — its reply must not be a
+   *     retried answer to the old request);
    *   - otherwise retries the SAME round once on Claude, over the same
    *     `this.messages` (already cleaned of OpenAI-only history) — but only
    *     when nothing of the round reached the caller or failed trying
@@ -3377,7 +3406,7 @@ class RelayConversation {
    */
   async _runModelRound(stat, toolCtx) {
     for (;;) {
-      const interruptSeqAtStart = this._interruptSeq;
+      const callerSeqAtStart = this._callerSeq;
       // A retry must measure its own first token, not the failed call's.
       const firstTokenAtStart = stat.firstTokenAt;
       const { msg, err, streamState, timedOut } = await this._modelAttempt(stat);
@@ -3412,7 +3441,7 @@ class RelayConversation {
           try { this._endSession?.({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
           return null;
         }
-        if (this.ended || this._interruptSeq !== interruptSeqAtStart) {
+        if (this.ended || this._callerSeq !== callerSeqAtStart) {
           await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
           return null;
         }

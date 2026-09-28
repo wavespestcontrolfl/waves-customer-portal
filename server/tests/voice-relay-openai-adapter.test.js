@@ -1093,6 +1093,29 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     expect(convo2.model).toBe(MODELS.DEFAULTS.VOICE);
   });
 
+  test('a reconnected leg of an unswitched call keeps the earlier leg\'s model while the gates still allow it', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true'; // no inbound override: this process alone would pick Claude
+    const resume = { callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: null, priorModel: LUNA };
+    const convo = new RelayConversation({ callSid: 'CA-resume-prior', from: '+19415551234', send: () => {} });
+    expect(convo._provider).toBe('anthropic');
+    await convo._applyResumeState(resume);
+    expect(convo.model).toBe(LUNA);
+    expect(convo._provider).toBe('openai');
+
+    // Gate turned off since: the kill switch wins — the reconnect stays on Claude.
+    delete process.env.GATE_VOICE_RELAY_OPENAI_INBOUND;
+    const killed = new RelayConversation({ callSid: 'CA-resume-prior-killed', from: '+19415551234', send: () => {} });
+    await killed._applyResumeState(resume);
+    expect(killed._provider).toBe('anthropic');
+
+    // A delayed reload after this leg already ran a model call never changes models mid-leg.
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    const late = new RelayConversation({ callSid: 'CA-resume-prior-late', from: '+19415551234', send: () => {} });
+    late._turnStats.push({ rounds: 1 });
+    await late._applyResumeState(resume);
+    expect(late._provider).toBe('anthropic');
+  });
+
   test('a leg that already switched on its own keeps its pin and record when a delayed resume reload lands', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
@@ -1132,6 +1155,37 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     expect(stat.firstTokenAt).toBeNull(); // the failed attempt's stamp is discarded (the Claude double streams no events)
     expect(stat.effort).toBe(convo._stampedEffort); // Claude's effort, not Luna's
     expect(stat.timedOut).toBe(false);
+  });
+
+  test('a caller who speaks again during a silent failed call gets the NEW turn answered — the old one is never retried', async () => {
+    jest.useFakeTimers();
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      global.fetch = jest.fn((url, opts) => new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted.');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      }));
+      mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Wednesday works.' }], stop_reason: 'end_turn' });
+      const spoken = [];
+      const convo = new RelayConversation({ callSid: 'CA-fallback-new-prompt', from: '+19415551234', send: (t) => spoken.push(t) });
+      convo.handlePrompt('book me for tuesday');
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      const second = convo.handlePrompt('actually make it wednesday'); // a prompt, not an interrupt
+      jest.advanceTimersByTime(20000); // STREAM_TIMEOUT_MS
+      await second;
+
+      expect(mockAnthropicStreamCalls).toHaveLength(1); // only the new turn, on Claude
+      const lastUser = [...mockAnthropicStreamCalls[0].messages].reverse().find((m) => m.role === 'user');
+      expect(JSON.stringify(lastUser.content)).toMatch(/wednesday/);
+      expect(spoken).toContain('Wednesday works.');
+      expect(convo._modelSwitch).toMatchObject({ from: LUNA, reason: 'stream_timeout' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('a barge-in after a stream timeout, while the round is still settling, ends the round — no Claude retry', async () => {
