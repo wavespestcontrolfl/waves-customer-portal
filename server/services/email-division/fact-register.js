@@ -405,8 +405,12 @@ async function syncFactRegister({ conn = db, now = new Date(), facts = FACTS, re
   }
 
   if (retireStrays) {
+    // Strays are the register's rows by SOURCE, whatever their category: a
+    // person may re-file a fact in the admin knowledge editor, and a fact
+    // withdrawn after that still has to retire (codex round 11 P2). The
+    // retirement keeps the person's category and wording.
     const strays = await conn('knowledge_base')
-      .where({ source: SOURCE, category: CATEGORY })
+      .where({ source: SOURCE })
       .whereNot({ status: 'archived' })
       .whereNotIn('slug', facts.map((fact) => fact.slug))
       .select('id', 'slug');
@@ -702,22 +706,32 @@ function lastLawnSubject(text) {
 }
 
 // A verbless fragment set off by commas — "..., in the summer", "...,
-// especially in July", "..., not active, ..." — has no verdict of its own:
-// it is judged with the clause it hangs off, back to the nearest clause that
-// carries a verb. "Large patch is dormant, not active, in the summer" states
-// the fact across three clauses; "Gray leaf spot thrives, unlike large
-// patch, in the summer" is the contrast. A fragment WITH a verb ("in the
-// summer it thrives") stands on its own, as before.
+// especially in July", "..., of course, ..." — has no verdict of its own: it
+// inherits the verdict of the nearest clause before it that carries a verb,
+// judged ALONE. "Large patch is dormant, not active, in the summer" states
+// the fact in its first clause; "Large patch thrives, without slowing, in
+// summer" asserts the claim there — the "without" in the fragment between
+// reinforces the claim, it never clears it (codex round 11 P1), so the
+// clauses are never concatenated and handed to the generic negation test.
+// A fragment that carries its own negation ("..., not in summer, but in
+// fall") is judged alone, like a full clause. A fragment WITH a verb ("in
+// the summer it thrives") stands on its own, as before.
 const FRAGMENT_LEAD = /^(?:in|into|during|through(?:out)?|over|across|by|until|till|from|for|as|with|without|like|such|since|after|before|around|about|at|on|within|of|come|especially|particularly|mostly|mainly|usually|typically|often|even|only|not|never|rarely|seldom|less|more|much|far|well)\b/i;
 const CLAUSE_VERB = /\b(?:is|are|was|were|be|been|being|am|has|have|had|do|does|did|can|could|will|would|should|may|might|must|shall|gets?|got|becomes?|became|stays?|stayed|remains?|remained|keeps?|kept|tends?|seems?|appears?|appeared|looks?|shows?|showed|thrives?|thrived|flares?|flared|spreads?|peaks?|peaked|slows?|slowed|stops?|stopped|fades?|faded|goes|went|gone|comes?|came|hits?|strikes?|struck|develops?|developed|starts?|started|begins?|began|returns?|returned|takes?|took|makes?|made|causes?|caused|means?|meant|needs?|wants?|thinks?|sees?|saw|expect\w*|watch\w*|treat\w*|appl(?:y|ies|ied)|water\w*|mow\w*|hold\w*|skip\w*|wait\w*|call\w*|love\w*|like\w*|prefer\w*)\b/i;
 function isFragment(clause) {
   return FRAGMENT_LEAD.test(clause) && !CLAUSE_VERB.test(clause);
 }
-function governingText(clauses, i) {
-  if (!isFragment(clauses[i])) return clauses[i];
-  let j = i;
-  while (j > 0 && isFragment(clauses[j])) j -= 1;
-  return clauses.slice(j, i + 1).join(' ');
+// The clause whose verdict clause i carries (`judged`), and the text from
+// that clause through clause i (`span`) — the span only ever answers "is
+// the contrast about large patch" and "does an until/before follow the
+// negated receding verb", never the generic negation test.
+function patchVerdictUnit(clauses, i) {
+  const own = { judged: clauses[i], span: clauses[i] };
+  if (!isFragment(clauses[i]) || clauseDenies(clauses[i])) return own;
+  let j = i - 1;
+  while (j >= 0 && isFragment(clauses[j])) j -= 1;
+  if (j < 0) return own;
+  return { judged: clauses[j], span: clauses.slice(j, i + 1).join(' ') };
 }
 
 function patchClaimInSentence(sentence, previousSentence = '') {
@@ -735,17 +749,18 @@ function patchClaimInSentence(sentence, previousSentence = '') {
     if (subject === null && LAWN_PRONOUN_SUBJECT.test(clause)) subject = lastLawnSubject(previousSentence);
     if (subject !== 'patch' || !PATCH_TRIGGER.test(clause)) continue;
     if (previousClauseIsMythLabel(clauses, i)) continue;
-    // A verbless fragment is judged with its governing clause (see
-    // governingText); a full clause on its own.
-    const judged = governingText(clauses, i);
+    // A verbless fragment carries the verdict of the clause it hangs off
+    // (see patchVerdictUnit); a full clause is judged on its own.
+    const { judged, span } = patchVerdictUnit(clauses, i);
     // "Large patch doesn't slow down in summer": the negation is on the
     // receding verb, so it asserts the claim — unless the clause calls it
-    // a myth.
-    if (NEGATED_RECEDE.test(judged)) {
+    // a myth. "..., until the heat" after it is the fact (receding waits
+    // for the heat), the same as within one clause.
+    if (NEGATED_RECEDE.test(judged) && !/\b(?:until|before)\b/i.test(span)) {
       if (MYTH_WORD.test(judged)) continue;
       return clause;
     }
-    if (patchRecedes(judged) || clauseDenies(judged, PATCH_CONTRAST)) continue;
+    if (patchRecedes(judged) || clauseDenies(judged) || PATCH_CONTRAST.test(span)) continue;
     return clause;
   }
   return null;
@@ -824,12 +839,19 @@ const TECHNICIAN_CONFIRMS = /\btechnicians?\b[^.]{0,80}\b(?:confirm|tell|let\s+y
 // never exempts an absolute audience claim ("safe for children and pets")
 // or a fixed re-entry time ("safe after 15 minutes"), technician or not.
 const DRY_STATE = /\b(?:once|when|after|until)\b[^.,;]{0,40}?\b(?:dry|dried|dries)\b|\b(?:has|have)\s+dried\b|\bdry\s+to\s+the\s+touch\b/i;
-const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+// Worded fractions of an hour are the same fixed figure (codex round 11
+// P1): "a quarter hour", "a quarter-hour", "a quarter of an hour", "three
+// quarters of an hour", "a half hour", "half an hour", "an hour and a half".
+const FIXED_REENTRY_TIME = /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve|fifteen|twenty|thirty|forty-?five|sixty|ninety|half\s+an|a\s+couple\s+of|a\s+few|an?)\s*(?:minutes?|mins?|hours?|hrs?)\b|\b(?:(?:a|one)\s+)?quarter(?:-|\s+of\s+an?\s+|\s+)hour\b|\bthree[-\s]quarters?\s+of\s+an\s+hour\b|\ba\s+half[-\s]hour\b|\ban?\s+hour\s+and\s+a\s+half\b/i;
 // Every protected audience, in every degree ("safer for pets", "safest for
 // pollinators"): never inside the dry-state idiom (codex round 8 P1).
 // Any degree of "safe" other than the plain adjective (codex round 10 P1).
 const SAFE_COMPARATIVE = /\bsafe(?:r|st)\b|\bsafely\b/i;
-const AUDIENCE_ABSOLUTE = /\bsafe(?:r|st)?\s+(?:for|around|near|with)\s+(?:the\s+|your\s+|our\s+)?(?:bees?|pollinators?|butterfl(?:y|ies)|birds?|fish|wildlife|pets?|kids?|children|babies|infants?|toddlers?|dogs?|cats?|puppies|kittens?|people|humans?|everyone|everybody|(?:whole\s+|entire\s+)?family|the\s+environment)\b/i;
+const AUDIENCE_SOURCE = '(?:the\\s+|your\\s+|our\\s+)?(?:bees?|pollinators?|butterfl(?:y|ies)|birds?|fish|wildlife|pets?|kids?|children|babies|infants?|toddlers?|dogs?|cats?|puppies|kittens?|people|humans?|everyone|everybody|(?:whole\\s+|entire\\s+)?family|the\\s+environment)';
+const AUDIENCE_ABSOLUTE = new RegExp(`\\bsafe(?:r|st)?\\s+(?:for|around|near|with)\\s+${AUDIENCE_SOURCE}\\b`, 'i');
+// The adjective form names its audience after the product noun: "a safe
+// treatment for pets once dry" is the audience claim, idiom or not.
+const AUDIENCE_AFTER_PRODUCT = new RegExp(`\\b(?:for|around|near|with)\\s+${AUDIENCE_SOURCE}\\b`, 'i');
 
 // The dry-state + technician exemption is bound to the CLAIM's clause: the
 // dry condition and the technician confirmation must sit in that clause or
@@ -848,11 +870,29 @@ function canonicalFinding(sentence) {
   return { phrase, isDuration: DURATION_WORD.test(phrase) };
 }
 
+// The bare adjective on a product noun takes the same narrow dry-state
+// exemption as the clause forms (codex round 11 P2): "This is a safe
+// treatment once dry, and your technician confirms timing" is the idiom.
+// Exactly "safe" (never safer/safest), the dry state and the technician in
+// the claim's clause or the one beside it, no fixed time and no audience.
+function adjectiveInDryStateIdiom(sentence, clauses, match) {
+  if (SAFE_COMPARATIVE.test(match[0])) return false;
+  const first = splitClauses(`${sentence.slice(0, match.index)}X`).length - 1;
+  const last = Math.max(first, splitClauses(sentence.slice(0, match.index + match[0].length)).length - 1);
+  const claim = clauses.slice(first, last + 1).join(' ');
+  const beside = clauses.slice(Math.max(0, first - 1), last + 2).join(' ');
+  return DRY_STATE.test(beside) && TECHNICIAN_CONFIRMS.test(beside)
+    && !FIXED_REENTRY_TIME.test(claim) && !AUDIENCE_ABSOLUTE.test(claim) && !AUDIENCE_AFTER_PRODUCT.test(claim);
+}
+
 function safetyClaimInSentence(sentence) {
   const canonical = canonicalFinding(sentence);
   if (canonical && !canonical.isDuration) return sentence;
-  if (SAFE_COMPOUND.test(sentence) || SAFE_ADJECTIVE_PRODUCT.test(sentence)) return sentence;
+  if (SAFE_COMPOUND.test(sentence)) return sentence;
   const clauses = splitClauses(sentence);
+  for (const match of sentence.matchAll(new RegExp(SAFE_ADJECTIVE_PRODUCT.source, 'gi'))) {
+    if (!adjectiveInDryStateIdiom(sentence, clauses, match)) return sentence;
+  }
   for (let i = 0; i < clauses.length; i += 1) {
     const clause = clauses[i];
     if (!SAFE_CLAIM.test(clause)) continue;

@@ -28,7 +28,7 @@ describe('pest-insider buildPestInsiderSystemPrompt', () => {
     expect(prompt).toContain('The Lawn Corner');
     expect(prompt).toContain('Myth-Buster');
     expect(prompt).toContain('FEATURED SERVICE (the one pitch): mosquito treatment');
-    expect(prompt).toContain('LAWN CORNER BEAT: chinch bugs on St. Augustine (UF: thrive in warm, damp summer months)');
+    expect(prompt).toContain('LAWN CORNER BEAT: chinch bugs on St. Augustine (their season, from the verified facts)');
     expect(prompt).toContain('retention');
     expect(prompt).toContain('exactly ONE pitch and ONE CTA');
   });
@@ -56,6 +56,20 @@ describe('pest-insider buildPestInsiderSystemPrompt', () => {
       expect(slate.beats).toBeTruthy();
     }
     expect(buildPestInsiderSystemPrompt(voice, 'Smarch')).toContain('general home pest defense');
+  });
+
+  // Codex PR #5187 r11: a figure restated in the rotation outlives the
+  // register fact it came from (a withdrawn or flagged fact would still be
+  // prompted). Slates name topics; the figures come only from the register.
+  test('no rotation entry carries a figure, a duration, a temperature or a named-source number', () => {
+    const FIGURE = /\d+\s*(?:–|-|to)\s*\d+\s*days|\d+\s*°|\d+\s*days?\b|[½¼¾]|\d/;
+    const SOURCE_CITATION = /\b(?:UF|CDC|IFAS|EPA)\b|\bper\s+UF\b/;
+    for (const [month, slate] of Object.entries(PEST_INSIDER_ROTATION)) {
+      for (const [field, text] of Object.entries(slate)) {
+        expect({ month, field, figure: FIGURE.test(text) }).toEqual({ month, field, figure: false });
+        expect({ month, field, citation: SOURCE_CITATION.test(text) }).toEqual({ month, field, citation: false });
+      }
+    }
   });
 });
 

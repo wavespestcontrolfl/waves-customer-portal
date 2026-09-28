@@ -42,6 +42,8 @@ jest.mock('../services/newsletter-validator', () => ({
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 const mockTrigger = jest.fn(async () => ({ bellWritten: true }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: mockTrigger }));
+const mockAudit = jest.fn(async () => 'audit-1');
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: mockAudit }));
 
 const express = require('express');
 const db = require('../models/db');
@@ -111,4 +113,47 @@ test('a VERSION_CHANGED claim from the background send is a benign no-op (no fai
   expect(updates.some((c) => c[0]?.status === 'failed')).toBe(false);
   // …but the operator is told the send did not happen (the route already answered 202).
   expect(mockTrigger).toHaveBeenCalledWith('newsletter_send_not_dispatched', expect.objectContaining({ sendId: SEND_UUID, subject: DRAFT.subject }));
+});
+
+// Codex round 11: triggerNotification can resolve without delivering
+// anything; the route checks the result and leaves a durable signal.
+async function sendThatChanged() {
+  mockDb(DRAFT);
+  const err = new Error('row changed'); err.code = 'VERSION_CHANGED';
+  mockSendCampaign.mockRejectedValueOnce(err);
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/admin/newsletter/sends/${SEND_UUID}/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+    });
+    expect([200, 202]).toContain(res.status);
+  });
+  await new Promise((r) => setTimeout(r, 20));
+}
+
+test('a not-dispatched notice that resolved but reached nobody writes a critical audit event', async () => {
+  mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null });
+  await sendThatChanged();
+  expect(mockAudit).toHaveBeenCalledTimes(1);
+  expect(mockAudit).toHaveBeenCalledWith({
+    actor_type: 'system',
+    action: 'newsletter.send_not_dispatched_unnotified',
+    resource_type: 'newsletter_send',
+    resource_id: SEND_UUID,
+    metadata: { subject: DRAFT.subject },
+    critical: true,
+  });
+});
+
+test('a not-dispatched notice that threw writes the audit event too', async () => {
+  mockTrigger.mockRejectedValueOnce(new Error('bell table down'));
+  await sendThatChanged();
+  expect(mockAudit).toHaveBeenCalledTimes(1);
+});
+
+test('a delivered not-dispatched notice (bell row, or a push that reached a device) writes no audit event', async () => {
+  mockTrigger.mockResolvedValueOnce({ bellWritten: true, push: null });
+  await sendThatChanged();
+  mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } });
+  await sendThatChanged();
+  expect(mockAudit).not.toHaveBeenCalled();
 });

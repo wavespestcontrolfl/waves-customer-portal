@@ -629,6 +629,20 @@ async function sendCampaign(sendId, opts = {}) {
     }
   }
 
+  // The delivery ledger is the audience boundary: a campaign that already
+  // has delivery rows is resumed, never re-seeded — on EVERY path. A
+  // partially delivered campaign returned to draft (an invalid resume, codex
+  // round 11) and sent again through the normal Send path must reach only
+  // its outstanding ledger rows, never subscribers who joined the segment
+  // since the first pass. Checked after the claim, so the row is ours.
+  if (!opts.existingDeliveriesOnly) {
+    const ledgerRow = await db('newsletter_send_deliveries').where({ send_id: send.id }).first('id');
+    if (ledgerRow) {
+      logger.info(`[newsletter] send ${send.id} already has a delivery ledger — sending to its outstanding rows only, not re-seeding the segment`);
+      opts = { ...opts, existingDeliveriesOnly: true };
+    }
+  }
+
   let subscribers = [];
   // Recipients dropped for ineligibility: the pre-dispatch resume sweep plus
   // the per-chunk re-check. Subtracted from recipientCount before
@@ -1134,9 +1148,10 @@ async function prepareResumeCampaign(sendId) {
     if (errors.length > 0) {
       // Nothing is claimed. Return the campaign to an editable draft (PATCH
       // accepts draft/scheduled only) with its approval cleared; the
-      // per-recipient delivery ledger is untouched, so a later send of the
-      // corrected copy reaches only the recipients still outstanding
-      // (codex round 9). A live 'sending' owner was refused above; the reset
+      // per-recipient delivery ledger is untouched, and sendCampaign never
+      // re-seeds a campaign that has a ledger (its ledger guard, codex round
+      // 11), so a later send of the corrected copy reaches only the
+      // recipients still outstanding (codex round 9). A live 'sending' owner was refused above; the reset
       // is a compare-and-set on the state inspected here — the same guard
       // the claim below uses — so it never lands on a row another worker
       // claimed since, and clearing the claim token tells a stuck original

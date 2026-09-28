@@ -194,66 +194,73 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
 // season, override any month via the Compose prompt). Built from the
 // SWFL pest calendar: each month carries the featured service (the ONE
 // pitch), the Lawn Corner beat, and the content angles that month owns.
+//
+// Every slate names TOPICS only — never a figure, a duration, a
+// temperature, a date or a named-source number (codex PR #5187 r11). The
+// numbers live in the fact register alone and reach the prompt through
+// factsPromptBlock, so a fact withdrawn from the register (deactivated or
+// flagged) stops reaching the writer; a figure restated here would outlive
+// it. pest-insider.test.js pins this.
 const PEST_INSIDER_ROTATION = {
   January: {
-    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; exclusion per UF: prune touching limbs, trim palm skirts, plants 2 ft off the house — UF gives no rodent season, so do not invent one)',
+    service: 'rodent control & pest inspections (snowbirds reopening closed-up homes — the "welcome-back inspection"; roof rat exclusion from the verified facts — the source gives no rodent season, so do not invent one)',
     lawn: 'dry-season lawn watering discipline + winter annuals',
-    beats: 'surprises in snowbird homes; what a roof rat can jump (UF: 3 ft up, 4 ft across); R. hageni termites fly on winter evenings (UF: early Dec–early Feb)',
+    beats: 'surprises in snowbird homes; how roof rats get in (reach and jumping, from the verified facts); winter termite flights — only what the verified facts say about native subterranean flight season',
   },
   February: {
     service: 'termite protection & WDO inspections (pre-swarm prep — the single most important content window of the year starts NOW)',
     lawn: 'pre-emergent timing before spring weeds wake up',
-    beats: 'flying ants vs termites — the 10-second test; drywood vs subterranean',
+    beats: 'flying ants vs termites — the quick look test; drywood vs subterranean',
   },
   March: {
-    service: 'subterranean termite treatment (swarm season is ON — UF: native flights Jan–May on warm afternoons after rain; Asian subterranean swarms begin in March)',
-    lawn: 'spring lawn wake-up: first mow height (UF: standard St. Augustine 3.5–4 in), aeration timing',
+    service: 'subterranean termite treatment (swarm season is ON — native and Asian subterranean flight seasons, from the verified facts)',
+    lawn: 'spring lawn wake-up: first mow height for St. Augustine (from the verified facts), aeration timing',
     beats: 'termite swarmers after warm rain; citrus bloom (pure engagement — everyone in SWFL has opinions)',
   },
   April: {
-    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mounds wake with spring rain)',
+    service: 'termite & WDO inspections (spring home-buying season) + fire ant control (mating flights after spring rain, from the verified facts)',
     lawn: 'weed pre-emergents last call + aeration',
-    beats: 'lovebugs on the road (UF: first flight April–May); spring buyers need WDO',
+    beats: 'lovebugs on the road (their flight season, from the verified facts); spring buyers need WDO',
   },
   May: {
-    service: 'mosquito treatment (rainy-season kickoff — every container is a nursery: CDC says egg to adult in 7–10 days — the biggest add-on push of the year)',
-    lawn: 'rainy-season mowing rhythm (UF: ½–¾ in of water per application); watch for early chinch activity',
+    service: 'mosquito treatment (rainy-season kickoff — container mosquitoes after rain: the egg-to-adult timeline and the dump-and-scrub rhythm, from the verified facts — the biggest add-on push of the year)',
+    lawn: 'rainy-season mowing and watering rhythm for St. Augustine (from the verified facts); watch for early chinch activity',
     beats: 'standing-water audit checklist ("walk your yard with this list"); Memorial Day backyard prep',
   },
   June: {
-    service: 'mosquito treatment (daily thunderstorms = standing water everywhere)',
-    lawn: 'chinch bugs on St. Augustine (UF: thrive in warm, damp summer months); nitrogen/phosphorus blackout begins June 1 (April 1 in North Port)',
-    beats: 'hurricane season opens — the post-storm yard checklist (standing water is a mosquito nursery in 7–10 days per CDC; clear debris); say only what the register supports about pests after storms',
+    service: 'mosquito treatment (daily thunderstorms = standing water everywhere; container mosquitoes, from the verified facts)',
+    lawn: 'chinch bugs on St. Augustine (their season, from the verified facts); the summer fertilizer restrictions — dates and places only as the verified facts state them',
+    beats: 'hurricane season opens — the post-storm yard checklist (standing water and container mosquitoes, from the verified facts; clear debris); say only what the register supports about pests after storms',
   },
   July: {
-    service: 'quarterly pest defense (palmetto bugs indoors — UF: they wander in for food and water or to avoid extreme weather; ghost ants in kitchens — UF: wall voids, behind cabinetry, potted plants)',
-    lawn: 'chinch bug damage (UF: infestations peak early July) — brown patches that aren\'t drought; the coffee-can flotation test',
+    service: 'quarterly pest defense (palmetto bugs indoors — why they wander in, from the verified facts; ghost ants in kitchens — where they nest, from the verified facts)',
+    lawn: 'chinch bug damage (their peak, from the verified facts) — brown patches that aren\'t drought; the coffee-can flotation test',
     beats: 'ghost ants, palmetto bugs, the coffee-can chinch test',
   },
   August: {
     service: 'lawn pest control (chinch bugs shredding St. Augustine — before/after season)',
-    lawn: 'recovery plan for chinch damage (UF: mow standard St. Augustine at 3.5–4 in, ½–¾ in of water per application)',
+    lawn: 'recovery plan for chinch damage (mowing height and watering for St. Augustine, from the verified facts)',
     beats: 'peak hurricane risk — post-storm yard checklist; back-to-school',
   },
   September: {
-    service: 'termite & WDO inspection (storm-damaged, wet wood is what termites find; half of Florida\'s recorded western drywood flights are Sep–Nov per UF — native subterranean termites have ONE flight season, Dec–May, and no second swarm after storms) + lawn recovery',
-    lawn: 'fall fertilization window opens as blackout ends',
+    service: 'termite & WDO inspection (storm-damaged, wet wood is what termites find; drywood flight seasons from the verified facts — native subterranean termites have ONE flight season and no second swarm after storms) + lawn recovery',
+    lawn: 'fall fertilization window opens as the summer restrictions end (dates only as the verified facts state them)',
     beats: 'hurricane peak; post-storm yard checklist (standing water, debris piles, displaced rodents); drywood termite flights in fall — never a "second subterranean swarm after storms"',
   },
   October: {
-    service: 'rodent exclusion (UF: prune touching limbs, trim palm skirts, plants 2 ft off the house; roof rats jump 3 ft up and 4 ft across — UF gives no rodent season)',
-    lawn: 'fall fertilization (blackout ends Sept 30) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
+    service: 'rodent exclusion (roof rat access and exclusion, from the verified facts — the source gives no rodent season)',
+    lawn: 'fall fertilization (as the summer restrictions end — dates only as the verified facts state them) + watering days — state a district restriction ONLY if the verified facts below carry a current one; if they do not, say nothing about a schedule',
     beats: 'spooky season fun: spider myths, which Florida bugs are ACTUALLY dangerous — sourced facts only, no invented seasonality',
   },
   November: {
-    service: 'rodent control (attic checks as snowbirds return — exclusion per UF; UF gives no rodent season)',
+    service: 'rodent control (attic checks as snowbirds return — roof rat exclusion from the verified facts; the source gives no rodent season)',
     lawn: 'winter annuals in; last fertilization call',
     beats: 'pantry pests before holiday baking; firewood hitchhikers',
   },
   December: {
     service: 'pest inspections (pest-proof the house before holiday guests; gift-a-service for elderly parents)',
     lawn: 'cool-season lawn care + holiday lighting vs irrigation',
-    beats: 'Christmas tree hitchhikers; pantry pests; R. hageni termites fly on winter evenings (UF: early Dec–early Feb)',
+    beats: 'Christmas tree hitchhikers; pantry pests; winter termite flights — only what the verified facts say about native subterranean flight season',
   },
 };
 

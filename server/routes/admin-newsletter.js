@@ -939,11 +939,36 @@ router.post('/sends/:id/send', async (req, res) => {
         // row sit as an edited draft they believe was dispatched (codex
         // round 9).
         logger.info(`[newsletter] background send ${req.params.id} changed after validation — not dispatching that version`);
+        // triggerNotification can resolve without delivering anything (no
+        // bell row, no push — { bellWritten: false, push: null }), so the
+        // result is checked, not just the absence of a throw — the same
+        // predicate newsletter-proof.js's notifyProof uses (codex round 11).
+        // An undelivered notice is logged AND written as a critical audit
+        // event, so the "not sent" fact survives somewhere durable.
+        let delivered = false;
+        let failure = null;
         try {
           const { triggerNotification } = require('../services/notification-triggers');
-          await triggerNotification('newsletter_send_not_dispatched', { sendId: req.params.id, subject: send.subject });
+          const result = await triggerNotification('newsletter_send_not_dispatched', { sendId: req.params.id, subject: send.subject });
+          delivered = result?.bellWritten === true || Number(result?.push?.sent) > 0;
         } catch (notifyErr) {
-          logger.warn(`[newsletter] not-dispatched notice failed: ${notifyErr.message}`);
+          failure = notifyErr.message;
+        }
+        if (!delivered) {
+          logger.error(`[newsletter] not-dispatched notice for ${req.params.id} was not delivered${failure ? `: ${failure}` : ' (no bell, no push)'}`);
+          try {
+            const { recordAuditEvent } = require('../services/audit-log');
+            await recordAuditEvent({
+              actor_type: 'system',
+              action: 'newsletter.send_not_dispatched_unnotified',
+              resource_type: 'newsletter_send',
+              resource_id: req.params.id,
+              metadata: { subject: send.subject },
+              critical: true,
+            });
+          } catch (auditErr) {
+            logger.error(`[newsletter] not-dispatched audit for ${req.params.id} failed: ${auditErr.message}`);
+          }
         }
         return;
       }

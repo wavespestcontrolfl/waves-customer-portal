@@ -5603,7 +5603,9 @@ const REENTRY_SPELLED_NUM_SRC = `(?:(?:one|two|three|four|five|six|seven|eight|n
 // is a figure — a single-word endpoint would drop the compound half.
 // Seconds/days/weeks are figures too (Codex PR r8 audit): "do not
 // re-enter for 90 seconds", "keep pets off for one day".
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|a\\s+(?:day|week)\\b)`;
+// Fractional hours are figures in every wording (codex PR #5187 r11): "a
+// quarter hour", "a quarter-hour", "three quarters of an hour".
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|(?:(?:a|one)\\s+)?quarter(?:-|\\s+of\\s+an?\\s+|\\s+)hour|three[-\\s]quarters\\s+of\\s+an\\s+hour|a\\s+(?:day|week)\\b)`;
 // Copular/modal predicate grammar shared by the safety-subject patterns
 // (Codex PR r8 audit): "will be safe", "becomes safe", "should be safe"
 // are the same unconditional claim as "is safe". Bounded NON-NEGATING

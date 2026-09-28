@@ -623,6 +623,26 @@ describe('findUnverifiedClaims', () => {
     ])('a fragment hanging off a claim, or a clause with its own verb, is still the claim: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
     });
+
+    // Codex round 11 P1: a negation inside an intervening fragment
+    // reinforces the claim clause — it never clears it.
+    test.each([
+      'Large patch thrives, without slowing, in summer.',
+      'Large patch thrives, never slowing, in summer.',
+      'Large patch is not dormant, in the summer.',
+      'Large patch is a common sight, especially in the summer.',
+    ])('a fragment inherits the verdict of the verb clause it hangs off, judged alone: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch is dormant, not active, in the summer.',
+      'Large patch slows down, of course, in the summer.',
+      'Gray leaf spot thrives, unlike large patch, in the summer.',
+      'Large patch thrives, not in summer, but in fall.',
+    ])('a receding governing clause, a contrast over the span, or a fragment carrying its own negation passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
   });
 
   describe('non_flea_vacuum_advice', () => {
@@ -704,8 +724,19 @@ describe('findUnverifiedClaims', () => {
     test.each([
       'The lawn is safe once dry, and your technician will confirm the timing.',
       'Once it has dried, the lawn is safe again; your technician confirms the timing.',
+      // The adjective form takes the same exemption (codex round 11 P2).
+      'This is a safe treatment once dry, and your technician confirms timing.',
     ])('the plain "safe once dry" idiom with the technician confirming passes: %s', (sentence) => {
       expect(rule(sentence, 'absolute_safety_claim')).toBe(false);
+    });
+
+    test.each([
+      'This is a safe treatment for pets once dry, and your technician confirms timing.',
+      'This is a safer treatment once dry, and your technician confirms timing.',
+      'Choose our safe lawn treatment.',
+      'Our pet-safe treatment is fine once dry, and your technician confirms timing.',
+    ])('the adjective form outside the narrow idiom — an audience, a comparative, no dry state, or a compound — still blocks: %s', (sentence) => {
+      expect(rule(sentence, 'absolute_safety_claim')).toBe(true);
     });
 
     test.each([
@@ -731,6 +762,12 @@ describe('findUnverifiedClaims', () => {
       'Stay off the grass for one hour after we leave.',
       'Pets can go back outside after 45 minutes.',
       'Re-entry is fine after 4 hours.',
+      // Worded fractions of an hour (codex round 11 P1).
+      'Keep pets off the treated lawn for a quarter hour.',
+      'Keep pets off the treated lawn for a quarter-hour.',
+      'Wait three quarters of an hour before letting the dog out.',
+      'Stay off the grass for a half hour.',
+      'Keep kids off the lawn for an hour and a half.',
     ])('flags: %s', (sentence) => {
       expect(rule(sentence, 'fixed_reentry_time')).toBe(true);
     });

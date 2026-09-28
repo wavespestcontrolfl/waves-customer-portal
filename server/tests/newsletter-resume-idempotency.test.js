@@ -102,6 +102,7 @@ function buildDb({ send, deliveries = [], subscribers = [], eligibleAtDispatch =
       })) }),
     ],
     newsletter_send_deliveries: [
+      chain({ first: null }),                               // ledger guard: no rows yet → seed
       chain({}),                                            // insert onConflict
       chain({ result: deliveries }),                        // SELECT after insert
       // Terminal 'skipped' update for recipients that failed the dispatch
@@ -224,6 +225,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         recheckQuery,
       ],
       newsletter_send_deliveries: [
+        chain({ first: null }),                                      // ledger guard: no rows yet → seed
         chain({}),                                                    // insert onConflict
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
         chain({ updated: 1 }),                                        // post-send bulk update
@@ -482,6 +484,7 @@ describe('sendCampaign — per-recipient idempotency (I5 layer 2)', () => {
         chain({ result: [{ id: 1, customer_id: null }, { id: 2, customer_id: null }] }),
       ],
       newsletter_send_deliveries: [
+        chain({ first: null }),                                      // ledger guard: no rows yet → seed
         chain({}),
         chain({ result: [
           { id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null },
@@ -799,6 +802,7 @@ describe('resumeCampaign — preconditions', () => {
       ],
       newsletter_send_deliveries: [
         chain({ count: 0 }),                                  // no rows exist yet
+        chain({ first: null }),                               // ledger guard in sendCampaign: still none → seed
         chain({}),                                            // insert onConflict
         chain({ result: [{ id: 'd-1', subscriber_id: 1, status: 'queued', ab_variant: null }] }),
         chain({ updated: 1 }),                                // post-send bulk update
@@ -907,6 +911,72 @@ describe('resumeCampaign — preconditions', () => {
       send_id: 's',
       send_attempt_token: 'attempt-2',
     });
+  });
+
+  // Codex round 11 on #5187: a partially delivered campaign returned to
+  // draft by an invalid resume, then sent through the NORMAL Send path, must
+  // not re-seed the segment — a subscriber who joined since the first pass
+  // never receives the old partial campaign.
+  test('a normal send of a campaign that already has a delivery ledger reaches only its outstanding rows — no new recipient is seeded', async () => {
+    let finalUpdate = null;
+    let subscriberWhereIn = null;
+    const draftSend = {
+      id: 's',
+      status: 'draft',
+      html_body: '<p>Body</p>',
+      text_body: 'Body',
+      subject: 'Hello',
+      from_email: 'newsletter@wavespestcontrol.com',
+      from_name: 'Waves',
+      reply_to: 'contact@wavespestcontrol.com',
+      segment_filter: null,
+      subject_b: null,
+    };
+    const deliveryChains = [
+      chain({ first: { id: 'd-1' } }),                      // ledger guard: rows exist → no seeding
+      chain({ result: [
+        { id: 'd-1', subscriber_id: 1, status: 'delivered', ab_variant: null },
+        { id: 'd-2', subscriber_id: 2, status: 'failed', ab_variant: null },
+      ] }),
+      chain({ returning: [{ id: 'd-2', subscriber_id: 2, send_attempt_token: 'attempt-2' }] }), // claim retryable row
+      chain({ updated: 1 }),                                // post-send bulk update
+      chain({ count: 0 }),                                  // final retryable ledger count
+    ];
+    const queues = {
+      newsletter_sends: [
+        chain({ first: draftSend }),                          // fetch
+        chain({ returning: [{ id: 's' }] }),                  // atomic claim draft → sending
+        chain({ updated: 1 }),                                // per-chunk heartbeat
+        chain({ updated: 1, onUpdate: (payload) => { finalUpdate = payload; } }),
+        chain({ first: null }),                               // social-share refetch
+      ],
+      newsletter_send_deliveries: [...deliveryChains],
+      newsletter_subscribers: [
+        // 0-recipient guard: the segment now matches a THIRD subscriber who
+        // joined after the first pass.
+        chain({ count: 3 }),
+        chain({
+          result: [{ id: 2, email: 'b@example.com', unsubscribe_token: 'tok-b', customer_id: null }],
+          onWhereIn: (...args) => { subscriberWhereIn = args; },
+        }),
+        chain({ result: [{ id: 2, customer_id: null }] }),   // per-chunk eligibility re-check
+      ],
+      newsletter_calendar: [chain({ updated: 1 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      if (!queue || !queue.length) throw new Error(`unexpected ${table}`);
+      return queue.shift();
+    });
+
+    const result = await sendCampaign('s');
+
+    for (const q of deliveryChains) expect(q.insert).not.toHaveBeenCalled();
+    expect(subscriberWhereIn).toEqual(['id', [2]]);
+    expect(mockSendBroadcast).toHaveBeenCalledTimes(1);
+    expect(mockSendBroadcast.mock.calls[0][0].recipients.map((r) => r.email)).toEqual(['b@example.com']);
+    expect(result.recipients).toBe(2);
+    expect(finalUpdate.recipient_count).toBe(2);
   });
 
   test('resume preflight: a retryable ledger row whose recipient is no longer eligible is terminalized before dispatch', async () => {
