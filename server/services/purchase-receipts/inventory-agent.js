@@ -557,13 +557,21 @@ function validateExisting(raw, ctx) {
 // pick was refused precisely because it conflicts with that stronger match,
 // so the guess is the matcher's product (or nothing if it isn't on hand to
 // name) — never the substitute the refusal just rejected.
+// With no deterministic match, the candidate is a guess only when the title
+// actually NAMES it (its catalog name or a pre-existing alias, whole words —
+// productNamedByTitle): a candidate offered on a shared token alone ("Bifen
+// IT" for a "Bifen XTS" title) is exactly the identity the validator found
+// unsupported, so it is never recommended.
 function existingGuess(candidate, ctx) {
   const { matchedProductId } = ctx;
-  if (!matchedProductId || matchedProductId === candidate.id) {
-    return { type: 'existing', productId: candidate.id, productName: candidate.name };
+  if (matchedProductId) {
+    const matched = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].find((p) => p.id === matchedProductId);
+    return matched ? { type: 'existing', productId: matched.id, productName: matched.name } : null;
   }
-  const matched = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].find((p) => p.id === matchedProductId);
-  return matched ? { type: 'existing', productId: matched.id, productName: matched.name } : null;
+  const titleWords = normalizeForMatch(ctx.rawTitle).split(' ').filter(Boolean);
+  return productNamedByTitle(titleWords, candidate, ctx.aliasesByProduct || {})
+    ? { type: 'existing', productId: candidate.id, productName: candidate.name }
+    : null;
 }
 
 function validateExistingCandidate(raw, ctx, candidate) {
@@ -632,9 +640,10 @@ function validateExistingCandidate(raw, ctx, candidate) {
 // `statedBy` runs against the title after statingText() folds separators, so
 // "Soil-Surfactant" and "Termite-Bait" read like their spaced forms. Each
 // stating phrase states exactly ONE category (a composite like "weed & feed"
-// is a fertilizer — granular, broadcast — never also herbicide), and a
+// is a fertilizer — granular, broadcast — never also herbicide), a
 // specific bait ("termite bait", "mole bait") never also states generic
-// bait. A category the title doesn't state, or one not on this list at all
+// bait, and a title that still states two categories holds
+// (validateNewProduct). A category the title doesn't state, or one not on this list at all
 // ("supplies", "cleaner", "termite monitoring", "soil moisture management
 // aid", "termiticide / insecticide"), holds the line for a person.
 const CANONICAL_CATEGORIES = [
@@ -688,6 +697,22 @@ function statingText(rawTitle) {
 function categoriesStatedBy(rawTitle) {
   const title = statingText(rawTitle);
   return new Set(CANONICAL_CATEGORIES.filter((c) => c.statedBy.test(title)).map((c) => c.name));
+}
+
+// The proposal's category, validated against the canonical list and the
+// title's own wording: { canonicalCategory } or { refusal }. Exactly ONE
+// stated category, and it must be the proposal's — a title that states two
+// ("Ant Control Bait Stakes": insecticide AND bait) is ambiguous, and the
+// category drives the application-method default, so the model never gets
+// to pick between them; a person does.
+function checkStatedCategory(proposedCategory, rawTitle) {
+  const category = String(proposedCategory || '').trim().toLowerCase();
+  const canonicalCategory = CANONICAL_CATEGORY_BY_LOWER.get(category);
+  if (!category || !canonicalCategory) return { refusal: 'proposed category is not in the catalog\'s allowed set' };
+  const stated = categoriesStatedBy(rawTitle);
+  if (stated.size > 1) return { refusal: `the listing states more than one category (${[...stated].sort().join(', ')})` };
+  if (!stated.has(canonicalCategory)) return { refusal: `the listing doesn't state the category ("${category}")` };
+  return { canonicalCategory };
 }
 
 // A validated 'new_product' decision, or 'agent_unsure' with why.
@@ -765,12 +790,9 @@ function validateNewProduct(raw, ctx) {
     return refuse(`looks like an existing product ("${name}")`);
   }
 
-  const category = String(proposed.category || '').trim().toLowerCase();
-  const canonicalCategory = CANONICAL_CATEGORY_BY_LOWER.get(category);
-  if (!category || !canonicalCategory) return refuse('proposed category is not in the catalog\'s allowed set');
-  if (!categoriesStatedBy(rawTitle).has(canonicalCategory)) {
-    return refuse(`the listing doesn't state the category ("${category}")`);
-  }
+  const categoryCheck = checkStatedCategory(proposed.category, rawTitle);
+  if (categoryCheck.refusal) return refuse(categoryCheck.refusal);
+  const { canonicalCategory } = categoryCheck;
 
   if (!reading.ok) return hold(`reading did not check out (${reading.reason})`);
 

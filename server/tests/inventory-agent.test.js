@@ -870,8 +870,28 @@ describe('classifyDecision — equipment / not_stock / unsure routing', () => {
 
   test('an explicit "unsure" answer that still names a real candidate product_id carries it as a suggestion', () => {
     const candidate = { id: 'p-taurus', name: 'Taurus SC' };
-    const decision = classifyDecision({ kind: 'unsure', reason: 'not confident', product_id: 'p-taurus' }, ctx({ candidates: [candidate] }));
+    const decision = classifyDecision({ kind: 'unsure', reason: 'not confident', product_id: 'p-taurus' }, ctx({ rawTitle: 'Taurus SC Termiticide 78 oz', candidates: [candidate] }));
     expect(decision).toMatchObject({ kind: 'unsure', suggestion: { type: 'existing', productId: 'p-taurus', productName: 'Taurus SC' } });
+  });
+
+  test('a candidate the title does not NAME (shared token only) is never the closest guess', () => {
+    const bifenIt = { id: 'p-bifen-it', name: 'Bifen IT', category: 'insecticide', container_size: '1 gal', inventory_unit: 'fl_oz' };
+    const raw = { kind: 'existing', product_id: 'p-bifen-it', reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 } };
+    const refused = classifyDecision(raw, ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz', lineQuantity: 1, candidates: [bifenIt] }));
+    expect(refused).toMatchObject({ kind: 'unsure' });
+    expect(refused).not.toHaveProperty('suggestion');
+    const direct = classifyDecision({ kind: 'unsure', reason: 'x', product_id: 'p-bifen-it' }, ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz', candidates: [bifenIt] }));
+    expect(direct).not.toHaveProperty('suggestion');
+  });
+
+  test('a title stating two categories holds whichever one the model picks', () => {
+    const reading = { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 };
+    for (const category of ['insecticide', 'bait']) {
+      const decision = classifyDecision({
+        kind: 'new_product', new_product: { name: 'TERRO Ant Control Bait Stakes', category, active_ingredient: null, epa_reg_no: null }, reading,
+      }, ctx({ rawTitle: 'TERRO Ant Control Bait Stakes 12 Count', lineQuantity: 1 }));
+      expect(decision).toMatchObject({ kind: 'unsure', reason: expect.stringMatching(/more than one category \(bait, insecticide\)/) });
+    }
   });
 
   test('an "unsure" answer with a product_id NOT among the candidates carries no suggestion — never a guess this code can\'t stand behind', () => {
