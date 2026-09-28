@@ -250,6 +250,21 @@ are grouped under "Codex #5186 round 1 regressions" in the same file.
 - A `plant_slug` chip counts toward the condition-index host union only
   when it names a plant in the subject's own host index.
 
+## Round 4 hardening (Codex #5186 r4)
+
+- Identify mode also escalates when a lane holds only candidates that
+  resolve to no catalog node (an off-catalog guess with no valid group).
+- The resolved host's group adds its class token (a tree_shrub request that
+  resolves to a palm still sees the general `hosts: ['palms']` conditions).
+- `signatureFor` reads the validator-guaranteed fields without fallbacks;
+  `localAnnotationsFor` is a rule table (`LOCAL_FIT_RULES`); a blank
+  `watering_days` chip never earns `fits_watering`.
+- `PHOTO_ID_ESCALATE_BELOW` accepts only 0 < value <= 1 (else 0.80).
+- Named plant identities carry `verdict_label`, `role`/`role_label`,
+  `risk_label`, `action`/`action_label` for the identity card
+  (`PLANT_ROLE_LABELS`, `PLANT_VERDICT_LABELS`; risk/action from the pest
+  engine's maps).
+
 ## What L4 must do
 
 - Wire `identifyPlantV2` into `POST /api/photo-id/lawn` / `/tree_shrub`

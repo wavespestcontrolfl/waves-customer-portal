@@ -1311,6 +1311,95 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(engine._test.viableHostSlugs(run('fixture-sago-palm'), [])).toEqual([]);
     });
   });
+
+  describe('Codex #5186 round 4 regressions', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const MISS = { ok: false, reason: 'provider_error' };
+    const offItem = (name, confidence, groupId = null) => ({
+      slug: '', off_catalog_name: name, group_id: groupId, confidence,
+    });
+    const candidatesLeg = ({ turf = [], weeds = [], host = [] } = {}) => ({
+      ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf, weeds, host },
+    });
+    const cand = (slug, confidence) => {
+      const entry = catalog.getEntry(slug);
+      return {
+        slug, entry, confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: entry.group,
+      };
+    };
+
+    test('finding 1: identify mode escalates when the lane holds only an off-catalog guess with no resolvable group', async () => {
+      dispatch.mockResolvedValueOnce(candidatesLeg({ turf: [offItem('Mystery grass', 0.95)] }));
+      dispatch.mockResolvedValueOnce(MISS);
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(result.internal.escalation_reasons).toContain('no_identity_candidate');
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(result.v2.answer.level).toBe('unknown');
+    });
+
+    test('finding 1 (control): an off-catalog guess WITH a valid plant group is answerable at group level and does not trigger', async () => {
+      dispatch.mockResolvedValueOnce(candidatesLeg({ turf: [offItem('Mystery grass', 0.95, 'turfgrasses')] }));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.ok).toBe(true);
+      expect(result.internal.escalation_reasons).not.toContain('no_identity_candidate');
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+
+    test('finding 2: a tree_shrub request that resolves to a palm also draws the general palm conditions', () => {
+      const queen = catalog.getEntry('fixture-queen-palm');
+      expect(engine.classTokensFor('tree_shrub', queen)).toEqual(expect.arrayContaining(['shrubs', 'trees', 'palms']));
+      // The `citrus` token keys off the REAL catalog slug; the fixture's citrus is a plain shrubs-trees host here.
+      expect(engine.classTokensFor('tree_shrub', catalog.getEntry('fixture-citrus'))).toEqual(['shrubs', 'trees']);
+      expect(engine.classTokensFor('palm', null)).toEqual(['palms']);
+      expect(engine.classTokensFor('palm', catalog.getEntry('fixture-sago-palm'))).toEqual(['palms', 'shrubs', 'trees']);
+      const leafSpot = catalog.getEntry('fixture-palm-leaf-spot');
+      expect(leafSpot.condition.hosts).toEqual(['palms']);
+      expect(queen.plant.common_problems).not.toContain('fixture-palm-leaf-spot');
+      expect(engine.conditionIndexFor('tree_shrub', 'fixture-queen-palm').map((e) => e.slug)).toContain('fixture-palm-leaf-spot');
+    });
+
+    test('finding 5: a blank watering chip never earns fits_watering', () => {
+      const drought = catalog.getEntry('fixture-drought');
+      const sig = engine.signatureFor(drought);
+      expect(sig.siteFactors).toContain('infrequent_irrigation');
+      const tagsFor = (watering) => engine.localAnnotationsFor(drought, sig, { currentMonth: 1, chips: { watering_days: watering } });
+      expect(tagsFor(null)).not.toContain('fits_watering');
+      expect(tagsFor(undefined)).not.toContain('fits_watering');
+      expect(tagsFor('')).not.toContain('fits_watering');
+      expect(tagsFor('abc')).not.toContain('fits_watering');
+      expect(tagsFor(1)).toContain('fits_watering');
+      expect(tagsFor('0')).toContain('fits_watering');
+      expect(tagsFor(3)).not.toContain('fits_watering');
+    });
+
+    test('finding 6: a zero, blank or out-of-range PHOTO_ID_ESCALATE_BELOW falls back to 0.80', () => {
+      const saved = process.env.PHOTO_ID_ESCALATE_BELOW;
+      try {
+        for (const [value, expected] of [['0', 0.8], ['', 0.8], ['1.5', 0.8], ['abc', 0.8], ['0.5', 0.5], ['1', 1]]) {
+          process.env.PHOTO_ID_ESCALATE_BELOW = value;
+          expect(engine.escalateBelow()).toBe(expected);
+        }
+      } finally {
+        if (saved === undefined) delete process.env.PHOTO_ID_ESCALATE_BELOW; else process.env.PHOTO_ID_ESCALATE_BELOW = saved;
+      }
+    });
+
+    test('finding 7: a named plant identity carries the label fields the identity card renders', () => {
+      const weed = engine.buildIdentityResult([cand('fixture-nutsedge', 0.9)], { subject: 'lawn', currentMonth: 6 });
+      expect(weed.entry).toMatchObject({
+        verdict_label: 'Keep an eye on it', role: 'weed', role_label: 'Weed', risk_label: 'Low risk when left alone', action: 'monitor', action_label: 'Keep an eye on it',
+      });
+      const sago = engine.buildIdentityResult([cand('fixture-sago-palm', 0.9)], { subject: 'tree_shrub', currentMonth: 6 });
+      expect(sago.entry).toMatchObject({ verdict_label: 'Landscape plant', role_label: 'Landscape plant', risk_label: 'Can cause a medically significant reaction' });
+      const turf = engine.buildIdentityResult([cand('fixture-bahia', 0.9)], { subject: 'lawn', currentMonth: 6 });
+      expect(turf.entry).toMatchObject({ verdict_label: 'Lawn grass', role_label: 'Lawn grass' });
+      const palm = engine.buildIdentityResult([cand('fixture-queen-palm', 0.9)], { subject: 'palm', currentMonth: 6 });
+      expect(palm.entry.verdict_label).toBe('Palm');
+    });
+  });
 });
 
 describe('plant-engine — schema-invalid answers flip their ledger row (Codex #5186 round 2, finding 7)', () => {

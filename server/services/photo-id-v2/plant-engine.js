@@ -35,7 +35,7 @@ const { dispatch, rejectCall } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const Ajv = require('ajv');
 const {
-  dedupeCandidates, sameCandidateKey, deepestSharedNode,
+  dedupeCandidates, sameCandidateKey, deepestSharedNode, VERDICT_LABELS, ROLE_LABELS, RISK_LABELS, ACTION_LABELS,
 } = require('./pest-engine');
 const {
   CANDIDATES_A_SCHEMA,
@@ -144,32 +144,38 @@ function pestOutcomeFor(entry) {
   return entry.safety?.regulated === true ? 'regulated' : 'treatable';
 }
 
+// Every field read here is guaranteed present by the catalog content
+// validator (`validate.js`) and `species-catalog-plants.test.js` for
+// conditions, and by the pest catalog's own tests for pest entries (traits
+// 3–5, look_alikes 1–3), so no fallback decisions are needed (Codex #5186 r4
+// P2: `signatureFor` sat above the complexity threshold on fallbacks alone).
 function signatureFor(entry) {
   if (entry.condition) {
     const c = entry.condition;
+    const rs = c.required_signature;
     return {
-      elements: c.required_signature?.elements || [],
-      confirmableBy: c.required_signature?.confirmable_by || null,
-      signatureText: c.required_signature?.text || null,
-      signs: c.signs || [],
-      symptoms: c.symptoms || [],
-      differentials: c.differentials || [],
-      fieldTests: c.field_tests || [],
-      siteFactors: c.site_factors || [],
-      hosts: c.hosts || [],
-      outcome: c.outcome || null,
-      recoveryNote: c.recovery_note || null,
+      elements: rs.elements,
+      confirmableBy: rs.confirmable_by,
+      signatureText: rs.text,
+      signs: c.signs,
+      symptoms: c.symptoms,
+      differentials: c.differentials,
+      fieldTests: c.field_tests,
+      siteFactors: c.site_factors,
+      hosts: c.hosts,
+      outcome: c.outcome,
+      recoveryNote: c.recovery_note,
       isPestPossibility: false,
     };
   }
-  const differentials = (entry.look_alikes || []).map((la) => ({
-    slug: la.slug, difference: la.difference || null, next_observation: la.next_photo || null, photo_can_confirm: la.photo_can_confirm !== false,
+  const differentials = entry.look_alikes.map((la) => ({
+    slug: la.slug, difference: la.difference, next_observation: la.next_photo, photo_can_confirm: la.photo_can_confirm !== false,
   }));
   return {
-    elements: entry.traits || [],
+    elements: entry.traits,
     confirmableBy: 'photo',
-    signatureText: (entry.traits || [])[0] || null,
-    signs: entry.traits || [],
+    signatureText: entry.traits[0],
+    signs: entry.traits,
     symptoms: [],
     differentials,
     fieldTests: [],
@@ -214,16 +220,18 @@ function pestPossibilitiesForSubject(subject) {
   return catalog.listEntries({ section: 'pest' }).filter((e) => e.service?.line === line);
 }
 
-/** Class tokens for a subject/host (contract §4 point 2). */
+/** Class tokens for a subject/host (contract §4 point 2). The resolved
+ * host's own group adds its class too (Codex #5186 r4 P2): a tree_shrub
+ * request that resolves to a palm — `hostIndexFor('tree_shrub')` admits
+ * palms because customers misfile them — must still see the general
+ * `hosts: ['palms']` conditions, not only that palm's `common_problems`. */
+const SUBJECT_CLASS_TOKENS = Object.freeze({ lawn: ['turf'], palm: ['palms'], tree_shrub: ['shrubs', 'trees'] });
+const GROUP_CLASS_TOKENS = Object.freeze({ palms: ['palms'], 'shrubs-trees': ['shrubs', 'trees'], turfgrasses: ['turf'] });
 function classTokensFor(subject, hostEntry) {
-  if (subject === 'lawn') return ['turf'];
-  if (subject === 'palm') return ['palms'];
-  if (subject === 'tree_shrub') {
-    const tokens = ['shrubs', 'trees'];
-    if (hostEntry && hostEntry.slug === 'citrus') tokens.push('citrus');
-    return tokens;
-  }
-  return [];
+  const tokens = new Set(SUBJECT_CLASS_TOKENS[subject] || []);
+  for (const t of GROUP_CLASS_TOKENS[hostEntry?.group] || []) tokens.add(t);
+  if (hostEntry?.slug === 'citrus') tokens.add('citrus');
+  return [...tokens];
 }
 
 /**
@@ -474,29 +482,54 @@ function notYetFor(possibility, limit = 3) {
 // contract §6.2's fixed frond-pattern slug groups — no generic catalog field
 // encodes which fronds a palm nutrient/disease entry shows first, so this
 // module names the entries explicitly (documented in the PR).
-const FROND_OLDEST_SLUGS = new Set(['potassium-deficiency-palm', 'magnesium-deficiency-palm', 'lethal-bronzing', 'lethal-yellowing']);
-const FROND_NEWEST_SLUGS = new Set(['manganese-deficiency-palm', 'boron-deficiency-palm', 'iron-deficiency-palm']);
-const FROND_SPEAR_SLUGS = new Set(['palm-bud-rot']);
+const FROND_SLUGS_BY_CHIP = Object.freeze({
+  oldest: new Set(['potassium-deficiency-palm', 'magnesium-deficiency-palm', 'lethal-bronzing', 'lethal-yellowing']),
+  newest: new Set(['manganese-deficiency-palm', 'boron-deficiency-palm', 'iron-deficiency-palm']),
+  spear: new Set(['palm-bud-rot']),
+});
+const NEW_PLANTING_FACTORS = ['new_sod', 'deep_planting', 'wounding'];
+const SHADE_LIGHTS = ['shade', 'part_shade'];
+const UNANSWERED_APPLICATION = ['none', 'not_sure'];
+const RECENT_APPLICATION_DAYS = 21;
+
+/** A chip number, or null when the chip was left blank (`null`, `undefined`
+ * or `''` are how an unanswered optional chip arrives — `Number('')` would
+ * read as 0 and fake a "fits your watering" match; Codex #5186 r4 P2). */
+function chipNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function recentApplicationKinds(chips, context) {
+  const kinds = new Set();
+  if (chips.recent_application && !UNANSWERED_APPLICATION.includes(chips.recent_application)) kinds.add(chips.recent_application);
+  for (const a of (Array.isArray(context.applications) ? context.applications : [])) {
+    if (Number(a.days_ago) <= RECENT_APPLICATION_DAYS) kinds.add(a.kind);
+  }
+  return kinds;
+}
+
+/** Contract §6.2's annotations as a rule table (Codex #5186 r4 P2 asked for
+ * the repeated factor/chip branches to become one evaluation): each rule is
+ * a tag and the one fact-check that earns it. Annotations only reorder and
+ * label; they never move a confidence. */
+const LOCAL_FIT_RULES = Object.freeze([
+  ['peak_season', ({ entry, currentMonth }) => Array.isArray(entry.peak_months) && entry.peak_months.includes(currentMonth)],
+  ['fits_watering', ({ factors, watering }) => watering !== null
+    && ((factors.has('frequent_irrigation') && watering >= 3) || (factors.has('infrequent_irrigation') && watering <= 1))],
+  ['fits_application', ({ factors, applications }) => (factors.has('recent_herbicide') && (applications.has('weed_control') || applications.has('herbicide')))
+    || (factors.has('recent_fertilizer') && applications.has('fertilizer'))],
+  ['fits_light', ({ factors, chips }) => (factors.has('full_sun') && chips.light === 'full_sun') || (factors.has('shade') && SHADE_LIGHTS.includes(chips.light))],
+  ['fits_new_planting', ({ factors, chips }) => chips.recently_planted === true && NEW_PLANTING_FACTORS.some((f) => factors.has(f))],
+  ['fits_fronds', ({ entry, chips }) => FROND_SLUGS_BY_CHIP[chips.fronds]?.has(entry.slug) === true],
+]);
 
 function localAnnotationsFor(entry, sig, { currentMonth, chips = {}, context = {} } = {}) {
-  const tags = [];
-  if (Array.isArray(entry.peak_months) && entry.peak_months.includes(currentMonth)) tags.push('peak_season');
-  const factors = new Set(sig.siteFactors);
-  const watering = Number.isFinite(Number(chips.watering_days)) ? Number(chips.watering_days) : null;
-  if ((factors.has('frequent_irrigation') && watering !== null && watering >= 3)
-    || (factors.has('infrequent_irrigation') && watering !== null && watering <= 1)) tags.push('fits_watering');
-  const recentApplications = new Set([
-    chips.recent_application && chips.recent_application !== 'none' && chips.recent_application !== 'not_sure' ? chips.recent_application : null,
-    ...(Array.isArray(context.applications) ? context.applications.filter((a) => Number(a.days_ago) <= 21).map((a) => a.kind) : []),
-  ].filter(Boolean));
-  if ((factors.has('recent_herbicide') && (recentApplications.has('weed_control') || recentApplications.has('herbicide')))
-    || (factors.has('recent_fertilizer') && recentApplications.has('fertilizer'))) tags.push('fits_application');
-  if ((factors.has('full_sun') && chips.light === 'full_sun') || (factors.has('shade') && (chips.light === 'shade' || chips.light === 'part_shade'))) tags.push('fits_light');
-  if ((factors.has('new_sod') || factors.has('deep_planting') || factors.has('wounding')) && chips.recently_planted === true) tags.push('fits_new_planting');
-  if ((chips.fronds === 'oldest' && FROND_OLDEST_SLUGS.has(entry.slug))
-    || (chips.fronds === 'newest' && FROND_NEWEST_SLUGS.has(entry.slug))
-    || (chips.fronds === 'spear' && FROND_SPEAR_SLUGS.has(entry.slug))) tags.push('fits_fronds');
-  return tags;
+  const facts = {
+    entry, currentMonth, chips, factors: new Set(sig.siteFactors), watering: chipNumber(chips.watering_days), applications: recentApplicationKinds(chips, context),
+  };
+  return LOCAL_FIT_RULES.filter(([, fits]) => fits(facts)).map(([tag]) => tag);
 }
 
 // ── settle_it (§6.5) ───────────────────────────────────────────────────────
@@ -821,24 +854,46 @@ const UNKNOWN_IDENTITY_ANSWER = Object.freeze({
   level: 'unknown', node_id: null, wording: 'unknown', headline: UNUSABLE_HEADLINE, subhead: null,
 });
 
+// The identity card (`V2Result`) renders its verdict chip and the "What it
+// is" / "Risk" / "What to do" rows from label fields (Codex #5186 r4 P2),
+// so a named plant carries them: the pest engine's own maps for risk and
+// action, plus the plant kinds' roles and a plant-specific verdict chip (a
+// lawn grass or landscape plant is not "Harmless" — it is what it is; a weed
+// keeps the pest verdict wording).
+const PLANT_ROLE_LABELS = Object.freeze({
+  weed: 'Weed', lawn_grass: 'Lawn grass', landscape_plant: 'Landscape plant', plant_disease: 'Plant disease', plant_disorder: 'Lawn or plant problem',
+});
+const PLANT_VERDICT_LABELS = Object.freeze({ turfgrass: 'Lawn grass', host_plant: 'Landscape plant', palm: 'Palm' });
+function plantVerdictLabel(entry) {
+  if (entry.kind === 'host_plant' && entry.group === 'palms') return PLANT_VERDICT_LABELS.palm;
+  return PLANT_VERDICT_LABELS[entry.kind] || VERDICT_LABELS[entry.verdict] || null;
+}
+
 function namedIdentityAnswer(named) {
+  const { entry } = named;
   return {
     answer: {
       level: 'entry',
-      node_id: named.entry.slug,
+      node_id: entry.slug,
       wording: named.wording,
-      headline: `${named.wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${named.entry.common_name}`,
-      subhead: named.entry.scientific_name || null,
+      headline: `${named.wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${entry.common_name}`,
+      subhead: entry.scientific_name || null,
     },
     entry: {
-      slug: named.entry.slug,
-      common_name: named.entry.common_name,
-      scientific_name: named.entry.scientific_name || null,
-      kind: named.entry.kind,
-      verdict: named.entry.verdict,
-      ...plantSafetyFields(named.entry),
-      what_it_means: named.entry.copy?.what_it_means || null,
-      fact: named.entry.copy?.fact || null,
+      slug: entry.slug,
+      common_name: entry.common_name,
+      scientific_name: entry.scientific_name || null,
+      kind: entry.kind,
+      verdict: entry.verdict,
+      verdict_label: plantVerdictLabel(entry),
+      role: entry.role || null,
+      role_label: PLANT_ROLE_LABELS[entry.role] || ROLE_LABELS[entry.role] || null,
+      ...plantSafetyFields(entry),
+      risk_label: RISK_LABELS[entry.risk] || null,
+      action: entry.action || null,
+      action_label: ACTION_LABELS[entry.action] || null,
+      what_it_means: entry.copy?.what_it_means || null,
+      fact: entry.copy?.fact || null,
     },
   };
 }
@@ -1049,9 +1104,12 @@ function totalBudgetMs() {
   const raw = Number(process.env.PHOTO_ID_V2_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOTAL_BUDGET_MS;
 }
+/** `PHOTO_ID_ESCALATE_BELOW`: a number with 0 < value <= 1, else 0.80 —
+ * `0` (or an empty variable, which `Number('')` reads as 0) would silently
+ * switch the low-confidence second opinion off (Codex #5186 r4 P2). */
 function escalateBelow() {
   const raw = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
-  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.80;
+  return Number.isFinite(raw) && raw > 0 && raw <= 1 ? raw : 0.80;
 }
 
 async function callIdentityCandidates(images, subject, indexTexts, timeoutMs) {
@@ -1404,8 +1462,11 @@ function identifyLaneSlotsFor(subject) {
  * not skip the second opinion and hand the customer an unknown. */
 function identityTriggerReasons(identity, run) {
   const lowSlot = IDENTITY_SLOTS.some((slot) => identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow());
+  // A lane whose candidates cannot resolve to any catalog node (an off-catalog
+  // guess with no valid group) is as empty as no candidate at all — the
+  // customer would get `unknown` without the second read (Codex #5186 r4 P1).
   const noLaneCandidate = run.mode === 'identify' && !!identity.candidatesJson
-    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].length === 0);
+    && identifyLaneSlotsFor(run.subject).every((slot) => identity.slots[slot].every((c) => !candidateNodeIdPlant(c)));
   return reasonsFrom([
     [!identity.candidatesJson || identity.verifyMissed, 'gemini_missed'],
     [noLaneCandidate, 'no_identity_candidate'],
@@ -1725,6 +1786,8 @@ module.exports = {
   NEXT_STEP_TEMPLATES,
   SYMPTOM_HEADLINES,
   UNUSABLE_HEADLINE,
+  PLANT_ROLE_LABELS,
+  PLANT_VERDICT_LABELS,
   OBSERVED_TERMS,
   escalateBelow,
   _test: {
