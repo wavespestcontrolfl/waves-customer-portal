@@ -50,10 +50,22 @@ async function enqueueReceiptDelivery({
     updated_at: db.fn.now(),
   };
 
+  // The row is normally the dedupe. One exception: a live claim row an
+  // operator send created (claimReceiptJobForOperatorSend, source
+  // 'operator_send', still running) takes this request over, so releasing the claim after
+  // an undelivered email re-queues it instead of deleting the only job.
   const inserted = await database('receipt_delivery_jobs')
     .insert(row)
     .onConflict(['invoice_id'])
-    .ignore()
+    .merge({
+      source: row.source,
+      stripe_payment_intent_id: row.stripe_payment_intent_id,
+      next_attempt_at: row.next_attempt_at,
+      customer_initiated: row.customer_initiated,
+      updated_at: row.updated_at,
+    })
+    .where('receipt_delivery_jobs.source', 'operator_send')
+    .where('receipt_delivery_jobs.status', 'running')
     .returning('*');
 
   if (inserted?.[0]) return { enqueued: true, job: inserted[0] };
@@ -341,8 +353,9 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // queued for the same invoice (the payment webhook's, the Intelligence Bar
 // closeout repair's) would deliver a second receipt around it. The invoice's
 // one job row (unique on invoice_id) is the shared claim: the operator send
-// takes it as `running` first — the drain never claims a running row and
-// every enqueue dedupes on it — and hands it back afterwards
+// takes it as `running` first — the drain never claims a running row, and
+// an enqueue either dedupes on it or, on a row the claim created, takes that
+// row over for release to re-queue — and hands it back afterwards
 // (releaseOperatorReceiptClaim). A job the drain is delivering right now
 // refuses the operator send ({ inFlight: true }) rather than racing it.
 // A short transaction only: never held across the sends. A process that dies
@@ -396,8 +409,8 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
 // queued job would only repeat it; its text leg already skips once
 // receipt_sent_at is stamped). Otherwise the queued job goes back exactly as
 // it was — it still owes the email — and a row the claim itself created is
-// removed. Scoped to this claim's token; a failure logs and leaves the row
-// to recoverStaleLocks.
+// removed, or queued if an enqueue took it over. Scoped to this claim's
+// token; a failure logs and leaves the row to recoverStaleLocks.
 async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsResult = null, emailResult = null } = {}) {
   if (!claim?.id) return;
   const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
@@ -414,7 +427,12 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsR
         updated_at: db.fn.now(),
       });
     } else if (!claim.prior) {
-      await mine().del();
+      // A row the claim created goes away — unless an enqueue took it over
+      // meanwhile (source no longer 'operator_send'): that job is now due.
+      const removed = await mine().where({ source: 'operator_send' }).del();
+      if (!removed) {
+        await mine().update({ status: 'queued', locked_at: null, locked_by: null, updated_at: db.fn.now() });
+      }
     } else {
       await mine().update({
         status: claim.prior.status,

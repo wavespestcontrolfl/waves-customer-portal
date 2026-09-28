@@ -55,17 +55,44 @@ postgres('operator receipt claim on PostgreSQL', () => {
     await admin?.destroy();
   });
 
-  test('no job yet: the claim row blocks the drain and every enqueue; an undelivered email removes it', async () => {
+  test('no job yet: the claim row blocks the drain; an undelivered email removes it', async () => {
     const invoiceId = randomUUID();
     const claim = await claimReceiptJobForOperatorSend(invoiceId);
     expect(claim).toMatchObject({ id: expect.any(String), prior: null });
     expect(await job(invoiceId)).toMatchObject({ status: 'running', source: 'operator_send', locked_by: claim.token });
-
     expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
-    expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
 
     await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
     expect(await job(invoiceId)).toBeUndefined();
+  });
+
+  test('an enqueue during a claim the operator created is kept: still held from the drain, then queued when the email did not go out', async () => {
+    const invoiceId = randomUUID();
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    const queued = await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair', customerInitiated: true });
+    expect(queued).toMatchObject({ enqueued: true, job: { status: 'running', locked_by: claim.token, source: 'ib_closeout_repair' } });
+    expect((await claimDueReceiptDeliveryJobs({ limit: 50 })).map((j) => j.invoice_id)).not.toContain(invoiceId);
+
+    await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+    expect(await job(invoiceId)).toMatchObject({ status: 'queued', source: 'ib_closeout_repair', customer_initiated: true, locked_by: null });
+    const drained = await claimDueReceiptDeliveryJobs({ limit: 50 });
+    expect(drained.map((j) => j.invoice_id)).toContain(invoiceId);
+  });
+
+  test('an enqueue during an operator claim whose email went out is completed with it — no second email', async () => {
+    const invoiceId = randomUUID();
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    await enqueueReceiptDelivery({ invoiceId, source: 'stripe_webhook' });
+    await releaseOperatorReceiptClaim(claim, { emailDelivered: true, emailResult: { ok: true } });
+    expect(await job(invoiceId)).toMatchObject({ status: 'completed', source: 'stripe_webhook' });
+  });
+
+  test('an enqueue while an operator holds an existing queued job still dedupes — that job is restored as it was', async () => {
+    const invoiceId = await seedJob();
+    const claim = await claimReceiptJobForOperatorSend(invoiceId);
+    expect(await enqueueReceiptDelivery({ invoiceId, source: 'ib_closeout_repair' })).toEqual({ enqueued: false, deduped: true });
+    await releaseOperatorReceiptClaim(claim, { emailDelivered: false });
+    expect(await job(invoiceId)).toMatchObject({ status: 'queued', source: 'stripe_webhook' });
   });
 
   test('a delivered email completes the claim row, so a later enqueue still dedupes', async () => {
