@@ -495,7 +495,13 @@ describe('model-switchboard', () => {
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
-    expect(deepSafe).toEqual(['DEEP', 'EXTREME']);
+    // NEWSLETTER is reached only through the newsletterWriter policy in
+    // llm/call.js, whose wire cap gives always-thinking models their floor;
+    // its default (Opus 5.5) is itself a requires:'deep' model.
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'NEWSLETTER']);
+    expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
+    expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
+    expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
     for (const id of Object.keys(sb.MODEL_CATALOG).filter((k) => /fable|mythos/.test(k))) {
       expect(sb.MODEL_CATALOG[id].requires).toBe('deep');
     }
