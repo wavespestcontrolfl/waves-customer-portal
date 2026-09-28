@@ -376,9 +376,16 @@ const HOUR_LEAD_DAYS = new Set([
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
   'sun', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'today', 'tonight', 'tomorrow',
 ]);
-// Once the exact hour is said, the rest of the turn may not correct it or
-// offer another: "at two, actually three", "at two, or four".
-const AFTER_HOUR_REJECTS = new Set(['or', 'actually', 'instead', 'rather']);
+// Once the exact hour is said, the rest of the turn may only be courtesy
+// from this closed list. Anything else — a correction ("actually three"),
+// an alternative ("or four"), doubt ("I think", "approximately"), a length
+// ("two to four hours") — sends the call to the office.
+const AFTER_HOUR_WORDS = new Set([
+  ',', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
+  'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
+  'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
+  'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
+]);
 
 function hourExactIn(text, words) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
@@ -394,13 +401,16 @@ function hourExactIn(text, words) {
       && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
     const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || HOUR_LEAD_DAYS.has(next) || rangeEnd;
     const rest = toks.slice(rangeEnd ? hb + 2 : hb);
-    const clean = !rest.some((t) => AFTER_HOUR_REJECTS.has(t) || /^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight');
+    const clean = rest.every((t) => AFTER_HOUR_WORDS.has(t) || HOUR_LEAD_DAYS.has(t));
     return lead && tail && clean && (prev !== 'between' || rangeEnd);
   });
 }
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
+    // "Next" near the slot ("two next Thursday") names a later week than the
+    // recorded day words can: it never grounds.
+    && !padded(sentencesHolding(turns, quote)).includes(' next ')
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday

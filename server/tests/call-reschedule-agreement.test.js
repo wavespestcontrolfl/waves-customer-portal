@@ -313,6 +313,13 @@ describe('groundRescheduleAgreement', () => {
       expect([said, plain(THURSDAY_2PM, said, 'two').ok]).toEqual([said, false]);
     }
     expect(agreedAt('2027-03-02T14:00:00-05:00', 'We will move it to March 2.', { day: 'March 2', hour: '2', period: null }).ok).toBe(false);
+    // Codex #5163 r6: doubt or a length after the hour, and an unrecorded "next".
+    for (const said of ['We will see you Thursday at two, I think.', 'We will see you Thursday at two, approximately.', 'The treatment on Thursday is for two to four hours.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').ok]).toEqual([said, false]);
+    }
+    expect(plain(THURSDAY_2PM, 'We will move you to two next Thursday.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thanks so much.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thank you, have a great day.', 'two').ok).toBe(true);
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00 or 4:00.', '2').ok).toBe(false);
     // A quote cut short before a qualifier is judged by its whole turn.
     expect(ground(v2({
