@@ -569,7 +569,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, o
       <div className="tech-visit-body">
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={setDictationPending} serviceId={service?.id} locked={locked} />
-          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked} />
+          {/* A clip being recorded keeps recording behind the photo manager, so
+              photos wait until the dictation is finished. */}
+          <PhotosSection serviceId={service?.id} request={request} photos={photos} locked={locked || dictationPending} />
           <ProductsSection
             rows={rows}
             method={form.method}

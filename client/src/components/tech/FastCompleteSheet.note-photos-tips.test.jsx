@@ -128,10 +128,20 @@ describe('FastCompleteSheet recorded dictation', () => {
     expect(screen.getByRole('button', { name: 'Transcribing' }).disabled).toBe(true);
   });
 
+  test('photos wait until a recorded clip is finished', async () => {
+    dictation.state = { listening: true, mode: 'upload', uploading: false };
+    await fillRequired(makeRequest());
+    const photos = screen.getByRole('button', { name: 'Add photos' });
+    expect(photos.disabled).toBe(true);
+    fireEvent.click(photos);
+    expect(screen.queryByRole('dialog', { name: 'Photo manager' })).toBeNull();
+  });
+
   test('live speech recognition never holds the completion', async () => {
     dictation.state = { listening: true, mode: 'speech', uploading: false };
     const submit = await fillRequired(makeRequest());
     expect(submit.disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Add photos' }).disabled).toBe(false);
   });
 });
 
