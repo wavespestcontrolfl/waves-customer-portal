@@ -29,9 +29,17 @@ function isSenderRenderedEmail(message) {
 // A skipped email with no later stage: nothing else re-sends it, so staff
 // must follow up by hand. The Day 30 follow-up is final unless the Day 90
 // ladder (GATE_DUNNING_LADDER_90, read now) carries the invoice on.
+// The micro-deposit email names its dunning touch at the end of its
+// trigger_event_id (microdeposit_verification_email:<invoice>:<touch>):
+// the late-payment tier ('90d') or the follow-up step id.
 function isFinalSenderRenderedEmail(message) {
+  const ladderLive = process.env.GATE_DUNNING_LADDER_90 === 'true';
   const key = String(message?.template_key || '').trim();
-  if (key === 'invoice.followup_30_day') return process.env.GATE_DUNNING_LADDER_90 !== 'true';
+  if (key === 'invoice.followup_30_day') return !ladderLive;
+  if (key === 'payment.microdeposit_verification') {
+    const touch = String(message?.trigger_event_id || '').split(':').pop();
+    return touch === '90d' || touch === 'd90_final_notice' || (touch === 'd30_final' && !ladderLive);
+  }
   return ['billing_late_payment_90_day', 'invoice.followup_90_day', 'billing.previsit_balance'].includes(key);
 }
 

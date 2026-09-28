@@ -312,20 +312,26 @@ describe('attemptRecovery codex-fix behaviors', () => {
     });
 
   test.each([
-    ['billing_late_payment_90_day', undefined, true],
-    ['invoice.followup_90_day', 'true', true],
-    ['billing.previsit_balance', undefined, true],
-    ['invoice.followup_30_day', undefined, true],
-    ['invoice.followup_30_day', 'true', false],
-    ['billing_late_payment_60_day', undefined, false],
-  ])('a bounced %s (ladder gate %s) alert says final=%s', async (templateKey, ladder, final) => {
+    ['billing_late_payment_90_day', undefined, true, null],
+    ['invoice.followup_90_day', 'true', true, null],
+    ['billing.previsit_balance', undefined, true, null],
+    ['invoice.followup_30_day', undefined, true, null],
+    ['invoice.followup_30_day', 'true', false, null],
+    ['billing_late_payment_60_day', undefined, false, null],
+    ['payment.microdeposit_verification', undefined, true, '90d'],
+    ['payment.microdeposit_verification', 'true', true, 'd90_final_notice'],
+    ['payment.microdeposit_verification', undefined, true, 'd30_final'],
+    ['payment.microdeposit_verification', 'true', false, 'd30_final'],
+    ['payment.microdeposit_verification', undefined, false, '60d'],
+  ])('a bounced %s (ladder gate %s) alert says final=%s', async (templateKey, ladder, final, touch) => {
     if (ladder) process.env.GATE_DUNNING_LADDER_90 = ladder; else delete process.env.GATE_DUNNING_LADDER_90;
     db.mockImplementation(orderedDb({
       first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
       returning: (table) => (table === 'email_bounce_recoveries' ? [{ id: 'rec1' }] : []),
     }));
     await recovery.attemptRecovery(
-      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'] },
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: templateKey, suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'],
+        trigger_event_id: touch ? `microdeposit_verification_email:inv1:${touch}` : null },
       { event: 'bounce', type: 'bounce' },
     );
     const body = NotificationService.notifyAdmin.mock.calls[0][2];
