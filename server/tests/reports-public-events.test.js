@@ -615,6 +615,23 @@ describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UP
   });
 });
 
+describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () => {
+  // The service-report /:token/ask handler records what the answer covered,
+  // never what the customer typed.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('records exactly question_length and topic — never the question text or the answer', () => {
+    const m = src.match(/recordServiceReportEvent\(service, 'report_question_asked', 'public_report', req, \{([\s\S]*?)\}\);/);
+    expect(m).toBeTruthy();
+    const keys = m[1].replace(/\/\/.*$/gm, '').split(',').map((k) => k.trim().split(':')[0].trim()).filter(Boolean);
+    expect(keys.sort()).toEqual(['question_length', 'topic']);
+  });
+
+  test('the topic comes from the same routing that produced the answer', () => {
+    expect(src).toMatch(/const \{ answer, topic \} = routeServiceReportQuestion\(\{/);
+  });
+});
+
 describe('storedRevisionMatches (cross-sell resubmit no-op, PR r11 P2)', () => {
   const { storedRevisionMatches } = reportsRouter;
   const snapshot = {

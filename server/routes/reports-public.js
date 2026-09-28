@@ -180,7 +180,7 @@ const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue'
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
-  answerServiceReportQuestion,
+  routeServiceReportQuestion,
 } = require('../services/service-report/report-assistant');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -1814,13 +1814,17 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const answer = answerServiceReportQuestion({
+    const { answer, topic } = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
+    // The question's text is never stored — only its length and the topic
+    // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
+    // the engagement stats can say what customers ask about per report type.
     await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
       question_length: question.length,
+      topic,
     });
     return res.json({ answer });
   } catch (err) { next(err); }

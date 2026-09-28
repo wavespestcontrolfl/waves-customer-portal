@@ -13,16 +13,18 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const rawCalls = [];
-// The tool fires 2 db.raw calls in a fixed order: the main engagement
-// ROLLUP (index 0), then reserviceWithin14Days (index 1). Each gets its own
-// queued row set so a test can control one without affecting the other.
+// The tool fires 3 db.raw calls in a fixed order: the main engagement
+// ROLLUP (index 0), reserviceWithin14Days (index 1), then questionTopics
+// (index 2). Each gets its own queued row set so a test can control one
+// without affecting the others.
 let rawRows = [];
 let reserviceRows = [];
+let topicRows = [];
 const mockDb = jest.fn(() => { throw new Error('get_report_engagement must not use the builder'); });
 mockDb.raw = jest.fn((sql, bindings) => {
   const idx = rawCalls.length;
   rawCalls.push({ sql, bindings });
-  const queued = [rawRows, reserviceRows][idx] || [];
+  const queued = [rawRows, reserviceRows, topicRows][idx] || [];
   return Promise.resolve({ rows: queued });
 });
 jest.mock('../models/db', () => mockDb);
@@ -34,6 +36,7 @@ beforeEach(() => {
   rawCalls.length = 0;
   rawRows = [];
   reserviceRows = [];
+  topicRows = [];
 });
 
 describe('get_report_engagement', () => {
@@ -47,7 +50,7 @@ describe('get_report_engagement', () => {
   test('binds the window as real Dates spanning ET midnight to the day after date_to', async () => {
     await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     // Main ROLLUP query, then reserviceWithin14Days.
-    expect(rawCalls).toHaveLength(2);
+    expect(rawCalls).toHaveLength(3);
     const [fromTs, toTs] = rawCalls[0].bindings;
     expect(fromTs).toBeInstanceOf(Date);
     expect(toTs).toBeInstanceOf(Date);
@@ -209,5 +212,20 @@ describe('get_report_engagement', () => {
     expect(await executeDashboardTool('get_report_engagement', { date_from: '2026-01-01', date_to: '2026-99-01' })).toEqual({ error: 'date_from and date_to must be real YYYY-MM-DD dates' });
     expect(await executeDashboardTool('get_report_engagement', { date_from: '2026-09-02', date_to: '2026-09-01' })).toEqual({ error: 'date_from must be on or before date_to' });
     expect(rawCalls).toHaveLength(0);
+  });
+  test('questionTopics counts questions by service line and answer topic, bound to the same ET window, never reading question text', async () => {
+    topicRows = [
+      { service_line: 'lawn', topic: 'watering', questions: '4' },
+      { service_line: 'lawn', topic: 'results', questions: '1' },
+      { service_line: 'pest', topic: 'reentry', questions: '2' },
+    ];
+    const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    expect(res.questionTopics).toEqual({ lawn: { watering: 4, results: 1 }, pest: { reentry: 2 } });
+    const [fromTs, toTs] = rawCalls[2].bindings;
+    expect(fromTs).toEqual(rawCalls[0].bindings[0]);
+    expect(toTs).toEqual(rawCalls[0].bindings[1]);
+    expect(rawCalls[2].sql).toMatch(/event_name = 'report_question_asked'/);
+    expect(rawCalls[2].sql).toMatch(/metadata->>'topic'/);
+    expect(rawCalls[2].sql).not.toMatch(/metadata->>'question'/);
   });
 });

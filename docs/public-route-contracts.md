@@ -2852,7 +2852,14 @@ generic 404 — their pages never mount the ask bar. Only write: an
 content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
-keyword-routed as before, so older clients are unaffected. This route and the
+keyword-routed as before, so older clients are unaffected. The service-report
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
+LLM) writes one `service_report_events` row, `report_question_asked`, with
+metadata `{ question_length, topic }` — never the question text or the answer
+(owner ruling 2026-09-28: topic only). `topic` is the answer family the
+question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
+`findings`, `next_steps`, `next_visit`, `applied`, `results`, `summary`,
+`unrouted`); the response body is unchanged. This route and the
 service-report `/api/reports/:token/ask` both answer with
 `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
 response, including CORS preflights, the global `/api` limiter's 429 and

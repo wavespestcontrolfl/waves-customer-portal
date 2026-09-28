@@ -576,13 +576,15 @@ function questionRoutingRules({
     // under the plan shown on the same page (codex #3565 gh-r29).
     {
       test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
+      topic: 'watering',
       answer: () => answerWateringAftercare({ data, weekPlan, aftercare }),
     },
     {
       test: () => Boolean(weekPlan?.title) && wateringIntent,
+      topic: 'watering',
       answer: () => [weekPlan.title, weekPlan.detail].filter(Boolean).join(' '),
     },
-    { test: (q) => /\b(irrigation)\b/.test(q), answer: () => answerReentry({ data }) },
+    { test: (q) => /\b(irrigation)\b/.test(q), topic: 'watering', answer: () => answerReentry({ data }) },
     // AW-06: exact-word matching missed inflections ("treated", "applying",
     // "products", "used") — this is the branch "What was applied outside
     // today?" and "Why was <product> used?" must reach. A question naming
@@ -593,21 +595,21 @@ function questionRoutingRules({
     // appointment?" answers with the appointment, not today's application).
     // Observation verbs outrank treatment inflections ("What did you find
     // while treating?") — codex #4839 P2.
-    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), topic: 'findings', answer: () => answerFindings({ data }) },
     // Preparation wording outranks appointment nouns — codex #4839 P2.
-    { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => PREP_ADVICE_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit advice outranks treatment inflections ("What do you recommend
     // after spraying?") — codex #4839 P2.
     // Only an actual scheduling request ("Should I schedule my next
     // appointment?") outranks advice — "What do you recommend before my next
     // appointment?" is still advice.
-    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => ADVICE_RE.test(q) && !SCHEDULING_REQUEST_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Scheduled returns go to the appointment.
-    { test: (q) => SCHEDULED_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => SCHEDULED_RETURN_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
     // Future treatment timing is scheduling, not today's application.
     {
       test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_VERB_RE.test(q),
-      answer: () => answerNextAppointment({ nextAppointment }),
+      topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }),
     },
     {
       // A pressure/score question with only the generic "used" ("What is the
@@ -617,15 +619,16 @@ function questionRoutingRules({
       test: (q) => TREATMENT_QUESTION_RE.test(q) && (!APPOINTMENT_RE.test(q) || PAST_TENSE_RE.test(q) || /\b(?:last|today'?s?|previous)\b/.test(q))
         && !(TREND_CORE_RE.test(q) && !/\b(?:products?|spray\w*|appl\w*|treat\w*|chemicals?|baits?)\b/.test(q)),
       // "Is the treatment working?" asks about results, not what was applied.
+      topic: (q) => (EFFECTIVENESS_RE.test(q) ? 'results' : 'applied'),
       answer: (q) => (EFFECTIVENESS_RE.test(q) ? answerTrend({ data }) : answerAppliedToday({ data })),
     },
     // Explicit scheduling wording outranks the broad advice phrases ("Should
     // I schedule my next appointment?") and treatment inflections above.
-    { test: (q) => APPOINTMENT_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
-    { test: (q) => ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    { test: (q) => APPOINTMENT_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => ADVICE_RE.test(q), topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit findings wording outranks the broad lawn subjects ("What
     // damage did you find?" on a pest report).
-    { test: (q) => /\b(find|found|finding|findings)\b/.test(q), answer: () => answerFindings({ data }) },
+    { test: (q) => /\b(find|found|finding|findings)\b/.test(q), topic: 'findings', answer: () => answerFindings({ data }) },
     // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
     // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
     // which all read from this same score breakdown in answerTrend. codex
@@ -634,24 +637,31 @@ function questionRoutingRules({
     // "color"/"stress" describe a finding, not a lawn score.
     {
       test: (q) => TREND_CORE_RE.test(q) || (isLawnReport(data) && LAWN_TREND_SUBJECT_RE.test(q)),
-      answer: () => answerTrend({ data }),
+      topic: 'results', answer: () => answerTrend({ data }),
     },
     // "watch" added (AW-06): "What should I watch for next?" is advisory
     // next-steps intent, not an appointment-date lookup — checked before the
     // bare "next" appointment rule below.
     {
       test: (q) => /\b(do|watch|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q),
-      answer: () => answerNextSteps({ data, nextAppointment }),
+      topic: 'next_steps', answer: () => answerNextSteps({ data, nextAppointment }),
     },
-    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), answer: () => answerNextAppointment({ nextAppointment }) },
+    { test: (q) => /\b(next|upcoming|appointment|appt|schedule|scheduled|come back|be back)\b/.test(q) && !PEST_RETURN_RE.test(q), topic: 'next_visit', answer: () => answerNextAppointment({ nextAppointment }) },
     {
       test: (q) => /\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q),
-      answer: () => answerFindings({ data }),
+      topic: 'findings', answer: () => answerFindings({ data }),
     },
   ];
 }
 
-function answerServiceReportQuestion({
+// Every answer a report question can get, by what it answered: the topic
+// recorded on the report_question_asked event (never the question text —
+// the report ask route stores only its length and this key).
+const REPORT_QUESTION_TOPICS = Object.freeze([
+  'reentry', 'watering', 'findings', 'next_steps', 'next_visit', 'applied', 'results', 'summary', 'unrouted',
+]);
+
+function routeServiceReportQuestion({
   question,
   data,
   nextAppointment,
@@ -664,7 +674,7 @@ function answerServiceReportQuestion({
   // see isReentryIntent — so "What was applied outside today?" reaches the
   // treatment answer below instead of being hijacked here.
   if (isReentryIntent(q)) {
-    return answerReentry({ data });
+    return { topic: 'reentry', answer: answerReentry({ data }) };
   }
 
   const weekPlan = data?.reportV2?.water?.weekPlan;
@@ -682,16 +692,28 @@ function answerServiceReportQuestion({
     data, nextAppointment, weekPlan, aftercare, wateringIntent,
   });
   const matched = rules.find((rule) => rule.test(q));
-  if (matched) return matched.answer(q);
+  if (matched) {
+    const topic = typeof matched.topic === 'function' ? matched.topic(q) : matched.topic;
+    return { topic, answer: matched.answer(q) };
+  }
 
   const summary = data?.dynamicContext?.aiSummary;
   if (summary?.headline || summary?.body) {
-    return [summary.headline, summary.body].filter(Boolean).join(' ');
+    return { topic: 'summary', answer: [summary.headline, summary.body].filter(Boolean).join(' ') };
   }
-  return 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.';
+  return {
+    topic: 'unrouted',
+    answer: 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.',
+  };
+}
+
+function answerServiceReportQuestion(args = {}) {
+  return routeServiceReportQuestion(args).answer;
 }
 
 module.exports = {
+  REPORT_QUESTION_TOPICS,
+  routeServiceReportQuestion,
   answerServiceReportQuestion,
   answerAppliedToday,
   answerNextSteps,

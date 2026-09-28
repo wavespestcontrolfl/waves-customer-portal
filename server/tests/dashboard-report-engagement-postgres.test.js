@@ -287,6 +287,22 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate_pct: 100 });
   });
 
+  test('questionTopics counts report questions by service line and topic; older topic-less events are left out', async () => {
+    const cust = await customer();
+    const { record } = await sentVisit({ customerId: cust, date: '2026-08-05', line: 'lawn' });
+    const asked = (metadata, at) => trx('service_report_events').insert({
+      service_record_id: record.id, customer_id: cust, event_name: 'report_question_asked',
+      channel: 'public_report', metadata: JSON.stringify(metadata), occurred_at: at,
+    });
+    await asked({ question_length: 22, topic: 'watering' }, '2026-08-06T15:00:00Z');
+    await asked({ question_length: 31, topic: 'watering' }, '2026-08-07T15:00:00Z');
+    await asked({ question_length: 18, topic: 'results' }, '2026-08-08T15:00:00Z');
+    await asked({ question_length: 40 }, '2026-08-09T15:00:00Z'); // before topics were recorded
+    await asked({ question_length: 12, topic: 'watering' }, '2026-09-15T15:00:00Z'); // outside the window
+    const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
+    expect(res.questionTopics).toEqual({ lawn: { watering: 2, results: 1 } });
+  });
+
   test('the date-window scans have an index leading with service_date', async () => {
     const { rows } = await trx.raw(
       "SELECT indexdef FROM pg_indexes WHERE tablename = 'service_records' AND indexname = 'service_records_service_date_idx'",

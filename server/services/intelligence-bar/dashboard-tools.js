@@ -176,7 +176,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_report_engagement',
-    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate_pct}, rate_pct in percent 0-100) — of the performed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate_pct}, rate_pct in percent 0-100) — of the performed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Also returns questionTopics: { <service_line>: { <topic>: count } } — Waves AI questions customers asked on their reports in the period, by what the answer covered (reentry, watering, findings, next_steps, next_visit, applied, results, summary, unrouted; the question text itself is never stored). Use for "what are customers asking on their lawn reports?",  "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -1065,6 +1065,32 @@ async function getReserviceWithin14Days(from, to, cutoff) {
   return byLine;
 }
 
+// What customers ask Waves AI on their reports, by the topic each answer
+// came from (report-assistant.js REPORT_QUESTION_TOPICS). The ask route
+// never stores the question text, only its length and this key (owner
+// ruling 2026-09-28). Keyed by service line, independent of report sends;
+// questions asked before topics were recorded carry none and are left out.
+async function getReportQuestionTopics(fromTs, toTs) {
+  const { rows } = await db.raw(`
+    SELECT COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
+           sre.metadata->>'topic' AS topic,
+           COUNT(*)::int AS questions
+    FROM service_report_events sre
+    JOIN service_records srec ON srec.id = sre.service_record_id
+    WHERE sre.event_name = 'report_question_asked'
+      AND sre.metadata->>'topic' IS NOT NULL
+      AND sre.occurred_at >= ? AND sre.occurred_at < ?
+    GROUP BY 1, 2
+    ORDER BY 1, 3 DESC
+  `, [fromTs, toTs]);
+  const byLine = {};
+  for (const row of rows) {
+    if (!byLine[row.service_line]) byLine[row.service_line] = {};
+    byLine[row.service_line][row.topic] = parseInt(row.questions, 10) || 0;
+  }
+  return byLine;
+}
+
 async function getReportEngagement(input = {}) {
   const now = new Date();
   // Inclusive lower bound: 29 days back + today = exactly 30 ET calendar days.
@@ -1186,6 +1212,7 @@ async function getReportEngagement(input = {}) {
   // counted as "no re-service".
   const reserviceCutoff = etDateString(addETDays(now, -15));
   const reserviceByLine = await getReserviceWithin14Days(from, to, reserviceCutoff);
+  const questionTopics = await getReportQuestionTopics(fromTs, toTs);
   const reserviceWithin14Days = {};
   for (const line of RESERVICE_LINES) {
     reserviceWithin14Days[line] = reserviceByLine[line] || { visits: 0, reserviced: 0, rate_pct: null };
@@ -1197,11 +1224,13 @@ async function getReportEngagement(input = {}) {
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
     by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
     reserviceWithin14Days,
+    questionTopics,
     notes: [
       'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
+      'questionTopics counts Waves AI questions asked on reports in the period, by service line, by the topic each answer came from (reentry, watering, findings, next_steps, next_visit, applied, results, summary, unrouted); the question text is never stored, and questions asked before topics were recorded are not counted',
       'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts performed, customer-visible, non-re-service visits in the period that got a same-customer same-line re-service 1-14 days later (each re-service credits only its nearest earlier visit), classified from the canonical completion record of each visit (not the editable booking); rate_pct is a percent (0-100), null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
     ],
   };
