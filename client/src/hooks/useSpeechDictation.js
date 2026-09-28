@@ -388,7 +388,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") stopLive();
     };
-    const onPointerDown = (event) => {
+    // Capture-phase click: fires for pointer AND keyboard (Enter / Space)
+    // activation, and on the document before the button's own handler runs.
+    const onClick = (event) => {
       const el = event.target instanceof Element ? event.target : null;
       if (!el || micElRef.current?.contains(el)) return;
       if (el.closest('button, [role="button"], input[type="submit"], input[type="button"], a[href]')) {
@@ -397,11 +399,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     };
     const onSubmit = () => stopLive({ discard: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
-    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("click", onClick, true);
     document.addEventListener("submit", onSubmit, true);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("click", onClick, true);
       document.removeEventListener("submit", onSubmit, true);
     };
   }, [listening]);

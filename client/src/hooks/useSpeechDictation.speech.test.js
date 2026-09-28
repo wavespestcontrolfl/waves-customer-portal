@@ -317,7 +317,7 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     }
   });
 
-  it("pressing any other button (Save, Generate, Send) stops a live session; a press on plain content does not", () => {
+  it("clicking any other button (Save, Generate, Send) stops a live session; a click on plain content does not", () => {
     const { result } = renderHook(() => useSpeechDictation(vi.fn()));
     act(() => result.current.toggle());
     const instance = FakeSpeechRecognition.instances[0];
@@ -325,14 +325,14 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     const text = document.createElement("p");
     text.textContent = "report text";
     const save = document.createElement("button");
-    const saveLabel = document.createElement("span"); // a press lands on the label inside
+    const saveLabel = document.createElement("span"); // a click lands on the label inside
     save.appendChild(saveLabel);
     document.body.append(text, save);
     try {
-      act(() => text.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      act(() => text.dispatchEvent(new MouseEvent("click", { bubbles: true })));
       expect(instance.stop).not.toHaveBeenCalled();
 
-      act(() => saveLabel.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      act(() => saveLabel.dispatchEvent(new MouseEvent("click", { bubbles: true })));
       expect(instance.stop).toHaveBeenCalledTimes(1);
       act(() => instance.onend());
       expect(instance.start).toHaveBeenCalledTimes(1); // stopped, not restarted
@@ -343,7 +343,7 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     }
   });
 
-  it("the mic's own press is the normal tap-to-stop: the press itself does not stop, the click does, and the last words still arrive", () => {
+  it("the mic's own click is the normal tap-to-stop: the document listener skips it, toggle stops, and the last words still arrive", () => {
     const onTranscript = vi.fn();
     const { result } = renderHook(() => useSpeechDictation(onTranscript));
     const mic = document.createElement("button");
@@ -354,9 +354,9 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
       act(() => result.current.toggle({ currentTarget: mic })); // the click that started it
       const instance = FakeSpeechRecognition.instances[0];
 
-      // Holding the mic: pointerdown alone must not stop (and so can never
-      // let the same gesture's click restart it).
-      act(() => micIcon.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      // The mic's own click reaches the document listener first: it must be
+      // skipped there, so the one gesture is a single tap-to-stop.
+      act(() => micIcon.dispatchEvent(new MouseEvent("click", { bubbles: true })));
       expect(instance.stop).not.toHaveBeenCalled();
 
       act(() => result.current.toggle({ currentTarget: mic })); // the click: tap-to-stop
@@ -379,7 +379,7 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     const save = document.createElement("button");
     document.body.append(save);
     try {
-      act(() => save.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+      act(() => save.dispatchEvent(new MouseEvent("click", { bubbles: true })));
       act(() => fireFinalResult(instance, "said while pressing save"));
       expect(onTranscript).not.toHaveBeenCalled();
     } finally {
@@ -403,6 +403,21 @@ describe("useSpeechDictation speech path — keep listening through pauses", () 
     const second = FakeSpeechRecognition.instances[1];
     act(() => fireFinalResult(second, "fresh words"));
     expect(onTranscript).toHaveBeenCalledWith("fresh words");
+  });
+
+  it("a keyboard-activated button (Enter / Space fire click with no pointer event) stops a live session", () => {
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    act(() => result.current.toggle());
+    const instance = FakeSpeechRecognition.instances[0];
+    const complete = document.createElement("button");
+    complete.type = "button";
+    document.body.append(complete);
+    try {
+      act(() => complete.click()); // what the browser does on Enter / Space
+      expect(instance.stop).toHaveBeenCalledTimes(1);
+    } finally {
+      complete.remove();
+    }
   });
 
   it("submitting a form stops a live session", () => {
