@@ -365,6 +365,35 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(bodies[0].irrigationSystemType).toEqual(['spray', 'drip']);
   });
 
+  it('locks the form while a save is in flight', async () => {
+    let releaseSave;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/property-preferences')) {
+        return new Promise((resolve) => {
+          releaseSave = () => resolve(new Response(JSON.stringify({ success: true, saved: true, preferences: BASE_PREFS }), {
+            status: 200, headers: { 'Content-Type': 'application/json' },
+          }));
+        });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    await screen.findByText('Access & Preferences');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    const notes = (await screen.findByText('Access Notes')).closest('label').querySelector('textarea');
+    fireEvent.change(notes, { target: { value: 'Ring twice' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(notes).toBeDisabled());
+    releaseSave();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument());
+  });
+
   it('an unset contact preference shows Not set, and choosing Text actually saves it', async () => {
     const bodies = [];
     vi.stubGlobal('fetch', vi.fn((url, options) => {

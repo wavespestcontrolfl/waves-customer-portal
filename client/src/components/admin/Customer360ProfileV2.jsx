@@ -7277,13 +7277,17 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
           {err}
         </div>
       )}
-      <AccessPrefsEditForm
-        d={draft}
-        set={set}
-        setDraft={setDraft}
-        fieldErrors={fieldErrors}
-        hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
-      />
+      {/* Locked while a save is in flight: edits typed then would miss the
+          submitted snapshot and be dropped when the editor closes. */}
+      <fieldset disabled={saving} className="contents">
+        <AccessPrefsEditForm
+          d={draft}
+          set={set}
+          setDraft={setDraft}
+          fieldErrors={fieldErrors}
+          hasStructuredPets={Array.isArray(prefs?.pets_structured) && prefs.pets_structured.length > 0}
+        />
+      </fieldset>
       <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-hairline border-zinc-200">
         <Button variant="secondary" size="sm" onClick={closeEditor} disabled={saving}>
           Cancel
