@@ -430,8 +430,19 @@ describe('findUnverifiedClaims', () => {
     'A storm-triggered second termite swarm is just an old wives\' tale.',
     'Myth: termites swarm again after storms.',
     'Myth — large patch is a summer disease.',
-  ])('a sentence stating the claim IS a myth is the correct fact, not the claim: %s', (sentence) => {
+    'Myth: that termites have a second swarm after late-summer storms.',
+  ])('the matched claim itself named a myth is the correct fact, not the claim: %s', (sentence) => {
     expect(findUnverifiedClaims(sentence)).toEqual([]);
+  });
+
+  test.each([
+    ['a myth phrase in another clause of the same sentence', 'Termites swarm again after storms, but winter swarms are a myth.', 'termite_second_swarm'],
+    ['a myth phrase after a semicolon', 'Termites have a second swarm after storms; the rest is a myth.', 'termite_second_swarm'],
+    ['a myth phrase after a dash', 'Termites swarm again after storms — the winter swarm is a myth.', 'termite_second_swarm'],
+    ['a myth phrase about something else in the sentence', 'Large patch thrives in summer, and the idea that it is harmless is a myth.', 'large_patch_summer_disease'],
+    ['"Myth:" labelling an EARLIER claim, then the false one', 'Myth: termites never swarm. Fact: termites swarm again after every storm.', 'termite_second_swarm'],
+  ])('a myth phrase that is not about the matched claim clears nothing: %s', (_label, sentence, rule) => {
+    expect(findUnverifiedClaims(sentence).some((c) => c.rule === rule)).toBe(true);
   });
 
   test('a correct denial earlier in the sentence does NOT exempt a later false claim in it', () => {

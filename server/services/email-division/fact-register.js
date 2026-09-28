@@ -437,13 +437,19 @@ const PRONOUN_SUBJECT = '(?:they|these\\s+(?:insects|pests|bugs)|the\\s+colony|c
 // The span a denial's negation may reach across: no clause break, no dash.
 const DENIAL_SPAN = '[^.,;:—–-]{0,60}?';
 
-// Tight shapes that state the whole claim is false and cannot be produced
-// by an unrelated aside. Checked against the sentence the occurrence sits
-// in (they may come after the match: "... are a myth").
-const MYTH_DENIALS = [
-  /\b(?:is|are|was|were|remains?)\s+(?:just\s+|only\s+|simply\s+)?(?:a\s+|an\s+)?(?:myth|misconception|misunderstanding|old\s+wives'?\s+tale|folklore)\b/i,
-  /\bmyth\s*[:—–-]/i,
-];
+// "X is a myth" / "Myth: X" — the claim named as a falsehood. Bound to the
+// MATCHED claim, never to the sentence around it: the myth phrase must sit
+// right after the match inside the same clause ("... a second termite swarm
+// after storms is a myth"), or right before it as a label ("Myth: termites
+// swarm again after storms"). A myth phrase in ANOTHER clause of the same
+// sentence ("Termites swarm again after storms, but winter swarms are a
+// myth") clears nothing. At most three words may stand between the match
+// and the verb ("outbreaks are a myth", "after storms is a myth").
+const MYTH_SUFFIX = /^\s*(?:[\w'’-]+\s+){0,3}?(?:is|are|was|were|remains?)\s+(?:just\s+|only\s+|simply\s+)?(?:a\s+|an\s+)?(?:myth|misconception|misunderstanding|old\s+wives'?\s+tale|folklore)\b/i;
+const MYTH_PREFIX = /\bmyth\s*[:—–-]\s*(?:that\s+)?$/i;
+// Where a clause ends after the match: a period, comma, semicolon, colon,
+// em/en dash, or a spaced hyphen (never the hyphen inside "late-summer").
+const CLAUSE_BREAK_AFTER = /[.,;:—–]|\s-\s/;
 
 // Known-false or overreaching claim shapes an AI-written newsletter draft
 // must never state. `denials` lists the ONLY phrasings that exempt an
@@ -489,7 +495,7 @@ const UNVERIFIED_CLAIM_RULES = [
       new RegExp(`\\b(?:no|never)\\s+(?:such\\s+)?${REPEAT_MODIFIER}\\b`, 'i'),
       new RegExp(`\\bnot\\s+(?:a|an|any)\\s+${REPEAT_MODIFIER}\\b`, 'i'),
     ],
-    mythDenials: MYTH_DENIALS,
+    mythDenial: true,
   },
   {
     // Large patch is "most likely to be observed from November through May
@@ -511,7 +517,7 @@ const UNVERIFIED_CLAIM_RULES = [
       // "leaf and sheath spot ... is different from large patch"
       /\b(?:unlike|differs?\s+from|different\s+from|distinct\s+from|confused\s+with|mistaken\s+for|not)\s+(?:a\s+|the\s+)?(?:brown|large)\s+patch\b/i,
     ],
-    mythDenials: MYTH_DENIALS,
+    mythDenial: true,
   },
   {
     // Continuing to vacuum after treatment is flea guidance: it stimulates
@@ -577,6 +583,20 @@ function globalPattern(pattern) {
 
 const PRONOUN_START = new RegExp(`^${PRONOUN_SUBJECT}\\b`, 'i');
 
+// True when the matched claim itself is named a myth: "<claim> is a myth"
+// within the same clause, or "Myth: <claim>" directly before it.
+function isNamedAsMyth(body, match) {
+  const idx = match.index ?? 0;
+  const end = idx + match[0].length;
+  const rest = body.slice(end);
+  const breakAt = rest.search(CLAUSE_BREAK_AFTER);
+  const suffix = breakAt === -1 ? rest : rest.slice(0, breakAt);
+  if (MYTH_SUFFIX.test(suffix)) return true;
+  const before = body.slice(0, idx);
+  const clauseStart = Math.max(before.lastIndexOf('.'), before.lastIndexOf(','), before.lastIndexOf(';')) + 1;
+  return MYTH_PREFIX.test(before.slice(clauseStart));
+}
+
 // A pronoun-subject occurrence is the termite claim only when this sentence
 // or the one before it names termites and neither names a drywood species.
 function isTermiteContext(body, match) {
@@ -587,16 +607,13 @@ function isTermiteContext(body, match) {
 // True when THIS occurrence is the rule's own correct fact (one of its
 // allowlisted denial shapes, or — vacuum rule only — the affirmative
 // instruction in a sentence about fleas), not the false claim.
-function isExemptOccurrence(body, match, { rule, denials, mythDenials }) {
+function isExemptOccurrence(body, match, { rule, denials, mythDenial }) {
   if (rule === 'termite_second_swarm' && PRONOUN_START.test(match[0]) && !isTermiteContext(body, match)) return true;
   if (Array.isArray(denials) && denials.length) {
     const window = denialWindow(body, match);
     if (denials.some((denial) => denial.test(window))) return true;
   }
-  if (Array.isArray(mythDenials) && mythDenials.length) {
-    const sentence = sentenceWindow(body, match);
-    if (mythDenials.some((denial) => denial.test(sentence))) return true;
-  }
+  if (mythDenial && isNamedAsMyth(body, match)) return true;
   if (rule === 'non_flea_vacuum_advice') {
     const negated = !!match[1];
     if (!negated && /\bflea/i.test(sentenceWindow(body, match))) return true;
