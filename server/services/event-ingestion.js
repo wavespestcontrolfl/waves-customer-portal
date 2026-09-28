@@ -43,7 +43,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
-const { mergeEvents, pickSurvivor, EVENT_MERGE_LOCK_KEY } = require('./event-dedup');
+const { mergeEvents, pickSurvivor, computeSurvivorBackfill, EVENT_MERGE_LOCK_KEY } = require('./event-dedup');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -267,6 +267,8 @@ function parseDateOrNull(raw) {
 // see its own header) and falls back to `new Date(input)` for anything else
 // (an explicit offset, a trailing Z, or unparseable text), matching
 // parseDateOrNull's behavior exactly in those cases.
+const HOUR_MS = 60 * 60 * 1000;
+
 // Date.UTC and new Date() both roll an impossible component forward into a
 // later valid instant (Feb 30 -> Mar 2, 24:00 -> the next midnight,
 // 99:00 -> four days on). A written date/time is real only if its components
@@ -296,7 +298,18 @@ function parseExtractedStartAt(raw) {
   const [, y, mo, dd, h = '00', mi = '00', s = '00'] = m;
   if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +s)) return null;
   const d = parseETDateTime(`${y}-${mo}-${dd}T${h}:${mi}:${s}`);
-  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
+  // A wall clock inside a DST change names no single instant: 2:30 AM on the
+  // spring-forward Sunday never happens (parseETDateTime rolls it to 3:30)
+  // and 1:30 AM on the fall-back Sunday happens twice. Rather than store a
+  // guessed time, accept only a wall clock that names exactly one instant.
+  const namesWallClock = (instant) => {
+    const p = etParts(instant);
+    return p.year === +y && p.month === +mo && p.day === +dd && p.hour === +h && p.minute === +mi;
+  };
+  if (!namesWallClock(d)) return null;
+  if (namesWallClock(new Date(d.getTime() - HOUR_MS)) || namesWallClock(new Date(d.getTime() + HOUR_MS))) return null;
+  return d;
 }
 
 // ET wall-clock 'HH:MM' for a given instant — minute precision, matching the
@@ -898,18 +911,23 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
       } else if (survivorId) {
         // Survivor is another listing (cross-source dedup): the merged row
         // keeps this source's key, as every cross-source merged row does.
-        await mergeEvents(survivorId, [legacyRow.id]);
+        const survivor = await db('events_raw').where({ id: survivorId }).first();
+        await mergeEvents(survivorId, [legacyRow.id], { backfill: computeSurvivorBackfill(survivor || {}, [legacyRow]) });
       }
       return;
     }
+    // Every merge below carries the loser's event_url/image_url onto a
+    // survivor that lacks them, as autoMergeDuplicates does, so retiring the
+    // row that held a backfilled image never leaves the live event without it.
     if (pickSurvivor([currentRow, legacyRow]).id === currentRow.id) {
-      await mergeEvents(currentRow.id, [legacyRow.id]);
+      await mergeEvents(currentRow.id, [legacyRow.id], { backfill: computeSurvivorBackfill(currentRow, [legacyRow]) });
       return;
     }
     // The legacy row survives and takes the current key in the same
     // transaction as the merge; the loser moves to a bounded retired key
     // (external_id is varchar(256)).
     await mergeEvents(legacyRow.id, [currentRow.id], {
+      backfill: computeSurvivorBackfill(legacyRow, [currentRow]),
       afterMerge: async (trx) => {
         await trx('events_raw').where({ id: currentRow.id })
           .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });

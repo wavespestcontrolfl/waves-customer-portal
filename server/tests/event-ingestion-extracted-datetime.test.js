@@ -53,13 +53,20 @@ describe('parseExtractedStartAt — ET wall-clock parsing for Claude-extracted s
     expect(naive.getTime()).toBe(offset.getTime());
   });
 
-  test('a naive string just before the spring-forward gap still resolves (no silent skip)', () => {
-    // 2026-03-08 02:30 ET does not exist (clocks jump 2:00→3:00 EDT).
-    // parseETDateTime rolls a nonexistent wall time forward by the gap
-    // rather than throwing or silently misreading it as UTC.
-    const d = parseExtractedStartAt('2026-03-08T02:30:00');
-    expect(d).not.toBeNull();
-    expect(Number.isNaN(d.getTime())).toBe(false);
+  test('a wall clock inside a DST change is rejected rather than guessed', () => {
+    // 2026-03-08 02:30 ET never happens (clocks jump 2:00 → 3:00 EDT), and
+    // 2026-11-01 01:30 ET happens twice (EDT, then EST an hour later).
+    expect(parseExtractedStartAt('2026-03-08T02:30:00')).toBeNull();
+    expect(parseExtractedStartAt('2026-11-01T01:30:00')).toBeNull();
+    expect(parseExtractedStartAt('2026-11-01 01:00')).toBeNull();
+    // Either side of each change is a single instant and still parses.
+    expect(parseExtractedStartAt('2026-03-08T01:59').toISOString()).toBe('2026-03-08T06:59:00.000Z');
+    expect(parseExtractedStartAt('2026-03-08T03:00').toISOString()).toBe('2026-03-08T07:00:00.000Z');
+    expect(parseExtractedStartAt('2026-11-01T00:59').toISOString()).toBe('2026-11-01T04:59:00.000Z');
+    expect(parseExtractedStartAt('2026-11-01T02:00').toISOString()).toBe('2026-11-01T07:00:00.000Z');
+    expect(parseExtractedStartAt('2026-11-01').toISOString()).toBe('2026-11-01T04:00:00.000Z');
+    // An explicit offset is never ambiguous.
+    expect(parseExtractedStartAt('2026-11-01T01:30:00-05:00').toISOString()).toBe('2026-11-01T06:30:00.000Z');
   });
 
   test('null/blank/garbled input returns null, same as before', () => {

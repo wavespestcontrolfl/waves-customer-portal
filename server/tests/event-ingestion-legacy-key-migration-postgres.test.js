@@ -169,6 +169,35 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(rowsAfterSecond.find((r) => r.id === legacyId).merged_into).toBe(newKeyId);
   });
 
+  test('retiring the legacy row carries its backfilled image onto the surviving row', async () => {
+    const source = { id: sourceId, coverage_geo: [] };
+    const title = 'TEST Legacy Row Holds The Image Event';
+    const url = 'https://test.invalid/legacy-row-holds-image-event/';
+    const image = 'https://test.invalid/legacy-row-holds-image.jpg';
+    const startIso = daysFromNowIso(34);
+    const start = parseExtractedStartAt(startIso);
+    const { externalId: newKey, legacyExternalId: legacyKey } = extractedEventDedupKeys(title, start, url);
+
+    const [newKeyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: newKey, title, start_at: start, event_url: url, admin_status: 'approved',
+    }).returning(['id']);
+    const [legacyRow] = await db('events_raw').insert({
+      source_id: sourceId, external_id: legacyKey, title, start_at: start, event_url: url, admin_status: 'pending',
+      image_url: image,
+    }).returning(['id']);
+    const newKeyId = newKeyRow.id || newKeyRow;
+    const legacyId = legacyRow.id || legacyRow;
+
+    await upsertExtractedEvents(source, [{ title, startAt: startIso, eventUrl: url, description: 'no image on this pull' }]);
+
+    const survivor = await db('events_raw').where({ id: newKeyId }).first();
+    const retired = await db('events_raw').where({ id: legacyId }).first();
+    expect(retired.merged_into).toBe(newKeyId);
+    expect(survivor.merged_into).toBeNull();
+    expect(survivor.admin_status).toBe('approved');
+    expect(survivor.image_url).toBe(image);
+  });
+
   test('when the legacy row carries the stronger editorial decision, it survives and takes over the new key', async () => {
     const source = { id: sourceId, coverage_geo: [] };
     const title = 'TEST Approved Legacy Row Event';
