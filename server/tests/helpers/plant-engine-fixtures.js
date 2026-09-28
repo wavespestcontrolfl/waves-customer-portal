@@ -176,6 +176,16 @@ const FIXTURE = buildFixtureCatalog({
       service: { line: 'lawn', key: null, label: 'Lawn Care', inspection_first: false, referral: null }, urgency: 'low',
       plant: { type: 'turf', id_cues: ['V-shaped seed head', 'Coarse open canopy'], common_problems: [] },
     }),
+    // Draft (unapproved) turfgrass: an account turf that resolves to it is
+    // still never shown by name (contract §4, pre-push audit on #5186 r1).
+    {
+      slug: 'fixture-zoysia-draft', common_name: 'Fixture Zoysia Draft', scientific_name: 'Zoysia fixturica', kind: 'turfgrass',
+      group: 'turfgrasses', subgroup: null, verdict: 'harmless', role: 'lawn_grass', risk: 'low', action: 'monitor',
+      safety_line: null, safety: COMMON_SAFETY, range: 'common', active_months: ALL_MONTHS, peak_months: [],
+      traits: ['Stiff dense blades'], look_alikes: [], copy: { what_it_means: 'Unreviewed.', fact: 'Unreviewed.' }, links: {},
+      service: { line: 'lawn', key: null, label: 'Lawn Care', inspection_first: false, referral: null }, urgency: 'low', review: DRAFT, verification: [],
+      plant: { type: 'turf', id_cues: ['Stiff dense blades'], common_problems: [] },
+    },
     // Two palms (group `palms`) that look alike each other; the queen's FIRST
     // look-alike is the sago (another group), so a next-photo pick that reads
     // the global top's first look-alike asks the wrong question (Codex #5186

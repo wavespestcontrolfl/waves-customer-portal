@@ -978,6 +978,23 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         expect(result.v2.subject.plant).toMatchObject({ slug: 'fixture-st-augustine', wording: 'likely' });
       });
 
+      test('an account turf whose catalog entry is not owner-approved is never shown by name, and still outranks a photo guess', () => {
+        const built = engine.buildWorkup({
+          subject: 'lawn',
+          possibilities: [],
+          turfCandidates: [cand('fixture-st-augustine', 0.9)],
+          weedCandidates: [],
+          hostCandidates: [],
+          observedTerms: [],
+          currentMonth: 6,
+          chips: {},
+          context: { grass_type_on_file: 'fixture-zoysia-draft' },
+          photosCount: 1,
+          quality: OK_QUALITY,
+        });
+        expect(built.subject.plant).toBeNull();
+      });
+
       test('an off-catalog top below the threshold escalates too', async () => {
         queue(
           candidatesLeg({ host: [idItem('', 0.5, { off_catalog_name: 'Foxtail palm', group_id: 'palms' })] }),

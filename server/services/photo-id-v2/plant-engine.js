@@ -601,10 +601,10 @@ function weedWordingLine(entry, wording) {
 
 /** `context.grass_type_on_file` (a lawn scorer value, e.g. `st_augustine`,
  * or already a turfgrass slug) resolved to its catalog entry. `unknown` and
- * `mixed` never resolve to one specific grass. An account fact is trusted
- * regardless of the entry's own review status — it is not a model claim
- * subject to the naming gate, just a known fact about the property (own
- * design decision, documented in the PR). */
+ * `mixed` never resolve to one specific grass. The account fact outranks
+ * any photo guess whatever the entry's review status, but its catalog copy
+ * reaches the customer only once the entry is owner-approved (see
+ * `workupSubjectFor`). */
 function resolveAccountTurf(context = {}) {
   const raw = context.grass_type_on_file;
   if (!raw || raw === 'unknown' || raw === 'mixed') return null;
@@ -837,9 +837,13 @@ function workupSubjectFor({
   const slot = subject === 'lawn' ? 'turf' : 'host';
   let plant = null;
   if (accountTurf) {
-    plant = {
+    // Contract §4: unapproved entries are excluded from every answer — the
+    // account fact is trusted, but unreviewed catalog copy is not shown
+    // (pre-push audit on #5186 r1). An unapproved account turf still
+    // outranks any photo guess, so the slot then stays empty.
+    plant = isApproved(accountTurf) ? {
       slug: accountTurf.slug, common_name: accountTurf.common_name, scientific_name: accountTurf.scientific_name || null, source: 'account', wording: null,
-    };
+    } : null;
   } else if (!namingBlocked) {
     const named = identityEntryLevelAnswer((subject === 'lawn' ? turfCandidates : hostCandidates)[0] || null, identityFlags[slot]);
     if (named) {

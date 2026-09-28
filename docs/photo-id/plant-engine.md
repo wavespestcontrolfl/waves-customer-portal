@@ -95,6 +95,10 @@ empty turf answer. `internal.identity.lane` records the choice.
   per slot — turf, weeds and host separately, off-catalog tops included — so
   a flipped or uncertain turf answer escalates even under a
   higher-confidence weed, and a turf/weed confidence swap does not.
+- The lawn's account turf (`context.grass_type_on_file`) outranks any photo
+  guess, but is shown by name only once its catalog entry is owner-approved;
+  until then `subject.plant` stays `null` (contract §4: unapproved entries
+  are excluded from every answer).
 - A provider disagreement in `mode: "identify"` resolves to the two tops'
   deepest shared catalog node ("Looks like a plant" for a palm vs a citrus),
   never to a group only one provider supports.
