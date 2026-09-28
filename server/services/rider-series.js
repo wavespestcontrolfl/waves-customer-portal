@@ -50,6 +50,10 @@ const MAX_WAIT_DAYS = 105;
 // acting on it (packing a cooler, arranging access), so it's a fixed
 // anchor regardless of what any reminder/confirmation ledger shows.
 const NEAR_TERM_DAYS = 7;
+// How long an overdue rider (anchor so old the next step would land before
+// the plan floor) waits for a host date before taking a standalone date on
+// the floor: the normal window's width, MAX_WAIT_DAYS - MIN_GAP_DAYS.
+const OVERDUE_WAIT_DAYS = MAX_WAIT_DAYS - MIN_GAP_DAYS;
 
 // In-progress statuses: a visit a tech is actively on stops being a
 // candidate to move or cancel, same posture as every other series writer
@@ -92,12 +96,19 @@ function shiftPastWeekend(dateStr, skip, direction = 'forward') {
  *   preference, applied only to a standalone fallback date.
  * @param {'forward'|'back'} [weekendShift] - the rider series' own shift
  *   direction, applied only to a standalone fallback date.
+ * @param {string} [earliestDate] - never plan a date before this
+ *   (YYYY-MM-DD). A lapsed rider's anchor can be months old, and the walk
+ *   from it would otherwise emit past dates. An overdue step takes the
+ *   first host date in [earliestDate, earliestDate + OVERDUE_WAIT_DAYS],
+ *   else a standalone date on earliestDate itself.
  */
 function planRiderDates({
   hostDates = [], lastRiderDate, horizonDate, skipWeekends = false, weekendShift = 'forward',
+  earliestDate = null,
 } = {}) {
   const anchor = dateOnly(lastRiderDate);
   const horizon = dateOnly(horizonDate);
+  const floor = dateOnly(earliestDate);
   const dates = [];
   if (!anchor || !horizon) return dates;
   const sortedHosts = Array.from(new Set((hostDates || []).map(dateOnly).filter(Boolean))).sort();
@@ -107,13 +118,24 @@ function planRiderDates({
   // Bounded: at MIN_GAP_DAYS per step this comfortably covers any
   // realistic horizon (a 20-year horizon is ~95 steps at 77 days).
   for (let guard = 0; guard < 1000; guard++) {
-    const minDate = addDaysStr(last, MIN_GAP_DAYS);
-    const maxDate = addDaysStr(last, MAX_WAIT_DAYS);
+    let minDate = addDaysStr(last, MIN_GAP_DAYS);
+    let maxDate = addDaysStr(last, MAX_WAIT_DAYS);
     if (!minDate || !maxDate) break;
+    const overdue = !!floor && minDate < floor;
+    if (overdue) {
+      minDate = floor;
+      maxDate = addDaysStr(floor, OVERDUE_WAIT_DAYS);
+    }
     const hostCandidate = sortedHosts.find((d) => d >= minDate);
-    let next = (hostCandidate && hostCandidate <= maxDate)
-      ? hostCandidate
-      : shiftPastWeekend(addDaysStr(last, TARGET_GAP_DAYS), skipWeekends, dir);
+    let next;
+    if (hostCandidate && hostCandidate <= maxDate) {
+      next = hostCandidate;
+    } else {
+      const base = overdue ? floor : addDaysStr(last, TARGET_GAP_DAYS);
+      next = shiftPastWeekend(base, skipWeekends, dir);
+      // A backward weekend shift must not cross the floor.
+      if (floor && next && next < floor) next = shiftPastWeekend(base, skipWeekends, 'forward');
+    }
     if (!next || next <= last) break; // malformed input guard — never stall/reverse
     if (next > horizon) break;
     dates.push(next);
@@ -432,19 +454,26 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       && dateOnly(r.scheduled_date) > lastRiderDate
     ));
 
+    // Never plan into the past or into the near-term window, whose rows are
+    // immovable: a lapsed rider's anchor (its last completed visit) can be
+    // months old, and walking from it would insert past-dated rows or move
+    // a future row backward.
+    const planFloor = addDaysStr(nearTermCutoff, 1);
+
     let horizonDate;
     if (hostDates.length) {
       horizonDate = hostDates[hostDates.length - 1];
     } else {
       const { plannedVisitCountForPattern } = require('./recurring-appointment-seeder');
       const count = plannedVisitCountForPattern(riderParent.recurring_pattern, {});
-      horizonDate = addDaysStr(lastRiderDate, count * TARGET_GAP_DAYS);
+      horizonDate = addDaysStr(lastRiderDate > planFloor ? lastRiderDate : planFloor, count * TARGET_GAP_DAYS);
     }
 
     const plan = planRiderDates({
       hostDates,
       lastRiderDate,
       horizonDate,
+      earliestDate: planFloor,
       skipWeekends: !!riderParent.skip_weekends,
       weekendShift: riderParent.weekend_shift === 'back' ? 'back' : 'forward',
     });
@@ -606,6 +635,7 @@ module.exports = {
   TARGET_GAP_DAYS,
   MAX_WAIT_DAYS,
   NEAR_TERM_DAYS,
+  OVERDUE_WAIT_DAYS,
   planRiderDates,
   syncRiderSeries,
   syncRidersOfHost,

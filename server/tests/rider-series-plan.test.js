@@ -1,6 +1,8 @@
 // Pure date-rule tests for rider-series.js#planRiderDates — no DB.
 // Scope doc: ~/lawn-pest-rhythm-scope-20260928.md, "Date rule".
-const { planRiderDates, MIN_GAP_DAYS, TARGET_GAP_DAYS, MAX_WAIT_DAYS } = require('../services/rider-series');
+const {
+  planRiderDates, MIN_GAP_DAYS, TARGET_GAP_DAYS, MAX_WAIT_DAYS, OVERDUE_WAIT_DAYS,
+} = require('../services/rider-series');
 
 function addDays(dateStr, days) {
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -140,5 +142,48 @@ describe('rider-series planRiderDates', () => {
   test('missing anchor or horizon returns an empty plan rather than throwing', () => {
     expect(planRiderDates({ hostDates: ['2026-01-01'] })).toEqual([]);
     expect(planRiderDates({ hostDates: ['2026-01-01'], lastRiderDate: '2026-01-01' })).toEqual([]);
+  });
+
+  test('a stale anchor never plans before earliestDate: overdue rider takes the first host date in the overdue window', () => {
+    const anchor = '2026-01-01';
+    const floor = '2026-10-06';
+    const hostDates = datesEvery('2026-10-20', 42, 8); // first host date 14 days after the floor
+    const plan = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: hostDates[hostDates.length - 1], earliestDate: floor });
+    expect(plan.length).toBeGreaterThan(0);
+    expect(plan.every((d) => d >= floor)).toBe(true);
+    expect(plan[0]).toBe('2026-10-20');
+    expect(plan[1]).toBe(hostDates[2]); // then back on every 2nd host date
+  });
+
+  test('without earliestDate the same stale anchor would walk through past dates (fail-without-fix evidence)', () => {
+    const plan = planRiderDates({ hostDates: [], lastRiderDate: '2026-01-01', horizonDate: '2026-12-31' });
+    expect(plan[0]).toBe(addDays('2026-01-01', TARGET_GAP_DAYS));
+    expect(plan[0] < '2026-10-06').toBe(true);
+  });
+
+  test('an overdue rider with no host date in the overdue window takes a standalone date on the floor', () => {
+    const floor = '2026-10-06'; // a Tuesday
+    const hostDates = [addDays(floor, OVERDUE_WAIT_DAYS + 1)];
+    const plan = planRiderDates({ hostDates, lastRiderDate: '2026-01-01', horizonDate: '2027-06-01', earliestDate: floor });
+    expect(plan[0]).toBe(floor);
+    expect(plan.every((d) => d >= floor)).toBe(true);
+  });
+
+  test('a backward weekend shift on an overdue standalone date never crosses the floor', () => {
+    const floor = '2026-10-10'; // a Saturday
+    const plan = planRiderDates({
+      hostDates: [], lastRiderDate: '2026-01-01', horizonDate: '2027-06-01', earliestDate: floor, skipWeekends: true, weekendShift: 'back',
+    });
+    expect(plan[0] >= floor).toBe(true);
+    expect(plan[0]).toBe('2026-10-12'); // Monday
+  });
+
+  test('earliestDate does not change a plan whose anchor is recent', () => {
+    const anchor = '2026-10-01';
+    const hostDates = datesEvery('2026-10-15', 42, 10);
+    const horizon = hostDates[hostDates.length - 1];
+    const base = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: horizon });
+    const floored = planRiderDates({ hostDates, lastRiderDate: anchor, horizonDate: horizon, earliestDate: '2026-10-09' });
+    expect(floored).toEqual(base);
   });
 });

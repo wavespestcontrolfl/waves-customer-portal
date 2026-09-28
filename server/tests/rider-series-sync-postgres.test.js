@@ -722,4 +722,26 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(result.skipped).toBe('host_is_rider');
     expect(await snapshot(pestParent.id)).toEqual(before);
   });
+
+  test('a lapsed rider (last visit 300 days ago) never plans into the past or the near-term window', async () => {
+    const today = etDateString();
+    const floor = addDays(today, 8);
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnStart = addDays(today, 14);
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: lawnStart, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: addDays(today, -300) });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ status: 'completed', rides_parent_id: lawnParent.id });
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBeUndefined();
+    expect(result.insert.length).toBeGreaterThan(0);
+
+    const pestDates = (await snapshot(pestParent.id)).filter((r) => r.id !== pestParent.id).map((r) => r.date);
+    expect(pestDates.length).toBe(result.insert.length);
+    expect(pestDates.every((d) => d >= floor)).toBe(true);
+    expect(pestDates[0]).toBe(lawnStart); // overdue: rides the first lawn stop after the floor
+  });
 });

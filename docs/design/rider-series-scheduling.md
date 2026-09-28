@@ -52,6 +52,13 @@ The link is one level deep. Sync refuses a series that rides itself
   date instead (weekend-shifted the same way the seeder shifts a normal
   seeded date).
 - Continues until `horizonDate`.
+- Never plans before `earliestDate`. The sync passes the day after the
+  7-day near-term window, whose rows are immovable. A lapsed rider's anchor
+  (its last completed visit) can be months old, and walking from it would
+  otherwise plan past dates. When a step would land before the floor, the
+  rider is overdue: it takes the first host date within
+  `OVERDUE_WAIT_DAYS` (28) of the floor, else a standalone date on the
+  floor, and the walk continues normally from there.
 
 With lawn at a steady 42-day cadence, this lands the rider on every 2nd
 lawn date (84-day gaps). A skipped, paused or ended host falls back to its
