@@ -1,5 +1,6 @@
 /** Email division area-intel cron: gate-off no-op + gate-on smoke check +
- * the persisted previous-month catch-up marker. Same mocking shape as
+ * the day-1..10 late-arrival window + the persisted previous-month
+ * catch-up marker. Same mocking shape as
  * scheduler-geocoder-backstop.test.js. */
 jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -80,14 +81,47 @@ test('day 5 of the month, no prior success recorded — still recomputes the pre
   jest.useRealTimers();
 });
 
-test('previous month already recorded as succeeded — the tick recomputes only the current month', async () => {
-  jest.useFakeTimers().setSystemTime(new Date('2026-10-06T09:10:00Z'));
+test('after the late-arrival window, previous month already recorded as succeeded — the tick recomputes only the current month', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-10-11T09:10:00Z')); // 5:10 AM ET, Oct 11 — window closed after day 10
   db.__systemSettingsRow = { value: '2026-09-01' }; // September already caught up
   emailAreaIntelLive.mockReturnValue(true);
   computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
   await registeredTick()();
   expect(computeAreaIntel).toHaveBeenCalledTimes(1); // current month only
   expect(db.__inserts).toHaveLength(0); // no new marker write — nothing changed
+  jest.useRealTimers();
+});
+
+// A prior-month closeout backfilled (earlier service_date) AFTER the first
+// successful previous-month run must still reach that month's aggregate —
+// the marker alone must not make the day-1 computation final.
+test.each([
+  ['Oct 2, 5:10 AM ET', '2026-10-02T09:10:00Z'],
+  ['Oct 6, 5:10 AM ET', '2026-10-06T09:10:00Z'],
+  ['Oct 10, 11:10 PM ET (Oct 11 in UTC)', '2026-10-11T03:10:00Z'],
+])('inside the late-arrival window (%s), marker already current — still recomputes the previous month, no marker rewrite', async (_label, iso) => {
+  jest.useFakeTimers().setSystemTime(new Date(iso));
+  db.__systemSettingsRow = { value: '2026-09-01' }; // September's first run already succeeded
+  emailAreaIntelLive.mockReturnValue(true);
+  computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
+  await registeredTick()();
+  expect(computeAreaIntel).toHaveBeenCalledTimes(2);
+  const months = computeAreaIntel.mock.calls.map(([{ month: m }]) => m);
+  expect(months[0].getUTCMonth()).toBe(9); // October — current month
+  expect(months[1].getUTCMonth()).toBe(8); // September — recomputed again for late arrivals
+  expect(db.__inserts).toHaveLength(0);
+  jest.useRealTimers();
+});
+
+test('after the window, marker still names an older month (missed window) — catch-up recomputes the previous month once and records it', async () => {
+  jest.useFakeTimers().setSystemTime(new Date('2026-10-20T09:10:00Z'));
+  db.__systemSettingsRow = { value: '2026-08-01' }; // September never succeeded
+  emailAreaIntelLive.mockReturnValue(true);
+  computeAreaIntel.mockResolvedValue({ month: '2026-10-01', citiesProcessed: 0, summary: [] });
+  await registeredTick()();
+  expect(computeAreaIntel).toHaveBeenCalledTimes(2);
+  expect(computeAreaIntel.mock.calls[1][0].month.getUTCMonth()).toBe(8);
+  expect(db.__inserts).toEqual([expect.objectContaining({ key: 'email_area_intel_previous_month_computed', value: '2026-09-01' })]);
   jest.useRealTimers();
 });
 

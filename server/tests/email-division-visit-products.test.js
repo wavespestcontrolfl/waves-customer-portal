@@ -1,8 +1,39 @@
 // Email division per-visit product reader — pure-function tests only (no
 // DB). DB-backed reads are covered in email-division-postgres.test.js.
 const {
-  PRODUCT_FAMILIES, classifyProduct, rankVisibleProducts, parsePestsNamed, allCustomerFacingStrings,
+  PRODUCT_FAMILIES, classifyProduct, rankVisibleProducts, parsePestsNamed, allCustomerFacingStrings, readVisitProducts,
 } = require('../services/email-division/visit-products');
+
+// Minimal knex-shaped stub: conn('service_products').where(...).orderBy(...) -> rows.
+function stubConn(rows) {
+  return () => ({ where: () => ({ orderBy: async () => rows }) });
+}
+
+describe('readVisitProducts source scope: a recorded active ingredient wins over the product name', () => {
+  test('"ZOECON 10578 Gentrol Complete EC3" (pyriproxyfen + permethrin + tetramethrin) never gets the hydroprene 120-day note or fact-gentrol-igr', async () => {
+    const { products } = await readVisitProducts('sr-1', { conn: stubConn([
+      { product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin' },
+    ]) });
+    expect(products[0]).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [] });
+  });
+
+  test.each([
+    ['Gentrol IGR', 'hydroprene', true],
+    ['Gentrol IGR', '', true], // no active ingredient recorded -> name fallback
+    ['Gentrol IGR', '   ', true], // whitespace-only counts as absent
+    ['Gentrol IGR', null, true],
+    ['Taurus SC', 'imidacloprid', false], // non_repellent by name, but the recorded AI is not fipronil
+    ['Talstar P', 'lambda-cyhalothrin', false], // contact_residual, but not bifenthrin
+    ['House Brand Bifenthrin', 'bifenthrin', true], // AI decides even with an unscoped name
+  ])('%s / %j -> verified:%s', async (productName, activeIngredient, verified) => {
+    const { products } = await readVisitProducts('sr-1', { conn: stubConn([{ product_name: productName, active_ingredient: activeIngredient }]) });
+    expect(products[0].verified).toBe(verified);
+    if (!verified) {
+      expect(products[0].notes).toEqual([]);
+      expect(products[0].factSlugs).toEqual([]);
+    }
+  });
+});
 
 describe('classifyProduct', () => {
   test.each([

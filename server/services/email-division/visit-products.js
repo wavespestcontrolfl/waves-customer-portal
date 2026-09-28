@@ -77,10 +77,17 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
   return { products, primary, secondary };
 }
 
+// A recorded active ingredient decides source scope on its own; the
+// product name is only a fallback when no active ingredient was recorded.
+// A brand name alone never pulls a different chemistry into a label claim
+// — e.g. "ZOECON 10578 Gentrol Complete EC3" (server/data/pricing.csv) is
+// pyriproxyfen + permethrin + tetramethrin, so the hydroprene-only Gentrol
+// IGR 120-day note must not ride along just because the name says Gentrol.
 function matchesAny(scope, productName, activeIngredient) {
-  const ai = String(activeIngredient || '').toLowerCase();
+  const ai = String(activeIngredient || '').trim().toLowerCase();
+  if (ai) return scope.ai.some((s) => ai.includes(s));
   const name = String(productName || '').toLowerCase();
-  return scope.ai.some((s) => ai.includes(s)) || scope.name.some((s) => name.includes(s));
+  return scope.name.some((s) => name.includes(s));
 }
 
 /** Pure ranking step (split out for a DB-free unit test). */

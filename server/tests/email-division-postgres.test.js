@@ -22,6 +22,12 @@ const { randomUUID } = require('crypto');
 const knex = require('knex');
 const { readVisitProducts, readVisitSummary, getActivityRatingAverages } = require('../services/email-division/visit-products');
 const { computeAreaIntel, getAreaIntelSentence } = require('../services/email-division/area-intel');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+// ET calendar date `days` from today — readVisitSummary's next-visit lower
+// bound is max(today ET, service date), so next-visit fixtures must move
+// with the real clock; a fixed near-future literal silently expires.
+const etDaysFromToday = (days) => etDateString(addETDays(new Date(), days));
 
 suite('email division against real Postgres', () => {
   let database;
@@ -143,10 +149,31 @@ suite('email division against real Postgres', () => {
     expect(alpine.dryRule).toEqual({ hours: null, text: 'Stay off treated areas until dry.' });
   });
 
+  test('readVisitProducts: a recorded active ingredient decides source scope — Gentrol Complete (pyriproxyfen) never gets the hydroprene claim', async () => {
+    const customerId = await makeCustomer();
+    const visitId = await makeVisit(customerId);
+    await trx('service_products').insert([
+      // Exact row from server/data/pricing.csv — the Gentrol name matches,
+      // but the recorded chemistry is not hydroprene.
+      { id: randomUUID(), service_record_id: visitId, product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin', applied_at: new Date('2026-09-10T10:00:00Z') },
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol IGR', active_ingredient: 'hydroprene', applied_at: new Date('2026-09-10T10:05:00Z') },
+      // No active ingredient recorded — the name is the only evidence left.
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol Point Source', active_ingredient: null, applied_at: new Date('2026-09-10T10:10:00Z') },
+    ]);
+    const { products } = await readVisitProducts(visitId, { conn: trx });
+    const complete = products.find((p) => p.productName.startsWith('ZOECON 10578'));
+    expect(complete).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [] });
+    const hydroprene = products.find((p) => p.productName === 'Gentrol IGR');
+    expect(hydroprene).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
+    expect(hydroprene.notes.map((n) => n.text)).toEqual(['The Gentrol IGR (hydroprene) label states 120 days of control.']);
+    const nameOnly = products.find((p) => p.productName === 'Gentrol Point Source');
+    expect(nameOnly).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
+  });
+
   test('readVisitSummary: structured fields, advisory/conditions keys, and pests named', async () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId, {
-      service_line: 'pest', visit_number: 3, client_pest_rating: 4,
+      service_date: etDaysFromToday(0), service_line: 'pest', visit_number: 3, client_pest_rating: 4,
       technician_notes: 'WHAT WE DID: treated for ghost, big-headed, and crazy ants along the foundation.',
       structured_notes: { areasTreated: ['exterior', 'garage'] },
       advisory: { pet_advisory: 'Keep pets off treated areas until dry.', exterior_reentry_min: 30, interior_reentry_min: 0, irrigation_hold_hr: 24 },
@@ -155,10 +182,11 @@ suite('email division against real Postgres', () => {
     // An abandoned 'rescheduled' row dated EARLIER than the live replacement
     // — including it would wrongly return the obsolete date as "next".
     await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-11-01', service_type: 'Pest Control', status: 'rescheduled',
+      id: randomUUID(), customer_id: customerId, scheduled_date: etDaysFromToday(30), service_type: 'Pest Control', status: 'rescheduled',
     });
+    const liveNextDate = etDaysFromToday(60);
     await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-12-10', service_type: 'Pest Control', status: 'confirmed',
+      id: randomUUID(), customer_id: customerId, scheduled_date: liveNextDate, service_type: 'Pest Control', status: 'confirmed',
     });
     const summary = await readVisitSummary(visitId, { conn: trx });
     expect(summary.customerId).toBe(customerId);
@@ -170,25 +198,26 @@ suite('email division against real Postgres', () => {
     expect(summary.conditions).toEqual({ tempF: 88, rain24hIn: 0.1 });
     const nextDate = summary.nextVisitDate instanceof Date
       ? summary.nextVisitDate.toISOString().slice(0, 10) : String(summary.nextVisitDate).slice(0, 10);
-    expect(nextDate).toBe('2026-12-10'); // never the earlier, abandoned 'rescheduled' row
+    expect(nextDate).toBe(liveNextDate); // never the earlier, abandoned 'rescheduled' row
   });
 
   test('readVisitSummary: excludes a past appointment between the service date and today from "next visit"', async () => {
     const customerId = await makeCustomer();
-    const visitId = await makeVisit(customerId, { service_date: '2026-01-15' });
+    const visitId = await makeVisit(customerId, { service_date: etDaysFromToday(-120) });
     // Still 'pending' in the database, but its date has long since passed —
     // reading this summary well after the visit must not surface a stale
     // appointment as "next" just because it postdates the completed visit.
     await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_date: '2026-03-01', service_type: 'Pest Control', status: 'pending',
+      id: randomUUID(), customer_id: customerId, scheduled_date: etDaysFromToday(-60), service_type: 'Pest Control', status: 'pending',
     });
+    const liveNextDate = etDaysFromToday(45);
     await trx('scheduled_services').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_date: '2028-01-01', service_type: 'Pest Control', status: 'confirmed',
+      id: randomUUID(), customer_id: customerId, scheduled_date: liveNextDate, service_type: 'Pest Control', status: 'confirmed',
     });
     const summary = await readVisitSummary(visitId, { conn: trx });
     const nextDate = summary.nextVisitDate instanceof Date
       ? summary.nextVisitDate.toISOString().slice(0, 10) : String(summary.nextVisitDate).slice(0, 10);
-    expect(nextDate).toBe('2028-01-01');
+    expect(nextDate).toBe(liveNextDate);
   });
 
   test('getActivityRatingAverages: partitions by service_line and omits a cohort with fewer than 20 rated visits', async () => {

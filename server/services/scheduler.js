@@ -7622,21 +7622,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // DAILY 5:10 AM ET — Email division area-intel recompute: the current
-  // month every tick, and the previous month on EVERY tick until one run
-  // for it succeeds (persisted marker below) — not a fixed day-N window,
-  // so a gate enabled on day 4+ or a string of failed ticks still catches
-  // up. computeAreaIntel replaces the whole month atomically, so repeating
-  // an already-succeeded month is idempotent, not a double-count. Dark
-  // behind GATE_EMAIL_AREA_INTEL (emailAreaIntelLive) — unset returns
+  // month every tick, and the previous month (a) on EVERY tick through
+  // ET day EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY (10) of the new month,
+  // and (b) after that, on every tick until one run for it has succeeded
+  // (persisted marker below). (a) is the late-arrival window: the
+  // completion flow backfills service_records with an EARLIER
+  // service_date (complete-scheduled-service.js isBackfillCompletion), so
+  // a prior-month closeout recorded after the 1st must still reach that
+  // month's aggregate — the first successful run is not final until the
+  // window closes. Records backfilled after day 10 into a closed month are
+  // a known, bounded miss. (b) keeps the catch-up for a missed window: a
+  // gate enabled on day 11+ or a string of failed ticks still recomputes
+  // the previous month once. computeAreaIntel replaces the whole month
+  // atomically, so repeating a month is idempotent, not a double-count.
+  // Dark behind GATE_EMAIL_AREA_INTEL (emailAreaIntelLive) — unset returns
   // immediately. No caller sends anything. See
   // server/services/email-division/area-intel.js.
   const EMAIL_AREA_INTEL_PREV_MONTH_KEY = 'email_area_intel_previous_month_computed';
+  const EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY = 10;
   cron.schedule('10 5 * * *', async () => {
     const { emailAreaIntelLive } = require('../config/feature-gates');
     if (!emailAreaIntelLive()) return;
     try {
       const { computeAreaIntel } = require('./email-division/area-intel');
-      const { etMonthStart } = require('../utils/datetime-et');
+      const { etMonthStart, etParts } = require('../utils/datetime-et');
       await runExclusive('email-area-intel-recompute', async () => {
         const now = new Date();
         const result = await computeAreaIntel({ month: now });
@@ -7648,12 +7657,17 @@ function initScheduledJobs() {
         // naming an earlier month) means that catch-up has not succeeded
         // yet, so this tick retries it — and only writes the marker AFTER
         // computeAreaIntel resolves, so a failed run leaves it unset and
-        // the very next tick tries again.
+        // the very next tick tries again. Inside the late-arrival window
+        // the previous month is recomputed regardless of the marker.
         const prevMonthStr = etMonthStart(now, -1);
+        const inLateArrivalWindow = etParts(now).day <= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY;
         const marker = await db('system_settings').where({ key: EMAIL_AREA_INTEL_PREV_MONTH_KEY }).first('value');
-        if (marker?.value !== prevMonthStr) {
+        const markerCurrent = marker?.value === prevMonthStr;
+        if (inLateArrivalWindow || !markerCurrent) {
           const prevResult = await computeAreaIntel({ month: new Date(`${prevMonthStr}T12:00:00Z`) });
           logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
+        }
+        if (!markerCurrent) {
           await db('system_settings').insert({
             key: EMAIL_AREA_INTEL_PREV_MONTH_KEY, value: prevMonthStr, category: 'email_area_intel',
             description: 'Latest previous-month email_area_intel_monthly recompute that succeeded; the daily tick retries until this matches.',
