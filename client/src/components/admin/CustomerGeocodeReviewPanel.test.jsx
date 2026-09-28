@@ -915,6 +915,21 @@ describe("CustomerGeocodeReviewPanel", () => {
     await act(async () => pendingSave.resolve(await response({ enabled: true, ...record(), review: { status: "verified" } })));
   });
 
+  it("reports no open draft once the panel unmounts with a draft open", async () => {
+    const onDraftActiveChange = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+
+    const view = render(<CustomerGeocodeReviewPanel onDraftActiveChange={onDraftActiveChange} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(true);
+
+    // The page-level navigation guards rely on this to stop asking once the
+    // panel that owned the draft is gone.
+    view.unmount();
+    expect(onDraftActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
   it.each([
     ["reports the queue disabled", () => response({ enabled: false })],
     ["answers 404 because the route went away", () => response({ error: "Not found" }, 404)],

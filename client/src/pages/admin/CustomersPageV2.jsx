@@ -1982,6 +1982,9 @@ export default function CustomersPageV2() {
       // the draft (no shared modifier-click helper exists in the repo;
       // AdminLayoutV2/AdminWorkspaceNavigation each inline this same check).
       if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      // tel:/sms:/mailto: hand off to another app and a download link stays
+      // on this page — only a real http(s) page change can unmount a draft.
+      if (link.hasAttribute("download") || !/^https?:$/.test(link.protocol)) return;
       if (link.origin === window.location.origin
         && `${link.pathname}${link.search}` === `${window.location.pathname}${window.location.search}`) return;
       if (!confirmDiscardDraft()) {

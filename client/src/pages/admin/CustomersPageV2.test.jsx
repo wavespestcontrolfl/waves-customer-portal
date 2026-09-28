@@ -692,18 +692,23 @@ describe('CustomersPageV2 workflow state', () => {
       <a href="/admin/customers" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Customers</a>
       <a href="/admin/customers#queue" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Queue section</a>
       <a href="/admin/communications#notifications" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Notifications</a>
+      <a href="tel:+15555550100" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Call</a>
+      <a href="/admin/export.csv" download onClick={(e) => { e.preventDefault(); linkClicks(); }}>Export</a>
       <CustomersPageV2 />
     </MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
     fireEvent.click(screen.getByRole('link', { name: 'Customers' }));
     fireEvent.click(screen.getByRole('link', { name: 'Queue section' }));
+    // A phone link or a download never unloads this page either.
+    fireEvent.click(screen.getByRole('link', { name: 'Call' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Export' }));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(linkClicks).toHaveBeenCalledTimes(2);
+    expect(linkClicks).toHaveBeenCalledTimes(4);
 
     // A fragment on a different page still leaves this one.
     fireEvent.click(screen.getByRole('link', { name: 'Notifications' }));
     expect(confirmSpy).toHaveBeenCalledOnce();
-    expect(linkClicks).toHaveBeenCalledTimes(2);
+    expect(linkClicks).toHaveBeenCalledTimes(4);
   });
 
   // Overlay mode mounts the directory queue and a profile together: opening
