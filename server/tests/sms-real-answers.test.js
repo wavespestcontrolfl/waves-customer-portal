@@ -1925,6 +1925,19 @@ describe('#5194 round 1', () => {
     expect(resolveServiceType).toHaveBeenLastCalledWith('palm_injection');
   });
 
+  test('explicit inspection intent wins over the pricing family, using the REAL keyword resolver (audit P1: WDO ≠ termite bait)', async () => {
+    jest.dontMock('../services/customer-pricing-ai');
+    const resolveServiceType = jest.fn(async (key) => ({ wdo_inspection: { name: 'WDO Inspection' }, termite_inspection: { name: 'Termite Inspection' }, termite_bait: { name: 'Termite Bait Station System' }, rodent_inspection: { name: 'Rodent Inspection' } }[key] || null));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I schedule a WDO inspection?')).resolves.toBe('WDO Inspection');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('wdo_inspection');
+    await expect(drafter.requestedServiceType('I need a termite inspection for closing')).resolves.toBe('Termite Inspection');
+    await expect(drafter.requestedServiceType('Can someone do a rodent inspection?')).resolves.toBe('Rodent Inspection');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('termite_bait');
+  });
+
   test('a complaint callback ("the mosquitoes came back") keeps the completed visit\'s service — never a new standalone booking', async () => {
     mockCatalog();
     const drafter = require('../services/sms-shadow-drafter');

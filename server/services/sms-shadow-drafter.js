@@ -473,10 +473,16 @@ async function requestedServiceType(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
   try {
+    // Explicit inspection intent first (pre-push audit P1): the pricing
+    // resolver folds "WDO inspection" into the termite family, which would
+    // price a bait-system treatment for an inspection request.
+    const inspection = /\bwdo\b/i.test(text) ? 'wdo_inspection'
+      : /\binspection\b/i.test(text) && /\btermite/i.test(text) ? 'termite_inspection'
+        : /\binspection\b/i.test(text) && /\b(?:rodent|rats?|mice|mouse)\b/i.test(text) ? 'rodent_inspection'
+          : null;
     const { serviceKeyFromText } = require('./customer-pricing-ai');
-    const key = serviceKeyFromText(text);
-    if (!key) return null;
-    const catalogKey = PRICING_KEY_TO_CATALOG_KEY[key];
+    const key = inspection ? null : serviceKeyFromText(text);
+    const catalogKey = inspection || (key ? PRICING_KEY_TO_CATALOG_KEY[key] : null);
     if (!catalogKey) return null;
     const { resolveServiceType } = require('./service-library');
     const row = await resolveServiceType(catalogKey);
