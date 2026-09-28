@@ -114,7 +114,7 @@ const CompanionCompletions = require('../services/service-report/companion-compl
 // — shared by /complete, /schedule-followup, and the shared status writer's
 // cancellation re-park hook. Route-local copies drifted (Codex r1–r2 on
 // PR #3091 found four leak shapes between them).
-const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert, TWO_TREATMENT_PACKAGE_KEYS } = require('../services/typed-followup-obligation');
+const { typedFollowupVerdict, typedFollowupObligationForCompletedSource, parkFollowupAlert } = require('../services/typed-followup-obligation');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('../services/service-closeout-requirements');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
@@ -2500,7 +2500,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       companionFindings = null,
       activityScore = null,
       activityScoreSource = null,
-      nextStepChips = null,
+      // The "Next steps" chip picker was retired (owner ruling 2026-09-27) —
+      // nextStepChips is deliberately not destructured from the request
+      // body: a pre-deploy tab that still submits it is accepted (extra
+      // body keys are simply ignored) and never read.
       completionTelemetry = null,
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
@@ -3176,7 +3179,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
       : null;
     let typedFindings = null;
-    let typedChips = [];
     let typedActivityScore = null;
     let typedScoreSource = null;
     // Typed validation runs AFTER the idempotency claim (Codex P2): a retry
@@ -3321,28 +3323,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             },
           };
         }
-        const chipsValidation = ActivityIndicators.validateNextStepChips(
-          nextStepChips, typedFindingsType, structuredFindings.values || {},
-          // Visit 1 of a two-treatment package owes the included follow-up
-          // regardless of findings — "No action needed" would land in the
-          // immutable report beside a completion response demanding the
-          // second visit (Codex r3). Visit 2 (followup_included) may say it.
-          {
-            packageFollowupPending: TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
-              && svc.followup_included !== true,
-          },
-        );
-        if (!chipsValidation.ok) {
-          return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
-        }
-        // Owner spec: trapping reports always end with a clear next action.
-        if (ActivityIndicators.nextStepRequiredForType(typedFindingsType) && !chipsValidation.chips.length) {
-          return {
-            status: 422,
-            body: { error: 'Select at least one next step.', code: 'next_step_required' },
-          };
-        }
-        typedChips = chipsValidation.chips;
+        // The "Next steps" chip picker/requirement was retired (owner ruling
+        // 2026-09-27) — Recommendations is now the single tech-advice field.
+        // A pre-deploy tab that still submits nextStepChips has the field
+        // accepted and ignored — it is never read from the request body.
         typedFindings = { type: typedFindingsType, values: structuredFindings.values || {} };
 
         // Every customer-facing free-text surface on a typed report gets the
@@ -6225,7 +6209,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             serviceData.typedReportSnapshot = ActivityIndicators.buildTypedReportSnapshot({
               projectType: typedFindingsType,
               values: typedFindings.values,
-              nextStepChips: typedChips,
               serviceKey: completionProfile?.serviceKey || null,
               serviceLabel: completionProfile?.serviceName || svc.service_type || null,
               visitSequence: typedVisitSequence,
@@ -6282,7 +6265,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const companionSnapshot = ActivityIndicators.buildTypedReportSnapshot({
                 projectType: companion.type,
                 values: companion.values,
-                nextStepChips: companion.chips,
                 serviceKey: completionProfile?.serviceKey || null,
                 // The companion section speaks for ITS work, not the whole
                 // combined service — null falls back to the type's own label

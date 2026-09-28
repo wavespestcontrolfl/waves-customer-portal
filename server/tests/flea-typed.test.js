@@ -7,14 +7,10 @@
 const {
   ACTIVITY_INDICATORS,
   REQUIRED_FINDINGS_FIELDS,
-  TYPE_NEXT_STEP_CHIPS,
-  NEXT_STEP_CHIPS,
   customerLabelForValue,
   deriveActivityScore,
   findBannedCustomerCopy,
-  nextStepRequiredForType,
   validateTypedFindings,
-  validateNextStepChips,
   validateActivityScoreConsistency,
   findingsSchemaForType,
   buildTodaysResult,
@@ -36,10 +32,10 @@ describe('flea schema', () => {
     expect(byKey.evidence_level.options).toEqual(['None observed', 'Suspected', 'Light', 'Moderate', 'Heavy']);
     expect(byKey.customer_prep.options).toContain('Treat pets through veterinarian');
     expect(REQUIRED_FINDINGS_FIELDS.flea).toEqual(['evidence_level', 'treatment_completed', 'customer_prep']);
-    expect(nextStepRequiredForType('flea')).toBe(true);
-    for (const chip of TYPE_NEXT_STEP_CHIPS.flea) {
-      expect({ chip, hasSentence: !!NEXT_STEP_CHIPS[chip] }).toEqual({ chip, hasSentence: true });
-    }
+    // Next-step chip picker retired (owner ruling 2026-09-27) — no required
+    // flag, no per-type chip list on the schema slice any more.
+    expect(findingsSchemaForType('flea').nextStepRequired).toBeUndefined();
+    expect(findingsSchemaForType('flea').nextStepChips).toBeUndefined();
   });
 
   test('conditional activity-areas requirement is served to the client (Codex P2 round 2)', () => {
@@ -66,7 +62,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: FLEA_VALUES,
-      chips: ['Vacuum daily for 2 weeks', 'Coordinate vet flea control'],
       activity: { score: 3 },
       visitSequence: 1,
     });
@@ -75,7 +70,9 @@ describe('flea report', () => {
     expect(result.body).toContain('completed a targeted exterior flea treatment');
     expect(result.body).toContain('applied an insect growth regulator');
     expect(result.body).toContain('Flea control works best when treatment and home care happen together');
-    expect(result.body).toContain('Vacuum daily for the next two weeks');
+    // Next-step chip picker retired (owner ruling 2026-09-27) — no
+    // chip-derived sentence, no "Contact us" filler.
+    expect(result.nextStep).toBeNull();
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
@@ -84,7 +81,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: { ...FLEA_VALUES, evidence_level: 'None observed' },
-      chips: ['Monitor activity'],
       activity: { score: 0 },
       visitSequence: 1,
     });
@@ -95,7 +91,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: { ...FLEA_VALUES, evidence_level: 'Suspected' },
-      chips: ['Monitor activity'],
       activity: { score: 1 },
       visitSequence: 1,
     });
@@ -107,7 +102,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Program — Progress Visit',
       values: FLEA_VALUES,
-      chips: ['Monitor activity'],
       activity: { score: 2, trend: 'improving', trendWord: 'decreased since the last visit' },
       visitSequence: 2,
     });
@@ -120,7 +114,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: { ...FLEA_VALUES, evidence_level: 'Light' },
-      chips: ['Follow-up recommended'],
       activity: { score: 4, source: 'technician' },
       visitSequence: 1,
     });
@@ -133,7 +126,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: FLEA_VALUES, // evidence_level: Moderate — confirmed activity
-      chips: ['Monitor activity'],
       activity: { score: 1, source: 'technician' },
       visitSequence: 1,
     });
@@ -145,7 +137,6 @@ describe('flea report', () => {
       projectType: 'flea',
       reportTypeLabel: 'Flea Service Summary',
       values: { ...FLEA_VALUES, evidence_level: 'Suspected' },
-      chips: ['Monitor activity'],
       activity: { score: 3, source: 'technician' },
       visitSequence: 1,
     });
@@ -222,27 +213,6 @@ describe('validation', () => {
   });
 });
 
-describe('next-step chips vs recorded evidence (Codex P2 round 2)', () => {
-  test('"No action needed" is rejected beside confirmed or suspected activity', () => {
-    for (const level of ['Suspected', 'Light', 'Moderate', 'Heavy']) {
-      const result = validateNextStepChips(['No action needed'], 'flea',
-        { ...FLEA_VALUES, evidence_level: level });
-      expect({ level, ok: result.ok }).toEqual({ level, ok: false });
-      expect(result.error).toMatch(/No action needed/);
-    }
-  });
-
-  test('"No action needed" stays available for truthful cleared visits', () => {
-    const cleared = validateNextStepChips(['No action needed'], 'flea',
-      { ...FLEA_VALUES, evidence_level: 'None observed', activity_areas: '' });
-    expect(cleared).toEqual({ ok: true, chips: ['No action needed'] });
-    // Aftercare chips are unaffected by the evidence level.
-    expect(validateNextStepChips(['Vacuum daily for 2 weeks'], 'flea', FLEA_VALUES).ok).toBe(true);
-    // Legacy callers without values keep the allowlist-only behavior.
-    expect(validateNextStepChips(['No action needed'], 'flea').ok).toBe(true);
-  });
-});
-
 describe('final score vs cleared evidence (Codex P2 round 4)', () => {
   test('pinned scores cannot cross the cleared boundary', () => {
     // Nonzero pin beside cleared evidence: headline would say activity was
@@ -276,7 +246,6 @@ describe('snapshot', () => {
     const snapshot = buildTypedReportSnapshot({
       projectType: 'flea',
       values: FLEA_VALUES,
-      nextStepChips: ['Vacuum daily for 2 weeks', 'Wash pet bedding'],
       serviceKey: 'flea_tick',
       serviceLabel: 'Flea & Tick Service',
       visitSequence: 1,

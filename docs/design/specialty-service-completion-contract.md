@@ -53,9 +53,12 @@ and bed bug (`20260731400000_bed_bug_untyped_completion.js`).
    items with customer labels, `serviceKey`/`serviceLabel`/`reportTypeLabel`).
    Reports render from the snapshot forever; never recomputed from live
    templates.
-5. Every typed report opens with **Today's Result** (headline + body +
-   next step). It must answer: was there a problem / what we did / is it
-   getting better / what should I do next.
+5. Every typed report opens with **Today's Result** (headline + body). It
+   must answer: was there a problem / what we did / is it getting better.
+   What the customer should do next comes from the technician's
+   Recommendations (when given) and the program position / next visit — never
+   a chip-derived sentence (retired 2026-09-27, §7), and no copy points to
+   recommendations that may not exist.
 6. **Zero states render.** `0`, `none_found`, `cleared`-class values, and
    meaningful `false` are results, displayed positively. Only
    null/undefined/"" are skipped.
@@ -73,11 +76,12 @@ and bed bug (`20260731400000_bed_bug_untyped_completion.js`).
 | Tier | Types | Required interactions | Target |
 |---|---|---|---|
 | 1 — routine | mosquito_event, palm_injection, one_time_lawn_treatment | outcome → confirm products/photos → submit | 20–45s |
-| 2 — findings | pest_inspection, one_time_pest_treatment, cockroach, flea, rodent_exclusion, rodent_trapping, wildlife_trapping, bed_bug | outcome → activity tap (or confirm prefill) → required selects (≤4) → 1–3 next-step chips → submit | <60s |
+| 2 — findings | pest_inspection, one_time_pest_treatment, cockroach, flea, rodent_exclusion, rodent_trapping, wildlife_trapping, bed_bug | outcome → required selects (≤4) → activity tap only for tech-set gauges (rodent_exclusion, rodent_trapping, wildlife_trapping; derive-mapped types score from their findings field) → optional Recommendations → submit | <60s |
 | 3 — compliance | termite_treatment (later termite_inspection if WDO-adjacent) | full mandated fields | accuracy over speed |
 
 Quick path for "nothing major found" (Tier 2): outcome tap → zero-state
-activity tap → "No action needed" chip → submit. 4 interactions.
+findings select (or zero-state activity tap on a tech-set gauge) → submit.
+3 interactions.
 
 ## 4. Per-type contract
 
@@ -154,8 +158,8 @@ heat treatment".
 ## 6. Today's Result templates (deterministic; AI only polishes)
 
 - **Initial, activity found** — headline: "{PestNoun} activity was
-  {levelWord} today." body: "{WhatWeDid sentence from treatment_performed/
-  chips}. {NextStep sentence}."
+  {levelWord} today." body: "{WhatWeDid sentence from treatment_performed}." (No chip-derived
+  next-step sentence since the Next steps chips were retired — see §7.)
 - **Initial, zero state** — headline: "No active signs of {pestNoun} observed
   today." body: "{WhatWeDid}. Continue monitoring and contact us if activity
   returns."
@@ -174,23 +178,16 @@ Subtype awareness: snapshot carries `serviceKey`/`serviceLabel`/
 "One-Time Pest Treatment". `reportTypeLabel` derives from the booked service's
 display name, falling back to the type label.
 
-## 7. Next-step chips (per family; generate the summary's next-step sentence)
+## 7. Next-step chips — retired 2026-09-27
 
-- **pest/cockroach**: No action needed · Monitor activity · Sanitation
-  recommended · Reduce moisture · Seal entry gaps · Remove cardboard/clutter ·
-  Keep treated areas undisturbed · Follow-up recommended
-- **flea**: Vacuum daily for 2 weeks · Wash pet bedding · Coordinate vet flea
-  control · Stay off treated areas until dry · Follow-up recommended
-- **rodent**: Trap check scheduled · Seal entry points · Sanitation
-  recommended · Monitor for new activity · Exclusion work scheduled
-- **wildlife**: Daily trap checks underway · Avoid trap area · Secure
-  trash/food sources
-- **bed bug**: Follow prep sheet · Wash/dry bedding on high heat · 14-day
-  follow-up scheduled · Continue monitoring
-- **mosquito**: Dump standing water weekly · Avoid treated foliage until dry
-- **lawn**: Follow watering guidance · Mow guidance provided · Re-check
-  scheduled
-- **palm**: Retreatment scheduled · Monitor fronds for change
+The per-family "Next steps (up to 4)" chip picker is retired (owner ruling
+2026-09-27): **Recommendations (optional)** is the single place for technician
+advice, and it prints verbatim on the report. There is no next-step
+requirement, no chip validation, and no chip-derived "From your technician"
+sentence on new reports (`buildTodaysResult` stores `nextStep: null`;
+snapshots from summary template v7 carry none). Snapshots frozen before the retirement keep
+their stored sentence and chips and render unchanged. A client that still
+posts `nextStepChips` is accepted and the field is ignored.
 
 ## 8. Report sections (typed reports)
 
@@ -246,7 +243,8 @@ A fixture passes when an owner review answers yes to all:
 3. Sounds professional; nothing alarming, hedgy, or awkward.
 4. No internal jargon or raw field keys; no banned words (§2.7).
 5. Zero states read as positive results, observation-scoped.
-6. Next step is explicit.
+6. When there is a next step, it is explicit (program position, follow-up
+   visit, or the technician's Recommendations).
 7. A tech could have produced it within the tier's time budget.
 
 ## 12. Golden fixtures
