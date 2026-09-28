@@ -28,7 +28,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { completionInvoiceAmount } = require('./billing-lane');
+const { completionInvoiceAmount, isStampedZeroEstimate } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
 async function resolveAppointmentCardLane({
@@ -194,12 +194,17 @@ async function resolveCompletionChargeCap({
   // review, exactly the uncapped posture below; the charge service
   // re-asserts the anchor under its own locks
   // (requireExtendedCompletionAnchor).
+  // A per-application visit stamped $0 is free (owner 2026-09-28): its cap
+  // is $0, never the acceptance fee — a reused invoice can only pass on an
+  // independently authorized setup-fee allowance below.
+  const perAppStampedZero = perApplicationBilling && isStampedZeroEstimate(svc.estimated_price);
   const acceptedPerVisit = apptCardOneTimeCharge
     ? apptCardAcceptedAmount
     : (svc.estimated_price != null && Number(svc.estimated_price) > 0
       ? Number(svc.estimated_price)
-      : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
-        ? Number(svc.cust_per_application_fee) : extendedLaneAnchor));
+      : (perAppStampedZero ? 0
+        : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+          ? Number(svc.cust_per_application_fee) : extendedLaneAnchor)));
   const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
   // Manual-discount accepts gross the service line up and bring it back
   // with a negative discount line — invoices.subtotal is the PRE-discount

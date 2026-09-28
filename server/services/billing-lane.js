@@ -809,9 +809,12 @@ function attachedInvoiceAutoChargeLikely({
     // (approximation of the rail's bounded allowance — its authorization
     // predicates aren't cheaply readable here, and over-allowing only
     // risks a promise the rail then routes to review, never a charge).
+    // A stamped $0 anchors at $0, never the fee (owner 2026-09-28) — only a
+    // setup-fee allowance below can still pass.
     const perAppAnchor = estimatedPrice != null && Number(estimatedPrice) > 0
       ? Number(estimatedPrice)
-      : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null);
+      : (isStampedZeroEstimate(estimatedPrice) ? 0
+        : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null));
     if (perAppAnchor == null) return false;
     let setupLineAmount = 0;
     try {

@@ -24,7 +24,7 @@
 | Pre-Payment Discount | `prepayment` | percentage | 5% | Prepayment flag | No | — |
 | WaveGuard Gold Discount | `waveguard_gold` | percentage | 15% | Gold tier | Yes | tier |
 | WaveGuard Member Discount | `waveguard_member` | percentage | 15% | Any WaveGuard tier (Bronze+) | No | tier |
-| WaveGuard Member Discount (Termite Inspection) | `waveguard_member_wdo` | percentage | 100% | Any WaveGuard tier + WDO service | Yes | — |
+| WaveGuard Member Free Annual Termite Inspection | `waveguard_member_wdo` (key kept) | percentage | 100% | Any WaveGuard tier + standalone Termite Inspection Service (`termite_inspection`) — never the real-estate WDO | Yes | — |
 | WaveGuard Platinum Discount | `waveguard_platinum` | percentage | 20% | Platinum tier | Yes | tier |
 | WaveGuard Referral | `referral` | fixed_amount | $25.00 | Referral flag | No | — |
 | WaveGuard Silver Discount | `waveguard_silver` | percentage | 10% | Silver tier | Yes | tier |
@@ -72,4 +72,4 @@ migration decision.
 
 ### Bug Fix Applied
 
-The original `free_termite_inspection` record had `service_key_filter: 'termite_inspection'` which doesn't match any `service_key` in the services table. The correct value is `wdo_inspection`. Migration `20260408000002` fixes this and also broadens eligibility from Silver+ to Bronze+ (all members) to match Square behavior.
+**Superseded 2026-09-28 (owner: "wdo is not free, if your a waveguard member you get a free annual termite inspection").** Migration `20260928110000` re-scopes both `waveguard_member_wdo` and `free_termite_inspection` from `wdo_inspection` back to `termite_inspection` (the standalone inspection, which now exists in the catalog). A WDO inspection is never free for members. The Termite Inspection Service stays inactive for now (`20260928140000`) until booking a $0 catalog service is safe. History: `20260408000002` had pointed `free_termite_inspection` at `wdo_inspection` and broadened eligibility to Bronze+.
