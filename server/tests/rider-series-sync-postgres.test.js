@@ -57,9 +57,14 @@ const knex = require('knex');
 
 const RECURRING_APPOINTMENT_SEEDER = require('../services/recurring-appointment-seeder');
 const { planRiderDates } = require('../services/rider-series');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
 function daysBetween(a, b) {
   return Math.round((new Date(`${b}T00:00:00Z`) - new Date(`${a}T00:00:00Z`)) / 86400000);
+}
+
+function addDays(dateStr, days) {
+  return etDateString(addETDays(parseETDateTime(`${dateStr}T12:00`), days));
 }
 
 jest.setTimeout(30000);
@@ -287,5 +292,148 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
       .filter((d) => d > PEST_START && afterRows.find((r) => r.scheduled_date.toISOString().slice(0, 10) === d).status !== 'cancelled')
       .sort();
     expect(futurePestDatesFinal).toEqual(expectedPlanAfterExtend);
+  });
+
+  test('a failed immovable-lookup query aborts the sync — nothing moved, inserted, or cancelled', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const before = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    // Force the invoices lookup (one of the batched immovable-row queries)
+    // to fail. DDL inside a transaction is fully transactional — restored
+    // before this test ends regardless of outcome.
+    await trx.raw('ALTER TABLE invoices RENAME TO invoices_disabled_for_test');
+    let result;
+    try {
+      result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    } finally {
+      await trx.raw('ALTER TABLE invoices_disabled_for_test RENAME TO invoices');
+    }
+
+    expect(result.skipped).toBe('error');
+    expect(result.move).toEqual([]);
+    expect(result.insert).toEqual([]);
+    expect(result.cancel).toEqual([]);
+
+    const after = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+    expect(after).toEqual(before);
+  });
+
+  test('a rider row with a visit_id set is immovable — never moved or cancelled', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const pestRows = await seriesRows(pestParent.id);
+    const grouped = pestRows.find((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START);
+    const groupedDate = grouped.scheduled_date.toISOString().slice(0, 10);
+    const [visit] = await trx('service_visits').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_date: grouped.scheduled_date, stop_base_key: 'synthetic-stop', created_by: 'test',
+    }).returning('*');
+    await trx('scheduled_services').where({ id: grouped.id }).update({ visit_id: visit.id });
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    const plan = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+    expect(plan.move.some((m) => m.id === grouped.id)).toBe(false);
+    expect(plan.cancel.some((c) => c.id === grouped.id)).toBe(false);
+
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    const stillThere = await trx('scheduled_services').where({ id: grouped.id }).first('scheduled_date', 'status', 'visit_id');
+    expect(stillThere.scheduled_date.toISOString().slice(0, 10)).toBe(groupedDate);
+    expect(stillThere.status).not.toBe('cancelled');
+    expect(String(stillThere.visit_id)).toBe(String(visit.id));
+  });
+
+  test('a rider row scheduled within the next 7 days is immovable regardless of other signals', async () => {
+    const today = etDateString();
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    // Host has no date the rider's own rule could ever reach from `today`
+    // (200 days out) — isolates the near-term rule from the ordinary
+    // host-date-matching path; any effect proven here is the 7-day rule
+    // alone.
+    const hostStart = addDays(today, 200);
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: hostStart, technicianId: lawnTechId });
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: today });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+    // A movable-looking pest row 3 days out, matching no planned date (the
+    // plan's first candidate lands ~84+ days from `today`) — must be left
+    // alone anyway because it's inside the 7-day window.
+    const nearTermDate = addDays(today, 3);
+    const [nearTermRow] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status: 'pending',
+      scheduled_date: nearTermDate, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_parent_id: pestParent.id, recurring_ongoing: true, source: 'admin',
+    }).returning('*');
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    const plan = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+    expect(plan.move.some((m) => m.id === nearTermRow.id)).toBe(false);
+    expect(plan.cancel.some((c) => c.id === nearTermRow.id)).toBe(false);
+
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    const stillThere = await trx('scheduled_services').where({ id: nearTermRow.id }).first('scheduled_date', 'status');
+    expect(stillThere.scheduled_date.toISOString().slice(0, 10)).toBe(nearTermDate);
+    expect(stillThere.status).not.toBe('cancelled');
+  });
+
+  test('a rider row lands in the SAME visit as its host row (GATE_VISIT_GROUPS)', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const [property] = await trx('customer_properties').insert({ id: randomUUID(), customer_id: customerId }).returning('*');
+    const [lawnService] = await trx('services').insert({
+      id: randomUUID(), service_key: `synthetic_lawn_${randomUUID().slice(0, 8)}`, name: 'Synthetic Lawn Care',
+      groupable: true, group_family: 'recurring_property_service',
+    }).returning('*');
+    const [pestService] = await trx('services').insert({
+      id: randomUUID(), service_key: `synthetic_pest_${randomUUID().slice(0, 8)}`, name: 'Synthetic Pest Control',
+      groupable: true, group_family: 'recurring_property_service',
+    }).returning('*');
+
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await trx('scheduled_services').where({ id: lawnParent.id }).update({ service_id: lawnService.id, property_id: property.id });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', lawnParent.id).orWhere('recurring_parent_id', lawnParent.id); })
+      .update({ property_id: property.id, service_id: lawnService.id });
+
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await trx('scheduled_services').where({ id: pestParent.id })
+      .update({ service_id: pestService.id, property_id: property.id, rides_parent_id: lawnParent.id });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ property_id: property.id, service_id: pestService.id });
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+
+    const lawnRows = await seriesRows(lawnParent.id);
+    const pestRows = await seriesRows(pestParent.id);
+    const matched = pestRows.filter((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START && r.status !== 'cancelled');
+    expect(matched.length).toBeGreaterThan(0);
+    for (const pestRow of matched) {
+      const d = pestRow.scheduled_date.toISOString().slice(0, 10);
+      const hostRow = lawnRows.find((r) => r.scheduled_date.toISOString().slice(0, 10) === d);
+      expect(hostRow).toBeTruthy();
+      expect(pestRow.visit_id).not.toBeNull();
+      expect(String(pestRow.visit_id)).toBe(String(hostRow.visit_id));
+      const visit = await trx('service_visits').where({ id: pestRow.visit_id }).first();
+      expect(visit).toBeTruthy();
+      expect(visit.status).toBe('open');
+    }
   });
 });

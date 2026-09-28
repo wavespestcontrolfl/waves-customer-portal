@@ -45,6 +45,11 @@ const { transitionJobStatus } = require('./job-status');
 const MIN_GAP_DAYS = 77;
 const TARGET_GAP_DAYS = 84;
 const MAX_WAIT_DAYS = 105;
+// Owner ruling: existing customers' pest dates move with NO texts — a row
+// inside this window is close enough that the customer may already be
+// acting on it (packing a cooler, arranging access), so it's a fixed
+// anchor regardless of what any reminder/confirmation ledger shows.
+const NEAR_TERM_DAYS = 7;
 
 // In-progress statuses: a visit a tech is actively on stops being a
 // candidate to move or cancel, same posture as every other series writer
@@ -142,39 +147,62 @@ async function lockCustomerCommsIfKnown(trx, customerId) {
 // Batched "is this rider row an immovable anchor" lookup — never move,
 // re-date or cancel a row a customer or the business is already committed
 // to. Conservative by design (see the module header's per-condition list).
+// FAILS CLOSED: any one of these queries throwing propagates straight out
+// (no try/catch here) — a query failure means "can't prove this row is
+// safe to touch," never "safe to touch." The caller (syncRiderSeries) runs
+// this whole reconcile inside a savepoint, so the thrown error aborts and
+// rolls back JUST this rider's sync (nothing moved/inserted/cancelled),
+// logged as skipped: 'error'; the nightly reconcile retries later.
 async function immovableRowIdSet(trx, rowIds) {
   const ids = (rowIds || []).filter(Boolean);
   const immovable = new Set();
   if (!ids.length) return immovable;
-  const guarded = async (fn, label) => {
-    try { return await fn(); } catch (err) {
-      logger.warn(`[rider-series] immovable check '${label}' failed (treating as inconclusive, not immovable): ${err.message}`);
-      return [];
-    }
-  };
   const [
-    invoiced, held, cardApproved, packeted, completionClaims,
+    invoiced, held, cardApproved, packeted, completionClaims, reminderSent,
   ] = await Promise.all([
-    guarded(() => trx('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'), 'invoices'),
-    guarded(() => trx('estimate_card_holds').whereIn('scheduled_service_id', ids)
-      .whereIn('status', ['held', 'charged_completion', 'charged_no_show']).pluck('scheduled_service_id'), 'estimate_card_holds'),
-    guarded(() => trx('appointment_card_requests').whereIn('scheduled_service_id', ids)
-      .whereIn('status', ['completed', 'satisfied']).pluck('scheduled_service_id'), 'appointment_card_requests'),
-    guarded(() => trx('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'), 'visit_completion_packet_items'),
-    guarded(() => trx('service_completion_attempts').whereIn('service_id', ids)
-      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id'), 'service_completion_attempts'),
+    trx('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
+    trx('estimate_card_holds').whereIn('scheduled_service_id', ids)
+      .whereIn('status', ['held', 'charged_completion', 'charged_no_show']).pluck('scheduled_service_id'),
+    trx('appointment_card_requests').whereIn('scheduled_service_id', ids)
+      .whereIn('status', ['completed', 'satisfied']).pluck('scheduled_service_id'),
+    trx('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
+    trx('service_completion_attempts').whereIn('service_id', ids)
+      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id'),
+    // The authoritative "already told the customer" ledger
+    // (appointment-reminders.js) — a row whose 72h/24h reminder or booking
+    // confirmation already sent must stay put (owner ruling: existing
+    // customers' pest dates move with NO texts, so a row the customer has
+    // already been told about is fixed).
+    trx('appointment_reminders').whereIn('scheduled_service_id', ids)
+      .where((q) => q.where('confirmation_sent', true).orWhere('reminder_72h_sent', true).orWhere('reminder_24h_sent', true))
+      .pluck('scheduled_service_id'),
   ]);
-  for (const id of [...invoiced, ...held, ...cardApproved, ...packeted, ...completionClaims]) immovable.add(id);
+  for (const id of [...invoiced, ...held, ...cardApproved, ...packeted, ...completionClaims, ...reminderSent]) immovable.add(id);
   return immovable;
 }
 
 // Status/attribute-only immovability (no DB) — combined with
-// immovableRowIdSet's attribute lookups by the caller.
+// immovableRowIdSet's attribute lookups by the caller. Includes the
+// scheduled_services-column "already told the customer" stamps
+// (appointment-reminders.js also writes confirmation_sms_sent_at on this
+// row for a legacy/placeholder path; reminder_24h_sent / arrival_sms_sent_at
+// / prep_sent_at are this row's own send stamps outside that ledger) and
+// visit_id: a grouped row's date is kept in sync with its service_visits
+// stop only through visit-groups.js's own move paths (handleChildStopChanged
+// runs on the pool, not this module's trx) — a plain UPDATE here would
+// silently desync the row from its stop's base key, so a grouped row is
+// never a move/cancel candidate; the visit's own move (or ungrouping) is
+// what relocates it.
 function immovableByOwnFields(row) {
   return IN_PROGRESS_STATUSES.includes(row.status)
     || row.prepaid_amount != null
     || row.customer_confirmed === true
-    || row.field_confirmed_at != null;
+    || row.field_confirmed_at != null
+    || row.visit_id != null
+    || row.confirmation_sms_sent_at != null
+    || row.reminder_24h_sent === true
+    || row.arrival_sms_sent_at != null
+    || row.prep_sent_at != null;
 }
 
 // ALLOWLIST, not a blocklist: scheduled_services carries dozens of
@@ -324,7 +352,10 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       .where((q) => { q.where('id', riderParentId).orWhere('recurring_parent_id', riderParentId); })
       .select('*');
     const attributeImmovable = await immovableRowIdSet(trx, riderRows.map((r) => r.id));
-    const isImmovable = (r) => immovableByOwnFields(r) || attributeImmovable.has(r.id);
+    const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
+    const isImmovable = (r) => immovableByOwnFields(r)
+      || attributeImmovable.has(r.id)
+      || (dateOnly(r.scheduled_date) != null && dateOnly(r.scheduled_date) <= nearTermCutoff);
 
     let lastRiderDate = null;
     for (const r of riderRows) {
@@ -512,6 +543,7 @@ module.exports = {
   MIN_GAP_DAYS,
   TARGET_GAP_DAYS,
   MAX_WAIT_DAYS,
+  NEAR_TERM_DAYS,
   planRiderDates,
   syncRiderSeries,
   syncRidersOfHost,

@@ -70,11 +70,24 @@ own 84-day cadence rather than lapsing.
    `completed` OR **immovable**: en_route/on_site, an invoice linked, a
    prepaid stamp, an active/charged card hold or an approved appointment-
    card request, a `visit_completion_packet_items` row, a live
-   `service_completion_attempts` claim, or `customer_confirmed` /
-   `field_confirmed_at` set. Conservative by design — never move or
-   cancel a row the business or the customer is already committed to.
-   With no completed/immovable row at all (a brand-new rider), the anchor
-   falls back to the rider parent's own `scheduled_date`.
+   `service_completion_attempts` claim, `customer_confirmed` /
+   `field_confirmed_at` set, a **non-null `visit_id`** (a grouped row's
+   date is kept in sync with its `service_visits` stop only through
+   visit-groups.js's own move paths — a plain UPDATE here would desync
+   it), a **reminder or confirmation already sent** (the authoritative
+   `appointment_reminders` ledger's `confirmation_sent` /
+   `reminder_72h_sent` / `reminder_24h_sent`, or this row's own
+   `confirmation_sms_sent_at` / `reminder_24h_sent` / `arrival_sms_sent_at`
+   / `prep_sent_at` stamps — owner ruling: existing customers' pest dates
+   move with NO texts, so a row the customer has already been told about
+   is fixed), or **scheduled within the next `NEAR_TERM_DAYS` (7) days**
+   of today. Conservative by design — never move or cancel a row the
+   business or the customer is already committed to, and the immovable
+   lookups themselves **fail closed**: a query error aborts that rider's
+   whole sync (logged, `skipped: 'error'`, savepoint-rolled-back) rather
+   than treating an unprovable row as movable. With no completed/immovable
+   row at all (a brand-new rider), the anchor falls back to the rider
+   parent's own `scheduled_date`.
 5. Horizon = the host's last live future date, or (host has none) the
    anchor plus `plannedVisitCountForPattern(pattern) * TARGET_GAP_DAYS`
    days — the same visit count the seeder would plan for that pattern in a

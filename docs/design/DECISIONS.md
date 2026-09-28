@@ -2633,7 +2633,15 @@ engine, not just a matching cadence.
 105), `syncRiderSeries` diffs that plan against the rider's current movable
 future rows (keep / move / insert / cancel) and never touches an immovable
 one (started, invoiced, prepaid, card-held, packet-owned, a live completion
-claim, or customer/field-confirmed). Every automated path that would
+claim, customer/field-confirmed, grouped into a `service_visits` stop
+(`visit_id` set — a plain date UPDATE would desync it from the stop),
+already reminded/confirmed (the authoritative `appointment_reminders`
+ledger, or this row's own send-stamp columns — owner ruling: existing
+customers' pest dates move with NO texts), or inside the next 7 days).
+Review round 1 (2026-09-28) also made the immovable lookups themselves
+fail closed: a query error now aborts and rolls back just that rider's
+sync (savepoint, logged, `skipped: 'error'`) instead of treating an
+unprovable row as movable. Every automated path that would
 otherwise walk a rider's own interval (completion auto-extend, the
 visit-count top-up, the plan-ending alert action) checks
 `rides_parent_id` first and calls `syncRiderSeries` instead; every path
