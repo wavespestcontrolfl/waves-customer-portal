@@ -957,95 +957,37 @@ multi-property account's report can never list another property's visits.
 Gate off (default): the field is absent and the payload is byte-identical
 to today.
 
-Findings- and season-aware cross-sell priority (owner-approved 2026-09-27,
-rewritten structurally 2026-09-28 after FOUR rounds of "claim inferred
-from free text" findings — see below): `GATE_REPORT_CROSS_SELL_V2` (dark,
-off unless exactly `true`, read at call time; inert unless
-`GATE_REPORT_CROSS_SELL` is also on — there is no card to prioritize
-without it) layers a priority on top of the existing `crossSell` offer
-ladder (`services/service-report/cross-sell.js`'s `buildReportCrossSell`).
-On, the payload's existing `crossSell` object may additionally carry
-`reason` — one short, honest, reason-tied FIXED sentence rendered above
-the CTA button, one per branch below, never composed from or naming a
-location or severity the structured field itself doesn't state (roach:
-"We noted roach activity during this visit — our cockroach control
-program is a focused two-treatment cleanout."; rodent: "We noted signs of
-rodent activity during this visit — …" ("during this visit", never
-"today" — reopening an older report recomputes these reasons from the
-same visit's saved snapshot, so a same-day claim would misdate historical
-findings as current); season-mosquito: "Mosquito season is here in SW Florida — …")
-— and `serviceKey` may resolve to two targets the ladder itself never picks:
-`rodent_bait` and `mosquito`, priced through the SAME
-`buildCustomerPricingResponse` estimator path and per-application-only
-serialization rule as the existing ladder targets. Their prompts/labels
-live in cross-sell.js's own `V2_TARGET_PROMPTS`/`V2_TARGET_LABELS` maps,
-deliberately NOT added to the shared `OFFER_PROMPTS`/`OFFER_LABELS`
-vocabulary the portal offer card and the photo-triage lane
-(`buildPortalOffer`, `buildOfferForFamily`) also read by
-`requestedTargetKey` — those two surfaces are unaffected by this gate and
-still refuse `rodent_bait`/`mosquito` as an unknown family. `serviceKey`
-may also resolve to `cockroach_control` — the one target priced OUTSIDE
-the estimator (a fixed one-time catalog price; `mode` is always
-`quote_cta`, `option` is always `null`) — gated on the live `services`
-catalog row (`is_active`, `!is_archived`, `customer_visible`,
-`booking_enabled`) and on the customer having no already-open
-(pending/confirmed/en_route/on_site) visit linked to it.
-
-Findings priority reads ONLY structured, fixed-vocabulary fields from THIS
-visit's typed report snapshots (`service_records.service_data`'s
-`typedReportSnapshot` / `companionReportSnapshots`, primary or companion —
-`server/services/project-types.js` is the one source of truth for these
-keys/options) — free-text parsing of `service_findings`
-(category/title/detail/recommendation) and any negation handling over it
-was REMOVED ENTIRELY 2026-09-28 rather than refined a fourth time: those
-rows carry a technician's RECOMMENDATION and CATEGORY LABEL alongside the
-observation, text no regex could reliably separate from an actual finding.
-`technician_notes` was never read (raw notes must never egress on a
-customer surface) and still isn't. An UNTYPED (general pest) visit carries
-no typed snapshot at all — no findings signal, season/ladder decides. The
-surviving structured checks, each "unknown/empty value → no signal": roach
-— a COMPANION (never the primary — a primary cockroach report means the
-customer is already mid-program today) typed `cockroach` snapshot's
-`activity_level` is anything other than `'None observed'`; rodent — a
-`rodent_trapping` snapshot's `captures` count is > 0, OR a
-`rodent_bait_station` snapshot's `bait_consumption` is anything other than
-`'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
-`'Yes'` (primary or companion, no exclusion). There is no termite findings
-signal (removed 2026-09-28, same round as the ladder change below — a
-termite reading has no production consumer left). Mosquito has NO findings
-branch at all (removed 2026-09-28, a prior round: a mention count
-in short structured text could not be tied reliably to genuine severity)
-— it is offered ONLY by season (America/New_York May–Oct) or the
-unchanged ladder. Season (May–Oct mosquito) runs only when no findings
-branch fired. Termite is never offered from a report (owner ruling
-2026-09-28: report offers push the three pillars — pest, lawn, tree &
-shrub — so the ladder is `pest_control → lawn_care → tree_shrub`, a
-customer owning all three gets no card, and the former termite findings
-and swarm-season branches are gone). The SAME owner ruling applies to
-EVERY offer surface, not only the report ("three pillars is fine for now,
-yes applies there too"): the portal offer card and the photo-triage lane
-(`buildPortalOffer` / `buildPortalPurchaseBasis` / `resolvePortalOfferTarget`,
-and `buildOfferForFamily`) share the identical `OFFER_LADDER` and
-`pickOfferTarget` — a customer owning pest, lawn, AND tree & shrub gets no
-ladder-picked offer on any surface, and the portal's one-tap termite
-purchase path is gone with it. An explicit `requestedTargetKey: 'termite'`
-(e.g. a photo-triage identification of termite activity) is a DIFFERENT,
-deliberate code path — never the ladder's own pick — and is unaffected:
-`OFFER_PROMPTS`/`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite`
-so that request still prices normally. Never offers a family the customer
-already owns — reuses the ladder's own property-scoped ownership + plan-rate
-evidence, including the `termite_bait` → `termite` ownership mapping (this
-also covers a typed rodent/termite report's OWN identity — a
-`rodent_trapping` visit's own family is already counted owned by the
-ladder's existing report-identity corroboration, so no separate
-primary-exclusion rule is needed for rodent/termite the way roach's is). A
-recent, uncorroborated termite report identity still fails the WHOLE report
-card closed (the ambiguity guard's own `GUARDED_OWNERSHIP_FAMILIES` set
-keeps termite even though it left `OFFER_LADDER` — the same
-both-answers-wrong doctrine as a recent pest/lawn/tree identity). Gate off
-(default):
-`crossSell` is byte-identical to today's unchanged ladder pick and carries
-no `reason` field.
+Report cross-sell ladder (owner-approved 2026-08-13, `GATE_REPORT_CROSS_SELL`;
+`services/service-report/cross-sell.js`'s `buildReportCrossSell`): the
+report payload's `crossSell` object offers the ONE next family the
+customer doesn't have, walking `OFFER_LADDER` =
+`pest_control → lawn_care → tree_shrub` (owner ruling 2026-09-28: report
+offers push the three pillars only — termite left the ladder). A customer
+owning pest, lawn, AND tree & shrub gets no card at all. The SAME owner
+ruling applies to EVERY offer surface, not only the report ("three
+pillars is fine for now, yes applies there too"): the portal offer card
+and the photo-triage lane (`buildPortalOffer` / `buildPortalPurchaseBasis`
+/ `resolvePortalOfferTarget`, and `buildOfferForFamily`) share the
+identical `OFFER_LADDER` and `pickOfferTarget` — a customer owning all
+three pillars gets no ladder-picked offer on any surface, and the
+portal's one-tap termite purchase path is gone with it. `termite`/
+`termite_bait` ownership still counts as "has a plan, not the anchor" via
+the ownership vocabulary's mapping — it is simply never the offered rung.
+An explicit `requestedTargetKey: 'termite'` (e.g. a photo-triage
+identification of termite activity) is a DIFFERENT, deliberate code path
+— never the ladder's own pick — and is unaffected: `OFFER_PROMPTS`/
+`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite` so that
+request still prices normally. Never offers a family the customer already
+owns — the ladder's own property-scoped ownership + plan-rate evidence
+decide it (this also covers a typed rodent/termite report's OWN identity —
+a `rodent_trapping` visit's own family is already counted owned by the
+ladder's existing report-identity corroboration). A recent, uncorroborated
+report identity for any family in `GUARDED_OWNERSHIP_FAMILIES`
+(`OFFER_LADDER` plus `termite`, kept there for exactly this ambiguity even
+though termite left the ladder itself) fails the WHOLE report card closed
+— the unseeded-next-visit gap and a just-cancelled plan are
+indistinguishable, so offering the family and advancing past it are each
+wrong in one of those worlds.
 
 The payload's `protocol.structuredObservations` contains only the saved
 completion-form observation snapshot, and a nonempty snapshot carries
