@@ -56,8 +56,14 @@ describe('assertRepriceAllowed', () => {
 
 test('update-details and the "following visits" propagation both run the guard before writing a price', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  // Decided before the first Stripe cancel in update-details (a cancelled
+  // payment session does not roll back with the transaction).
+  const guardAt = src.indexOf('assertRepriceAllowed(trx, req.params.id, updates.estimated_price)');
+  const stripeCancelNote = src.indexOf('EVERY refusal is decided BEFORE the first Stripe cancel');
   const editWrite = src.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
-  expect(src.slice(editWrite - 700, editWrite)).toContain('assertRepriceAllowed(trx, req.params.id, updates.estimated_price)');
+  expect(guardAt).toBeGreaterThan(-1);
+  expect(guardAt).toBeLessThan(stripeCancelNote);
+  expect(guardAt).toBeLessThan(editWrite);
   const siblingWrite = src.indexOf("await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);");
   expect(src.slice(siblingWrite - 300, siblingWrite)).toContain('assertRepriceAllowed(conn, sibling.id, siblingUpdates.estimated_price)');
 });

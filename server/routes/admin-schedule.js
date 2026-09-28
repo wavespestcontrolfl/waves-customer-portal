@@ -13540,6 +13540,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // consumers append NULLs last.
           updates.route_order = null;
         }
+        // Owner ruling 2026-09-28: a visit's price cannot change while money
+        // is already committed at the old price — an open invoice with a
+        // balance, a live estimate card hold, or an approved appointment-card
+        // charge. Every collector (completion, the balance sweep, card holds,
+        // the card lane, grouped closeout) would otherwise still collect the
+        // old amount. Staff void / release it first. Only a FREE re-service
+        // conversion (which voids its own invoices) is exempt.
+        if (updates.estimated_price !== undefined && !reServiceConversionZeroPrice) {
+          await assertRepriceAllowed(trx, req.params.id, updates.estimated_price);
+        }
         // Assigning a payer must first release any UNCONFIRMED combined
         // pay-page session riding this visit's invoices (codex #3427 r8
         // P1): the browser confirms a combined ACH PI directly after the
@@ -13725,16 +13735,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // commit and then sees the invoice in 'sending'. A payer can never
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
-        // Owner ruling 2026-09-28: a visit's price cannot change while money
-        // is already committed at the old price — an open invoice with a
-        // balance, a live estimate card hold, or an approved appointment-card
-        // charge. Every collector (completion, the balance sweep, card holds,
-        // the card lane, grouped closeout) would otherwise still collect the
-        // old amount. Staff void / release it first. Only a FREE re-service
-        // conversion (which voids its own invoices) is exempt.
-        if (updates.estimated_price !== undefined && !reServiceConversionZeroPrice) {
-          await assertRepriceAllowed(trx, req.params.id, updates.estimated_price);
-        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
