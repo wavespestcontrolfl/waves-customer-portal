@@ -3200,6 +3200,18 @@ class RelayConversation {
     this._pinClaudeFallback();
     this._modelSwitch = { from, to: this.model, reason, turn: Number.isFinite(turn) ? turn : null };
     logger.warn(`[voice-relay] provider-failure fallback callSid=${maskSid(this.callSid)} reason=${reason} from=${from} to=${this.model}`);
+    // Stamped on the call row the moment it happens (codex r2 P2 on #5209):
+    // a reconnect leg can start before this socket's close appends its
+    // segment, and loadResumeState reads this stamp first. Best effort and
+    // bounded — the switch itself never waits on it.
+    const sw = this._modelSwitch;
+    if (this.callSid) {
+      withTimeout(Promise.resolve().then(() => db('call_log').where('twilio_call_sid', this.callSid).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_model_switch', ?::jsonb)", [JSON.stringify(sw)]),
+      })), 2000, null).catch((err) => {
+        logger.warn(`[voice-relay] model switch stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      });
+    }
   }
 
   /**
@@ -3209,7 +3221,13 @@ class RelayConversation {
    * switched, so a reconnect never returns to the provider that failed.
    */
   _pinClaudeFallback() {
-    this.model = resolveSharedAnthropicChain(null).model;
+    const shared = resolveSharedAnthropicChain(null);
+    this.model = shared.model;
+    // A rejected VOICE_RELAY_MODEL / MODEL_VOICE is why the call runs on the
+    // registry default now (codex r2 P2): keep that in the stamp.
+    if (shared.fallbackReason && !String(this._modelFallbackReason || '').includes(shared.fallbackReason)) {
+      this._modelFallbackReason = [this._modelFallbackReason, shared.fallbackReason].filter(Boolean).join('; ');
+    }
     this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
     this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
@@ -3352,17 +3370,28 @@ class RelayConversation {
           this._switchToClaudeFallback(streamTimedOut ? 'stream_timeout' : 'provider_error', stat.turn);
           stat.effort = this._stampedEffort; // the turn's reply now comes from Claude
           // A barge-in or hang-up any time during this attempt — including
-          // after a stream timeout had already aborted its controller, or
-          // during the flushChain await above — means the caller has moved
-          // on: the round ends as an interruption rather than answering the
-          // old prompt on Claude. The switch stands.
-          if (this.ended || this._interruptSeq !== interruptSeqAtStart) {
+          // after a stream timeout had already aborted its controller, during
+          // the flushChain await above, or during the ownership check below —
+          // means the caller has moved on: the round ends as an interruption
+          // rather than answering the old prompt on Claude. The switch stands.
+          const movedOn = () => this.ended || this._interruptSeq !== interruptSeqAtStart;
+          // A replacement socket that took the call claim while the failed
+          // request was in flight (codex r2 P2): never spend a Claude retry
+          // on the stale socket — end it the way a superseded finalize does.
+          // The block renderer has no progressive check of its own, so this
+          // re-asks the same ownership question before any retry.
+          if (!spokeAlready && !movedOn() && ((streamState && streamState.withheld) || await this._sessionSuperseded().catch(() => false))) {
+            logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${this.callSid}`);
+            await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+            this._ending = true;
+            try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+            return null;
+          }
+          if (movedOn()) {
             await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
             return null;
           }
-          // A superseded session (`withheld`) speaks nothing more this round —
-          // it takes the ordinary failure path below, exactly as before.
-          if (!spokeAlready && !(streamState && streamState.withheld)) {
+          if (!spokeAlready) {
             stat.firstTokenAt = firstTokenAtStart;
             continue; // retry THIS round once, now pinned to Claude — `finally` below still runs first
           }

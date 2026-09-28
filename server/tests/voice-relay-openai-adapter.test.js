@@ -907,6 +907,66 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  test('the switch is stamped on the call row at once, so a reconnect that starts before this socket closes still sees it', async () => {
+    const db = require('../models/db');
+    const update = jest.fn(async () => 1);
+    db.mockImplementation(() => ({ where: () => ({ update }) }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
+      mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
+      const convo = new RelayConversation({ callSid: 'CA-fallback-row', from: '+19415551234', send: () => {} });
+      await convo.handlePrompt('hello?');
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(update).toHaveBeenCalledTimes(1);
+      const { metadata } = update.mock.calls[0][0];
+      expect(metadata.sql).toContain("'relay_model_switch'");
+      expect(JSON.parse(metadata.bindings[0])).toEqual(convo._modelSwitch);
+    } finally {
+      db.mockReset();
+      delete db.raw;
+    }
+  });
+
+  test('a superseded socket never spends a Claude retry — it ends as superseded', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
+    mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Stale answer.' }], stop_reason: 'end_turn' });
+    const spoken = [];
+    const convo = new RelayConversation({ callSid: 'CA-fallback-superseded', from: '+19415551234', send: (t) => spoken.push(t) });
+    convo._sessionSuperseded = async () => true;
+    convo._endSession = jest.fn();
+    await convo.handlePrompt('hello?');
+
+    expect(mockAnthropicStreamCalls).toHaveLength(0);
+    expect(spoken).not.toContain('Stale answer.');
+    expect(convo._endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+    expect(convo._modelSwitch).toMatchObject({ from: LUNA }); // the switch itself still stands
+  });
+
+  test('a rejected shared Claude setting stays in the stamp after the switch lands on the registry default', () => {
+    jest.isolateModules(() => {
+      const saved = process.env.VOICE_RELAY_MODEL;
+      process.env.VOICE_RELAY_MODEL = 'not-a-real-model';
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      try {
+        const { RelayConversation: RC } = require('../services/voice-agent/relay-conversation');
+        const convo = new RC({ callSid: 'CA-fallback-attr', from: '+19415551234', send: () => {} });
+        expect(convo._provider).toBe('openai');
+        expect(convo._modelFallbackReason).toBeNull();
+        convo._switchToClaudeFallback('provider_error', 1);
+        expect(convo._versionStamps().model_fallback_reason).toBe('unknown_shared_model:VOICE_RELAY_MODEL=not-a-real-model');
+      } finally {
+        if (saved === undefined) delete process.env.VOICE_RELAY_MODEL; else process.env.VOICE_RELAY_MODEL = saved;
+      }
+    });
+  });
+
   test('a reconnected leg of a call that already switched starts on Claude — one switch per call, not per socket', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;

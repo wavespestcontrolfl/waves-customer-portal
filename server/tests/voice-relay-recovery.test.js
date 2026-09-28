@@ -169,6 +169,9 @@ describe('relay-recovery module', () => {
     const sw = { from: 'gpt-6-luna', to: 'claude-sonnet-5', reason: 'provider_error', turn: 2 };
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: ants', versions: { model: 'claude-sonnet-5', model_switch: sw } }] } } });
     expect((await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).modelSwitch).toEqual(sw);
+    // …and from the row stamp the switching socket writes at once, before its segment lands (codex r2 P2).
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_model_switch: sw, relay_segments: [] } } });
+    expect((await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).modelSwitch).toEqual(sw);
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
