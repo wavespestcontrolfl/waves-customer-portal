@@ -4086,8 +4086,26 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+          const { acquireScheduledInvoiceMintLock, assertScheduledVisitLive } = require("./scheduled-invoice-mint");
           await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+          // Codex #5244 r7 P0: this bare-advisory-lock path is every linked
+          // create() caller that does NOT route through the shared
+          // acquireScheduledMintLockChain (a manual admin invoice, a
+          // project/WDO invoice, the annual-prepay-switch undo restore,
+          // …) — it took the SAME mint lock above but never re-read the
+          // visit under it, so a cancellation that won this lock FIRST and
+          // committed while this create() waited behind it left this mint
+          // to resume blind and bill a visit that will never happen. One
+          // extra FOR UPDATE read, gated by the SAME canonical status set
+          // and error shape the shared lock-chain chokepoint uses
+          // (scheduled-invoice-mint.js's assertScheduledVisitLive) — never
+          // a second hand-rolled check. A row that no longer exists is a
+          // different caller's concern, not this one's.
+          const lockedVisitForMint = await database('scheduled_services')
+            .where({ id: linkedScheduledServiceId })
+            .forUpdate()
+            .first('id', 'status');
+          if (lockedVisitForMint) assertScheduledVisitLive(lockedVisitForMint);
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
