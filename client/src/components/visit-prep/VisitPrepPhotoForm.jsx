@@ -523,6 +523,10 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       <button
         type="button"
         data-glass-accent=""
+        // Without the size tag the glass theme's accent rule pins buttons
+        // at 44px !important; primary keeps the 48px customer touch target
+        // (same tag PhotoId's submit uses).
+        data-glass-size="primary"
         onClick={send}
         disabled={sendDisabled}
         style={{

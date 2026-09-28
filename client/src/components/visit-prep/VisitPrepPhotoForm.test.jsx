@@ -106,6 +106,8 @@ describe('VisitPrepPhotoForm', () => {
       expect(control.style.fontSize).toBe('16px');
     }
     expect(screen.getByLabelText('A short note (optional)').style.fontSize).toBe('16px');
+    // The glass theme's accent rule forces 44px unless the primary size tag is set.
+    expect(screen.getByRole('button', { name: 'Send' }).getAttribute('data-glass-size')).toBe('primary');
   });
 
   it('caps the picker at min(3, photosRemaining)', async () => {
