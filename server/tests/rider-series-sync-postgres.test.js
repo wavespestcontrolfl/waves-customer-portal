@@ -1446,6 +1446,45 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(hostRowOnDate.technician_id).toBe(lawnTechId);
   });
 
+  test('a kept rider on a host date converges: a pinned tech and an off-hour host window are never re-flagged for refresh', async () => {
+    const hostTechId = randomUUID();
+    await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+    const riderOwnTechId = randomUUID();
+    await trx('technicians').insert({ id: riderOwnTechId, name: 'Synthetic Rider Own Tech', employment_status: 'active', field_dispatchable: true });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId });
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({
+      recurring_technician_id: riderOwnTechId, recurring_technician_override: true, rides_parent_id: lawnParent.id,
+    });
+    const hostChildDate = addDays(LAWN_START, 84);
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Lawn Care', status: 'pending',
+      scheduled_date: hostChildDate, window_start: '09:30', window_end: '11:30',
+      technician_id: hostTechId, is_recurring: true, recurring_pattern: 'every_6_weeks',
+      recurring_parent_id: lawnParent.id, recurring_ongoing: true, source: 'admin',
+      estimated_duration_minutes: 120,
+    });
+    // Keep the rider row ungrouped so it stays a kept, movable row.
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id).orWhere('id', lawnParent.id).orWhere('recurring_parent_id', lawnParent.id); })
+      .update({ property_id: null });
+    await disablePropertyAnchoring();
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    const landed = (await seriesRows(pestParent.id)).find((r) => r.scheduled_date.toISOString().slice(0, 10) === hostChildDate);
+    expect(landed).toBeTruthy();
+    expect(landed.visit_id).toBeNull();
+    expect(landed.technician_id).toBe(riderOwnTechId);
+    expect(String(landed.window_start)).toBe('09:00:00');
+
+    const dry = await syncRiderSeries(trx, pestParent.id, { dryRun: true });
+    expect(dry.keep.some((k) => k.id === landed.id)).toBe(true);
+    expect(dry.refresh).toEqual([]);
+    const second = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(second.refresh).toEqual([]);
+  });
+
   test('a rider insert onto a host date with an off-hour window lands floored to the hour, with the normalized end (P1 windows, fail-without-fix evidence)', async () => {
     const lawnTechId = randomUUID();
     await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });

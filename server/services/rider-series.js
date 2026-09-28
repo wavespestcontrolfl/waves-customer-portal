@@ -620,8 +620,80 @@ async function buildRiderSyncPlan(trx, cols, riderParent, hostParent, riderParen
 // duplicate). Claiming by row id, at most one per planned date, makes every
 // OTHER movable row on that date (or any row a plan date never reaches)
 // unmatched — a move or cancel candidate like any other unmatched row.
+// Host tech/window resolution shared by MOVE and REFRESH onto a host date
+// (P1 host tech / P1 windows, PR #5268 round 2): a host row's own
+// technician_id/window must never ride onto a rider row unvalidated — the
+// SAME eligibility rules assignableRecurringTemplateTechnicianId applies
+// to every other writer's insert (a marked-out or offboarded host tech
+// nulls the rider's own assignment rather than joining them to it), and
+// the SAME off-hour normalization the top-up applies (normalizeTopUpWindow)
+// — the rider path normalizes UNCONDITIONALLY, never behind an opt-in
+// flag, since it always joins an already-live host stop. The HOST row's
+// own estimated_duration_minutes drives the normalization (never the
+// rider's own, which can be a different service length) — this floors and
+// re-derives the HOST'S window, which the rider is only borrowing;
+// passing the rider's own duration would recompute a stop-end the host's
+// stop never had. Returns { unplaceable: true } (never writes) or
+// { technicianId, windowStart, windowEnd }. Resolved once per host date
+// BEFORE the diff (resolveHostJoins), so the kept-row refresh check compares
+// a rider row against the values a write would actually produce, never the
+// host row's raw fields: a pinned rider's own technician or an off-hour host
+// window would otherwise read as drift on every sync and never converge.
+async function resolveHostJoinFields(trx, template, hostRow, date) {
+  const { assignableRecurringTemplateTechnicianId, normalizeTopUpWindow } = require('../routes/admin-schedule');
+  // Host tech semantics (P1 fix #4, PR #5268 round 3): a pinned rider
+  // (recurring_technician_override true) keeps its OWN template tech,
+  // validated exactly as before — it never joins the host's tech. An
+  // unpinned rider joins the host stop instead. Spreading only
+  // `technician_id: hostRow.technician_id` onto `template` is not enough:
+  // recurringTemplateTechnicianId (admin-schedule.js) prefers
+  // `recurring_technician_id` over `technician_id` regardless of the
+  // override flag, so the rider's OWN recurring_technician_id would still
+  // win and the host tech would be silently ignored (or a host with no
+  // tech would leave the rider on its old assignment instead of going
+  // unassigned). Setting recurring_technician_id to the SAME host tech,
+  // with override forced false, closes that fallback so the resolved id
+  // can only be the host's. The underlying eligibility check (active,
+  // field-dispatchable, not absent that date) still runs unchanged, and
+  // an ineligible or unassigned host tech nulls the rider's own
+  // assignment exactly like any other writer's.
+  const pinned = !!template.recurring_technician_override;
+  const preferredTechParent = pinned ? template : {
+    ...template,
+    technician_id: hostRow.technician_id,
+    recurring_technician_id: hostRow.technician_id,
+    recurring_technician_override: false,
+  };
+  const technicianId = await assignableRecurringTemplateTechnicianId(trx, preferredTechParent, date);
+  const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, hostRow.estimated_duration_minutes, hostRow.window_end);
+  if (normalizedWindow?.unplaceable) return { unplaceable: true };
+  return {
+    technicianId,
+    windowStart: normalizedWindow ? normalizedWindow.start : hostRow.window_start,
+    windowEnd: normalizedWindow ? normalizedWindow.end : hostRow.window_end,
+  };
+}
+
+// Stage 3b: the resolved host-join fields for every planned date that is a
+// host date. Pure reads; runs on dry runs too, so a dry run reports the
+// same refreshes a real sync would write.
+async function resolveHostJoins(trx, template, planCtx) {
+  const joins = new Map();
+  for (const d of planCtx.plan) {
+    const hostRow = planCtx.hostByDate.get(d);
+    if (hostRow) joins.set(d, await resolveHostJoinFields(trx, template, hostRow, d));
+  }
+  return joins;
+}
+
+
+// A TIME column reads back as 'HH:MM:SS'; resolved windows are 'HH:MM'.
+function hhmm(value) {
+  return value == null ? null : String(value).slice(0, 5);
+}
+
 function diffRiderPlan(planCtx) {
-  const { hostByDate, movableRows, plan } = planCtx;
+  const { hostJoinByDate, movableRows, plan } = planCtx;
   const movableByDate = new Map();
   for (const r of movableRows) {
     const d = dateOnly(r.scheduled_date);
@@ -651,11 +723,11 @@ function diffRiderPlan(planCtx) {
     if (existing) {
       claimedIds.add(existing.id);
       keep.push({ id: existing.id, date: d });
-      const hostRow = hostByDate.get(d);
-      if (hostRow && (
-        (existing.window_start ?? null) !== (hostRow.window_start ?? null)
-        || (existing.window_end ?? null) !== (hostRow.window_end ?? null)
-        || (String(existing.technician_id ?? '') !== String(hostRow.technician_id ?? ''))
+      const joined = hostJoinByDate.get(d);
+      if (joined && !joined.unplaceable && (
+        hhmm(existing.window_start) !== hhmm(joined.windowStart)
+        || hhmm(existing.window_end) !== hhmm(joined.windowEnd)
+        || (String(existing.technician_id ?? '') !== String(joined.technicianId ?? ''))
       )) {
         refresh.push({ id: existing.id, date: d });
       }
@@ -685,7 +757,7 @@ function diffRiderPlan(planCtx) {
 
 // --- Stage 5: writes (only stage that writes; never called on dryRun) -----
 async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx, diff) {
-  const { hostByDate, riderRows, blackoutDates } = planCtx;
+  const { hostByDate, hostJoinByDate, riderRows, blackoutDates } = planCtx;
   const { move, refresh, insertDates, cancelRows } = diff;
   const {
     seriesCandidateDateClashes, assignableRecurringTemplateTechnicianId,
@@ -705,54 +777,6 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
   const skipRiderStamp = !!riderParent.skip_weekends;
   const dirRider = riderParent.weekend_shift === 'back' ? 'back' : 'forward';
 
-  // Host tech/window resolution shared by MOVE and REFRESH onto a host date
-  // (P1 host tech / P1 windows, PR #5268 round 2): a host row's own
-  // technician_id/window must never ride onto a rider row unvalidated — the
-  // SAME eligibility rules assignableRecurringTemplateTechnicianId applies
-  // to every other writer's insert (a marked-out or offboarded host tech
-  // nulls the rider's own assignment rather than joining them to it), and
-  // the SAME off-hour normalization the top-up applies (normalizeTopUpWindow)
-  // — the rider path normalizes UNCONDITIONALLY, never behind an opt-in
-  // flag, since it always joins an already-live host stop. The HOST row's
-  // own estimated_duration_minutes drives the normalization (never the
-  // rider's own, which can be a different service length) — this floors and
-  // re-derives the HOST'S window, which the rider is only borrowing;
-  // passing the rider's own duration would recompute a stop-end the host's
-  // stop never had. Returns { unplaceable: true } (never writes) or
-  // { technicianId, windowStart, windowEnd }.
-  async function resolveHostJoinFields(hostRow, date) {
-    // Host tech semantics (P1 fix #4, PR #5268 round 3): a pinned rider
-    // (recurring_technician_override true) keeps its OWN template tech,
-    // validated exactly as before — it never joins the host's tech. An
-    // unpinned rider joins the host stop instead. Spreading only
-    // `technician_id: hostRow.technician_id` onto `template` is not enough:
-    // recurringTemplateTechnicianId (admin-schedule.js) prefers
-    // `recurring_technician_id` over `technician_id` regardless of the
-    // override flag, so the rider's OWN recurring_technician_id would still
-    // win and the host tech would be silently ignored (or a host with no
-    // tech would leave the rider on its old assignment instead of going
-    // unassigned). Setting recurring_technician_id to the SAME host tech,
-    // with override forced false, closes that fallback so the resolved id
-    // can only be the host's. The underlying eligibility check (active,
-    // field-dispatchable, not absent that date) still runs unchanged, and
-    // an ineligible or unassigned host tech nulls the rider's own
-    // assignment exactly like any other writer's.
-    const pinned = !!template.recurring_technician_override;
-    const preferredTechParent = pinned ? template : {
-      ...template,
-      technician_id: hostRow.technician_id,
-      recurring_technician_id: hostRow.technician_id,
-      recurring_technician_override: false,
-    };
-    const technicianId = await assignableRecurringTemplateTechnicianId(trx, preferredTechParent, date);
-    const normalizedWindow = normalizeTopUpWindow(hostRow.window_start, hostRow.estimated_duration_minutes, hostRow.window_end);
-    if (normalizedWindow?.unplaceable) return { unplaceable: true };
-    return {
-      technicianId,
-      windowStart: normalizedWindow ? normalizedWindow.start : hostRow.window_start,
-      windowEnd: normalizedWindow ? normalizedWindow.end : hostRow.window_end,
-    };
-  }
 
   // Combines the two "this row's dispatch/route state must never survive a
   // rider MOVE or REFRESH unexamined" rules every other series move path
@@ -793,7 +817,7 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
     const hostRow = hostByDate.get(to);
     const updates = { scheduled_date: to, updated_at: new Date() };
     if (hostRow) {
-      const joined = await resolveHostJoinFields(hostRow, to);
+      const joined = hostJoinByDate.get(to);
       if (joined.unplaceable) {
         logger.warn(`[rider-series] parent=${riderParentId} move of row ${id} to host date ${to} has an unplaceable window after normalization — skipped this sync, retried next pass`);
         continue;
@@ -840,7 +864,7 @@ async function writeRiderPlan(trx, { cols, riderParent, riderParentId }, planCtx
   for (const { id, date } of refresh) {
     const hostRow = hostByDate.get(date);
     if (!hostRow) continue;
-    const joined = await resolveHostJoinFields(hostRow, date);
+    const joined = hostJoinByDate.get(date);
     if (joined.unplaceable) {
       logger.warn(`[rider-series] parent=${riderParentId} refresh of row ${id} onto host date ${date} has an unplaceable window after normalization — skipped this sync, retried next pass`);
       continue;
@@ -995,6 +1019,7 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     if (planCtx.skip) return { ...empty(), skipped: planCtx.skip };
     if (planCtx.noAnchor) return { ...empty(), skipped: 'no_anchor' };
 
+    planCtx.hostJoinByDate = await resolveHostJoins(trx, overlayRecurringTemplateOverrides(riderParent, cols), planCtx);
     const diff = diffRiderPlan(planCtx);
     const result = {
       keep: diff.keep, move: diff.move, insert: diff.insertDates, cancel: diff.cancelRows, refresh: diff.refresh,
