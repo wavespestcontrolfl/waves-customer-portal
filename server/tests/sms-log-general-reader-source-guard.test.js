@@ -427,6 +427,11 @@ const ALLOWLIST = [
     reason: 'deliberately includes in-flight review-ask/reply reservations as ask-spacing evidence (the REBUTTED FINDING note at the top of review-ask-reservation.js) — excluding them here would break the spacing guarantee this function exists to provide.',
   },
   {
+    file: 'services/review-ask-topic.js',
+    snippet: 'let rows = await db("sms_log")',
+    reason: 'inbound-only (direction: "inbound") — the customer\'s own texts as Day-0 topic evidence; a send reservation is always an outbound row.',
+  },
+  {
     file: 'services/review-request.js',
     snippet: 'const stamped = await db("sms_log")',
     reason: 'status explicitly excludes \'sending\' in its own whereNotIn list (evidence of DELIVERY, not an in-flight attempt) — an unresolved reservation cannot match.',
@@ -607,6 +612,16 @@ const ALLOWLIST = [
     file: 'services/reschedule-link-promises.js',
     snippet: 'const sms = await conn(\'sms_log\').where({ twilio_sid: row.provider_message_id }).first(\'id\', \'status\');',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const staffSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction outbound, admin_user_id NOT NULL): deliberately includes an in-flight reservation — a staff-initiated send attempt IS evidence a human just reached out, whether or not the provider has confirmed delivery yet; over-suppression (holding the marketing email) is the safe direction here, unlike the message-history readers this guard protects.',
+  },
+  {
+    file: 'services/email-division/eligibility.js',
+    snippet: "const inboundSms = await database('sms_log')",
+    reason: 'RECENT_HUMAN_CONTACT existence check (direction inbound): an inbound row is the customer\'s own message and is never a send reservation (those are always outbound placeholders), so the exclusion cannot apply regardless.',
   },
 ];
 
