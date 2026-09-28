@@ -1075,6 +1075,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let appSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
+  let smsDeferredOwned = false;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
@@ -1275,6 +1276,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   resolve_from_by_customer: true,
                 }),
               });
+              smsDeferredOwned = true;
               logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
             } catch (queueErr) {
               smsHoldUnowned = true;
@@ -1364,6 +1366,16 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
   const originalAt = originalDeliveryTimes.length
     ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
+  // Only an earlier accepted leg reached the customer on this path. Return
+  // this run's credit draw; the previous attempt's applied credit stays put.
+  if (!freshDelivery && !smsDeferredOwned && dunAppliedCredit > 0) {
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
+    } catch (e) {
+      logger.warn(`[invoice-followups] credit reversal after prior-delivery replay skipped for ${row.invoice_id}: ${e.message}`);
+    }
+  }
   const nextIndex = row.step_index + 1;
   // anchor_at (set when an admin edit shifted the due date) overrides the
   // send-time anchor so the whole remaining cadence stays on one timeline.
