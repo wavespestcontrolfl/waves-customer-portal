@@ -3,37 +3,40 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The actual canvas/decode pipeline lives in imageCompression.js and has
+// its own test suite; mocking it at the module boundary here lets these
+// tests prove what THIS component does with the result (sequential calls,
+// mime recovery, the decode-failure fallback, the processing-state guard)
+// without fighting jsdom's missing canvas/Image/createImageBitmap support.
+vi.mock('../../utils/imageCompression', () => ({
+  encodeJpegFile: vi.fn(),
+}));
+
+import { encodeJpegFile } from '../../utils/imageCompression';
 import VisitPrepPhotoForm from './VisitPrepPhotoForm';
 
 const photoFile = (name = 'bug.jpg') => new File(['photo'], name, { type: 'image/jpeg' });
+
+// Default: every encode "succeeds" immediately with a small JPEG File, so
+// tests that don't care about the resize pipeline itself can pick and send
+// without extra setup.
+function jpegOf(file) {
+  return new File(['jpeg-bytes'], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
+}
 
 function fileInput() {
   return document.querySelector('input[type="file"]');
 }
 
-// jsdom has no canvas, so the picker's real Image never decodes anything.
-// Default fixture: dimensions AT the 1600px resize threshold, so every
-// resize call takes resizeDataUrl's short-circuit branch (the original
-// data URL, unchanged) without ever touching a canvas — same limitation
-// and same fixture shape as PhotoId.test.jsx's own FixtureImage. Individual
-// tests below override this (large dimensions + stubbed canvas, or
-// onerror) to exercise the resize and decode-failure branches.
-class SmallFixtureImage {
-  set src(_value) {
-    this.width = 800;
-    this.height = 600;
-    this.onload();
-  }
-}
-
 beforeEach(() => {
-  vi.stubGlobal('Image', SmallFixtureImage);
+  encodeJpegFile.mockReset();
+  encodeJpegFile.mockImplementation(async (file) => jpegOf(file));
 });
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
 });
 
 describe('VisitPrepPhotoForm', () => {
@@ -137,24 +140,66 @@ describe('VisitPrepPhotoForm', () => {
     expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
   });
 
-  it('an empty-type .heic file (some browsers report this) is accepted and sent as image/heic', async () => {
-    // Simulates a real iPhone HEIC pick outside Safari: the browser can't
-    // decode HEIC into an <img>/canvas at all, so the picker falls back to
-    // the original bytes — but must still recover the mime from the
-    // filename extension so the multipart part declares image/heic, not
-    // application/octet-stream.
-    class UndecodableImage {
-      set src(_value) { this.onerror(); }
-    }
-    vi.stubGlobal('Image', UndecodableImage);
+  it('encodes picked photos ONE AT A TIME, never concurrently (a full-res decode+canvas per file is too much live memory for Promise.all)', async () => {
+    const resolvers = [];
+    encodeJpegFile.mockImplementation((file) => new Promise((resolve) => {
+      resolvers.push(() => resolve(jpegOf(file)));
+    }));
+
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
+    fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
+
+    // Only the FIRST file's encode has started — the second must wait for
+    // it, not run alongside it.
+    await waitFor(() => expect(encodeJpegFile).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: /Remove photo/ })).not.toBeInTheDocument();
+
+    resolvers[0]();
+    await waitFor(() => expect(encodeJpegFile).toHaveBeenCalledTimes(2));
+    // The second call only happened after the first resolved — proof the
+    // loop is sequential, not fired together.
+    expect(screen.queryAllByRole('button', { name: /Remove photo/ })).toHaveLength(0);
+
+    resolvers[1]();
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
+  });
+
+  it('Send stays disabled while a pick is still processing, so a tap can never omit the new photo', async () => {
+    let releaseEncode;
+    encodeJpegFile.mockImplementation((file) => new Promise((resolve) => {
+      releaseEncode = () => resolve(jpegOf(file));
+    }));
+
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
+    fireEvent.change(fileInput(), { target: { files: [photoFile()] } });
+
+    await waitFor(() => expect(encodeJpegFile).toHaveBeenCalledTimes(1));
+    // Still processing — Send must stay disabled and say nothing is picked.
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Adding…' })).toBeDisabled();
+
+    releaseEncode();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+  });
+
+  it('an empty-type .heic file (some browsers report this, or application/octet-stream) is accepted, sent as image/heic, and shows a placeholder tile — never a broken preview', async () => {
+    // The browser can't decode HEIC into a canvas at all (the common case
+    // outside Safari) — the picker falls back to the original bytes, but
+    // must still recover the mime from the filename extension so the
+    // multipart part declares image/heic, not application/octet-stream,
+    // AND must not try to preview bytes the browser just proved it can't
+    // render.
+    encodeJpegFile.mockResolvedValue(null);
 
     const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
-    const heic = new File(['heicbytes'], 'iphone-photo.heic', { type: '' });
+    const heic = new File(['heicbytes'], 'iphone-photo.heic', { type: 'application/octet-stream' });
     fireEvent.change(fileInput(), { target: { files: [heic] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByTestId('photo-placeholder')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -164,27 +209,14 @@ describe('VisitPrepPhotoForm', () => {
   });
 
   it('an oversized image is downscaled to a JPEG under the cap and sent, never silently dropped', async () => {
-    // A real iPhone camera JPEG: well over 5 MB, well over the 1600px
-    // resize threshold. Stub the canvas jsdom doesn't implement so the
-    // "needs resize" branch can run deterministically.
-    class LargeFixtureImage {
-      set src(_value) {
-        this.width = 4000;
-        this.height = 3000;
-        this.onload();
-      }
-    }
-    vi.stubGlobal('Image', LargeFixtureImage);
-    const smallJpeg = 'data:image/jpeg;base64,c21hbGw=';
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() });
-    vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(smallJpeg);
+    // >5 MB original — the earlier (byte-size-first) filter would have
+    // dropped this before the resize ever ran.
+    const oversized = new File([new Uint8Array(6 * 1024 * 1024)], 'camera-roll.jpg', { type: 'image/jpeg' });
+    encodeJpegFile.mockResolvedValue(new File(['small'], 'camera-roll.jpg', { type: 'image/jpeg' }));
 
     const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
 
-    // >5 MB original — the old (byte-size-first) filter would have dropped
-    // this silently before the resize ever ran.
-    const oversized = new File([new Uint8Array(6 * 1024 * 1024)], 'camera-roll.jpg', { type: 'image/jpeg' });
     fireEvent.change(fileInput(), { target: { files: [oversized] } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -196,7 +228,7 @@ describe('VisitPrepPhotoForm', () => {
     expect(sent.size).toBeLessThan(5 * 1024 * 1024);
   });
 
-  it('an unsupported file is rejected with one short line, never silently dropped', async () => {
+  it('an unsupported file is rejected with one short line, never silently dropped, and never reaches the encoder', async () => {
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
 
     const pdf = new File(['%PDF-1.4'], 'invoice.pdf', { type: 'application/pdf' });
@@ -204,6 +236,7 @@ describe('VisitPrepPhotoForm', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Photos must be JPEG, PNG, WebP, or HEIC, 5 MB or smaller.');
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(encodeJpegFile).not.toHaveBeenCalled();
   });
 
   it('picking more than the remaining room shows a count line instead of silently trimming', async () => {

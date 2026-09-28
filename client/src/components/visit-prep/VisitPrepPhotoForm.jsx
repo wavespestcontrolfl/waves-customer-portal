@@ -19,12 +19,22 @@
  * through a shared component for a single caller today — scope §6 calls
  * for extracting a picker only where doing so doesn't change an existing
  * caller's behavior; see the PR 2 report for the full reasoning.
+ *
+ * The DOWNSCALE step, though, reuses `client/src/utils/imageCompression.js`
+ * (`encodeJpegFile`) rather than a second decode/canvas pipeline — that is
+ * the repo's one designated canvas encoder (AGENTS.md: extend the existing
+ * mechanism, don't build a parallel one) and, critically, the reason it
+ * exists at all: a picked file is decoded and drawn to canvas ONE AT A TIME
+ * here (see `handleFiles` below), never with `Promise.all`, because a
+ * single 4032x3024 phone photo is already a ~46 MiB raster and decoding a
+ * multi-file pick concurrently can crash a mobile browser before anything
+ * uploads.
  */
 import { useEffect, useRef, useState } from 'react';
 import { COLORS, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as S } from '../../theme-customer';
 import Icon from '../Icon';
-import { mimeFromName, resizeImageFile } from '../../lib/image-resize';
+import { encodeJpegFile } from '../../utils/imageCompression';
 
 // Mirrors server/utils/request-photo-validation.js (MAX_PHOTOS,
 // MAX_PHOTO_BYTES — shared by visit-prep.js's VISIT_PREP_LIMITS) so an
@@ -36,6 +46,21 @@ const ALLOWED_TYPE_RE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
 const RESIZE_MAX_EDGE = 1600;
 const RESIZE_QUALITY = 0.85;
 const REJECTED_MESSAGE = 'Photos must be JPEG, PNG, WebP, or HEIC, 5 MB or smaller.';
+
+// Some browsers report an empty (or generic application/octet-stream)
+// `file.type` for HEIC/HEIF — recovered from the filename extension so the
+// multipart part still declares a real image type (a blank/generic type
+// would otherwise upload as application/octet-stream and fail the
+// server's declared-type allowlist). Small and single-use: PhotoId.jsx
+// keeps its own private copy of the same EXT_MIME/mimeFromName pair for
+// its own (unrelated, base64-JSON) picker — see the file header on why
+// this component isn't built on that one.
+const EXT_MIME = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif',
+};
+function mimeFromName(name) {
+  return EXT_MIME[String(name || '').split('.').pop().toLowerCase()] || null;
+}
 
 // Same value sets server/services/visit-prep.js's TOPICS and
 // server/routes/requests.js's VALID_LOCATIONS accept. Labels are this
@@ -87,6 +112,41 @@ function fileToPreview(file) {
   });
 }
 
+// One picked file -> `{ file, preview }` (accepted) or `null` (rejected:
+// unsupported type, or still over 5 MB after the resize/fallback attempt).
+// Pulled out of handleFiles's loop so the decision — type recovery,
+// downscale, decode-failure fallback, the final size check — reads as one
+// function with one job, called once per file from that loop.
+async function processPickedFile(file) {
+  let declaredMime = file.type;
+  if (!declaredMime || !ALLOWED_TYPE_RE.test(declaredMime)) {
+    declaredMime = mimeFromName(file.name) || declaredMime || '';
+  }
+  if (!declaredMime || !ALLOWED_TYPE_RE.test(declaredMime)) return null;
+
+  const encoded = await encodeJpegFile(file, { maxEdge: RESIZE_MAX_EDGE, quality: RESIZE_QUALITY });
+  let outFile = encoded;
+  // The preview is only ever built from bytes we know decode — the
+  // fallback below keeps a file the BROWSER couldn't render (that's why
+  // it fell back), so a data-URL preview of it would just be a broken
+  // image. null renders the placeholder tile instead.
+  let preview = null;
+  if (outFile) {
+    preview = await fileToPreview(outFile);
+  } else if (file.size > MAX_PHOTO_BYTES) {
+    // Couldn't decode at all (e.g. HEIC outside Safari), and the original
+    // is too large to fall back to untouched.
+    return null;
+  } else {
+    // Falls back to the original bytes, re-typed, since they already
+    // fit — the server converts HEIC itself either way.
+    outFile = new File([file], file.name, { type: declaredMime });
+  }
+  if (outFile.size > MAX_PHOTO_BYTES) return null;
+
+  return { file: outFile, preview };
+}
+
 function Chip({ label, active, onClick }) {
   return (
     <button
@@ -126,6 +186,11 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   const [phase, setPhase] = useState('form'); // 'form' | 'sending' | 'sent' | 'gone'
   const [error, setError] = useState(null);
   const [sentCount, setSentCount] = useState(0);
+  // True for the whole duration of a pick's decode/resize loop (see
+  // handleFiles) — Send is disabled while this is true so a tap can never
+  // submit the OLD `photos` state and silently omit a photo still being
+  // processed.
+  const [pickingPhotos, setPickingPhotos] = useState(false);
   const fileInputRef = useRef(null);
   const mountedRef = useRef(true);
   const ackHeadingRef = useRef(null);
@@ -154,20 +219,23 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   );
 
   // Every picked file is downscaled to a <=1600px JPEG at 0.85 quality
-  // before it ever reaches FormData — the same figures PhotoId.jsx's,
-  // LawnAssessmentPanel.jsx's, TechLawnDiagnosticPage.jsx's and
-  // TechSocialPostPage.jsx's own private copies use (client/src/lib/
-  // image-resize.js). A normal iPhone camera JPEG is routinely well over
-  // 5 MB straight off the camera roll — checking the ORIGINAL byte size
-  // (the earlier version of this file did) silently drops it before the
-  // resize ever gets a chance to shrink it under the cap. An empty/generic
-  // `file.type` (some browsers report this for HEIC/HEIF) is corrected
-  // from the filename extension so the multipart part still declares the
-  // right Content-Type — the server checks the DECLARED type against its
-  // allowlist, and an empty type goes out as application/octet-stream.
-  // A pick this loop drops for ANY reason (unsupported type, still over
-  // 5 MB after the resize attempt, or beyond the remaining photo count)
-  // shows one short line rather than silently vanishing.
+  // before it ever reaches FormData, through the shared `encodeJpegFile`
+  // (see the file header) — ONE AT A TIME, in a plain sequential loop,
+  // never `Promise.all`: decoding and canvasing several full-resolution
+  // phone photos concurrently can crash a mobile browser before anything
+  // uploads. `pickingPhotos` tracks the whole loop so Send stays disabled
+  // (and "Add photos" shows it's working) until every picked file has
+  // actually finished — otherwise a tap on Send while a pick is still
+  // resolving would submit the OLD `photos` state and silently omit the
+  // new one. An empty/generic `file.type` (some browsers report this, or
+  // report `application/octet-stream`, for HEIC/HEIF) is corrected from
+  // the filename extension so the multipart part still declares the right
+  // Content-Type — the server checks the DECLARED type against its
+  // allowlist, and a blank/generic type goes out as application/octet-
+  // stream. A pick this loop drops for ANY reason (unsupported type,
+  // still over 5 MB after the resize/fallback attempt, or beyond the
+  // remaining photo count) shows one short line rather than silently
+  // vanishing.
   const handleFiles = async (fileList) => {
     const all = Array.from(fileList || []);
     if (!all.length) return;
@@ -178,35 +246,24 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
     const overflowCount = all.length - picked.length;
     let rejectedForTypeOrSize = false;
 
-    const results = await Promise.all(picked.map(async (file) => {
-      const declaredMime = file.type || mimeFromName(file.name);
-      if (!declaredMime || !ALLOWED_TYPE_RE.test(declaredMime)) return null;
-
-      let outFile = await resizeImageFile(file, { maxEdge: RESIZE_MAX_EDGE, quality: RESIZE_QUALITY });
-      if (!outFile) {
-        // The browser couldn't decode this image at all (e.g. HEIC outside
-        // Safari) — fall back to the original bytes, re-typed, when they
-        // already fit; the server converts HEIC itself either way.
-        if (file.size > MAX_PHOTO_BYTES) return null;
-        outFile = new File([file], file.name, { type: declaredMime });
+    setPickingPhotos(true);
+    try {
+      const accepted = [];
+      for (const file of picked) {
+        // One decode/canvas in flight at a time — see the block comment
+        // above.
+        const result = await processPickedFile(file);
+        if (result) accepted.push(result);
+        else rejectedForTypeOrSize = true;
       }
-      if (outFile.size > MAX_PHOTO_BYTES) return null;
 
-      const preview = await fileToPreview(outFile);
-      return { file: outFile, preview };
-    }));
-
-    const accepted = [];
-    for (const result of results) {
-      if (result) accepted.push(result);
-      else rejectedForTypeOrSize = true;
+      setError(overflowCount > 0
+        ? `You can add up to ${maxPickable} photos.`
+        : rejectedForTypeOrSize ? REJECTED_MESSAGE : null);
+      if (accepted.length) setPhotos((prev) => [...prev, ...accepted].slice(0, maxPickable));
+    } finally {
+      setPickingPhotos(false);
     }
-
-    setError(overflowCount > 0
-      ? `You can add up to ${maxPickable} photos.`
-      : rejectedForTypeOrSize ? REJECTED_MESSAGE : null);
-    if (!accepted.length) return;
-    setPhotos((prev) => [...prev, ...accepted].slice(0, maxPickable));
   };
 
   const removePhoto = (index) => {
@@ -281,6 +338,8 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       </div>
     );
   }
+
+  const sendDisabled = !photos.length || phase === 'sending' || pickingPhotos;
 
   return (
     <div data-testid="visit-prep-form">
@@ -358,7 +417,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
                   style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8, border: `1px solid ${S.border}`, display: 'block' }}
                 />
               ) : (
-                <div style={{ height: '100%', border: `1px solid ${S.border}`, borderRadius: 8 }} />
+                <div data-testid="photo-placeholder" style={{ height: '100%', border: `1px solid ${S.border}`, borderRadius: 8, background: S.soft }} />
               )}
               <button
                 type="button"
@@ -391,6 +450,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
+          disabled={pickingPhotos}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -404,12 +464,13 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
             color: S.text,
             fontSize: 15,
             fontWeight: 600,
-            cursor: 'pointer',
+            cursor: pickingPhotos ? 'default' : 'pointer',
+            opacity: pickingPhotos ? 0.6 : 1,
             marginBottom: 14,
           }}
         >
           <Icon name="camera" size={16} />
-          Add photos
+          {pickingPhotos ? 'Adding…' : 'Add photos'}
         </button>
       ) : null}
 
@@ -428,7 +489,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
       <button
         type="button"
         onClick={send}
-        disabled={!photos.length || phase === 'sending'}
+        disabled={sendDisabled}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -443,8 +504,8 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           fontFamily: FONTS.ui,
           fontWeight: 700,
           fontSize: 15,
-          cursor: (!photos.length || phase === 'sending') ? 'default' : 'pointer',
-          opacity: (!photos.length || phase === 'sending') ? 0.5 : 1,
+          cursor: sendDisabled ? 'default' : 'pointer',
+          opacity: sendDisabled ? 0.5 : 1,
         }}
       >
         {phase === 'sending' ? 'Sending…' : 'Send'}
