@@ -68,6 +68,47 @@ for (const { label, statement } of lawnPestFindings) {
 const routineLiveLawnPests = catalog.lawn.find(([id]) => id === 'live-pests')?.[1];
 LAWN_PEST_OBSERVATION_SCOPE.set(routineLiveLawnPests, { location: null, state: 'present' });
 
+// Statement text (before " Location: … Extent: …") for each definite-live-
+// pest label, restricted to the seven definite-live pests — the "No live
+// pests detected" absence finding is deliberately excluded. Lets the report
+// "Near you" line (GATE_REPORT_NEAR_YOU) trace a stored
+// service_findings.title back to which pest it names, without hand-copying
+// the catalog statements a second time.
+const LAWN_DEFINITE_LIVE_PEST_STATEMENTS = new Map(
+  lawnPestFindings
+    .filter(({ label }) => LAWN_DEFINITE_LIVE_PEST_LABELS.has(label))
+    .map(({ label, statement }) => [statement, label]),
+);
+
+// Fixed lower-case plural customer noun for each definite-live-pest label
+// (owner ruling 2026-09-28, "Near you" line): strips the internal
+// " — observed" qualifier the chinch-bug label alone carries. One fixed map
+// so every "Near you" consumer reads the same customer-facing word instead
+// of re-deriving it.
+const LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS = new Map([
+  ['Chinch bugs — observed', 'chinch bugs'],
+  ['Tropical sod webworms', 'tropical sod webworms'],
+  ['Armyworms', 'armyworms'],
+  ['White grubs', 'white grubs'],
+  ['Mole crickets', 'mole crickets'],
+  ['Fire ants', 'fire ants'],
+  ['Turf scale or mealybugs', 'turf scale or mealybugs'],
+]);
+
+// Resolves a stored service_findings.title back to its definite-live-pest
+// label, or null when the title is not one of these seven (including when
+// it is the "No live pests detected" absence finding, or an unrelated
+// finding entirely). Titles are always `${statement} Location: …` with an
+// optional ` Extent: …` suffix, and every definite-live-pest statement is
+// unique text, so a prefix match is exact.
+function lawnDefiniteLivePestLabelForTitle(title) {
+  const text = String(title || '');
+  for (const [statement, label] of LAWN_DEFINITE_LIVE_PEST_STATEMENTS) {
+    if (text.startsWith(statement)) return label;
+  }
+  return null;
+}
+
 const lawnDiseaseGroup = lawnCatalog.groups
   .find(({ label }) => label === 'Disease and fungus-like conditions');
 const lawnDiseaseFindings = [
@@ -161,6 +202,9 @@ function conflictingRoutineObservations(observations = [], { treeShrubLandscapeC
 module.exports = {
   ROUTINE_SERVICE_OBSERVATIONS,
   STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  LAWN_DEFINITE_LIVE_PEST_LABELS,
+  LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
+  lawnDefiniteLivePestLabelForTitle,
   observationsForRoutineService,
   conflictingRoutineObservations,
 };

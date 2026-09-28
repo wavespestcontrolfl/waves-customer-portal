@@ -77,6 +77,7 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_REPORT_PLAN_SUMMARY=true ("Your plan" section on the LIVE report: an active plan member's visit/re-service COUNTS for this year — never prices, owner ruling 2026-09-28; live view only, stripped from PDF/static like nextAppointment; dark = report payload carries no planSummary)
+ *   GATE_REPORT_NEAR_YOU=true  ("Near you" line on the LIVE LAWN report only: the lawn pest most often found among other lawn customers in the same city over the last 30 ET days, shown only at/above the NEAR_YOU_MIN_CUSTOMERS distinct-customer floor — owner ruling 2026-09-28, "lawn only"; live view only, stripped from PDF/static like planSummary; dark = report payload carries no nearYou)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
@@ -495,6 +496,17 @@ const gates = {
   // static/sms_preview never carry it at any setting. Kill switch: unset or
   // any non-'true' value.
   reportPlanSummary: process.env.GATE_REPORT_PLAN_SUMMARY === 'true',
+
+  // "Near you" line on the LIVE lawn report ONLY (owner ask 2026-09-28,
+  // "lawn only"): one fixed-copy sentence naming the lawn pest most often
+  // found among other lawn customers in the same city over the last 30 ET
+  // days, shown only once at least NEAR_YOU_MIN_CUSTOMERS distinct
+  // customers had it (report-data.js) — never a count, name, or address.
+  // Additive and read-only; off = report payloads carry no nearYou key,
+  // byte-identical to today. Live view only, like planSummary above — PDF/
+  // static/sms_preview never carry it at any setting. Kill switch: unset or
+  // any non-'true' value.
+  reportNearYou: process.env.GATE_REPORT_NEAR_YOU === 'true',
 
   // Report-lane completion text for a visit that DOES have a bill. The
   // service_report_v1_with_invoice template ("Your {service_type} report is

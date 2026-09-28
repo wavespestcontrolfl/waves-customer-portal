@@ -581,7 +581,7 @@ describe('planSummary opt-in ("Your plan" card, GATE_REPORT_PLAN_SUMMARY)', () =
 
   test('the option defaults to OFF and is forwarded to the builder', () => {
     expect(src).toMatch(/planSummary = false,/);
-    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,\n/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard, nearYou,\n/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {
@@ -600,7 +600,7 @@ describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UP
 
   test('the option defaults to OFF and is forwarded to the builder', () => {
     expect(src).toMatch(/upcomingVisitsCard = false,/);
-    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,\n/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard, nearYou,\n/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {
@@ -612,6 +612,23 @@ describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UP
   test('the Q&A call site does NOT opt in', () => {
     // The ask handler's call, verbatim — it must stay scan-free.
     expect(src).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+  });
+});
+
+describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
+  // Same shape as planSummary/upcomingVisitsCard: the city-wide lawn-findings
+  // read runs only for the /data render, the one caller that shows the line.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('the option defaults to OFF and is forwarded to the builder', () => {
+    expect(src).toMatch(/nearYou = false,/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard, nearYou,\n/);
+  });
+
+  test('exactly one call site opts in, and it is the /data render', () => {
+    const optIns = src.match(/nearYou: true/g) || [];
+    expect(optIns).toHaveLength(1);
+    expect(src).toMatch(/composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,/);
   });
 });
 

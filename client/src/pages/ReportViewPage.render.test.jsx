@@ -1305,3 +1305,42 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     }
   });
 });
+
+// "Near you" line (owner ask 2026-09-28, lawn only): a fixed sentence naming
+// the lawn pest found most often around the customer's city, live mode only.
+describe('ReportViewPage — "Near you" line (nearYou)', () => {
+  it('live mode with nearYou renders the fixed sentence', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+    const { container } = renderReport(payload);
+
+    await screen.findByText('Near you');
+    const section = container.querySelector('#near-you');
+    expect(section).not.toBeNull();
+    expect(within(section).getByText('Around Parrish this past month, chinch bugs were the lawn pest we found most often.')).toBeInTheDocument();
+  });
+
+  it('renders nothing when the payload carries no nearYou', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.nearYou;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(container.querySelector('#near-you')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries nearYou (the server already strips it)', async () => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(container.querySelector('#near-you')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});

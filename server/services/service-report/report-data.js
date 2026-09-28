@@ -58,15 +58,23 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
-const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+const {
+  STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
+  lawnDefiniteLivePestLabelForTitle,
+} = require('../../../shared/service-completion-observations');
 // The plan's callbacks, as a customer knows them ("re-service"). Not
 // re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
 // rodent_trapping_followup, an included trapping-program visit that no
 // customer would call a re-service.
 const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 const { isActivePlanCustomer } = require('../waveguard-existing-services');
-const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
-const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
+const { isPerformedVisitOutcome, NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts, customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
+// "Near you" privacy floor: a lawn pest is named for a city only once this
+// many OTHER customers there had it in the window, so one household's
+// problem is never broadcast.
+const NEAR_YOU_MIN_CUSTOMERS = 3;
 
 let PhotoService = null;
 try {
@@ -1872,6 +1880,48 @@ function structuredCustomerConcern(structured = {}) {
 // snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
 // (pdf-queue.js) builds its payload outside the route helper, so the strip
 // must be shared, not route-inlined (codex P2 2026-07-18).
+// The lawn pest most often found among OTHER lawn customers in this
+// report's own service city over the last 30 ET days, named only once
+// NEAR_YOU_MIN_CUSTOMERS distinct customers had it (the "Near you" line,
+// GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records
+// only (the Pest Pressure prior-visit rule); the pest comes from the
+// structured lawn findings (shared/service-completion-observations.js).
+// Returns { city, pest } — a fixed customer noun, never a count, name, or
+// address — or null.
+async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } = {}) {
+  const nearYouCity = String(city || '').trim();
+  if (!customerId || !nearYouCity) return null;
+  const todayEt = etDateString(now);
+  const sinceEt = etDateString(addETDays(now, -29));
+  const { rows } = await knex.raw(`
+    SELECT f.title, sr.customer_id
+    FROM service_findings f
+    JOIN service_records sr ON sr.id = f.service_record_id
+    LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
+    JOIN customers c ON c.id = sr.customer_id
+    WHERE sr.status = 'completed'
+      AND sr.service_line = 'lawn'
+      AND sr.customer_id <> ?
+      AND sr.service_date >= ?::date AND sr.service_date <= ?::date
+      AND LOWER(TRIM(COALESCE(ss.service_address_city, c.city))) = LOWER(?)
+      AND ${customerVisibleServiceRecordPredicate('sr')}
+      AND COALESCE(sr.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+  `, [customerId, sinceEt, todayEt, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
+  const customersByLabel = new Map();
+  for (const row of rows || []) {
+    const label = lawnDefiniteLivePestLabelForTitle(row.title);
+    if (!label || !row.customer_id) continue;
+    if (!customersByLabel.has(label)) customersByLabel.set(label, new Set());
+    customersByLabel.get(label).add(String(row.customer_id));
+  }
+  const [top] = [...customersByLabel.entries()]
+    .map(([label, customers]) => ({ label, customers: customers.size }))
+    .filter((entry) => entry.customers >= NEAR_YOU_MIN_CUSTOMERS)
+    .sort((a, b) => (b.customers - a.customers) || a.label.localeCompare(b.label));
+  const pest = top ? LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS.get(top.label) : null;
+  return pest ? { city: nearYouCity, pest } : null;
+}
+
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
@@ -1879,6 +1929,7 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
   delete data.planSummary;
+  delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -5078,6 +5129,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     }
   } catch { /* best-effort */ }
 
+  // "Near you" line on the LIVE lawn report (owner ask 2026-09-28, "lawn
+  // only", GATE_REPORT_NEAR_YOU): see loadNearYouLawnPest. Same page-only
+  // opt-in as the plan card (the /ask build never pays for it).
+  let nearYou = null;
+  if (opts.mode === 'live' && opts.nearYou === true && featureGates.isEnabled('reportNearYou')
+    && serviceLine === 'lawn') {
+    try {
+      nearYou = await loadNearYouLawnPest(knex, { customerId: service.customer_id, city: service.city });
+    } catch { /* best-effort */ }
+  }
+
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
   // links the customer to their active bond on the portal My Plan tab with
   // its renewal date. Rides the SAME gate as the portal card
@@ -5964,6 +6026,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // stripLiveOnlyScheduleFields deletes it for every non-live render, same
     // staleness rule as nextAppointment.
     ...(planSummary ? { planSummary } : {}),
+    ...(nearYou ? { nearYou } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static
@@ -6124,6 +6187,7 @@ module.exports = {
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
+  loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
   parseJsonObject,

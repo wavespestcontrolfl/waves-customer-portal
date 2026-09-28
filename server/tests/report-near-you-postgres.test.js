@@ -1,0 +1,99 @@
+// Real migrated PostgreSQL, synthetic records, rolled back after every test.
+// Runs in the existing DB-gated CI step or the owning worktree's private QA DB.
+//
+// report-near-you.test.js pins the conditions and the counting with a fake;
+// this suite proves loadNearYouLawnPest's SQL filters against the real schema:
+// the city rule (the visit's stamped service city, else the customer's),
+// the 30-ET-day window, lawn-only, performed and customer-visible records,
+// and the viewer's own customer left out.
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
+
+const { randomUUID } = require('node:crypto');
+const lawnCatalog = require('../../shared/lawn-condition-findings.json');
+const { loadNearYouLawnPest } = require('../services/service-report/report-data');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+const statementFor = (label) => lawnCatalog.groups
+  .flatMap(({ findings }) => findings)
+  .find((finding) => finding.label === label).statement;
+const CHINCH_TITLE = `${statementFor('Chinch bugs — observed')} Location: Front yard.`;
+const daysAgo = (n) => etDateString(addETDays(new Date(), -n));
+
+postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
+  let database;
+  let trx;
+
+  beforeAll(() => {
+    const connection = process.env.DATABASE_URL;
+    const url = new URL(connection);
+    const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
+    database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+  });
+
+  beforeEach(async () => { trx = await database.transaction(); });
+  afterEach(async () => { if (trx) await trx.rollback(); });
+  afterAll(async () => { await database?.destroy(); });
+
+  async function customer(city = 'Parrish') {
+    const id = randomUUID();
+    await trx('customers').insert({
+      id, first_name: 'Synthetic', last_name: 'Fixture',
+      email: `${id}@example.invalid`, phone: `fixture-${id.slice(0, 8)}`,
+      address_line1: '100 Test Lane', city, zip: '00000',
+      active: true, pipeline_stage: 'active_customer', monthly_rate: 0,
+    });
+    return id;
+  }
+
+  // A completed lawn visit with one chinch-bug finding. `stampedCity` models
+  // a visit whose booking stamps a different service address city.
+  async function lawnFinding(customerId, {
+    date = daysAgo(5), line = 'lawn', status = 'completed', stampedCity = null, notes = {}, title = CHINCH_TITLE,
+  } = {}) {
+    const [sched] = await trx('scheduled_services').insert({
+      customer_id: customerId, scheduled_date: date, service_type: 'Lawn Care Visit', status: 'completed',
+      service_address_city: stampedCity,
+    }).returning('*');
+    const [rec] = await trx('service_records').insert({
+      customer_id: customerId, service_date: date, service_type: 'Lawn Care Visit', status,
+      scheduled_service_id: sched.id, service_line: line, structured_notes: JSON.stringify(notes),
+    }).returning('*');
+    await trx('service_findings').insert({ service_record_id: rec.id, category: 'observation', severity: 'medium', title });
+  }
+
+  test('three other customers in the city name the pest; the viewer, other cities and stamped-away visits do not count', async () => {
+    const viewer = await customer();
+    await lawnFinding(viewer); // the viewer's own finding never counts
+    for (let i = 0; i < 2; i += 1) await lawnFinding(await customer());
+    // Lives in Parrish, but this visit's booking stamps another city.
+    await lawnFinding(await customer(), { stampedCity: 'Bradenton' });
+    await lawnFinding(await customer('Bradenton')); // another city
+    expect(await loadNearYouLawnPest(trx, { customerId: viewer, city: 'Parrish' })).toBeNull();
+
+    // A third Parrish customer — here through the stamp, with a customer city
+    // elsewhere — meets the floor; the city compares trimmed and case-blind.
+    await lawnFinding(await customer('Sarasota'), { stampedCity: 'parrish' });
+    expect(await loadNearYouLawnPest(trx, { customerId: viewer, city: ' PARRISH ' }))
+      .toEqual({ city: 'PARRISH', pest: 'chinch bugs' });
+  });
+
+  test('outside the 30-day window, non-lawn, not performed, not completed and internal-only records do not count', async () => {
+    const viewer = await customer();
+    await lawnFinding(await customer()); // one that counts
+    await lawnFinding(await customer()); // two that count
+    await lawnFinding(await customer(), { date: daysAgo(30) }); // just past the window
+    await lawnFinding(await customer(), { line: 'pest' });
+    await lawnFinding(await customer(), { notes: { visitOutcome: 'customer_declined' } });
+    await lawnFinding(await customer(), { status: 'incomplete' });
+    await lawnFinding(await customer(), { notes: { typedReportDelivery: 'internal_only' } });
+    expect(await loadNearYouLawnPest(trx, { customerId: viewer, city: 'Parrish' })).toBeNull();
+
+    await lawnFinding(await customer(), { date: daysAgo(29) }); // the window's first day counts
+    expect(await loadNearYouLawnPest(trx, { customerId: viewer, city: 'Parrish' }))
+      .toEqual({ city: 'Parrish', pest: 'chinch bugs' });
+  });
+});
