@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/seo/seo-action-generator', () => ({
   getSummary: jest.fn(),
+  autoApprove: jest.fn(),
 }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
@@ -132,6 +133,28 @@ describe('admin seo actions routes — owner-only approve guard', () => {
       expect(decisionsInsert).toHaveBeenCalledWith(
         expect.objectContaining({ decision: 'accepted', decided_by_admin_id: 'admin-1' }),
       );
+    });
+  });
+
+  test('bulk auto-approve is owner-only too: a non-owner gets 403 and nothing is approved; the owner reaches it', async () => {
+    SeoActionGenerator.autoApprove.mockResolvedValue({ approved: 2 });
+    await withServer(async (baseUrl) => {
+      const denied = await fetch(`${baseUrl}/admin/seo/actions/auto-approve`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin2', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'example.test' }),
+      });
+      expect(denied.status).toBe(403);
+      expect((await denied.json()).error).toBe('This action is limited to the owner account.');
+      expect(SeoActionGenerator.autoApprove).not.toHaveBeenCalled();
+
+      const allowed = await fetch(`${baseUrl}/admin/seo/actions/auto-approve`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'example.test' }),
+      });
+      expect(allowed.status).toBe(200);
+      expect(SeoActionGenerator.autoApprove).toHaveBeenCalledWith('example.test');
     });
   });
 

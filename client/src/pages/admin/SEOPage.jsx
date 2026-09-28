@@ -7989,7 +7989,9 @@ function ActionsTab({ domain }) {
             </Button>
             <Button
               onClick={() =>
-                adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)
+                adminPost("/admin/seo/actions/auto-approve", { domain })
+                  .then(loadData)
+                  .catch((e) => setActionError(e.message || "Auto-approve failed."))
               }
               variant="secondary"
             >
