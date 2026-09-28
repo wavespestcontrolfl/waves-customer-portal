@@ -153,7 +153,7 @@ describe('intelligence bar Sentry write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('resolve_sentry_issue: unconfirmed builds a preview naming the issue by title, never resolves', async () => {
+  test('resolve_sentry_issue: unconfirmed builds a preview naming the issue by title and its pinned internal id, never resolves', async () => {
     process.env.SENTRY_API_TOKEN = 'sentry-token';
     global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
 
@@ -163,7 +163,30 @@ describe('intelligence bar Sentry write tools (preview only)', () => {
     expect(result.action).toBe('Resolve');
     expect(result.issue.short_id).toBe('WAVES-PORTAL-1A');
     expect(result.issue.title).toBe(issueFixture.title);
+    // The pinned canonical internal id, not just the display short id.
+    expect(result.issue.id).toBe(issueFixture.id);
     expect(result.note).toContain(issueFixture.title);
+  });
+
+  test('resolve_sentry_issue: a mixed-case / whitespace short id still resolves the exact issue', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+
+    const result = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: '  waves-portal-1a  ' });
+    expect(result.error).toBeUndefined();
+    expect(result.issue.short_id).toBe('WAVES-PORTAL-1A');
+  });
+
+  test('resolve_sentry_issue: shortIdLookup falling back to a fuzzy text-search hit is refused, never trusted as a match', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    // Simulates Sentry's shortIdLookup silently degrading to a full-text
+    // search: the query didn't resolve to the real short id, but the API
+    // still returned SOME issue (an unrelated one whose title/message
+    // happens to contain the query text) instead of erroring.
+    global.fetch.mockResolvedValueOnce(jsonResponse([{ ...issueFixture, shortId: 'WAVES-PORTAL-9Z' }]));
+
+    const result = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    expect(result.error).toMatch(/No Sentry issue found for short id "WAVES-PORTAL-1A"/);
   });
 
   test('ignore_sentry_issue: unconfirmed names the issue too', async () => {

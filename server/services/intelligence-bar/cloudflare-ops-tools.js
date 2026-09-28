@@ -165,13 +165,49 @@ async function getCloudflarePagesBuilds(input) {
   return { projects, total: projects.length, failing_builds: failing };
 }
 
-// Shared by the edge-error read and the cache-purge write preview — both
-// need the zone's real id/name, not just an operator-typed domain string.
+// Shared by the edge-error READ and (indirectly, via resolveZoneExact below)
+// the cache-purge WRITE preview — both need the zone's real id/name, not
+// just an operator-typed domain string. Reads may stay fuzzy; this one asks
+// Cloudflare's own exact `name=` filter and is fine for a read.
 async function resolveZone(zoneName) {
   const zonesJson = await cfRequest(`/zones?name=${encodeURIComponent(zoneName)}`);
   const zone = (zonesJson.result || [])[0];
   if (!zone) throw new Error(`No Cloudflare zone found named "${zoneName}".`);
   return zone;
+}
+
+const MAX_SUGGESTIONS = 5;
+
+// Exact (case-insensitive, trimmed) match ONLY — never a substring pick.
+// Used by every write tool's target resolution (pre-push audit #5275): a
+// fuzzy match could name one zone/project on the card while a later re-
+// resolve of the same raw string picks a different one (ordering isn't
+// guaranteed, and a new zone could start matching the same substring).
+// Reads (getCloudflareZones / getCloudflarePagesBuilds) may keep their
+// substring filter — this is for writes only. `%`/`_` in the input are
+// compared as literal characters, never SQL/LIKE wildcards, so a typed
+// wildcard can never widen the match.
+function resolveExactOrRefuse(items, rawNeedle, { label, getName }) {
+  const needle = String(rawNeedle || '').trim().toLowerCase();
+  const exact = items.filter((item) => getName(item).trim().toLowerCase() === needle);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    throw new Error(`Multiple Cloudflare ${label}s are exactly named "${rawNeedle}" — this should not happen; contact engineering. Candidates: ${exact.map(getName).join(', ')}.`);
+  }
+  const suggestions = items
+    .filter((item) => getName(item).toLowerCase().includes(needle))
+    .slice(0, MAX_SUGGESTIONS)
+    .map(getName);
+  const hint = suggestions.length ? ` Close matches: ${suggestions.join(', ')}.` : '';
+  throw new Error(`No Cloudflare ${label} found exactly named "${rawNeedle}".${hint}`);
+}
+
+// Full zone list + our own exact filter — never Cloudflare's `name=` filter
+// alone (undocumented exactness) and never the substring fallback the reads
+// use. Returns the one zone the write can safely name and act on.
+async function resolveZoneExact(zoneName) {
+  const zonesJson = await cfRequest(`/zones?per_page=${MAX_ZONES}`);
+  return resolveExactOrRefuse(zonesJson.result || [], zoneName, { label: 'zone', getName: (z) => z.name });
 }
 
 async function getCloudflareEdgeErrors(input) {
@@ -219,11 +255,13 @@ async function purgeCloudflareCache(input) {
   const zoneName = String(input.zone_name || '').trim();
   if (!zoneName) throw new Error('zone_name is required.');
   if (input.confirmed !== true) {
-    const zone = await resolveZone(zoneName);
+    const zone = await resolveZoneExact(zoneName);
     return {
       preview: true,
       tool: 'purge_cloudflare_cache',
-      zone: { zone: zone.name, status: zone.status, paused: Boolean(zone.paused) },
+      // The pinned canonical identity (id + exact name) — never the
+      // operator's raw string — is what a future commit path must act on.
+      zone: { id: zone.id, zone: zone.name, status: zone.status, paused: Boolean(zone.paused) },
       note: `Purge the ENTIRE Cloudflare edge cache for "${zone.name}" — every cached asset re-fetches from origin on the next request.`,
     };
   }
@@ -240,10 +278,7 @@ async function retryCloudflarePagesBuild(input) {
     const accountId = process.env.CF_ACCOUNT_ID;
     if (!accountId) throw new Error('CF_ACCOUNT_ID is not set — required for Pages project lookups.');
     const json = await cfRequest(`/accounts/${accountId}/pages/projects?per_page=${MAX_PAGES_PROJECTS}`);
-    const needle = projectName.toLowerCase();
-    const project = (json.result || []).find(p => p.name.toLowerCase() === needle)
-      || (json.result || []).find(p => p.name.toLowerCase().includes(needle));
-    if (!project) throw new Error(`No Cloudflare Pages project found named "${projectName}".`);
+    const project = resolveExactOrRefuse(json.result || [], projectName, { label: 'Pages project', getName: (p) => p.name });
     const dep = project.latest_deployment || null;
     if (!dep) throw new Error(`Project "${project.name}" has no deployment to retry.`);
     return {

@@ -187,15 +187,52 @@ describe('intelligence bar GitHub write tools (preview only)', () => {
     expect(result.note).toMatch(/nothing to rerun/);
   });
 
-  test('add_github_pr_label: unconfirmed names the PR, the label, and existing labels', async () => {
+  test('add_github_pr_label: unconfirmed names the PR, resolves the label against the real repo catalog, and existing labels', async () => {
     process.env.GITHUB_TOKEN = 'ghp_x';
-    global.fetch.mockResolvedValueOnce(jsonResponse(PR_FIXTURE));
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review' }, { name: 'existing-label' }]));
 
     const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
     expect(result.error).toBeUndefined();
     expect(result.pr.title).toBe(PR_FIXTURE.title);
     expect(result.label).toBe('needs-review');
     expect(result.existing_labels).toEqual(['existing-label']);
+  });
+
+  test('add_github_pr_label: a case/whitespace mismatch still resolves to the label\'s REAL canonical casing — never creates a duplicate', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'Needs-Review' }, { name: 'existing-label' }]));
+
+    // Operator typed lowercase/whitespace; the repo's real label is
+    // "Needs-Review" — the pinned label must be the REAL casing, not the
+    // operator's raw string (which would create a new duplicate label).
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: '  needs-review  ' });
+    expect(result.error).toBeUndefined();
+    expect(result.label).toBe('Needs-Review');
+  });
+
+  test('add_github_pr_label: a substring is never enough — no exact label named that exists refuses, listing close matches', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review-urgent' }, { name: 'existing-label' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
+    expect(result.error).toMatch(/No label named "needs-review" exists/);
+    expect(result.error).toContain('needs-review-urgent');
+  });
+
+  test('add_github_pr_label: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse([{ name: 'needs-review' }]));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-%' });
+    expect(result.error).toMatch(/No label named "needs-%" exists/);
   });
 
   test('add_github_pr_label: missing label refuses before any network call', async () => {

@@ -241,21 +241,51 @@ async function rerunFailedGithubChecks(input) {
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
 }
 
+const MAX_LABEL_SUGGESTIONS = 5;
+
+// Exact (case-insensitive, trimmed) match against the repo's REAL label
+// catalog — never the operator's raw string as-typed (pre-push audit
+// #5275). GitHub itself enforces label names unique case-insensitively per
+// repo, so an exact case-insensitive match is always at most one label; a
+// case/whitespace mismatch against an EXISTING label would otherwise create
+// a brand-new duplicate label instead of reusing the intended one. Returns
+// the label's own canonical name (correct casing), which is what gets
+// pinned into the preview/card, never the raw input.
+async function resolveRepoLabel(labelName) {
+  const needle = String(labelName).trim().toLowerCase();
+  const labels = await githubGet(`/repos/${repoPath()}/labels`, { per_page: 100 });
+  const list = Array.isArray(labels) ? labels : [];
+  const exact = list.filter(l => String(l.name || '').trim().toLowerCase() === needle);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    throw new Error(`Multiple labels on ${repoPath()} exactly match "${labelName}" — this should not happen; contact engineering. Candidates: ${exact.map(l => l.name).join(', ')}.`);
+  }
+  const suggestions = list
+    .filter(l => String(l.name || '').toLowerCase().includes(needle))
+    .slice(0, MAX_LABEL_SUGGESTIONS)
+    .map(l => l.name);
+  const hint = suggestions.length ? ` Close matches: ${suggestions.join(', ')}.` : '';
+  throw new Error(`No label named "${labelName}" exists on ${repoPath()}.${hint}`);
+}
+
 async function addGithubPrLabel(input) {
-  const label = String(input.label || '').trim();
-  if (!label) throw new Error('label is required.');
+  const rawLabel = String(input.label || '').trim();
+  if (!rawLabel) throw new Error('label is required.');
   if (input.confirmed !== true) {
     const pr = await resolvePr(input.pr_number);
+    const label = await resolveRepoLabel(rawLabel);
     const existing = (pr.labels || []).map(l => l.name);
     return {
       preview: true,
       tool: 'add_github_pr_label',
       pr: { number: pr.number, title: pr.title },
-      label,
+      // The pinned canonical label name (its real, existing casing) — never
+      // the operator's raw string — is what a future commit path must use.
+      label: label.name,
       existing_labels: existing,
-      note: existing.includes(label)
-        ? `PR #${pr.number} "${pr.title}" already has the "${label}" label.`
-        : `Add the "${label}" label to PR #${pr.number} "${pr.title}".`,
+      note: existing.includes(label.name)
+        ? `PR #${pr.number} "${pr.title}" already has the "${label.name}" label.`
+        : `Add the "${label.name}" label to PR #${pr.number} "${pr.title}".`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };

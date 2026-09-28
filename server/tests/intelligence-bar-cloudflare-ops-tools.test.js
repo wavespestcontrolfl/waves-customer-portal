@@ -148,15 +148,61 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('purge_cloudflare_cache: unconfirmed builds a preview naming the real zone, never purges', async () => {
+  test('purge_cloudflare_cache: unconfirmed builds a preview naming the real zone by its pinned id, never purges', async () => {
     process.env.CF_API_TOKEN = 'cf-token';
     global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }));
 
     const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' });
     expect(result.error).toBeUndefined();
     expect(result.preview).toBe(true);
-    expect(result.zone).toEqual({ zone: 'wavespestcontrol.com', status: 'active', paused: false });
+    // The pinned canonical identity (id + exact name), not just the name.
+    expect(result.zone).toEqual({ id: 'zone-1', zone: 'wavespestcontrol.com', status: 'active', paused: false });
     expect(result.note).toContain('wavespestcontrol.com');
+  });
+
+  test('purge_cloudflare_cache: a substring is never enough — it never picks a zone that merely contains the input', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [
+        { id: 'zone-1', name: 'bradentonflpestcontrol.com', status: 'active', paused: false },
+        { id: 'zone-2', name: 'bradenton-lawn-care.com', status: 'active', paused: false },
+      ],
+    }));
+
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'bradenton' });
+    expect(result.error).toMatch(/No Cloudflare zone found exactly named "bradenton"/);
+    // Suggests the near matches — never silently picks one.
+    expect(result.error).toContain('bradentonflpestcontrol.com');
+    expect(result.error).toContain('bradenton-lawn-care.com');
+  });
+
+  test('purge_cloudflare_cache: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [
+        { id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false },
+        { id: 'zone-2', name: 'bradentonflpestcontrol.com', status: 'active', paused: false },
+      ],
+    }));
+
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: '%.com' });
+    expect(result.error).toMatch(/No Cloudflare zone found exactly named "%\.com"/);
+  });
+
+  test('purge_cloudflare_cache: several zones exactly named the same thing is a refusal, never an arbitrary pick', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [
+        { id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false },
+        { id: 'zone-2', name: 'WavesPestControl.com', status: 'active', paused: false },
+      ],
+    }));
+
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' });
+    expect(result.error).toMatch(/Multiple Cloudflare zones are exactly named/);
   });
 
   test('purge_cloudflare_cache: confirmed:true refuses — the commit path is not built in this PR', async () => {
@@ -197,6 +243,52 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
 
     const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'nope' });
     expect(result.error).toMatch(/No Cloudflare Pages project/);
+  });
+
+  test('retry_cloudflare_pages_build: a substring is never enough — it never picks a project that merely contains the input', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [
+        { name: 'spoke-venice', latest_deployment: { latest_stage: { status: 'success' } } },
+        { name: 'spoke-venice-preview', latest_deployment: { latest_stage: { status: 'success' } } },
+      ],
+    }));
+
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    // Exact match on 'spoke-venice' exists (the other row only CONTAINS it),
+    // so this one still resolves — proves substring rows don't get pulled
+    // in as false ambiguity.
+    expect(result.error).toBeUndefined();
+    expect(result.project).toBe('spoke-venice');
+  });
+
+  test('retry_cloudflare_pages_build: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [{ name: 'spoke-venice', latest_deployment: { latest_stage: { status: 'success' } } }],
+    }));
+
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-%' });
+    expect(result.error).toMatch(/No Cloudflare Pages project found exactly named "spoke-%"/);
+  });
+
+  test('retry_cloudflare_pages_build: several projects exactly named the same thing is a refusal', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [
+        { name: 'spoke-venice', latest_deployment: null },
+        { name: 'Spoke-Venice', latest_deployment: null },
+      ],
+    }));
+
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    expect(result.error).toMatch(/Multiple Cloudflare Pages projects are exactly named/);
   });
 
   test('retry_cloudflare_pages_build: confirmed:true refuses — the commit path is not built in this PR', async () => {

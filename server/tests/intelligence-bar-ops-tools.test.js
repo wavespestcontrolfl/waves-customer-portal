@@ -280,7 +280,7 @@ describe('intelligence bar Railway write tools (preview only)', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('redeploy_railway_service: unconfirmed names the real service and its current deploy status', async () => {
+  test('redeploy_railway_service: unconfirmed names the real service by its pinned id and current deploy status', async () => {
     process.env.RAILWAY_TOKEN = 'proj-token';
     process.env.RAILWAY_PROJECT_ID = 'proj-1';
     process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
@@ -289,9 +289,65 @@ describe('intelligence bar Railway write tools (preview only)', () => {
     const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
     expect(result.error).toBeUndefined();
     expect(result.preview).toBe(true);
-    expect(result.service).toEqual({ service: 'portal', latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z' });
+    // The pinned canonical identity (id + exact name), not just the name.
+    expect(result.service).toEqual({ id: 's1', service: 'portal', latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z' });
     expect(result.note).toContain('portal');
     expect(result.note).toMatch(/Redeploy/);
+  });
+
+  test('redeploy_railway_service: a substring is never enough — it never picks a service that merely contains the input', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: {
+          edges: [
+            { node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } },
+            { node: { serviceId: 's2', serviceName: 'portal-worker', latestDeployment: { id: 'd2', status: 'SUCCESS', createdAt: '2026-07-11T09:00:00Z' } } },
+          ],
+        },
+      },
+    }));
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    // Exact match on 'portal' exists (the other row only CONTAINS it), so
+    // this still resolves — proves the substring row is never conflated in.
+    expect(result.error).toBeUndefined();
+    expect(result.service.id).toBe('s1');
+  });
+
+  test('redeploy_railway_service: wildcard characters in the input are literal, never widen the match', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'port%' });
+    expect(result.error).toMatch(/No Railway service found exactly named "port%"/);
+  });
+
+  test('redeploy_railway_service: several services exactly named the same thing is a refusal, never an arbitrary pick', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(gqlResponse({
+      environment: {
+        id: 'env-1',
+        name: 'production',
+        serviceInstances: {
+          edges: [
+            { node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } },
+            { node: { serviceId: 's2', serviceName: 'Portal', latestDeployment: { id: 'd2', status: 'SUCCESS', createdAt: '2026-07-11T09:00:00Z' } } },
+          ],
+        },
+      },
+    }));
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(result.error).toMatch(/Multiple Railway services are exactly named/);
   });
 
   test('restart_railway_service: unconfirmed names the real service too', async () => {
@@ -313,7 +369,7 @@ describe('intelligence bar Railway write tools (preview only)', () => {
     global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
 
     const result = await executeOpsTool('redeploy_railway_service', { service_name: 'nonexistent' });
-    expect(result.error).toMatch(/No Railway service matching/);
+    expect(result.error).toMatch(/No Railway service found exactly named/);
   });
 
   test.each(['redeploy_railway_service', 'restart_railway_service'])(

@@ -210,6 +210,8 @@ async function getServiceInstances() {
 // Resolve which service a query targets: explicit name match first, then the
 // service the portal itself runs as (RAILWAY_SERVICE_ID), then the only
 // service if there is just one. Ambiguity returns the list to choose from.
+// READ-only fuzzy fallback (substring) — the write tools use
+// resolveServiceExact below instead (pre-push audit #5275).
 async function resolveService(serviceName) {
   const { services } = await getServiceInstances();
   if (!services.length) throw new Error('No services found in the Railway environment.');
@@ -222,6 +224,40 @@ async function resolveService(serviceName) {
       throw new Error(`No Railway service matching "${serviceName}". Available: ${services.map(s => s.serviceName).join(', ')}`);
     }
     return match;
+  }
+  if (process.env.RAILWAY_SERVICE_ID) {
+    const own = services.find(s => s.serviceId === process.env.RAILWAY_SERVICE_ID);
+    if (own) return own;
+  }
+  if (services.length === 1) return services[0];
+  throw new Error(`Multiple Railway services — specify service_name. Available: ${services.map(s => s.serviceName).join(', ')}`);
+}
+
+const MAX_SERVICE_SUGGESTIONS = 5;
+
+// Exact (case-insensitive, trimmed) match ONLY when a name is given — never
+// the substring fallback resolveService uses (pre-push audit #5275): a
+// fuzzy match could name one service on the card while a later re-resolve
+// of the same raw string picks a different one. The no-name defaults
+// (RAILWAY_SERVICE_ID, the only service) are unchanged — those are
+// deterministic, not a guess. `%`/`_` in the input are literal characters.
+async function resolveServiceExact(serviceName) {
+  const { services } = await getServiceInstances();
+  if (!services.length) throw new Error('No services found in the Railway environment.');
+
+  if (serviceName) {
+    const needle = String(serviceName).trim().toLowerCase();
+    const exact = services.filter(s => (s.serviceName || '').trim().toLowerCase() === needle);
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) {
+      throw new Error(`Multiple Railway services are exactly named "${serviceName}" — this should not happen; contact engineering. Candidates: ${exact.map(s => s.serviceName).join(', ')}.`);
+    }
+    const suggestions = services
+      .filter(s => (s.serviceName || '').toLowerCase().includes(needle))
+      .slice(0, MAX_SERVICE_SUGGESTIONS)
+      .map(s => s.serviceName);
+    const hint = suggestions.length ? ` Close matches: ${suggestions.join(', ')}.` : ` Available: ${services.map(s => s.serviceName).join(', ')}`;
+    throw new Error(`No Railway service found exactly named "${serviceName}".${hint}`);
   }
   if (process.env.RAILWAY_SERVICE_ID) {
     const own = services.find(s => s.serviceId === process.env.RAILWAY_SERVICE_ID);
@@ -352,11 +388,14 @@ async function getRailwayVariableNames(input) {
 // enforced by the route, not here (ib-access.js ibFullAccess).
 async function writeRailwayService(toolName, input) {
   if (input.confirmed !== true) {
-    const service = await resolveService(input.service_name);
+    const service = await resolveServiceExact(input.service_name);
     return {
       preview: true,
       tool: toolName,
+      // The pinned canonical identity (id + exact name) — never the
+      // operator's raw string — is what a future commit path must act on.
       service: {
+        id: service.serviceId,
         service: service.serviceName,
         latest_deployment_status: service.latestDeployment?.status || 'NONE',
         deployed_at: service.latestDeployment?.createdAt || null,

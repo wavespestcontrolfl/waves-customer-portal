@@ -675,7 +675,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       env: { GITHUB_TOKEN: 'test-github-token' },
       responses: [GITHUB_PR_FIXTURE, { check_runs: [{ name: 'tests', status: 'completed', conclusion: 'failure', id: 111 }] }],
     },
-    add_github_pr_label: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE] },
+    add_github_pr_label: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE, [{ name: 'needs-review' }]] },
     request_codex_review: { env: { GITHUB_TOKEN: 'test-github-token' }, responses: [GITHUB_PR_FIXTURE] },
     submit_gsc_sitemap: { env: { GOOGLE_SERVICE_ACCOUNT_JSON: '{"type":"service_account"}' }, responses: [] },
   };

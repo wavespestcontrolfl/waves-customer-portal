@@ -218,13 +218,20 @@ async function getSentryNewIssues(input) {
 // by TITLE, not just echo the id back).
 async function resolveIssueByShortId(shortId) {
   const org = process.env.SENTRY_ORG || DEFAULT_ORG;
+  const normalized = String(shortId || '').trim().toUpperCase();
   const matches = await sentryGet(`/organizations/${org}/issues/`, {
-    query: shortId,
+    query: normalized,
     shortIdLookup: 1,
     limit: 1,
   });
   const issue = Array.isArray(matches) ? matches[0] : null;
-  if (!issue) throw new Error(`No Sentry issue found for short id "${shortId}".`);
+  // shortIdLookup silently degrades to a fuzzy full-text search when the
+  // query is not a real short id, rather than erroring — verify the result
+  // is an EXACT match before trusting it (pre-push audit #5275), or a
+  // malformed/mistyped id could resolve to an unrelated issue.
+  if (!issue || String(issue.shortId || '').toUpperCase() !== normalized) {
+    throw new Error(`No Sentry issue found for short id "${shortId}".`);
+  }
   return issue;
 }
 
@@ -275,7 +282,10 @@ async function writeSentryIssue(toolName, input) {
       preview: true,
       tool: toolName,
       action: action.verb,
-      issue: mapIssue(issue),
+      // The pinned canonical identity (internal id + the exact short id) —
+      // never a re-resolve of the operator's raw string — is what a future
+      // commit path must act on.
+      issue: { ...mapIssue(issue), id: issue.id },
       note: `${action.verb} "${issue.title}" (${issue.shortId}) in Sentry.`,
     };
     if (toolName === 'assign_sentry_issue') {

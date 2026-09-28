@@ -1484,17 +1484,42 @@ async function submitGscSitemap(input) {
   if (!domain) throw new Error('domain is required.');
   const sitemapPath = String(input.sitemap_path || DEFAULT_SITEMAP_PATH).trim() || DEFAULT_SITEMAP_PATH;
   if (input.confirmed !== true) {
-    const site = await db('fleet_sites').whereILike('domain', `%${domain}%`).first('domain', 'name', 'area');
-    const siteUrl = `https://${(site?.domain || domain).replace(/^https?:\/\//, '')}`;
+    // Exact (case-insensitive, trimmed) match ONLY — never the substring
+    // whereILike this used to run (pre-push audit #5275): an unescaped
+    // "%"/"_" in the operator's input was interpreted as a SQL wildcard,
+    // and even without one, a substring match with no ORDER BY could pick
+    // a DIFFERENT row than a later lookup of the same raw string. Fetch
+    // every tracked site and filter in JS, exactly like the Cloudflare/
+    // Railway/GitHub write tools do.
+    const normalized = domain.toLowerCase();
+    const rows = await db('fleet_sites').select('domain', 'name', 'area');
+    const matches = rows.filter((r) => String(r.domain || '').trim().toLowerCase() === normalized);
+    if (matches.length > 1) {
+      throw new Error(`Multiple tracked sites share the domain "${domain}" — this should not happen; contact engineering before submitting.`);
+    }
+    const site = matches[0] || null;
+    // Tracked sites only: an untracked string ("bradenton", "%.com") would
+    // put an arbitrary target on the card, and every real sitemap target is
+    // a fleet site. Near misses are offered, never picked.
+    if (!site) {
+      const close = rows
+        .map((r) => String(r.domain || '').trim())
+        .filter((d) => d && d.toLowerCase().includes(normalized))
+        .slice(0, 5);
+      throw new Error(`"${domain}" is not a tracked site.${close.length ? ` Close matches: ${close.join(', ')}.` : ''} Use the exact domain.`);
+    }
+    // The pinned canonical domain (the tracked row's own value, lowercased)
+    // — never the operator's raw casing — is what a future commit path must
+    // submit.
+    const canonicalDomain = site.domain.trim().toLowerCase();
+    const siteUrl = `https://${canonicalDomain}`;
     const sitemapUrl = `${siteUrl}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
     return {
       preview: true,
       tool: 'submit_gsc_sitemap',
-      site: site ? { domain: site.domain, name: site.name, area: site.area } : { domain, name: null, area: null },
+      site: { domain: site.domain, name: site.name, area: site.area },
       sitemap_url: sitemapUrl,
-      note: site
-        ? `Submit "${sitemapUrl}" to Google Search Console for ${site.name} (${site.domain}).`
-        : `Submit "${sitemapUrl}" to Google Search Console. This domain is not in the tracked fleet_sites list — double-check it before confirming.`,
+      note: `Submit "${sitemapUrl}" to Google Search Console for ${site.name} (${site.domain}).`,
     };
   }
   return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
