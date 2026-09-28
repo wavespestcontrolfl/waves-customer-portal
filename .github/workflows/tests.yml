@@ -115,6 +115,11 @@ jobs:
         env:
           RESCHEDULE_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/reschedule-link-promises-postgres.test.js
+      - name: Call booking-link text transaction tests
+        working-directory: server
+        env:
+          CALL_BOOKING_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/call-booking-link-text-postgres.test.js
       - name: First-application sibling-divergence sweep tests
         working-directory: server
         env:

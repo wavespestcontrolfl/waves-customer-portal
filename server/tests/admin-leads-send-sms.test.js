@@ -209,16 +209,29 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
   });
   afterEach(() => { bearerSpy.mockRestore(); });
 
-  test('a consultation send passes onDispatchStart/onDispatchAbort that write and clear the shared attempt row', async () => {
+  test('a consultation send passes onDispatchStart/onDispatchAbort/onDispatchRejected that write and clear the shared attempt row', async () => {
     await send();
-    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
     expect(typeof onDispatchStart).toBe('function');
     expect(typeof onDispatchAbort).toBe('function');
+    expect(typeof onDispatchRejected).toBe('function');
     await onDispatchStart();
     expect(insertConsultationLinkAttempt).toHaveBeenCalledWith({
       leadId: 'lead-qa', toPhone: lead.phone, source: 'admin_leads_send_sms',
     });
     await onDispatchAbort();
+    expect(deleteConsultationLinkAttempt).toHaveBeenCalledWith('attempt-42');
+  });
+
+  // codex #5196 r4 P2: onDispatchRejected deletes the SAME id — it fires
+  // from inside twilio.js's own dispatch() instead of onDispatchAbort when
+  // messages.create() itself throws a definitive rejection.
+  test('onDispatchRejected deletes the attempt row twilio.js\'s own dispatch() wrote', async () => {
+    await send();
+    const { onDispatchStart, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
+    await onDispatchStart();
+    expect(deleteConsultationLinkAttempt).not.toHaveBeenCalled();
+    await onDispatchRejected();
     expect(deleteConsultationLinkAttempt).toHaveBeenCalledWith('attempt-42');
   });
 
@@ -262,9 +275,10 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
   test('a plain reply with no consultation link never touches the attempt marker', async () => {
     bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
     await send({ message: 'Sounds good, see you then!', to: '+19415550103' });
-    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
     expect(onDispatchStart).toBeUndefined();
     expect(onDispatchAbort).toBeUndefined();
+    expect(onDispatchRejected).toBeUndefined();
     expect(insertConsultationLinkAttempt).not.toHaveBeenCalled();
   });
 

@@ -16,6 +16,7 @@
  */
 
 const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
+const { CITABILITY_AGENT_GUIDANCE } = require('./citability-agent-guidance');
 const MODELS = require('../../../config/models');
 
 const REFRESH_AGENT_CONFIG = {
@@ -69,6 +70,8 @@ each query YOU judge genuinely unanswered AND in-scope for this page:
   flow — a pest-pricing calculator link on a lawn page is the wrong CTA).
 - notes_for_reviewer must map every listed query → its new block, or its
   skip reason.
+
+${CITABILITY_AGENT_GUIDANCE}
 
 VOICE — same as writer-agent (casual SWFL neighbor, sandy soil refs,
 fertilizer rule covers nitrogen AND phosphorus, no hardcoded prices).

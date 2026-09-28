@@ -82,6 +82,7 @@ const SERVICE_FOOTPRINT_CITIES_LIST = (() => {
 })();
 
 const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
+const { CITABILITY_AGENT_GUIDANCE } = require('./citability-agent-guidance');
 
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
@@ -401,6 +402,8 @@ beyond pest identification or lawn care):
   allowed source or brief fact supports a claim, omit the claim;
   never write that it was "verified," "confirmed," or
   "fact-checked" merely because a search result or secondary summary exists.
+
+${CITABILITY_AGENT_GUIDANCE}
 
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
 FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail

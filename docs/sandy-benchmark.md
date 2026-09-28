@@ -159,11 +159,12 @@ the combined report is only written after every trial finishes.
 
 `--candidate-model` may also be a voice-eligible OpenAI id — one MODEL_CATALOG
 marks with a `voice` object (`server/config/models.js`; today gpt-6-sol,
-gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). Production inbound calls stay on
-Claude whatever the gate says: the relay accepts an OpenAI id only in a
-sandbox session or in the eval harness's own sessions (`evalHarness`, which
+gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). This gate never reaches production
+inbound calls: under it the relay accepts an OpenAI id only in a sandbox
+session or in the eval harness's own sessions (`evalHarness`, which
 `voice-relay-replay.js` alone sets), and the shared `VOICE_RELAY_MODEL` never
-takes one (collections reads it too). The runner never touches Sandy's
+takes one (collections reads it too). Production inbound has its own separate
+`GATE_VOICE_RELAY_OPENAI_INBOUND`, which eval-harness sessions never read. The runner never touches Sandy's
 sandbox line, so this only widens what a **benchmark candidate** may run on.
 The runner:
   - requires `OPENAI_API_KEY` in its OWN process environment up front (a
@@ -179,12 +180,15 @@ The runner:
     surface, but its own request/response translation and its own per-model
     reasoning effort (`MODEL_CATALOG[model].voice.reasoning`).
 
-**No silent Claude fallback.** An OpenAI leg that errors, times out, or is
-aborted rejects the SAME way a stalled Anthropic call does — it counts as a
-model failure/abort in the harness telemetry and runs through the relay's
-existing provider-failure handling. It never quietly re-runs the turn on
-Claude; a benchmark candidate that hits an OpenAI outage must show up as a
-failed/inconclusive run, not a clean pass on the wrong provider.
+**No Claude fallback in the harness.** Live calls (production inbound and
+the sandbox line) switch to Claude for the rest of the call when an OpenAI
+round fails for a provider reason; eval-harness sessions never do. An OpenAI
+leg that errors, times out, or is aborted rejects the SAME way a stalled
+Anthropic call does — it counts as a model failure/abort in the harness
+telemetry and runs through the relay's existing provider-failure handling. It
+never re-runs the turn on Claude; a benchmark candidate that hits an OpenAI
+outage must show up as a failed/inconclusive run, not a clean pass on the
+wrong provider.
 
 ### Thinking-always-on Anthropic candidates (Opus 5.5+)
 
