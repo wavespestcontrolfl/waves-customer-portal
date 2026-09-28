@@ -130,19 +130,19 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
   });
 
-  test('a competitor link on a non-blog (service/location) refresh is left untouched — the policy is scoped to blog posts (Codex r1 P2)', async () => {
-    // publishRefresh also refreshes service/location pages, which sit
-    // outside the owner's blog-only unlink policy AND outside the blog
-    // schema competitorFreeMarkdown re-validates against. Rewriting an
-    // existing citation/link on an unrelated metadata-only PR would be a
-    // silent, unrequested edit.
+  test('competitor links in a refreshed SERVICE page body are committed as plain text too (owner ruling 2026-09-28: "whatsoever")', async () => {
+    // The ruling covers every page, not just blog posts: a service/location
+    // refresh unlinks exactly like a blog one, and the PR notes list each
+    // removal so it is never silent.
     const res = await pub.publishRefresh(refreshDraft({
       body: 'Fresh Sarasota guidance. Per [Orkin\'s terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
     }), BRIEF);
     expect(res.status).toBe('pr_open');
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain("Per [Orkin's terms](https://www.orkin.com/terms) plans renew yearly");
-    expect(gh.createPr.mock.calls[0][0].body).not.toMatch(/Competitor links removed/);
+    expect(written).toContain("Per Orkin's terms plans renew yearly");
+    expect(written).not.toMatch(/orkin\.com/);
+    expect(written).toContain('[UF/IFAS](https://edis.ifas.ufl.edu/x)');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
   test('no_changes when body and meta are identical to live', async () => {
@@ -386,7 +386,7 @@ describe('publishRefresh blog-schema validation gate', () => {
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
-  test('a competitor link IS still unlinked on a blog-target metadata rewrite; a service-page one is left alone (Codex r1 P2)', async () => {
+  test('a competitor link is unlinked on a metadata rewrite of a blog target AND of a service page (owner ruling: every page)', async () => {
     const rewrite = () => pub.publishMetadataRewrite({
       type: 'metadata',
       file_path: BLOG_FILE_PATH,
@@ -402,10 +402,9 @@ describe('publishRefresh blog-schema validation gate', () => {
     expect(written).not.toMatch(/https?:\/\/(?:www\.)?orkin\.com/);
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
 
-    // A service page target: a competitor link sitting in a frontmatter
-    // field the rewrite never touches (title/description are overwritten
-    // wholesale either way) must survive a metadata-only PR untouched —
-    // the policy is scoped to blog posts.
+    // A service page target: a competitor link in a frontmatter field the
+    // rewrite never touches is still unlinked (the ruling covers every
+    // page), and the PR notes say so — never a silent edit.
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
     const svcWithLink = EXISTING.replace(
@@ -423,8 +422,8 @@ describe('publishRefresh blog-schema validation gate', () => {
     }, { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' });
     expect(svcRewrite.status).toBe('pr_open');
     const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
-    expect(data.sourceNote).toBe('Compare to https://www.orkin.com/terms');
-    expect(gh.createPr.mock.calls[0][0].body).not.toMatch(/Competitor links removed/);
+    expect(data.sourceNote).toBe('Compare to orkin.com');
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed[\s\S]*https:\/\/www\.orkin\.com\/terms/);
   });
 
   test('does NOT blog-validate a non-blog (service) page refresh', async () => {

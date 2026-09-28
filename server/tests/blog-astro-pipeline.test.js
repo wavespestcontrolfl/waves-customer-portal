@@ -1352,7 +1352,7 @@ describe('publishMetadataRewrite unlinks competitor links already on the page (o
     expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
   });
 
-  test('a SERVICE/LOCATION target: an existing competitor link is left untouched — the policy is scoped to blog posts (Codex r1 P2)', async () => {
+  test('a SERVICE/LOCATION target: an existing competitor link is unlinked too, and the PR notes list it (owner ruling: every page)', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
     gh.getFile.mockResolvedValue({
@@ -1383,8 +1383,9 @@ describe('publishMetadataRewrite unlinks competitor links already on the page (o
       service: 'pest',
     });
     const written = gh.putFile.mock.calls[0][0].content;
-    expect(written).toContain('Compare [Orkin](https://www.orkin.com/) before you sign.');
-    expect(gh.createPr.mock.calls[0][0].body).not.toMatch(/Competitor links removed/);
+    expect(written).toContain('Compare Orkin before you sign.');
+    expect(written).not.toMatch(/orkin\.com/);
+    expect(gh.createPr.mock.calls[0][0].body).toMatch(/Competitor links removed/);
   });
 });
 
