@@ -761,6 +761,9 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
                 id: 'r1', model: LUNA, status: 'completed',
                 output: [
                   { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-1' },
+                  // A blank message item beside the call — legal for OpenAI,
+                  // but an empty text block 400s on the Anthropic API.
+                  { type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'output_text', text: '' }] },
                   { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{"phone":"+19415551234"}', status: 'completed' },
                 ],
               },
@@ -786,6 +789,11 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     const claudeRequest = mockAnthropicStreamCalls.at(-1);
     const claudeToolUse = claudeRequest.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b && b.type === 'tool_use');
     expect(claudeToolUse).not.toHaveProperty('_openai');
+    const blankText = claudeRequest.messages
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b) => b && b.type === 'text' && !String(b.text).trim());
+    expect(blankText).toEqual([]); // dropped at the switch
+    expect(claudeRequest.messages.every((m) => typeof m.content === 'string' || m.content.length > 0)).toBe(true);
   });
 
   test('one switch per call — a Claude failure on the retried round takes the ordinary failure path, never a second switch', async () => {
@@ -895,6 +903,80 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
       expect(convo._modelSwitch).toMatchObject({ from: LUNA, reason: 'provider_error' }); // the switch still stands
       expect(convo._modelFailures).toBe(0); // an interruption, not a counted failure
     } finally {
+      if (savedRenderer === undefined) delete process.env.VOICE_RELAY_RENDERER; else process.env.VOICE_RELAY_RENDERER = savedRenderer;
+    }
+  });
+
+  test('a mid-stream OpenAI error on the block renderer retries on Claude, and the turn stats describe the Claude reply', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    global.fetch = jest.fn(async () => ({
+      ok: true, status: 200,
+      body: (async function* gen() {
+        // output_item.added fires the adapter's content_block_start, so the
+        // failed attempt stamps a first token before the stream breaks.
+        yield `data: ${JSON.stringify({ type: 'response.output_item.added', item: { type: 'message' } })}\n\n`;
+        yield `data: ${JSON.stringify({ type: 'error', error: { code: 'stream_broke' } })}\n\n`;
+      }()),
+    }));
+    mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'How can I help?' }], stop_reason: 'end_turn' });
+
+    const spoken = [];
+    const convo = new RelayConversation({ callSid: 'CA-fallback-midstream', from: '+19415551234', send: (t) => spoken.push(t) });
+    expect(convo.renderer).toBe('block');
+    await convo.handlePrompt('hello?');
+
+    expect(mockAnthropicStreamCalls).toHaveLength(1);
+    expect(spoken).toContain('How can I help?');
+    const stat = convo._turnStats[0];
+    expect(stat.modelSwitched).toBe(true);
+    expect(stat.firstTokenAt).toBeNull(); // the failed attempt's stamp is discarded (the Claude double streams no events)
+    expect(stat.effort).toBe(convo._stampedEffort); // Claude's effort, not Luna's
+    expect(stat.timedOut).toBe(false);
+  });
+
+  test('a barge-in after a stream timeout, while the round is still settling, ends the round — no Claude retry', async () => {
+    const savedRenderer = process.env.VOICE_RELAY_RENDERER;
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    jest.useFakeTimers();
+    try {
+      process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+      process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+      // A filler streams, then the stream hangs until the timeout aborts it.
+      global.fetch = jest.fn(async (url, opts) => ({
+        ok: true, status: 200,
+        body: (async function* gen() {
+          yield `data: ${JSON.stringify({ type: 'response.output_item.added', item: { type: 'message' } })}\n\n`;
+          yield `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'One moment please. ' })}\n\n`;
+          await new Promise((_resolve, reject) => opts.signal.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted.');
+            err.name = 'AbortError';
+            reject(err);
+          }));
+        }()),
+      }));
+      mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Answer to the old prompt.' }], stop_reason: 'end_turn' });
+
+      const spoken = [];
+      const convo = new RelayConversation({ callSid: 'CA-fallback-timeout-gap', from: '+19415551234', send: (t) => spoken.push(t) });
+      // Hold the filler's flush step open so the round is still settling
+      // after the timeout has fired.
+      let releaseCheck;
+      convo._sessionSuperseded = () => new Promise((resolve) => { releaseCheck = resolve; });
+      const run = convo.handlePrompt('hello?');
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      jest.advanceTimersByTime(20000); // STREAM_TIMEOUT_MS — the timer aborts the controller
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      convo.interrupt({ utteranceUntilInterrupt: '' }); // the caller talks over the silence
+      releaseCheck(false);
+      await run;
+
+      expect(mockAnthropicStreamCalls).toHaveLength(0); // never retried on Claude
+      expect(spoken).not.toContain('Answer to the old prompt.');
+      expect(convo._modelSwitch).toMatchObject({ from: LUNA, reason: 'stream_timeout' });
+      expect(convo._turnStats[0].timedOut).toBe(true);
+    } finally {
+      jest.useRealTimers();
       if (savedRenderer === undefined) delete process.env.VOICE_RELAY_RENDERER; else process.env.VOICE_RELAY_RENDERER = savedRenderer;
     }
   });

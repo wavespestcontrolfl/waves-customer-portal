@@ -446,6 +446,13 @@ function resolveSharedAnthropicChain(startFallbackReason = null) {
  * successful round's first tool_use block, and it must not ride into a
  * request built for the Anthropic client. Deleting the key leaves the block
  * (and its tool_use/tool_result pairing) otherwise untouched.
+ *
+ * Also drops blank text blocks: the adapter keeps an empty `output_text`
+ * part beside a tool call (mapResponseToMessage only refuses a blank reply
+ * with NO tool call), and the Anthropic Messages API rejects an empty or
+ * whitespace-only text block — one left in history would fail every Claude
+ * round after the switch. A block is dropped only while something else stays
+ * in that message, so no message is left with empty content.
  */
 function stripOpenAIHistoryExtras(messages) {
   for (const m of messages || []) {
@@ -455,6 +462,8 @@ function stripOpenAIHistoryExtras(messages) {
         delete block._openai;
       }
     }
+    const kept = m.content.filter((b) => !(b && b.type === 'text' && !String(b.text || '').trim()));
+    if (kept.length && kept.length !== m.content.length) m.content = kept;
   }
 }
 
@@ -1017,6 +1026,11 @@ class RelayConversation {
     // provider-failure fallback) — { from, to, reason, turn } — null until
     // then. One switch per call: its presence is also the switch-used guard.
     this._modelSwitch = null;
+    // Bumped by every interrupt() (a barge-in frame, or end()'s own abort).
+    // _runModelRound compares it across a failed attempt to tell whether the
+    // caller moved on before a Claude retry — the controller's own signal
+    // cannot say so once a stream timeout has already aborted it.
+    this._interruptSeq = 0;
     // Which client this session's model rounds run on — resolved once here,
     // alongside the model itself, and never re-read mid-call (see the file
     // header + resolveSessionModel). voiceEffortFor already returns null for
@@ -2347,6 +2361,7 @@ class RelayConversation {
    * call is end()'s own abort and records nothing.
    */
   interrupt(detail) {
+    this._interruptSeq += 1;
     try {
       if (this._controller) this._controller.abort();
     } catch {
@@ -3215,6 +3230,9 @@ class RelayConversation {
       // reference to the old one.
       const client = clientFor(this._provider);
       this._controller = new AbortController();
+      const interruptSeqAtStart = this._interruptSeq;
+      // A retry must measure its own first token, not the failed attempt's.
+      const firstTokenAtStart = stat.firstTokenAt;
       // PR C: fresh per attempt, never read outside it — see _newStreamState.
       const streamState = this.renderer === 'stream' ? this._newStreamState(this._controller.signal) : null;
       // Bound the model stream: without this a hung upstream call would pin the
@@ -3311,22 +3329,26 @@ class RelayConversation {
         const spokeAlready = Boolean(streamState && streamState.entry);
         if (attempt === 0 && this._canSwitchToClaudeFallback()) {
           stat.modelSwitched = true;
+          if (streamTimedOut) stat.timedOut = true; // the caller still waited out the timeout, rescued or not
           this._switchToClaudeFallback(streamTimedOut ? 'stream_timeout' : 'provider_error', stat.turn);
-          // A barge-in or hang-up that landed during the flushChain await
-          // above aborted THIS attempt's controller after the failure was
-          // caught — the caller has moved on, so the round ends as an
-          // interruption rather than answering the old prompt on Claude. (A
-          // timed-out attempt's controller is already aborted by its own
-          // timer, so only `ended` can say that here.) The switch stands.
-          if (this.ended || (!streamTimedOut && this._controller.signal.aborted)) {
+          stat.effort = this._stampedEffort; // the turn's reply now comes from Claude
+          // A barge-in or hang-up any time during this attempt — including
+          // after a stream timeout had already aborted its controller, or
+          // during the flushChain await above — means the caller has moved
+          // on: the round ends as an interruption rather than answering the
+          // old prompt on Claude. The switch stands.
+          if (this.ended || this._interruptSeq !== interruptSeqAtStart) {
             await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
             return null;
           }
           // A superseded session (`withheld`) speaks nothing more this round —
           // it takes the ordinary failure path below, exactly as before.
-          if (!spokeAlready && !(streamState && streamState.withheld)) continue; // retry THIS round once, now pinned to Claude — `finally` below still runs first
+          if (!spokeAlready && !(streamState && streamState.withheld)) {
+            stat.firstTokenAt = firstTokenAtStart;
+            continue; // retry THIS round once, now pinned to Claude — `finally` below still runs first
+          }
         }
-        stat.timedOut = streamTimedOut;
+        stat.timedOut = stat.timedOut || streamTimedOut;
         const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
         logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
         this._modelFailures += 1;
