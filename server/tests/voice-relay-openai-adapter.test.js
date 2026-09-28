@@ -1188,6 +1188,55 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     }
   });
 
+  test('a Claude retry the caller talks past while it runs is dropped — never spoken, its tools never run', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
+    let releaseRetry;
+    mockAnthropicScriptedMessages.push(new Promise((resolve) => { releaseRetry = resolve; }));
+    const spoken = [];
+    const convo = new RelayConversation({ callSid: 'CA-fallback-retry-talked-past', from: '+19415551234', send: (t) => spoken.push(t) });
+    convo.handlePrompt('book me for tuesday');
+    for (let i = 0; i < 50 && mockAnthropicStreamCalls.length === 0; i++) await new Promise((r) => setImmediate(r));
+    expect(mockAnthropicStreamCalls).toHaveLength(1); // the retry is in flight
+    const second = convo.handlePrompt('actually make it wednesday');
+    mockAnthropicScriptedMessages.push({ content: [{ type: 'text', text: 'Wednesday works.' }], stop_reason: 'end_turn' });
+    releaseRetry({ stop_reason: 'tool_use', content: [
+      { type: 'text', text: 'Tuesday is booked.' },
+      { type: 'tool_use', id: 'tu-stale', name: 'request_booking', input: {} },
+    ] });
+    await second;
+
+    expect(spoken).not.toContain('Tuesday is booked.');
+    expect(relayTools.executeTool).not.toHaveBeenCalledWith('request_booking', expect.anything(), expect.anything());
+    expect(spoken).toContain('Wednesday works.');
+  });
+
+  test('a timed-out switch claim is not a win — the leg reads and adopts the recorded switch', async () => {
+    const db = require('../models/db');
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
+    const winner = { from: LUNA, to: other, reason: 'provider_error', turn: 1 };
+    db.mockImplementation(() => ({
+      where: () => ({
+        whereRaw: () => ({ update: () => new Promise(() => {}) }), // the write never answers
+        first: async () => ({ model_switch: winner }),
+      }),
+    }));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    jest.useFakeTimers();
+    try {
+      const convo = new RelayConversation({ callSid: 'CA-claim-timeout', from: '+19415551234', send: () => {} });
+      const claim = convo._claimModelSwitch({ from: LUNA, to: MODELS.DEFAULTS.VOICE, reason: 'provider_error', turn: 1 });
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(await claim).toEqual(winner);
+    } finally {
+      jest.useRealTimers();
+      db.mockReset();
+      delete db.raw;
+    }
+  });
+
   test('a barge-in after a stream timeout, while the round is still settling, ends the round — no Claude retry', async () => {
     const savedRenderer = process.env.VOICE_RELAY_RENDERER;
     process.env.VOICE_RELAY_RENDERER = 'stream';

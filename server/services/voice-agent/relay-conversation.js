@@ -534,6 +534,12 @@ const CALLER_STOP_STALE_MS = 15000;
 const MAX_TOOL_ROUNDS = 6; // safety cap on tool_use loops per caller turn
 const MAX_CALL_TURNS = 40; // safety cap on total caller turns for one call
 const STREAM_TIMEOUT_MS = 20000; // bound a single model stream so it can't hang
+// A failed model call, by whether the stream timed out: the switch reason it
+// stamps, its log level, and the copy spoken if the round is not retried.
+const MODEL_FAILURE = {
+  true: { reason: 'stream_timeout', level: 'warn', copy: 'streamTimeout' },
+  false: { reason: 'provider_error', level: 'error', copy: 'modelError' },
+};
 const MAX_TOKENS = 1024; // voice replies are short
 // Bound the office-hours read the same way the context resolve is bounded: a
 // `.catch()` handles a rejection, not a hang, and this await sits in front of
@@ -3218,9 +3224,10 @@ class RelayConversation {
 
   /**
    * Persist `sw` as the call's switch only when none is recorded yet.
-   * Returns the switch another leg recorded first, or null when this one won
-   * or the row could not be read or written (bounded, best effort — the
-   * switch never waits more than a few seconds or fails on it).
+   * Returns the switch the row records when this leg did not provably win
+   * (another leg's, or this leg's own after a slow write), or null when this
+   * one won or the row could not be read or written (bounded, best effort —
+   * the switch never waits more than a few seconds or fails on it).
    */
   async _claimModelSwitch(sw) {
     if (!this.callSid) return null;
@@ -3228,7 +3235,10 @@ class RelayConversation {
       const claimed = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
         .whereRaw("metadata->'relay_model_switch' IS NULL")
         .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_model_switch', ?::jsonb)", [JSON.stringify(sw)]) }), 2000, null);
-      if (claimed !== 0) return null;
+      // Only an affected row is a win; a lost claim (0) or a timed-out one
+      // (null — the write may still land either way, codex r8) reads what
+      // the row records now and adopts it when it names another leg's model.
+      if (claimed > 0) return null;
       const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
         .first(db.raw("metadata->'relay_model_switch' AS model_switch")), 2000, null);
       const earlier = row && row.model_switch;
@@ -3405,12 +3415,23 @@ class RelayConversation {
    * (`_runLoop`) must return immediately on `null`.
    */
   async _runModelRound(stat, toolCtx) {
+    // The caller barged in, hung up, or spoke again since this round began —
+    // a Claude retry of it must never answer the old request (codex r7, r8).
+    const callerSeqAtStart = this._callerSeq;
+    const callerMovedOn = () => this.ended || this._callerSeq !== callerSeqAtStart;
+    let retrying = false;
     for (;;) {
-      const callerSeqAtStart = this._callerSeq;
       // A retry must measure its own first token, not the failed call's.
       const firstTokenAtStart = stat.firstTokenAt;
       const { msg, err, streamState, timedOut } = await this._modelAttempt(stat);
       if (msg) {
+        // Checked on a retry only: an ordinary first call keeps today's
+        // behavior, but a retry the caller talked past while it ran is
+        // dropped before it is spoken or runs a tool.
+        if (retrying && callerMovedOn()) {
+          await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
+          return null;
+        }
         this._modelFailures = 0; // a completed round resets the streak
         this._clearedFailures.model = true;
         return { msg, streamState };
@@ -3432,7 +3453,7 @@ class RelayConversation {
       // spoke" and wrongly retries.
       if (streamState) await streamState.flushChain;
       if (this._canSwitchToClaudeFallback()) {
-        await this._switchToClaudeFallback(timedOut ? 'stream_timeout' : 'provider_error', stat);
+        await this._switchToClaudeFallback(MODEL_FAILURE[timedOut].reason, stat);
         const retryable = !streamState || !(streamState.entry || streamState.failed);
         if (retryable && await this._sessionSuperseded().catch(() => false)) {
           logger.warn(`[voice-relay] provider-failure retry skipped — session superseded callSid=${maskSid(this.callSid)}`);
@@ -3441,7 +3462,7 @@ class RelayConversation {
           try { this._endSession?.({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
           return null;
         }
-        if (this.ended || this._callerSeq !== callerSeqAtStart) {
+        if (callerMovedOn()) {
           await this._closeStreamedRoundOnCatch(streamState, 'interrupted');
           return null;
         }
@@ -3450,11 +3471,12 @@ class RelayConversation {
           // spoke on OpenAI keeps OpenAI's effort (codex r4).
           stat.effort = this._stampedEffort;
           stat.firstTokenAt = firstTokenAtStart;
+          retrying = true;
           continue;
         }
       }
       stat.timedOut = stat.timedOut || timedOut;
-      const failure = timedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
+      const failure = MODEL_FAILURE[timedOut];
       logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${timedOut}: ${err.message}`);
       this._modelFailures += 1;
       // PR C: a partial streaming utterance is still "open" on Twilio's side
