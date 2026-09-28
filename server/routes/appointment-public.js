@@ -54,6 +54,7 @@ const {
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 const visitPrep = require('../services/visit-prep');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -1166,14 +1167,37 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
 
 // ── visit prep photos (GATE_VISIT_PREP_PHOTOS) ──────────────────────────────
 // Own limiter — 6/min, well under the router-wide 60/min, since a real
-// customer submits at most a couple of times per visit.
-const visitPrepLimiter = rateLimit({
+// customer submits at most a couple of times per visit. Keyed by the
+// repository's /64-collapsing unauthenticated key, not express-rate-limit's
+// raw-IP default (Codex r1 P1): an IPv6 caller holding one token could
+// otherwise rotate addresses inside its subnet for a fresh bucket each time.
+const VISIT_PREP_LIMITER_OPTIONS = {
   windowMs: 60 * 1000,
   max: 6,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'Too many attempts. Please try again in a minute.' },
-});
+};
+const visitPrepLimiter = rateLimit(VISIT_PREP_LIMITER_OPTIONS);
+
+// GATE_VISIT_PREP_PHOTOS + token-shape guard for the photos path. ONE
+// definition mounted twice on purpose: by server/index.js on the
+// /api/public/appointment prefix AHEAD of the shared body parsers (Codex r1
+// P0: with the parsers first, an oversized or malformed application/json
+// body to a dark or malformed photos path was answered 413/400 by the
+// parser before this 404 could run), and again as the route's own first
+// step so the router stays correct on its own. Both answer the SAME
+// generic 404 the router-level gate gives, BEFORE the route's limiter
+// (AGENTS.md: a dark GATE_* route skips its limiter so a probe never sees
+// a revealing 429). `req.path` is mount-relative in both places.
+const VISIT_PREP_PHOTOS_PATH_RE = /^\/([^/]+)\/photos\/?$/;
+function visitPrepPreParserGuard(req, res, next) {
+  const match = VISIT_PREP_PHOTOS_PATH_RE.exec(req.path || '');
+  if (!match) return next();
+  if (!TOKEN_RE.test(match[1]) || !visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+  return next();
+}
 
 const visitPrepUpload = multer({
   storage: multer.memoryStorage(),
@@ -1233,6 +1257,13 @@ async function deriveVisitPrepEligibility(svc) {
 // stop's state), and this is the one place that re-proves it, on the
 // connection that already owns the lock.
 async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
+  // ROW locks, not only the stop's advisory lock (Codex r1 P1): status
+  // writers such as transitionJobStatus update scheduled_services WITHOUT
+  // the advisory lock, so a plain read here could still race an en-route
+  // tap or a cancellation landing before the insert commits. FOR UPDATE on
+  // the token row (and, grouped, on every live member below) makes those
+  // writers wait for this transaction instead of slipping underneath it.
+  await trx('scheduled_services').where({ id: expectedId }).forUpdate().first('id');
   const svc = await loadByToken(token, trx);
   if (!svc || svc.customer_deleted_at) return null;
   if (expectedId && String(svc.id) !== String(expectedId)) return null;
@@ -1241,7 +1272,7 @@ async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
   let visitInfo = {};
   if (svc.visit_id) {
     const { openMembers } = require('../services/visit-groups');
-    const members = await openMembers(trx, svc.visit_id);
+    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
     if (members.length >= 2) {
       if (!membersOneStop(members)) {
         visitUnknown = true;
@@ -1260,14 +1291,7 @@ async function reloadEligibleVisitPrepRow(token, expectedId, trx) {
 
 router.post(
   '/:token/photos',
-  // Token format + the sub-gate run BEFORE this route's own limiter (AGENTS.md:
-  // a dark GATE_* route skips its limiter so a probe never sees a revealing
-  // 429) — both answer the SAME generic 404 the router-level gate already gives.
-  (req, res, next) => {
-    if (!TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
-    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
-    return next();
-  },
+  visitPrepPreParserGuard,
   visitPrepLimiter,
   // Load the token row and prove eligibility BEFORE multer ever buffers a
   // byte, so an ineligible request never costs the memory or the S3 round
@@ -1281,10 +1305,13 @@ router.post(
       const svc = await loadByToken(req.params.token);
       if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
+      // Ineligible answers the SAME generic 404 as an unknown or malformed
+      // token (Codex r1 P0, AGENTS.md public-token baseline): a valid
+      // bearer token for a past, inactive, one-time, or office-owned visit
+      // must not be distinguishable from no token at all. The page (GET)
+      // already tells a legitimate holder whether photos can be added.
       const eligibility = await deriveVisitPrepEligibility(svc);
-      if (!eligibility.eligible) {
-        return res.status(409).json({ error: "Photos can't be added to this visit online.", code: 'PREP_NOT_AVAILABLE' });
-      }
+      if (!eligibility.eligible) return res.status(404).json({ error: 'Not found' });
 
       req.visitPrepSvc = svc;
       return next();
@@ -1335,7 +1362,11 @@ router.post(
       // Only OUR OWN errors (visitPrep.js's prepError, marked `visitPrep`)
       // are echoed to an anonymous caller — a library error that happens to
       // carry a statusCode must never leak its message here.
-      if (err && err.visitPrep) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      if (err && err.visitPrep) {
+        // A locked-recheck refusal is the same generic 404 as the pre-check's.
+        if (err.statusCode === 404) return res.status(404).json({ error: 'Not found' });
+        return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      }
       return next(err);
     }
   },
@@ -1346,6 +1377,8 @@ router._test = {
   prepPhotosField,
   deriveVisitPrepEligibility,
   reloadEligibleVisitPrepRow,
+  visitPrepPreParserGuard,
+  VISIT_PREP_LIMITER_OPTIONS,
   confirmRaceVerdict,
   icsEscape,
   icsFold,
@@ -1375,6 +1408,8 @@ router._test = {
 };
 
 module.exports = router;
+// Mounted by server/index.js ahead of the shared body parsers (see the guard's comment).
+module.exports.visitPrepPreParserGuard = visitPrepPreParserGuard;
 // The page's own state predicate — the composer's visit picks skip what it
 // renders as 'past' (GH Codex #3844 r10).
 module.exports.pageState = pageState;

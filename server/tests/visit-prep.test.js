@@ -28,6 +28,16 @@ jest.mock('../services/photos', () => ({
 jest.mock('../services/visit-groups', () => ({
   lockStopForRow: (...args) => mockLockStopForRow(...args),
 }));
+// sharp stand-in (identity): the real decode/normalize path is proven in
+// visit-prep-image-decode.test.js; here the stages are the subject.
+jest.mock('sharp', () => (input) => {
+  const api = {};
+  api.rotate = () => api;
+  api.resize = () => api;
+  api.jpeg = () => api;
+  api.toBuffer = async () => Buffer.from(input);
+  return api;
+});
 
 const queries = [];
 function chain(table) {
@@ -308,11 +318,11 @@ describe('createVisitPrepSubmission', () => {
       .rejects.toMatchObject({ statusCode: 413, code: 'PREP_PHOTO_TOO_LARGE' });
   });
 
-  test('a null recheck (visit went ineligible under the lock) rejects with PREP_NOT_AVAILABLE and cleans up the upload', async () => {
+  test('a null recheck (visit went ineligible under the lock) rejects with the generic 404 and cleans up the upload', async () => {
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
     await expect(createVisitPrepSubmission({
       svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: async () => null,
-    })).rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+    })).rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND', message: 'Not found' });
     expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1); // it uploads BEFORE the lock, per the all-or-cleanup contract
     expect(mockDeletePhoto).toHaveBeenCalledWith('visitprep/svc-1/photo_0.jpg');
   });
@@ -348,12 +358,12 @@ describe('createVisitPrepSubmission', () => {
     expect(recheckSpy).toHaveBeenCalledWith(mockDb);
   });
 
-  test('retries VISIT_STOP_MOVED up to twice, then answers PREP_NOT_AVAILABLE', async () => {
+  test('retries VISIT_STOP_MOVED up to twice, then answers the generic 404', async () => {
     const err = Object.assign(new Error('stop moved'), { code: 'VISIT_STOP_MOVED' });
     mockLockStopForRow.mockRejectedValue(err);
     const files = [{ buffer: JPEG_BYTES, mimetype: 'image/jpeg' }];
     await expect(createVisitPrepSubmission({ svc: RECURRING_SVC, files, entry: 'appointment_page', recheck: alwaysRecheck() }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+      .rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND', message: 'Not found' });
     expect(mockLockStopForRow).toHaveBeenCalledTimes(3); // initial + 2 retries
   });
 });

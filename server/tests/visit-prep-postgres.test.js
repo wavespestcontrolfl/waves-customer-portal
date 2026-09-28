@@ -26,6 +26,16 @@ const mockDeletePhoto = jest.fn().mockResolvedValue(undefined);
 jest.mock('../services/photos', () => ({
   deletePhoto: (...args) => mockDeletePhoto(...args),
 }));
+// sharp stand-in (identity) — this suite proves the database contract;
+// decode/normalize is proven in visit-prep-image-decode.test.js.
+jest.mock('sharp', () => (input) => {
+  const api = {};
+  api.rotate = () => api;
+  api.resize = () => api;
+  api.jpeg = () => api;
+  api.toBuffer = async () => Buffer.from(input);
+  return api;
+});
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 function jpegBytes(seed) {
@@ -280,7 +290,7 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
         const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
         await expect(createVisitPrepSubmission({
           svc, files: [{ buffer: jpegBytes('gone'), mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck: async () => null,
-        })).rejects.toMatchObject({ statusCode: 409, code: 'PREP_NOT_AVAILABLE' });
+        })).rejects.toMatchObject({ statusCode: 404, code: 'PREP_NOT_FOUND' });
         expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
         const rows = await realDb('visit_prep_submissions').where({ scheduled_service_id: svcId });
         expect(rows).toHaveLength(0);
@@ -510,6 +520,39 @@ postgres('visit prep photos against migrated PostgreSQL', () => {
         expect(seen).not.toBeNull();
         expect(seen).not.toBe(realDb);
         expect(seen.isTransaction).toBe(true);
+      } finally {
+        await realDb('scheduled_services').where({ id: svcId }).del();
+      }
+    });
+
+    test('resubmitting an already-stored photo with a new note/topic/location updates the owning submission (nothing duplicated)', async () => {
+      let customerId; let svcId;
+      const trx = await database.transaction();
+      try {
+        ({ customerId, svcId } = await fixtureSvc(trx));
+        await trx.commit();
+      } catch (err) {
+        await trx.rollback();
+        throw err;
+      }
+      try {
+        const svc = { id: svcId, customer_id: customerId, property_id: null, visit_id: null };
+        const recheck = async () => svc;
+        const bytes = jpegBytes('note-resubmit');
+        const first = await createVisitPrepSubmission({ svc, files: [{ buffer: bytes, mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck, note: 'first note' });
+        expect(first.created).toBe(true);
+        const again = await createVisitPrepSubmission({
+          svc, files: [{ buffer: bytes, mimetype: 'image/jpeg' }], entry: 'appointment_page', recheck,
+          note: 'corrected note', topic: 'lawn', locationOnProperty: 'back_yard',
+        });
+        expect(again.created).toBe(false);
+        expect(again.summary).toMatchObject({ photoCount: 1, submissionCount: 1 });
+        const rows = await realDb('visit_prep_submissions').where({ scheduled_service_id: svcId });
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ note: 'corrected note', topic: 'lawn', location_on_property: 'back_yard' });
+        // The duplicate upload was cleaned up; the stored photo is untouched.
+        expect(mockDeletePhoto).toHaveBeenCalledTimes(1);
+        expect(await realDb('visit_prep_photos').where({ scheduled_service_id: svcId })).toHaveLength(1);
       } finally {
         await realDb('scheduled_services').where({ id: svcId }).del();
       }

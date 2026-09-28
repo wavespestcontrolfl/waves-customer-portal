@@ -40,6 +40,16 @@ jest.mock('../utils/funnel-photos', () => ({
 jest.mock('../services/photos', () => ({
   deletePhoto: (...args) => mockDeletePhoto(...args),
 }));
+// sharp stand-in: identity re-encode, so hash expectations below hold. The
+// real decode/normalize path is proven in visit-prep-image-decode.test.js.
+jest.mock('sharp', () => (input) => {
+  const api = {};
+  api.rotate = () => api;
+  api.resize = () => api;
+  api.jpeg = () => api;
+  api.toBuffer = async () => Buffer.from(input);
+  return api;
+});
 // Real visit-groups.js's advisory-lock plumbing needs its own DB shape
 // (raw SQL + a peek/verify pair) that would bloat this route-level fake for
 // no benefit — the lock's own peek->lock->verify->retry contract is proven
@@ -78,6 +88,7 @@ let dbState;
 function chain(table) {
   const api = {};
   let countMode = null;
+  let lockRead = false;
   api.where = () => api;
   api.whereIn = () => api;
   api.whereNotIn = () => api;
@@ -85,9 +96,13 @@ function chain(table) {
   api.orderBy = () => api;
   api.leftJoin = () => api;
   api.join = () => api;
-  api.forUpdate = () => api;
+  api.forUpdate = () => { lockRead = true; return api; };
   api.count = () => { countMode = table.indexOf('visit_prep_photos') === 0 ? 'photos' : 'submissions'; return api; };
   api.first = async () => {
+    // The locked recheck's FOR UPDATE on the token row (Codex r1 P1) — a
+    // lock read, not a loadByToken read, so it never advances the
+    // first-vs-second loadByToken accounting below.
+    if (lockRead && table.startsWith('scheduled_services')) { dbState.lockReads += 1; return { id: dbState.svcRow?.id }; }
     if (countMode === 'photos') return { count: dbState.photoCount + dbState.inserted.photos.length };
     if (countMode === 'submissions') return { count: dbState.submissionCount + dbState.inserted.submissions.length };
     if (table.startsWith('scheduled_services')) {
@@ -163,6 +178,7 @@ function resetDbState(overrides = {}) {
     photoCount: 0,
     existingHashes: [],
     membersThrow: false,
+    lockReads: 0,
     groupedMembersForPreCheck: null,
     inserted: { submissions: [], photos: [] },
     ...overrides,
@@ -269,22 +285,22 @@ describe('POST /api/public/appointment/:token/photos', () => {
     ['completed visit', { status: 'completed' }],
     ['inactive customer', { customer_active: false }],
     ['dispatch-owned unreviewed booking', { status: 'pending', source_action: 'ai_call_pipeline_followup', customer_confirmed: false }],
-  ])('%s is not eligible: 409 PREP_NOT_AVAILABLE', async (_label, overrides) => {
+  ])('%s is not eligible: the SAME generic 404 an unknown token gets', async (_label, overrides) => {
     resetDbState({ svcRow: { ...dbStateSvc(), ...overrides } });
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
       expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
     });
   });
 
-  test('unreadable grouped membership (visitUnknown): 409 PREP_NOT_AVAILABLE', async () => {
+  test('unreadable grouped membership (visitUnknown): generic 404', async () => {
     resetDbState({ svcRow: { ...dbStateSvc(), visit_id: 'visit-1' }, membersThrow: true });
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
     });
   });
 
@@ -397,7 +413,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
-  test('visit becomes ineligible between the pre-check and the locked write: 409 PREP_NOT_AVAILABLE, nothing stored, upload cleaned up', async () => {
+  test('visit becomes ineligible between the pre-check and the locked write: generic 404, nothing stored, upload cleaned up', async () => {
     // The FIRST loadByToken read (pre-multer guard) sees an eligible visit;
     // the SECOND (the recheck, called under the stop lock at write time)
     // sees it cancelled — modeling a status change that lands between the
@@ -405,8 +421,8 @@ describe('POST /api/public/appointment/:token/photos', () => {
     resetDbState({ svcRowAfterRecheck: { ...dbStateSvc(), status: 'cancelled' } });
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
       expect(dbState.inserted.submissions).toHaveLength(0);
       expect(dbState.inserted.photos).toHaveLength(0);
       // The photo WAS uploaded (upload happens before the lock) and must be
@@ -427,8 +443,8 @@ describe('POST /api/public/appointment/:token/photos', () => {
     mockOpenMembers.mockResolvedValue([members[0], { ...members[1], status: 'en_route' }]);
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('PREP_NOT_AVAILABLE');
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
       expect(dbState.inserted.submissions).toHaveLength(0);
       expect(dbState.inserted.photos).toHaveLength(0);
       expect(mockUploadFunnelPhotoToS3).toHaveBeenCalledTimes(1);
@@ -436,7 +452,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
       // The locked membership read went through openMembers ON THE WRITE'S
       // OWN CONNECTION (this fake's transaction IS mockDb) ...
       expect(mockOpenMembers).toHaveBeenCalledTimes(1);
-      expect(mockOpenMembers).toHaveBeenCalledWith(mockDb, 'visit-1');
+      expect(mockOpenMembers).toHaveBeenCalledWith(mockDb, 'visit-1', { forUpdate: true });
       // ... and label resolution (visitServicesFor's global-pool work) ran
       // for the pre-check's two members only — never again for the recheck.
       expect(mockBuildServiceLabel).toHaveBeenCalledTimes(2);
@@ -458,7 +474,31 @@ describe('POST /api/public/appointment/:token/photos', () => {
     });
   });
 
-  test('success: 201, and the response carries no keys/urls/note/identity', async () => {
+  test('an ineligible visit and an unknown token answer byte-identical 404s (no bearer-token oracle)', async () => {
+    resetDbState({ svcRow: { ...dbStateSvc(), status: 'completed' } });
+    let ineligible;
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      ineligible = { status: res.status, body: await res.text() };
+    });
+    resetDbState({ svcRow: null });
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }] });
+      expect({ status: res.status, body: await res.text() }).toEqual(ineligible);
+    });
+  });
+
+  test('HEIC converter saturation: 503 PREP_CONVERTER_BUSY (retryable), nothing stored', async () => {
+    mockConvertHeicToJpeg.mockRejectedValue(Object.assign(new Error('HEIC conversion capacity is unavailable'), { code: 'HEIC_CAPACITY' }));
+    await withServer(async (baseUrl) => {
+      const res = await postPhotos(baseUrl, { files: [{ bytes: HEIC_BYTES, mimetype: 'image/heic', name: 'a.heic' }] });
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe('PREP_CONVERTER_BUSY');
+      expect(mockUploadFunnelPhotoToS3).not.toHaveBeenCalled();
+    });
+  });
+
+  test('success: 201, the token row was locked FOR UPDATE under the stop lock, and the response carries no keys/urls/note/identity', async () => {
     await withServer(async (baseUrl) => {
       const res = await postPhotos(baseUrl, {
         files: [{ bytes: JPEG_BYTES, mimetype: 'image/jpeg' }],
@@ -467,6 +507,7 @@ describe('POST /api/public/appointment/:token/photos', () => {
         locationOnProperty: 'back_yard',
       });
       expect(res.status).toBe(201);
+      expect(dbState.lockReads).toBeGreaterThanOrEqual(1);
       const body = await res.json();
       expect(body).toEqual({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
       expect(JSON.stringify(body)).not.toMatch(/1234|friendly|s3_key|visitprep/i);
@@ -544,5 +585,73 @@ describe('GET /api/public/appointment/:token — additive prepPhotos', () => {
       const body = await res.json();
       expect(body.prepPhotos).toEqual({ eligible: true, photoCount: 2, photosRemaining: 4 });
     });
+  });
+});
+
+describe('visitPrepPreParserGuard — mounted by index.js AHEAD of the shared body parsers', () => {
+  const prevPrep = process.env.GATE_VISIT_PREP_PHOTOS;
+  afterAll(() => { if (prevPrep === undefined) delete process.env.GATE_VISIT_PREP_PHOTOS; else process.env.GATE_VISIT_PREP_PHOTOS = prevPrep; });
+
+  async function withGuardApp(fn) {
+    const { visitPrepPreParserGuard } = require('../routes/appointment-public');
+    const app = express();
+    // The production order (server/index.js): the guard, THEN a shared JSON
+    // parser whose own 413 would otherwise answer first.
+    app.use('/api/public/appointment', visitPrepPreParserGuard);
+    app.use(express.json({ limit: '1kb' }));
+    app.post('/api/public/appointment/:token/photos', (_req, res) => res.status(200).json({ reached: true }));
+    app.post('/api/public/appointment/:token/confirm', (_req, res) => res.status(200).json({ reached: true }));
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ parser: err.type || 'error' }));
+    const server = app.listen(0);
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    try { return await fn(baseUrl); } finally { await new Promise((r) => server.close(r)); }
+  }
+  const bigJson = JSON.stringify({ pad: 'x'.repeat(4096) });
+  const post = (baseUrl, token) => fetch(`${baseUrl}/api/public/appointment/${token}/photos`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: bigJson,
+  });
+
+  test('dark gate: an oversized application/json body to the photos path is the generic 404, not the parser 413', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'false';
+    await withGuardApp(async (baseUrl) => {
+      const res = await post(baseUrl, TOKEN);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'Not found' });
+    });
+  });
+
+  test('malformed token: generic 404 before the parser, gate on or off', async () => {
+    for (const gate of ['true', 'false']) {
+      process.env.GATE_VISIT_PREP_PHOTOS = gate;
+      await withGuardApp(async (baseUrl) => {
+        const res = await post(baseUrl, 'not-a-token');
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'Not found' });
+      });
+    }
+  });
+
+  test('gate on + well-formed token: the guard steps aside (the parser answers next — here its 413 proves the ordering)', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    await withGuardApp(async (baseUrl) => {
+      const res = await post(baseUrl, TOKEN);
+      expect(res.status).toBe(413);
+    });
+  });
+
+  test('other appointment paths are untouched by the guard', async () => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'false';
+    await withGuardApp(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/public/appointment/${TOKEN}/confirm`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ reached: true });
+    });
+  });
+});
+
+describe('visit-prep limiter', () => {
+  test('is keyed by the shared /64-collapsing unauthenticated key, not the raw IP', () => {
+    const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+    expect(require('../routes/appointment-public')._test.VISIT_PREP_LIMITER_OPTIONS.keyGenerator).toBe(unauthenticatedAuthLimitKey);
   });
 });

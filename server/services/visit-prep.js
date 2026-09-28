@@ -25,6 +25,7 @@ const logger = require('./logger');
 const PhotoService = require('./photos');
 const { visitPrepPhotosLive } = require('../config/feature-gates');
 const { MAX_PHOTOS, MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
+const sharp = require('sharp');
 const { convertHeicToJpeg } = require('./heic-to-jpeg');
 const { hashBuffer } = require('./service-report/photo-chain');
 const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
@@ -45,6 +46,15 @@ const VISIT_PREP_LIMITS = {
 };
 
 const TOPICS = ['pest', 'lawn', 'tree_shrub', 'other'];
+
+// Every accepted image is DECODED and re-encoded as JPEG through sharp
+// (Codex r1 P2): a header sniff alone admits a truncated or pathological
+// payload that the technician's browser then cannot render. Decoding also
+// applies the EXIF orientation, drops the metadata (GPS included), and
+// bounds the stored size. 25 MP matches the HEIC worker's own ceiling.
+const MAX_INPUT_PIXELS = 25_000_000;
+const MAX_STORED_EDGE_PX = 2560;
+const STORED_JPEG_QUALITY = 85;
 
 // Strip any HTML-ish characters before storage — the same one-line
 // convention every other free-text customer intake in this repo uses
@@ -215,16 +225,35 @@ async function prepareUploadFile(file) {
     throw prepError('One of the attached photos is not a valid image.', 400, 'PREP_INVALID_PHOTO');
   }
 
+  let source = buffer;
   if (isHeicFamily(declared)) {
-    let jpeg;
     try {
-      jpeg = await convertHeicToJpeg(buffer);
-    } catch {
+      source = await convertHeicToJpeg(buffer);
+    } catch (err) {
+      // Converter saturation is transient (Codex r1 P2): a valid photo must
+      // come back retryable, never "invalid".
+      if (err && err.code === 'HEIC_CAPACITY') {
+        throw prepError('Our photo converter is busy — please try again in a moment.', 503, 'PREP_CONVERTER_BUSY');
+      }
       throw prepError('One of the attached photos could not be converted.', 400, 'PREP_INVALID_PHOTO');
     }
-    return { buffer: jpeg, mimeType: 'image/jpeg' };
   }
-  return { buffer, mimeType: mimeFamily(declared) };
+  return { buffer: await normalizeToJpeg(source), mimeType: 'image/jpeg' };
+}
+
+// Full decode + JPEG re-encode (see MAX_INPUT_PIXELS). Anything sharp
+// cannot decode end to end — truncated data, an unsupported variant, more
+// pixels than the ceiling — is refused as an invalid photo.
+async function normalizeToJpeg(buffer) {
+  try {
+    return await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS, failOn: 'error' })
+      .rotate()
+      .resize({ width: MAX_STORED_EDGE_PX, height: MAX_STORED_EDGE_PX, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: STORED_JPEG_QUALITY })
+      .toBuffer();
+  } catch {
+    throw prepError('One of the attached photos is not a valid image.', 400, 'PREP_INVALID_PHOTO');
+  }
 }
 
 // Stage 2 — file preparation: count bounds, per-file validate/convert, hash
@@ -288,9 +317,9 @@ async function persistLocked(trx, {
   // concurrent locked writers can exhaust the pool waiting on each other's
   // recheck while each already holds a connection plus the stop lock.
   const current = await recheck(trx);
-  if (!current) {
-    throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
-  }
+  // Same generic 404 an unknown token gets (Codex r1 P0): an ineligible
+  // visit is never distinguishable from no visit at all on this route.
+  if (!current) throw prepError('Not found', 404, 'PREP_NOT_FOUND');
 
   const existing = await trx('visit_prep_photos').where({ scheduled_service_id: current.id }).select('image_sha256');
   const existingHashes = new Set(existing.map((r) => r.image_sha256));
@@ -298,7 +327,8 @@ async function persistLocked(trx, {
   const dropped = uploaded.filter((u) => existingHashes.has(u.sha256));
 
   if (toStore.length === 0) {
-    return { created: false, dropped, current };
+    await preserveResubmittedFields(trx, current, dropped[0], { topic, locationOnProperty, note });
+    return { created: false, dropped, current, summary: await visitPrepSummary(current, trx) };
   }
 
   const locked = await visitPrepSummary(current, trx);
@@ -331,7 +361,28 @@ async function persistLocked(trx, {
     photo_index: index,
   })));
 
-  return { created: true, dropped, current };
+  // Counts come from THIS transaction (Codex r1 P2): a post-commit read
+  // that failed would 500 a request whose photos were already durably
+  // stored and invite a retry of a write that had succeeded.
+  return { created: true, dropped, current, summary: await visitPrepSummary(current, trx) };
+}
+
+// A resubmit of already-stored photos carrying a corrected or newly added
+// note/topic/location (Codex r1 P2): there is no separate note endpoint, so
+// the submitted fields ride the submission that owns the first duplicate
+// photo. Non-empty submitted values overwrite; empty ones leave the record
+// alone.
+async function preserveResubmittedFields(trx, current, duplicate, { topic, locationOnProperty, note }) {
+  const patch = {};
+  if (note) patch.note = note;
+  if (topic) patch.topic = topic;
+  if (locationOnProperty) patch.location_on_property = locationOnProperty;
+  if (!Object.keys(patch).length || !duplicate) return;
+  const owner = await trx('visit_prep_photos')
+    .where({ scheduled_service_id: current.id, image_sha256: duplicate.sha256 })
+    .first('submission_id');
+  if (!owner) return;
+  await trx('visit_prep_submissions').where({ id: owner.submission_id }).update(patch);
 }
 
 // Runs `fn(trx)` under the CANONICAL stop lock (visit-groups.js's
@@ -347,15 +398,13 @@ async function withStopLock(svcId, fn) {
     try {
       return await db.transaction(async (trx) => {
         const locked = await lockStopForRow(trx, svcId);
-        if (locked === null) {
-          throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
-        }
+        if (locked === null) throw prepError('Not found', 404, 'PREP_NOT_FOUND');
         return fn(trx);
       });
     } catch (err) {
       if (err && err.code === 'VISIT_STOP_MOVED') {
         if (attempt < 2) continue;
-        throw prepError("Photos can't be added to this visit online.", 409, 'PREP_NOT_AVAILABLE');
+        throw prepError('Not found', 404, 'PREP_NOT_FOUND');
       }
       throw err;
     }
@@ -391,12 +440,6 @@ async function createVisitPrepSubmission({
   const fields = normalizeSubmissionFields({ topic, locationOnProperty, note });
   const prepared = await prepareFiles(files);
 
-  if (prepared.length === 0) {
-    // Every candidate photo was a within-request duplicate of another one
-    // in the same submission — nothing to upload or persist.
-    return { created: false, summary: await visitPrepSummary(svc) };
-  }
-
   const uploaded = await uploadAll(svc.id, prepared);
 
   let result;
@@ -410,7 +453,7 @@ async function createVisitPrepSubmission({
   // their already-uploaded objects are cleaned up regardless of outcome.
   await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
-  return { created: result.created, summary: await visitPrepSummary(result.current) };
+  return { created: result.created, summary: result.summary };
 }
 
 module.exports = {
@@ -423,6 +466,6 @@ module.exports = {
   visitPrepSummary,
   createVisitPrepSubmission,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg,
   },
 };
