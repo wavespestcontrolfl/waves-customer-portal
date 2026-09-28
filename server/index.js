@@ -1195,7 +1195,20 @@ const primeCatalogNames = config.nodeEnv === 'test'
   ? Promise.resolve()
   : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
 
-primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
+// Compile the shared re-entry claim patterns before accepting traffic, so
+// the first live voice turn or email draft doesn't pay V8's one-time regex
+// compilation (about a second, synchronous; #4905). Never blocks boot.
+const primeGuardrails = primeCatalogNames.then(() => {
+  if (config.nodeEnv === 'test') return;
+  try {
+    const ms = require('./services/content/content-guardrails').warmReentrySafetyPatterns();
+    logger.info(`[boot] re-entry claim patterns compiled in ${ms}ms`);
+  } catch (err) {
+    logger.warn(`[boot] re-entry claim pattern warm-up failed: ${err.message}`);
+  }
+});
+
+primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
