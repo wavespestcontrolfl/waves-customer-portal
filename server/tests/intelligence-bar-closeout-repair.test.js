@@ -9,7 +9,10 @@ jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: je
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
-jest.mock('../services/billing-recovery-bill', () => ({ assessVisitBillable: jest.fn(), billVisit: jest.fn(), pendingDepositForVisit: jest.fn().mockResolvedValue(0) }));
+jest.mock('../services/billing-recovery-bill', () => ({
+  assessVisitBillable: jest.fn(), billVisit: jest.fn(),
+  pendingDepositForVisit: jest.fn().mockResolvedValue(0), liveCardHoldForVisit: jest.fn().mockResolvedValue(null),
+}));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
@@ -340,7 +343,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {}, dueDate: '2026-09-14' });
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     // Pinned to closeout-status's canonical completion record (GH Codex P2).
-    expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.objectContaining({ serviceRecordId: 'rec-1' }));
+    expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.objectContaining({ serviceRecordId: 'rec-1', requireCompletedVisit: true }));
     expect(preview.steps[0]).toEqual(expect.objectContaining({ due_date: '2026-09-14', service_record_id: 'rec-1' }));
     expect(preview.steps).toEqual([expect.objectContaining({ step: 'bill_visit', scheduled_service_id: SVC, amount: 129, kind: 'billing' })]);
     expect(preview.notifies_customer).toBe(false);
@@ -351,6 +354,16 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/visit price \$129\.00, due 2026-09-14 .*total is set at creation/);
     // The 'billed' disposition cannot be removed from the portal (GH Codex P2).
     expect(contract.irreversible).toBe(true);
+  });
+
+  test('a visit with an open card hold stays manual (completion owns the hold rail)', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    BillingRecoveryBill.liveCardHoldForVisit.mockResolvedValueOnce({ id: 'hold-1', status: 'held' });
+    const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.code).toBe('nothing_repairable');
+    expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoice', fix: expect.stringMatching(/card hold is still open/) })]);
   });
 
   test('a visit carrying unapplied estimate deposit money stays manual', async () => {
@@ -391,7 +404,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     });
     expect(run.success).toBe(true);
     expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
-    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true, serviceRecordId: 'rec-1' }));
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true, serviceRecordId: 'rec-1', requireCompletedVisit: true, refuseLiveCardHold: true }));
 
     // Repriced after the card: the executor's plan no longer matches.
     BillingRecoveryBill.billVisit.mockClear();

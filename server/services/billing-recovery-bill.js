@@ -43,13 +43,6 @@ const refuse = (status, error) => ({ ok: false, status, error });
 // resolved (the IB repair passes closeout-status's canonical record); the
 // Bill button keeps its legacy join.
 async function loadBillableVisit(scheduledServiceId, serviceRecordId, database) {
-  // Same effective-payer resolution as the leak list: a per-job self-pay pin
-  // means the visit bills the customer directly, so the payer-billed reject
-  // below must not fire off the ignored account default. Column-guarded.
-  let billSelfPayAware = false;
-  try {
-    billSelfPayAware = await database.schema.hasColumn('scheduled_services', 'self_pay_override');
-  } catch { /* keep legacy */ }
   const query = database({ ss: 'scheduled_services' })
     .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
     .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
@@ -65,9 +58,7 @@ async function loadBillableVisit(scheduledServiceId, serviceRecordId, database) 
       'ss.prepaid_method',
       'ss.annual_prepay_term_id',
       'ss.scheduled_date',
-      database.raw(billSelfPayAware
-        ? 'COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) as payer_id'
-        : 'COALESCE(ss.payer_id, c.payer_id) as payer_id'),
+      'ss.status as ss_status',
       database.raw('COALESCE(ss.is_callback, false) as ss_callback'),
       database.raw('COALESCE(sr.is_callback, false) as sr_callback'),
       'sr.status as sr_status',
@@ -138,8 +129,19 @@ async function coverageRefusal(visit, billingMode, database) {
     return refuse(409, 'Customer is on active autopay — billing-cron charges monthly_rate; invoicing would double-charge.');
   }
   // v1 is self-pay only — a payer-billed visit is owed by the payer's AP inbox,
-  // not the homeowner, and must be cut through the payer invoice path.
-  if (visit.payer_id) return refuse(409, 'Visit is billed to a third-party payer — handle via the payer AP flow.');
+  // not the homeowner, and must be cut through the payer invoice path. Payer
+  // ownership comes from the canonical resolver InvoiceService.create uses
+  // (per-job payer, self-pay pin, account default, ACTIVE payers only), never a
+  // parallel classifier; an unreadable answer refuses.
+  let payerId;
+  try {
+    ({ payerId } = await require('./payer').resolveForInvoice({
+      database, customerId: visit.customer_id, scheduledServiceId: visit.scheduled_service_id, throwOnError: true,
+    }));
+  } catch {
+    return refuse(503, 'Payer could not be verified — try again.');
+  }
+  if (payerId) return refuse(409, 'Visit is billed to a third-party payer — handle via the payer AP flow.');
   if (visit.ss_callback || visit.sr_callback) return refuse(409, 'Visit is flagged as a callback / re-treat (no-cost).');
   // Always-free check for the write path — a stale/direct request must not
   // bill an always-free type.
@@ -182,9 +184,15 @@ function priceRefusalOrAmount(visit, billing) {
   return { ok: true, price, rowPrice };
 }
 
-async function assessVisitBillable(scheduledServiceId, { serviceRecordId = null, database = db } = {}) {
+// requireCompletedVisit (IB closeout repair): the scheduled visit itself must
+// still be completed — a completed record left behind on a cancelled or
+// rescheduled visit is a contradiction for a person, not a bill.
+async function assessVisitBillable(scheduledServiceId, { serviceRecordId = null, requireCompletedVisit = false, database = db } = {}) {
   const visit = await loadBillableVisit(scheduledServiceId, serviceRecordId, database);
   if (!visit) return refuse(404, 'Visit not found');
+  if (requireCompletedVisit && visit.ss_status !== 'completed') {
+    return refuse(409, `The visit is ${visit.ss_status || 'not completed'} — its completion record contradicts it; resolve that first.`);
+  }
   if (!visit.service_record_id) return refuse(422, 'Visit has no completion record — cannot invoice');
   // Office-handoff visits write service_records.status='incomplete' and the
   // completion flow intentionally skips invoicing — never bill those here.
@@ -198,6 +206,17 @@ async function assessVisitBillable(scheduledServiceId, { serviceRecordId = null,
 }
 
 const cents = (n) => Math.round(Number(n) * 100);
+
+// A one-time card-on-file hold still open on this visit (held / charging /
+// charge_review). Completion resolves it (chargeCardHoldOnCompletion) when it
+// mints; the Bill action does not, so such visits are not billed here.
+async function liveCardHoldForVisit(scheduledServiceId, database = db) {
+  const hold = await database('estimate_card_holds')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereIn('status', ['held', 'charging', 'charge_review'])
+    .first('id', 'status');
+  return hold || null;
+}
 
 // Unapplied deposit money createFromService would roll onto this visit's
 // invoice (scheduled_services.source_estimate_id → estimate_deposits), in
@@ -217,21 +236,30 @@ async function pendingDepositForVisit(scheduledServiceId, database = db) {
 // (the IB repair leaves deposit-bearing visits manual) — createFromService
 // refuses on its locked deposit read if any unapplied deposit would roll
 // onto this invoice.
+// requireCompletedVisit / refuseLiveCardHold: the IB repair's approval
+// covers neither a contradicted visit nor an open card hold — both are
+// re-checked under the lock.
 async function billVisit(scheduledServiceId, {
-  actorId = null, expectedPrice = null, refuseDepositCredit = false, serviceRecordId = null, database = db,
+  actorId = null, expectedPrice = null, refuseDepositCredit = false, serviceRecordId = null,
+  requireCompletedVisit = false, refuseLiveCardHold = false, database = db,
 } = {}) {
   try {
     // Serialize concurrent bills on the same visit, assess inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
     const { invoice, price } = await database.transaction(async (trx) => {
       await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
-      const assessed = await assessVisitBillable(scheduledServiceId, { serviceRecordId, database: trx });
+      const assessed = await assessVisitBillable(scheduledServiceId, { serviceRecordId, requireCompletedVisit, database: trx });
       if (!assessed.ok) {
         const e = new Error(assessed.error);
         e.refusal = assessed;
         throw e;
       }
       const { visit, price, rowPrice } = assessed;
+      if (refuseLiveCardHold && await liveCardHoldForVisit(scheduledServiceId, trx)) {
+        const e = new Error('A card hold is still open on this visit — completion captures or releases it; bill it from Billing Recovery after resolving the hold.');
+        e.status = 409;
+        throw e;
+      }
       if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
         const e = new Error(`The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`);
         e.status = 409;
@@ -305,4 +333,4 @@ async function billVisit(scheduledServiceId, {
   }
 }
 
-module.exports = { assessVisitBillable, billVisit, pendingDepositForVisit, dueDateFromVisit };
+module.exports = { assessVisitBillable, billVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit };

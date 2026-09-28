@@ -7,6 +7,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice', () => ({ createFromService: jest.fn() }));
+// Payer ownership comes from the canonical resolver (active payers only).
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 jest.mock('../services/autopay-eligibility', () => ({
   customerOnAutopay: jest.fn(),
   // SQL is ignored by the chain mock; just needs the { sql, binding } shape.
@@ -39,6 +41,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
+const PayerService = require('../services/payer');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const router = require('../routes/admin-billing-recovery');
@@ -48,7 +51,7 @@ const router = require('../routes/admin-billing-recovery');
 // to `rows` (the `.orderBy(...)` terminal in GET /leaks).
 function makeQB({ rows = [], first = null, insert = undefined } = {}) {
   const qb = {};
-  ['join', 'leftJoin', 'where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy']
+  ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNot', 'whereNotIn', 'orWhere', 'select', 'orderBy']
     .forEach((m) => { qb[m] = jest.fn(() => qb); });
   qb.first = jest.fn(() => Promise.resolve(first));
   qb.insert = jest.fn(() => Promise.resolve(insert));
@@ -232,10 +235,12 @@ describe('admin billing-recovery routes', () => {
 
   test('billing a payer-billed visit is blocked (self-pay only v1)', async () => {
     db.mockImplementation((arg) => {
-      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, payer_id: 'payer-1' } });
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
       throw new Error(`unexpected direct table ${JSON.stringify(arg)}`);
     });
     customerOnAutopay.mockResolvedValue(false);
+    // The canonical resolver says an ACTIVE payer owns this visit.
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/billing-recovery/ss-1/bill`, {
         method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' }, body: '{}',
@@ -537,5 +542,48 @@ describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => 
     customerOnAutopay.mockResolvedValue(false);
     await assessVisitBillable('ss-1', { serviceRecordId: 'sr-1' });
     expect(qb.where).toHaveBeenCalledWith('sr.id', 'sr-1');
+  });
+});
+
+describe('billVisit — canonical payer, visit status, card hold (GH Codex r2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  test('payer ownership is the canonical resolver (a deactivated payer resolves self-pay and bills); an unreadable payer refuses', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null });
+    await expect(assessVisitBillable('ss-1')).resolves.toEqual(expect.objectContaining({ ok: true }));
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', scheduledServiceId: 'ss-1', throwOnError: true }));
+    PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('payers read failed'));
+    await expect(assessVisitBillable('ss-1')).resolves.toEqual(expect.objectContaining({ ok: false, status: 503 }));
+  });
+
+  test('requireCompletedVisit refuses a completed record on a visit that is no longer completed', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: { ...BILLABLE_VISIT, ss_status: 'cancelled' } }) : makeQB({ first: null })));
+    await expect(assessVisitBillable('ss-1', { requireCompletedVisit: true }))
+      .resolves.toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/cancelled/) }));
+    // The Bill button (no flag) keeps its existing behavior.
+    await expect(assessVisitBillable('ss-1')).resolves.toEqual(expect.objectContaining({ ok: true }));
+  });
+
+  test('refuseLiveCardHold refuses under the lock and mints nothing', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: { ...BILLABLE_VISIT, ss_status: 'completed' } });
+      if (arg === 'estimate_card_holds') return makeQB({ first: { id: 'hold-1', status: 'held' } });
+      return makeQB({ first: null });
+    });
+    installTransaction((arg) => {
+      if (arg === 'invoices' || arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error('fall through');
+    });
+    const result = await billVisit('ss-1', { expectedPrice: 129, requireCompletedVisit: true, refuseLiveCardHold: true });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/card hold/) }));
+    expect(InvoiceService.createFromService).not.toHaveBeenCalled();
   });
 });

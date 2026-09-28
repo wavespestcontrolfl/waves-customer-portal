@@ -221,8 +221,13 @@ async function planInvoiceStep(status, knex) {
   const serviceRecordId = status.record?.id || null;
   // The same read-only checks the Bill button re-runs before minting: a
   // refusal (autopay, payer, prepaid, callback, unpriced…) is the manual fix.
-  const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { serviceRecordId, database: knex });
+  const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { serviceRecordId, requireCompletedVisit: true, database: knex });
   if (!assessed.ok) return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: String(assessed.error).replace(/\.$/, '') } };
+  // An open card hold is resolved by completion's hold rail, which this
+  // repair does not run — the visit stays manual.
+  if (await BillingRecoveryBill.liveCardHoldForVisit(status.serviceId, knex)) {
+    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: 'a card hold is still open on this visit — resolve the hold, then bill it from Billing Recovery' } };
+  }
   // Deposit-bearing visits stay manual: the mint would consume estimate
   // deposit money, an effect this card does not preview or bind.
   const deposit = await BillingRecoveryBill.pendingDepositForVisit(status.serviceId, knex);
@@ -314,6 +319,8 @@ const STEP_RUNNERS = {
       expectedPrice: step.amount,
       refuseDepositCredit: true,
       serviceRecordId: step.service_record_id || null,
+      requireCompletedVisit: true,
+      refuseLiveCardHold: true,
       database: knex,
     });
     if (!billed.ok) return { status: 'failed', detail: billed.error };
