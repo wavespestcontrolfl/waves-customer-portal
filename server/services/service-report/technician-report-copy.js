@@ -189,7 +189,7 @@ const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Za-z0-9#*
 const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
 const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
 const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)`;
-const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?|spread(?:s|ing)?|broadcast(?:s|ed|ing)?|distribut(?:e|es|ed|ing))`;
+const REPORT_WORK_ACTION_TEXT = String.raw`(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|replac(?:e|es|ed|ing)|remov(?:e|es|ed|ing)?|install(?:s|ed|ing)?|mix(?:es|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?|spread(?:s|ing)?|broadcast(?:s|ed|ing)?|distribut(?:e|es|ed|ing))`;
 const REPORT_PAST_ACCESS_WORK_ACTION_RE = new RegExp(String.raw`\b${REPORT_WORK_ACTION_TEXT}\b`, 'i');
 const REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT = String.raw`(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)`;
 const REPORT_REVERSE_CREDENTIAL_STATE_ADVERB_TEXT = String.raw`(?:now|currently|still|today|temporarily|again|recently|just|always|previously|originally|briefly)`;
@@ -264,12 +264,13 @@ function containsExplicitNumericCredential(text) {
 // so the unit is the evidence that quantities such as "400 sqft" and "100 ml"
 // are treatment details. Bare "in" stays out because it is commonly a
 // preposition ("2468 in the morning"), not reliable evidence of inches.
+const REPORT_MEASUREMENT_NUMBER_TEXT = String.raw`(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})`;
 const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
-  String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}(?=\s|[.,;:!?)]|$)`,
+  String.raw`\b${REPORT_MEASUREMENT_NUMBER_TEXT}\s*${REPORT_MEASUREMENT_UNIT_TEXT}(?=\s|[.,;:!?)]|$)`,
   'gi',
 );
 const REPORT_MEASUREMENT_AT_START_RE = new RegExp(
-  String.raw`^(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`,
+  String.raw`^${REPORT_MEASUREMENT_NUMBER_TEXT}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`,
   'i',
 );
 const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`, 'i');
@@ -379,10 +380,10 @@ const REPORT_FERTILIZER_NOUN_AFTER_RE = new RegExp(String.raw`^\s*(?:${REPORT_FE
 // "Applied product, then opened the gate with 24-0-11" on the credential path.
 const REPORT_APPLICATION_QUALIFIER_WORD = String.raw`(?!(?:and|then|before|after|with|using|used|via|to|for|at|on|into|near|by|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?|gate|door|garage|entry|keypad|lockbox|lock|alarm|code|pin|combo|combination|passcode|password|passphrase)\b)[a-z][a-z0-9&+'’./-]*`;
 const REPORT_APPLICATION_BEFORE_RE = new RegExp(
-  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_APPLICATION_QUALIFIER_WORD}\s+){0,4}(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
+  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|us(?:e|ed|ing)|mix(?:ed|ing)?)\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_APPLICATION_QUALIFIER_WORD}\s+){0,4}(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
   'i',
 );
-const REPORT_APPLICATION_AFTER_RE = /^\s*(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
+const REPORT_APPLICATION_AFTER_RE = /^\s*(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed|sprayed|used|mixed)\b/i;
 const REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i;
 const REPORT_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
 const REPORT_DEVICE_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|alarm)\b(?:\s+(?:is|was|were|reads?))?\s*[:=]?\s*$/i;
@@ -399,6 +400,7 @@ function hasCredentialAffixAroundAnalysis(before, after, preserveLeading, preser
   }
 
   const trailingGroup = after.match(/^([\s–—-]+)([A-Za-z0-9#*]{1,12})/);
+  if (trailingGroup && /[-–—]/.test(trailingGroup[1])) return true;
   const uppercaseCredentialGroup = trailingGroup
     && REPORT_CREDENTIAL_TRAILING_AFFIX_RE.test(trailingGroup[2]);
   return Boolean(uppercaseCredentialGroup && !preserveTrailing);
@@ -421,7 +423,7 @@ function maskFertilizerAnalyses(text) {
       before,
       after,
       applicationBefore || fertilizerNounBefore,
-      applicationAfter || fertilizerNounAfter,
+      applicationAfter || fertilizerNounAfter || /^\s+(?:adjacent|close|next)\s+to\b/i.test(after),
     );
     if (embeddedToken) return analysis;
 
@@ -511,7 +513,7 @@ const REPORT_ACCESS_CONDITION_FREQUENCY_TEXT = String.raw`(?:ever|still|again|no
 const REPORT_ACCESS_CONDITION_AUX_TEXT = String.raw`(?:can|could|will|would|should|may|might|must|need(?:s|ed)?(?:\s+to)?|want(?:s|ed)?(?:\s+to)?|(?:have|has|had)(?:\s+to)?|(?:am|are|is|was|were)\s+able\s+to)`;
 const REPORT_CONDITIONAL_ACCESS_LINK_TEXT = String.raw`(?:(?:so(?:\s+that)?|if|when(?:ever)?|before|after|once)\s+(?:${REPORT_ACCESS_CONDITION_SUBJECT_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_FREQUENCY_TEXT}\s+)?(?:${REPORT_ACCESS_CONDITION_AUX_TEXT}\s+)?|(?:and\s+)?then\s+)`;
 const REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
-  String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}(?:\s+(?:with|using|via|code|pin|combo|combination)|\s*[:=])\s*(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}(?:\s+(?:with|using|via|code|pin|combo|combination)\b|\s*[:=])\s*(?!${REPORT_WORK_ACTION_TEXT}\b)(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
   'gi',
 );
 const REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE = new RegExp(
@@ -522,6 +524,58 @@ const REPORT_CONDITIONAL_ACCESS_CODE_RE = new RegExp(
   String.raw`\b${REPORT_ACCESS_INSTRUCTION_ACTION_TEXT}\s+(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s+${REPORT_MEASUREMENT_UNIT_TEXT})?\s+${REPORT_CONDITIONAL_ACCESS_LINK_TEXT}(?:${REPORT_ACCESS_ACTION_MANNER_TEXT}\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b`,
   'gi',
 );
+// A numeric candidate can be named first, then referred to as a credential
+// or as the input that opens a device. Check this relationship before
+// fertilizer and measurement masking; the shared input/action fragments keep
+// the connector grammar aligned with the direct access forms.
+const REPORT_CREDENTIAL_REFERENCE_TEXT = String.raw`\s*,?\s*(?:(?:(?:and\s+)?then|and|before|after)\s+)?${REPORT_ACCESS_INSTRUCTION_ACTION_TEXT}\s+(?:it|that)`;
+const REPORT_REFERENCED_CREDENTIAL_RE = new RegExp(
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?:\s*${REPORT_MEASUREMENT_UNIT_TEXT})?${REPORT_CREDENTIAL_REFERENCE_TEXT}(?:\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}${REPORT_EXPLICIT_CREDENTIAL_NOUN_TEXT}\b|\s+to\s+(?:${REPORT_ACCESS_ACTION_MANNER_TEXT}\s+)?${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b)`,
+  'gi',
+);
+
+// "Opening the gate requires 2468 ml" is an access credential even though
+// it looks like a measurement. Mask only quantities owned by a bounded work
+// action/material phrase, then inspect every remaining candidate in that
+// access predicate so later credentials cannot inherit the exemption.
+const REPORT_ACCESS_PREDICATE_RE = new RegExp(
+  String.raw`\b${REPORT_DIRECT_ACCESS_ACTION_TEXT}\b[^\n.!?]{0,25}\b${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT}\b(?:\s+(?!${REPORT_WORK_ACTION_TEXT}\b)[a-z][a-z'’\-]*){0,5}\s+(?:require[sd]?|need[sd]?|takes?|took)\b`,
+  'gi',
+);
+const REPORT_ACCESS_PREDICATE_WORK_MEASUREMENT_RE = new RegExp(
+  String.raw`\b${REPORT_WORK_ACTION_TEXT}\b\s*${REPORT_MEASUREMENT_NUMBER_TEXT}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`,
+  'gi',
+);
+const REPORT_ACCESS_PREDICATE_MATERIAL_RE = new RegExp(
+  String.raw`\b${REPORT_MEASUREMENT_NUMBER_TEXT}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+(?:of\s+)?(?:treatment|product|lubricant|oil|bait|granules?|dust|spray|seal(?:ant)?)\b`,
+  'gi',
+);
+const REPORT_ACCESS_PREDICATE_INPUT_RE = new RegExp(
+  String.raw`\b${REPORT_INPUT_ACTION_TEXT}\s+(${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'gi',
+);
+
+function containsAccessPredicateCredential(text) {
+  const value = String(text || '');
+  for (const relationship of value.matchAll(REPORT_ACCESS_PREDICATE_RE)) {
+    const tailOffset = relationship.index + relationship[0].length;
+    const tail = value.slice(tailOffset).match(/^(?:\.(?=\d)|[^\n.!?])*/)?.[0] || '';
+    // Explicit input owns its candidate even when a material-looking suffix
+    // follows. Work/date exemptions only apply after that relationship check.
+    for (const input of tail.matchAll(REPORT_ACCESS_PREDICATE_INPUT_RE)) {
+      const digitCount = input[1].replace(/\D/g, '').length;
+      if (digitCount >= 3 && digitCount <= 8) return true;
+    }
+    const screened = maskPastAccessWorkDetails(maskStructuredDates(tail))
+      .replace(REPORT_ACCESS_PREDICATE_WORK_MEASUREMENT_RE, '[work-detail]')
+      .replace(REPORT_ACCESS_PREDICATE_MATERIAL_RE, '[work-detail]');
+    for (const candidate of screened.matchAll(new RegExp(REPORT_CREDENTIAL_TOKEN_RE.source, 'g'))) {
+      const digitCount = candidate[2].replace(/\D/g, '').length;
+      if (digitCount >= 3 && digitCount <= 8) return true;
+    }
+  }
+  return false;
+}
 
 function containsRawAccessDeviceCredential(text) {
   const value = String(text || '');
@@ -529,6 +583,7 @@ function containsRawAccessDeviceCredential(text) {
     REPORT_ACTIVE_ACCESS_DEVICE_CODE_RE,
     REPORT_PASSIVE_ACCESS_DEVICE_CODE_RE,
     REPORT_CONDITIONAL_ACCESS_CODE_RE,
+    REPORT_REFERENCED_CREDENTIAL_RE,
   ]) {
     for (const match of value.matchAll(pattern)) {
       const digitCount = match[1].replace(/\D/g, '').length;
@@ -580,6 +635,7 @@ function containsReportAccessCode(text) {
   if (containsExplicitNumericCredential(raw)) return true;
   if (containsPositionalCredentialInterface(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
+  if (containsAccessPredicateCredential(raw)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
   // credential ("Applied override 24-0-11 to open the rear gate").
