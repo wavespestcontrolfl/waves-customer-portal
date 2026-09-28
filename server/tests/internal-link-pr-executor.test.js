@@ -1288,7 +1288,7 @@ describe('internal-link PR auto-merge', () => {
     for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', source_url: '/a/', target_url: '/termite-inspection/' }]);
-    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', user: { login: 'waves-bot' }, created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.listPrFiles = jest.fn(async () => [{ filename: 'src/content/blog/a.md' }]);
     GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? headBody : baseBody }));
     GitHubClient.getBranchSha = jest.fn(async () => 'e'.repeat(40));
@@ -1336,6 +1336,25 @@ describe('internal-link PR auto-merge', () => {
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'codex_review_not_requested' });
     expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a review request from anyone but the PR\'s automation author does not start the silence clock', async () => {
+    GitHubClient.listIssueComments.mockResolvedValue([{ user: { login: 'drive-by-user' }, body: `@codex review on \`${HEAD}\``, created_at: new Date(Date.now() - 5 * 3600e3).toISOString() }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'codex_review_not_requested' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an advanced head during the merge closes the PR before the tasks leave pr_open', async () => {
+    GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true, headAdvanced: 'c'.repeat(40) });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged' });
+    expect(GitHubClient.closePr).toHaveBeenCalledWith(77);
+    expect(GitHubClient.closePr.mock.invocationCallOrder[0]).toBeLessThan(instance._markTaskMerged.mock.invocationCallOrder[0]);
+
+    GitHubClient.mergePr.mockResolvedValueOnce({ sha: 'b'.repeat(40), merged: true, headAdvanced: 'c'.repeat(40) });
+    GitHubClient.closePr.mockRejectedValueOnce(new Error('github down'));
+    instance._markTaskMerged.mockClear();
+    await expect(instance.runAutoMerge()).rejects.toThrow('github down');
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 
   test('holds inside the grace window while Codex has not answered', async () => {

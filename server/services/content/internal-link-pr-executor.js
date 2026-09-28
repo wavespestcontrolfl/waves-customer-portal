@@ -240,7 +240,7 @@ async function previewBuildGate(ctx) {
 // remediate). Runs BEFORE any gate that recycles tasks (link-only diff), so
 // a PR Codex rejected is never returned to the candidate pool unrecorded.
 async function codexFindingsGate(ctx) {
-  ctx.codex = await this._codexVerdict(ctx.prNumber, ctx.headSha);
+  ctx.codex = await this._codexVerdict(ctx.prNumber, ctx.headSha, ctx.pr.user?.login);
   if (!ctx.codex.findings) return null;
   return {
     reason: 'codex_findings',
@@ -592,6 +592,19 @@ class InternalLinkPrExecutor {
       if (err?.code === 'BLOG_BASE_MOVED') return { status: 'hold', reason: 'base_moved', pr_number: prNumber };
       throw err;
     }
+    // A commit that reached the branch during the merge window was NOT
+    // published (mergePr ships the verified head and reports headAdvanced),
+    // but it leaves the PR open with unreviewed content. Close it before the
+    // tasks leave pr_open: if the close fails, the throw keeps them pr_open,
+    // where provenanceGate holds the foreign head for a human.
+    if (merged?.headAdvanced) {
+      await GitHubClient.closePr(prNumber);
+      try {
+        await GitHubClient.retireBranch(pr.head?.ref);
+      } catch (err) {
+        logger.warn(`[internal-link-pr-executor] branch retirement after advanced head failed for PR #${prNumber}: ${err.message}`);
+      }
+    }
     const mergedAt = new Date();
     for (const task of prTasks) {
       await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
@@ -626,7 +639,7 @@ class InternalLinkPrExecutor {
     return { ok: true, files: [...changed] };
   }
 
-  async _codexVerdict(prNumber, headSha) {
+  async _codexVerdict(prNumber, headSha, trustedRequester = null) {
     const publisher = require('../content-astro/astro-publisher');
     const { codexReviewStatus, isCodexAuthor } = publisher._internals;
     const [comments, reviews, inline] = await Promise.all([
@@ -653,9 +666,13 @@ class InternalLinkPrExecutor {
     const findings = inlineFindings + reviewFindings + commentFindings;
     const clean = !findings && codexReviewStatus({ comments, reviews, headSha }).clean === true;
     // When the review of THIS head was requested (the grace window runs from
-    // here): a non-Codex "@codex review" comment naming the head commit.
+    // here): an "@codex review" comment naming the head commit, posted by the
+    // automation account that opened the PR — never an arbitrary commenter,
+    // who could otherwise start the silence clock without Codex being asked.
+    const trusted = String(trustedRequester || '').toLowerCase();
     const requestedAt = (comments || [])
-      .filter((c) => !isCodexAuthor(c?.user?.login) && /@codex\s+review/i.test(String(c.body || '')) && mentionsHead(c.body))
+      .filter((c) => trusted && String(c?.user?.login || '').toLowerCase() === trusted
+        && /@codex\s+review/i.test(String(c.body || '')) && mentionsHead(c.body))
       .map((c) => Date.parse(c.created_at || c.createdAt || 0))
       .filter(Number.isFinite)
       .sort((a, b) => b - a)[0] || null;
@@ -820,7 +837,9 @@ class InternalLinkPrExecutor {
       return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: prNumber };
     }
     const resolvedPrNumber = prNumber || prInfo.number || null;
-    if (!prInfo?.merged) {
+    // task.merged_at: runAutoMerge published the verified head itself (an
+    // advanced-head PR is then closed without GitHub's merged flag).
+    if (!prInfo?.merged && !task.merged_at) {
       // A closed-but-unmerged PR (abandoned canary, manual close) is terminal.
       // Leaving the task at pr_open strands it forever: the review queue can't
       // requeue or dismiss a pr_open task (those require a terminal status), and
