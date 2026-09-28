@@ -641,8 +641,14 @@ describe('runPending and the orphan sweep', () => {
     process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
     process.env.GATE_DUNNING_LADDER_90 = 'true';
-    const row = seqRow({ step_index: 1, next_touch_at: tenAmET('2026-08-05') });
-    setupFullDb({ batchReads: [[row]] });
+    // Day 3 (step 0) is the same day on both cadences, so the ladder gate
+    // does not re-time it: sent Sunday 08-02, due today.
+    const row = seqRow({
+      step_index: 0, next_touch_at: tenAmET('2026-08-05'),
+      created_at: tenAmET('2026-08-02'), invoice_sent_at: tenAmET('2026-08-02'), invoice_created_at: tenAmET('2026-08-02'),
+    });
+    // Both revival reads come first under these gates; the batch is third.
+    setupFullDb({ batchReads: [[], [], [row]] });
     // The sweep itself fails (e.g. its candidate query times out).
     runExclusive.mockRejectedValueOnce(new Error('statement timeout'));
 
