@@ -48,6 +48,36 @@ describe('extractCompanyNames', () => {
     }
   });
 
+  test('every published text field goes in — including secondary_keywords and brief-derived primary_keyword (Codex r4)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: ['Bug Out'] } });
+    const draft = { ...DRAFT, frontmatter: { ...DRAFT.frontmatter, secondary_keywords: ['bug out alternatives sarasota'] } };
+
+    const r = await extractCompanyNames(draft, { brief: { target_keyword: 'termite plan comparison' } });
+
+    const { text } = dispatchWithFallback.mock.calls[0][1];
+    expect(text).toContain('secondary_keywords[0]: bug out alternatives sarasota');
+    expect(text).toContain('primary_keyword: termite plan comparison');
+    expect(r.companies).toEqual(['Bug Out']);
+    // …and a company only there is off the owner list.
+    const gate = require('../services/content/comparison-table-gate');
+    expect(gate.namedCompetitorListVerdict({ namedCompetitors: [], companyExtraction: r }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Bug Out'] });
+  });
+
+  test('own-brand filtering drops only OUR exact names and domains — never a company merely containing "Waves" (Codex r4)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [
+      'Making Waves Pest Control', 'Waves Pest Control', 'WAVES PEST CONTROL, LLC', 'Waves Pest Control Sarasota',
+      'Sarasota Pest Control', 'Bradenton Lawn Care', 'www.sarasotaflpestcontrol.com', 'Waves',
+    ] } });
+
+    const r = await extractCompanyNames(DRAFT);
+
+    expect(r.companies).toEqual(['Making Waves Pest Control']);
+    const gate = require('../services/content/comparison-table-gate');
+    expect(gate.namedCompetitorListVerdict({ namedCompetitors: ['Orkin'], companyExtraction: r }))
+      .toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Making Waves Pest Control'] });
+  });
+
   test('an empty list is a clean result', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { companies: [] } });
     expect(await extractCompanyNames(DRAFT)).toMatchObject({ ok: true, companies: [] });

@@ -3149,7 +3149,7 @@ describe('runNext post-publish bookkeeping', () => {
 describe('named-competitor autopublish gate', () => {
   const SLUG = '/pest-control/taexx-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, businessNameConfirmer = undefined, slug = SLUG, signalMetadata = undefined }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, businessNameConfirmer = undefined, slug = SLUG, signalMetadata = undefined, frontmatterExtra = {} }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3196,6 +3196,7 @@ describe('named-competitor autopublish gate', () => {
             slug,
             canonical: `https://www.wavespestcontrol.com${slug}`,
             title: 'In-Wall Systems Compared for SWFL Homes',
+            ...frontmatterExtra,
           },
           body: body || 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
         },
@@ -3328,6 +3329,7 @@ describe('named-competitor autopublish gate', () => {
       ['a suffix-less brand ("Bug Out")', { body: 'Bug Out competes with local providers in Sarasota.' }, ['Bug Out']],
       ['a name only in the slug', { body: 'How to compare local termite providers before you switch.', slug: '/pest-control/hulett-alternatives/' }, ['Hulett']],
       ['a name used both generically and as a company', { body: 'Lawn Doctor can be an informal term for a turf specialist. Lawn Doctor competes with local providers for recurring plans.' }, ['Lawn Doctor']],
+      ['a name only in secondary_keywords', { body: 'How to compare local pest providers.', frontmatterExtra: { secondary_keywords: ['bug out alternatives sarasota'] } }, ['Bug Out']],
     ])('%s the model lists is off the owner list', async (_label, draftOpts, companies) => {
       process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
       const publisher = prPublisher(915);
@@ -3338,8 +3340,11 @@ describe('named-competitor autopublish gate', () => {
 
       const result = await runner.runNext();
 
-      const sent = businessNameConfirmer.extractCompanyNames.mock.calls[0][0];
+      const [sent, sentOpts] = businessNameConfirmer.extractCompanyNames.mock.calls[0];
       if (draftOpts.slug) expect(sent.frontmatter.slug).toBe(draftOpts.slug);
+      if (draftOpts.frontmatterExtra) expect(sent.frontmatter).toMatchObject(draftOpts.frontmatterExtra);
+      // The brief rides along so brief-derived published fields are scanned.
+      expect(sentOpts.brief).toEqual(expect.objectContaining({ id: 'brief_named_1' }));
       expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
       expect(result.reviewer_notes).toContain(companies[0]);
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();

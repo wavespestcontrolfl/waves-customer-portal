@@ -1325,6 +1325,7 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     const extractor = deps.businessNameConfirmer || require('./business-name-confirmer');
     comparisonResult.companyExtraction = await extractor.extractCompanyNames(draft, {
       prior: stored && stored.companyExtraction,
+      brief,
     });
     if (comparisonResult.companyExtraction.ok !== true) {
       return { ok: false, reason: `company-name check unavailable for the fix (${comparisonResult.companyExtraction.reason || 'unknown'})` };

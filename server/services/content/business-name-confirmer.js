@@ -14,8 +14,10 @@
  *
  * One structured FAST-tier call per unattended blog draft (about ten a
  * week), on the fastStructured two-provider policy, lane
- * business_name_confirm. The input is the title, slug / URL path, meta
- * description, body and link destinations, bounded to MAX_INPUT_CHARS.
+ * business_name_confirm. The input is every text field of the frontmatter
+ * that ships (the publisher's own normalizer) plus the writer's raw
+ * frontmatter and top-level metadata, the link destinations, and the body,
+ * bounded to MAX_INPUT_CHARS.
  *
  * Result: { ok: true, key, companies: [canonical name…], checked_at } or
  * { ok: false, key, reason, retryable }. `key` hashes the exact input sent;
@@ -35,11 +37,39 @@ const competitorFacts = require('./competitor-facts');
 // unseen) — it fails closed instead.
 const MAX_INPUT_CHARS = 60_000;
 const CALL_TIMEOUT_MS = 30_000;
-const PROMPT_VERSION = 'company-extraction-v1';
-const OWN_BRAND_RE = /\bwaves\b/i;
+const PROMPT_VERSION = 'company-extraction-v2';
+
+// Our OWN names, matched as exact whole names (case/punctuation-insensitive)
+// — never "contains the word Waves" (pre-push r4: "Making Waves Pest
+// Control" is somebody else). Sources: the company name, each GBP profile
+// ("Waves Pest Control <location>", config/locations.js), and every fleet
+// site's brand label + domain (content-astro/spoke-sites.js).
+function normalizeOwnName(value) {
+  return String(value || '').toLowerCase()
+    .replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')
+    .replace(/^the\s+/, '').replace(/[^a-z0-9.]+/g, ' ').trim();
+}
+let OWN_NAMES = null;
+function ownNames() {
+  if (OWN_NAMES) return OWN_NAMES;
+  const names = ['Waves', 'Waves Pest Control', 'Waves Pest Control, LLC'];
+  try {
+    for (const loc of require('../../config/locations').WAVES_LOCATIONS || []) {
+      if (loc && loc.name) names.push(`Waves Pest Control ${loc.name}`);
+    }
+  } catch { /* locations unavailable — the fixed names still apply */ }
+  try {
+    for (const site of require('../content-astro/spoke-sites').SPOKE_SITES || []) {
+      names.push(site.key);
+      if (site.group !== 'Hub' && site.label) names.push(site.label);
+    }
+  } catch { /* fleet unavailable — the fixed names still apply */ }
+  OWN_NAMES = new Set(names.map(normalizeOwnName).filter(Boolean));
+  return OWN_NAMES;
+}
 
 const SYSTEM_PROMPT = [
-  'You review a blog draft written for Waves Pest Control, a Florida pest control and lawn care company.',
+  'You review a blog draft written for Waves Pest Control, a Florida pest control and lawn care company that also publishes under local site names such as "Sarasota Pest Control" and "Bradenton Lawn Care".',
   'List every pest control, lawn care, landscaping, termite, mosquito, wildlife, or other home-service COMPANY that the draft names, links to, or refers to — in the title, slug/URL, meta description, body, or link destinations.',
   'Include a company even when it is named only once, only in a link or URL slug, or only in a heading, and include it if ANY use in the draft refers to the company (a name used generically in one sentence and as a company in another is still a company).',
   'Do NOT list: Waves Pest Control or its own websites; retailers (e.g. Home Depot, Lowe\'s, Amazon); universities, extension services, government bodies, and laws; product or chemical brands; publications and news outlets; generic service phrases or methods ("pest control", "Biological Pest Control", "Yard Mosquito Control").',
@@ -57,18 +87,53 @@ const RESPONSE_SCHEMA = {
 
 const LINK_RE = /https?:\/\/[^\s)"'<>\]]+/gi;
 
-/** extractionInput(draft) → the exact text sent (null when over the bound). */
-function extractionInput(draft) {
+// Every string (and string inside an array or object) of a frontmatter
+// value, as `path: value` lines. Dates / numbers / booleans are skipped.
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?$/;
+function textFields(value, path, out) {
+  if (typeof value === 'string') {
+    if (value.trim() && !ISO_DATE_RE.test(value.trim())) out.push(`${path}: ${value.trim()}`);
+  } else if (Array.isArray(value)) {
+    value.forEach((v, i) => textFields(v, `${path}[${i}]`, out));
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) textFields(v, path ? `${path}.${k}` : k, out);
+  }
+  return out;
+}
+
+// The frontmatter that SHIPS: the publisher's own normalizer
+// (astro-publisher normalizeAutonomousBlogFrontmatter — the whitelist
+// publishOrUpdatePage commits, including brief-derived defaults such as
+// primary_keyword from the brief's target keyword), so a field added there
+// is scanned without touching this module. The writer's raw frontmatter and
+// top-level metadata are scanned too (pre-push r7), since the two shapes can
+// disagree. Normalizer unavailable → raw fields only, still every field.
+function publishedFrontmatter(draft, brief) {
   const fm = draft?.frontmatter || {};
+  try {
+    const { _internals } = require('../content-astro/astro-publisher');
+    const slug = String(fm.slug || draft?.url || '').replace(/^\/+|\/+$/g, '');
+    return _internals.normalizeAutonomousBlogFrontmatter(fm, brief || {}, String(draft?.body || ''), { slug, canonical: fm.canonical });
+  } catch (_) {
+    return {};
+  }
+}
+
+/** extractionInput(draft, brief) → the exact text sent (null when over the bound). */
+function extractionInput(draft, brief = null) {
   const body = String(draft?.body || draft?.content || '');
   const links = [...new Set(body.match(LINK_RE) || [])];
-  // BOTH metadata shapes (top-level and frontmatter) — producers disagree on
-  // which one the publisher reads, so every distinct value is checked.
-  const all = (...vals) => [...new Set(vals.filter(Boolean).map(String))].join(' | ');
+  const topLevel = {
+    title: draft?.title, meta_description: draft?.meta_description, url: draft?.url, slug: draft?.slug,
+    metaTitle: draft?.metaTitle, metaDescription: draft?.metaDescription,
+  };
+  const lines = [...new Set([
+    ...textFields(publishedFrontmatter(draft, brief), '', []),
+    ...textFields(draft?.frontmatter || {}, '', []),
+    ...textFields(topLevel, '', []),
+  ])];
   const text = [
-    `TITLE: ${all(draft?.title, fm.title, draft?.metaTitle, fm.metaTitle, fm.meta_title)}`,
-    `SLUG / URL: ${all(fm.slug, draft?.slug, draft?.url, fm.canonical)}`,
-    `META DESCRIPTION: ${all(draft?.meta_description, fm.meta_description, draft?.metaDescription, fm.metaDescription)}`,
+    `FRONTMATTER AND METADATA:\n${lines.join('\n')}`,
     `LINK DESTINATIONS:\n${links.join('\n')}`,
     `BODY:\n${body}`,
   ].join('\n\n');
@@ -86,7 +151,7 @@ function canonicalCompanies(names) {
   const out = new Set();
   for (const raw of names) {
     const nm = String(raw || '').trim();
-    if (!nm || OWN_BRAND_RE.test(nm)) continue;
+    if (!nm || ownNames().has(normalizeOwnName(nm))) continue;
     out.add(competitorFacts.findCompetitor(nm)?.name || nm);
   }
   return [...out].sort();
@@ -97,8 +162,8 @@ function canonicalCompanies(names) {
  * `retryable: true` marks provider / output failures (an outage should
  * delay the post); an over-long draft is `retryable: false`.
  */
-async function extractCompanyNames(draft, { prior = null } = {}) {
-  const text = extractionInput(draft);
+async function extractCompanyNames(draft, { prior = null, brief = null } = {}) {
+  const text = extractionInput(draft, brief);
   if (text === null) return { ok: false, key: null, reason: 'draft_too_long_for_extraction', retryable: false };
   const key = inputKey(text);
   if (prior && prior.ok === true && prior.key === key && Array.isArray(prior.companies)) return prior;
@@ -131,5 +196,5 @@ async function extractCompanyNames(draft, { prior = null } = {}) {
 
 module.exports = {
   extractCompanyNames,
-  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies },
+  _internals: { SYSTEM_PROMPT, MAX_INPUT_CHARS, extractionInput, inputKey, canonicalCompanies, ownNames, normalizeOwnName },
 };

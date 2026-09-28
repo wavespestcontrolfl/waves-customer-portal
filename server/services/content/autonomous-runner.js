@@ -952,7 +952,7 @@ class AutonomousRunner {
       if (run.action_type === 'new_supporting_blog') {
         const extractor = getBusinessNameConfirmer();
         const extraction = extractor
-          ? await extractor.extractCompanyNames(draft)
+          ? await extractor.extractCompanyNames(draft, { brief })
           : { ok: false, reason: 'business_name_confirmer_unavailable', retryable: true };
         comparisonResult.companyExtraction = extraction;
         run.comparison_table_result = comparisonResult;

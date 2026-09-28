@@ -1695,7 +1695,10 @@ describe('validateAutonomousRunGates', () => {
 
     const cleared = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(cleared.ok).toBe(true);
-    expect(deps.businessNameConfirmer.extractCompanyNames).toHaveBeenCalledWith(expect.objectContaining({ body: expect.any(String) }), { prior: stored });
+    expect(deps.businessNameConfirmer.extractCompanyNames).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.any(String) }),
+      { prior: stored, brief: expect.objectContaining({ action_type: 'new_supporting_blog' }) },
+    );
     expect(cleared.comparisonResult.companyExtraction).toEqual(stored);
 
     deps.businessNameConfirmer.extractCompanyNames = jest.fn(async () => ({ ok: true, key: 'k2', companies: ['Bug Out'] }));
