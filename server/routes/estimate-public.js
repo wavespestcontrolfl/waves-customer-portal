@@ -22,6 +22,21 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
+const {
+  computeContactGaps,
+  sanitizeContactLastName,
+  sanitizeContactFirstName,
+  sanitizeContactEmail,
+  fillExistingCustomerLastName,
+  fillExistingCustomerEmail,
+  cleanedNameTokens: contactGapNameTokens,
+  IDENTITY_MISMATCH: CONTACT_IDENTITY_MISMATCH,
+  hasRealFirstName: contactGapHasRealFirstName,
+  hasRealLastName: contactGapHasRealLastName,
+  fillLinkedCustomerFirstName,
+  capCodePoints: contactGapCapCodePoints,
+} = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -39,6 +54,19 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+const {
+  collapseMirroredRows,
+  hasPurchasedTrenchingWarranty,
+  isPreSlabTreatmentItem,
+  matchingTrenchingWarrantyRow,
+  preSlabExtendedWarrantySelected,
+  preSlabSelectedWarrantyPart,
+  rawOneTimeWarrantyEvidenceItems,
+  trenchingServiceIdentity,
+  trenchingWarrantyDecision,
+  reconcilePricedTrenchingWarrantyEvidence,
+} = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -3349,26 +3377,12 @@ function isLawnCareOneTimeItem(item = {}) {
 }
 
 function isPreSlabOneTimeItem(item = {}) {
-  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-    .replace(/[_-]+/g, ' ');
-  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
-    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+  return isPreSlabTreatmentItem(item);
 }
 
 function preSlabCustomerCopy(items = []) {
   const preSlabItems = (Array.isArray(items) ? items : []).filter(isPreSlabOneTimeItem);
-  const hasExtendedWarranty = preSlabItems.some((item) => {
-    const raw = [item.warrantyStatus, item.detail, item.det]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    if (item.warrantyExtendedSelected === true) return true;
-    if (raw.includes('no extended')) return false;
-    return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
-  });
+  const hasExtendedWarranty = preSlabItems.some(preSlabExtendedWarrantySelected);
   // Two slots render this copy — the one-time note inside the price card and
   // the mini-guarantee line below it. Split the service description from the
   // warranty assurance so they don't print the same sentence twice (the
@@ -4766,6 +4780,10 @@ function renderMembershipBlockHtml(membership) {
 
 function renderPage(token, estimate, estData, membership, opts = {}) {
   const est = estimate;
+  // The claims this page may make (shared/estimate-copy-claims.cjs
+  // guaranteeScope): 'none' with termite or unclassifiable work,
+  // 'satisfaction' with a rodent or commercial service, else 'all'.
+  const pageGuaranteeScope = guaranteeScope(estimate || {});
   // "Show your work" payload — built (gate-checked) by the caller; null
   // keeps every byte of the rendered page identical to the pre-gate HTML.
   const showYourWork = opts.showYourWork || null;
@@ -4804,7 +4822,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const germanRoachOneTimeCopy = germanRoachCleanoutItem
     ? `${germanRoachVisitPhrase(germanRoachCleanoutItem.visits)} to break the breeding cycle. Pay on service day, no recurring schedule.`
     : '';
-  const germanRoachGuaranteeCopy = '100% guaranteed with the Waves Guarantee.';
   // Service copy pack (estimate-one-time-copy.js) — the hero note takes the
   // pack only when EVERY billable row resolves to the same key (a mixed
   // roach + wasp quote must not read as a roach cleanout — codex pre-push
@@ -4815,7 +4832,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // renderers agree on when a quote is mixed (codex #3823 r8 P0).
   const oneTimeIntelligenceRows = [...oneTimeItems, ...boraCareOneTimeRows];
   const oneTimeHeroCopy = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems) && oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows)
-    ? oneTimeItems.map(resolveOneTimeServiceCopy).find(Boolean) || null
+    ? oneTimeItems.map(item => resolveOneTimeServiceCopy(item, { guaranteeScope: pageGuaranteeScope })).find(Boolean) || null
     : null;
   const recurringMonthlyParts = resolveRecurringMonthlyParts(est, estData);
   const storedBaseMonthly = Number(recurringMonthlyParts.baseMonthly || est.monthlyTotal || 0);
@@ -4952,7 +4969,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
-              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and warranty — then schedules your visit. You pay on service day; no card or deposit now.',
+              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and written service terms — then schedules your visit. You pay on service day; no card or deposit now.',
               payPrefHeading: 'Choose how you want to pay',
               payPrefCardTitle: 'Pay per application',
               payPrefCardSub: 'Invoice is sent automatically after confirmation.',
@@ -5016,7 +5033,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               cardConfirmTitle: 'Confirm invoice',
               cardConfirmSub: 'next step creates your invoice and makes secure payment available.',
               perksHeading: 'What WaveGuard members get',
-              perksBody: 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
+              perksBody: pageGuaranteeScope !== 'all'
+                ? 'Your WaveGuard membership includes priority service, locked-in pricing, and access to your service team.'
+                : 'Your WaveGuard membership goes beyond routine visits - priority service, locked-in pricing, and protection between treatments.',
               finalHeading: 'Go Waves! Wave Goodbye to Pests!',
               finalSubhead: '',
               finalBody: '',
@@ -5592,27 +5611,36 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // on unused visits, cancel anytime with no contract, money-back guarantee +
   // free re-service. Gated to recurring plans (same condition as the billing
   // card) and mode-aware so it hides in one-time mode.
+  // Termite and unclassifiable estimates make no guarantee claim
+  // (serviceMixMakesNoGuaranteeClaim, decided by the route from the
+  // estimate's rows): the card keeps the payment-option refund details but
+  // does not promise no-contract terms, anytime cancellation, or a guarantee.
+  // Every generic plan term on this card (no contract, cancel anytime, the
+  // guarantee) covers the whole plan, so it needs every service to carry the
+  // plan terms: termite, unknown, rodent or commercial work anywhere leaves
+  // only the factual refund details (AGENTS.md estimate truth scope).
+  const planTermsNeutral = pageGuaranteeScope !== 'all';
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
-    <h2>Cancel, refunds &amp; our guarantee</h2>
-    <p class="billing-lede">No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.</p>
+    <h2>${planTermsNeutral ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
+    <p class="billing-lede">${planTermsNeutral ? 'Your written service scope and terms apply.' : 'No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.'}</p>
     <ul class="plan-terms-list">
-      <li class="plan-terms-item">
+      ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
         <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
-      </li>
+      </li>`}
       ${showMembershipFee && !membershipSetupWaivedForExistingCustomer ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Your ${fmtMoney(membershipFee)} setup is refundable</span>
         <span class="plan-terms-detail">Change your mind? Just ask and we&rsquo;ll refund the WaveGuard setup in full.</span>
       </li>` : ''}
       ${showAnnualPrepayOption ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Annual prepay is prorated</span>
-        <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
+        <span class="plan-terms-detail">${planTermsNeutral ? 'Unused applications on the 12-month prepay plan are refunded on a prorated basis.' : 'On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.'}</span>
       </li>` : ''}
-      <li class="plan-terms-item">
+      ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
         <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
-      </li>
+      </li>`}
     </ul>
   </section>` : '';
 
@@ -5799,11 +5827,29 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeRowCopyAllowed = !hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   // One copy per logical job, included (service-credit) rows skipped — the
   // same helper the React contract uses (codex #3823 r3 P2s).
-  const oneTimeRowCopies = oneTimeRowCopyAllowed ? resolveOneTimeRowCopies(billableOneTimeItems) : [];
+  // Each row states its own service's terms (serviceRowTermsScope), as the
+  // page data stamps them for the React page.
+  const pageCommercialScope = estimateHasCommercialScope(estData);
+  const oneTimeRowScopes = billableOneTimeItems.map((it) => serviceGuaranteeScope(
+    pageGuaranteeScope,
+    serviceRowTermsScope(pageGuaranteeScope, it, { commercial: pageCommercialScope }),
+  ));
+  const oneTimeRowCopies = oneTimeRowCopyAllowed
+    ? resolveOneTimeRowCopies(
+      billableOneTimeItems.map((it, rowIndex) => ({ ...it, termsScope: oneTimeRowScopes[rowIndex] })),
+      { guaranteeScope: pageGuaranteeScope },
+    )
+    : [];
   const realOneTimeRows = billableOneTimeItems.map((it, rowIndex) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
-    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    // Plan-terms parts go and the scope stays; a pre-slab job keeps its
+    // selected extended warranty (owner ruling 2026-09-27).
+    const rowScope = oneTimeRowScopes[rowIndex];
+    const detail = copyAllowedInScope(rawDetail, rowScope)
+      ? rawDetail
+      : withoutClaimsOutsideScope(rawDetail, rowScope, preSlabSelectedWarrantyPart(it));
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -5834,6 +5880,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : (hasOnlyMosquitoServices
       ? MOSQUITO_PERKS
       : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
+    .filter((perk) => copyAllowedInScope(perk, pageGuaranteeScope))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
@@ -6039,10 +6086,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
         <li>Interior treatment available on every visit &mdash; priced from your building, no surprise fees</li>
-        <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
+        ${planTermsNeutral ? '' : '<li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>'}
         <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
-        <li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>
+        ${planTermsNeutral ? '' : '<li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>'}
       </ul>
     </div>` : ''}
   </section>`;
@@ -6058,7 +6105,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // a boolean, never per row.
   // One-time-only service copy pack chips lead (roach, flea, wasp, bed
   // bug, …) — same source the React contract's askChips reads.
-  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows) : null;
+  const oneTimeOnlyAskCopy = isOneTimeOnly && !isRegulatedCertificateSurface ? oneTimeOnlyIntelligenceCopy(oneTimeIntelligenceRows, { guaranteeScope: pageGuaranteeScope }) : null;
   const askPrompts = oneTimeOnlyAskCopy?.askChips?.length
     ? oneTimeOnlyAskCopy.askChips.slice(0, 6)
     : buildEstimateAskPrompts(
@@ -6621,7 +6668,7 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
+    ${!planTermsNeutral && canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
 
@@ -6658,7 +6705,7 @@ ${shellTopBar()}
   <section class="card booking-card" id="trenching-review-card">
     <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
     <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
-    <p class="card-sub" style="font-style:italic">This price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you before your visit is scheduled &mdash; so it can't be self-booked online.</p>
+    <p class="card-sub" style="font-style:italic">Your price is set from the measured treatment path. A Waves specialist confirms the treatment plan, access, exact footage, and product with you before scheduling your visit, so it can&rsquo;t be self-booked online.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="max-width:360px;margin:16px auto 0;display:block;text-align:center;text-decoration:none">Call Waves to confirm &mdash; ${escapeHtml(COMPANY.phone)}</a>
     <p class="card-sub" style="margin-top:12px">Prefer we reach out? We'll follow up to confirm your treatment path and schedule your visit. You pay on service day.</p>
   </section>
@@ -6813,7 +6860,7 @@ ${shellTopBar()}
   </div>` : trenchingReviewBeforeBooking ? `
   <div class="final">
     <h2>Waves will confirm &amp; schedule your trenching</h2>
-    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and warranty &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
+    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and written service terms &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -8614,12 +8661,33 @@ async function handleEstimateView(req, res, next) {
     const acceptanceTermsForcesReactView = featureGates.isEnabled('estimateAcceptanceTerms')
       && isEstimateAcceptActive(estimate)
       && acceptanceTermsApplyTo(estimate);
+    // Missing-contact capture (owner ruling 2026-09-27) lives ONLY in the
+    // React accept card; the legacy server-HTML page cannot collect a last
+    // name / email (codex #5102 r1 P0). An accept-active estimate with a
+    // contact gap therefore always gets the React view — same shape as the
+    // acceptance-terms force above. A lookup failure fails open (no force).
+    let contactGapsForceReactView = false;
+    if (isEstimateAcceptActive(estimate)) {
+      try {
+        const linkedCustomerForGaps = estimate.customer_id
+          ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
+          : null;
+        const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email);
+      } catch (e) {
+        // Fail CLOSED toward the React view: it can collect the fields,
+        // the legacy page cannot (codex #5102 r7).
+        contactGapsForceReactView = true;
+        logger.warn(`[estimate-view] contact-gap routing check failed, forcing the React view: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
       || estimatePdfRenderPass
-      || acceptanceTermsForcesReactView;
+      || acceptanceTermsForcesReactView
+      || contactGapsForceReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -8643,6 +8711,7 @@ async function handleEstimateView(req, res, next) {
       && !recurringCardForcesReactView
       && !estimatePdfRenderPass
       && !acceptanceTermsForcesReactView
+      && !contactGapsForceReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -8671,7 +8740,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -8832,6 +8901,12 @@ async function handleEstimateView(req, res, next) {
 
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
+      // The page's guarantee rule, decided from the same normalized rows the
+      // React view reads (renderPage only sees this view and the data).
+      noGuaranteeClaims: estimateMakesNoGuaranteeClaim(estData, pricingBundleForView),
+      // A guarantee line covering the whole estimate needs every service to
+      // carry the plan terms (estimateCarriesPlanTerms).
+      noEstimateWideGuarantee: !estimateCarriesPlanTerms(estData, pricingBundleForView),
       status: estimate.status === 'accepted'
         ? estimate.status
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
@@ -9047,7 +9122,52 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
     }
 
-    const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+    // Missing-contact capture (owner ruling 2026-09-27): the accept card
+    // asks for whatever's actually missing — last name and/or email — right
+    // above the Accept button. Only sanitize/validate here (a malformed
+    // value 400s before any mutation); a blank/absent value is never an
+    // error — last name is server-optional (a stale tab loaded before this
+    // deployed must still be able to accept; the client enforces required)
+    // and email is optional by design. The gap verdict, the estimate write
+    // and the customer fills all happen inside the accept transaction below.
+    const { value: sanitizedContactLastName, error: contactLastNameError } = sanitizeContactLastName(req.body?.contactLastName);
+    if (contactLastNameError) {
+      return res.status(400).json({ error: contactLastNameError.message, code: contactLastNameError.code });
+    }
+    const { value: sanitizedContactFirstName, error: contactFirstNameError } = sanitizeContactFirstName(req.body?.contactFirstName);
+    if (contactFirstNameError) {
+      return res.status(400).json({ error: contactFirstNameError.message, code: contactFirstNameError.code });
+    }
+    const { value: sanitizedContactEmail, error: contactEmailError } = sanitizeContactEmail(req.body?.contactEmail);
+    if (contactEmailError) {
+      return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
+    }
+    // Only the fields the server itself flags as gaps are ever written —
+    // the same verdict /data advertised, recomputed INSIDE the accept
+    // transaction on the locked row (codex #5102 r1 P0, r4 P2): a crafted
+    // value for a field the page never offered writes nothing, and a failed
+    // gap check fails the accept (retryable) instead of silently dropping
+    // what the customer typed. Nothing touches the in-memory estimate
+    // before customer resolution (codex #5102 r4 P1): a submitted email
+    // must never steer matchAcceptCustomerByPhone toward another profile.
+    let contactFillFirstName = null;
+    let contactFillLastName = null;
+    // The surname the patched estimate name ends with, carried separately so
+    // a multi-word collected first name ("Mary Ann") never splits it.
+    let acceptContactSurname = null;
+    let contactFillEmail = null;
+    let acceptContactView = null;
+    // The estimate's own first name (pre-fill) — the identity an existing
+    // profile must match before the accept card may fill it.
+    let acceptContactIdentityName = null;
+    let acceptContactLinkedId = null;
+    // Set when an existing profile's blank email was filled — the open
+    // customer_email_missing review cards resolve after commit.
+    let acceptContactEmailBackfill = null;
+
+    // Reassigned after the accept-card contact patch lands (below), so the
+    // confirmation texts greet with the name the customer just supplied.
+    let firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
     // Commercial auto-priced lawn/tree: approval-only manual-billing workflow.
     // No booking deposit/card, no auto-schedule, no auto-invoice; the converter
@@ -10742,7 +10862,133 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           .update({ status: 'resolved', updated_at: trx.fn.now() });
       }
 
+      // Accept-card contact fill, decided and persisted HERE: the estimate
+      // row is FOR UPDATE-locked above and the accept is past its
+      // eligibility checks, so the gap verdict is judged on the locked row
+      // (a concurrent writer's value simply closes the gap) and the write
+      // rolls back with the transaction on any later failure. A read error
+      // propagates and fails the accept rather than discarding the input.
+      if (sanitizedContactLastName || sanitizedContactEmail || sanitizedContactFirstName) {
+        const lockedContact = await trx('estimates').where({ id: estimate.id })
+          .first('customer_id', 'customer_name', 'customer_email', 'estimate_data');
+        if (lockedContact) {
+          const linkedCustomerForGaps = lockedContact.customer_id
+            ? await trx('customers').where({ id: lockedContact.customer_id }).first('first_name', 'last_name', 'email')
+            : null;
+          const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
+          acceptContactIdentityName = contactGapNameTokens(lockedContact.customer_name).join(' ') || null;
+          acceptContactLinkedId = lockedContact.customer_id || null;
+          if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
+          // The first name the patched estimate name starts with: the one
+          // the page asked for when there was none (gaps.firstName), else the
+          // estimate's own, else the linked profile's. With none at all (a
+          // stale tab that never showed the first-name field) the surname is
+          // not applied — the accept never mints a placeholder first name.
+          contactFillFirstName = (sanitizedContactFirstName && lockedGaps.firstName) ? sanitizedContactFirstName : null;
+          // A whole estimate name equal to the linked profile's multi-word
+          // first name ("Mary Ann") stays whole as the first name.
+          const lockedNameTokens = contactGapNameTokens(lockedContact.customer_name);
+          const linkedFirst = String(linkedCustomerForGaps?.first_name ?? '').trim().replace(/\s+/g, ' ');
+          const estimateNameIsLinkedFirst = lockedNameTokens.length > 1
+            && contactGapHasRealFirstName(linkedFirst)
+            && lockedNameTokens.join(' ').toLowerCase() === linkedFirst.toLowerCase();
+          const patchFirstName = contactFillFirstName
+            || (estimateNameIsLinkedFirst ? lockedNameTokens.join(' ') : lockedNameTokens[0])
+            || (contactGapHasRealFirstName(linkedCustomerForGaps?.first_name) ? String(linkedCustomerForGaps.first_name).trim() : null);
+          if (!patchFirstName) {
+            contactFillLastName = null;
+            contactFillFirstName = null;
+          }
+          if (sanitizedContactEmail && lockedGaps.email) contactFillEmail = sanitizedContactEmail;
+          const contactWrite = {};
+          if (contactFillLastName || contactFillFirstName) {
+            // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
+            // row keeps no 'undefined' first name. A first name collected on
+            // its own (the linked profile already has a real surname) still
+            // lands: surname = the one collected, else the linked profile's
+            // real one. varchar(100) column.
+            const linkedLast = String(linkedCustomerForGaps?.last_name ?? '').trim();
+            const patchLastName = contactFillLastName
+              || (contactGapHasRealLastName(linkedLast) ? linkedLast : '');
+            acceptContactSurname = patchLastName || null;
+            contactWrite.customer_name = contactGapCapCodePoints(`${patchFirstName} ${patchLastName}`.trim(), 100);
+            // An authored proposal snapshots its own preparedFor, which
+            // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
+            // Same rule as customer-contact-fanout's name sync: a
+            // preparedFor matching the old name moves with it, and the
+            // "PDF emailed" marker drops whenever the PDF-visible name moves
+            // (patched preparedFor, or none — the PDF fell back to the
+            // column). A CUSTOM preparedFor (landlord → tenant) is left
+            // alone with its marker.
+            let lockedData = lockedContact.estimate_data;
+            if (typeof lockedData === 'string') {
+              try { lockedData = JSON.parse(lockedData); } catch { lockedData = null; }
+            }
+            if (lockedData && typeof lockedData === 'object') {
+              const preparedFor = lockedData.proposal?.preparedFor;
+              const priorKey = String(lockedContact.customer_name ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+              const patchPreparedFor = !!(preparedFor
+                && String(preparedFor).trim().toLowerCase().replace(/\s+/g, ' ') === priorKey);
+              if ((patchPreparedFor || !preparedFor) && (patchPreparedFor || 'proposalDelivery' in lockedData)) {
+                const { proposalDelivery: _droppedDelivery, ...rest } = lockedData;
+                const nextData = patchPreparedFor
+                  ? { ...rest, proposal: { ...rest.proposal, preparedFor: contactWrite.customer_name } }
+                  : rest;
+                contactWrite.estimate_data = JSON.stringify(nextData);
+              }
+            }
+          }
+          if (contactFillEmail) contactWrite.customer_email = contactFillEmail;
+          if (Object.keys(contactWrite).length) {
+            await trx('estimates').where({ id: estimate.id }).update(contactWrite);
+          }
+          // Applied to the in-memory estimate only AFTER customer
+          // resolution below; the new-profile insert reads it directly.
+          acceptContactView = {
+            customer_name: contactWrite.customer_name ?? lockedContact.customer_name,
+            customer_email: contactWrite.customer_email ?? lockedContact.customer_email,
+          };
+        }
+      }
+      // Existing-customer email fill through the shared claim guard. A
+      // REFUSED claim (the address was just restored to a merged-away
+      // customer by an undo, or the guard failed) must not survive on the
+      // estimate either — the accepted-onboarding email falls back to
+      // estimates.customer_email when the customer has none (codex #5102
+      // r2 P1). "Already on file" / "filled concurrently" leave the
+      // customer's own standing value, so the estimate copy is harmless.
+      const applyAcceptContactEmailFill = async (targetCustomerId, identityName = acceptContactIdentityName) => {
+        if (!contactFillEmail) return;
+        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedName: identityName });
+        if (claim?.emailApplied) acceptContactEmailBackfill = { customerId: targetCustomerId, email: contactFillEmail };
+        const reason = claim?.emailDroppedReason || '';
+        // An identity mismatch keeps the value on the estimate: it belongs
+        // to whoever the estimate is addressed to, just not this profile.
+        if (claim && !claim.emailApplied && reason
+          && !['email already on file', 'email filled concurrently', CONTACT_IDENTITY_MISMATCH].includes(reason)) {
+          await trx('estimates').where({ id: estimate.id }).where('customer_email', contactFillEmail).update({ customer_email: null });
+          if (acceptContactView && acceptContactView.customer_email === contactFillEmail) acceptContactView.customer_email = null;
+          contactFillEmail = null;
+        }
+      };
       let customerId = estimate.customer_id;
+      // Already-linked customer: fill its last_name/email ONLY if blank/the
+      // 'Customer' placeholder (the fill helpers re-check that under this
+      // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
+      // already fenced this row since acceptPreLockedCommsId === customerId
+      // here). Never overwrites a real value already on file.
+      if (customerId) {
+        // The explicitly linked profile with a placeholder first name takes
+        // the collected one first; that name is then the identity the
+        // surname / email fills check against.
+        let linkedIdentityName = acceptContactIdentityName;
+        if (contactFillFirstName && customerId === acceptContactLinkedId) {
+          const firstFill = await fillLinkedCustomerFirstName(trx, customerId, contactFillFirstName);
+          if (firstFill.applied) linkedIdentityName = contactFillFirstName;
+        }
+        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: linkedIdentityName });
+        await applyAcceptContactEmailFill(customerId, linkedIdentityName);
+      }
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this
       // acceptance — reuse it instead of re-guessing by phone. A second
@@ -10784,6 +11030,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             throw err;
           }
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+          // Sibling's existing customer: same guarded, never-overwrite fill.
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
+          await applyAcceptContactEmailFill(customerId);
         }
       }
       if (!customerId && estimate.customer_phone) {
@@ -10818,8 +11067,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             err.code = 'CUSTOMER_BUSY_RETRY';
             throw err;
           }
+          // Reused an existing profile: fill its last_name/email ONLY if
+          // blank/the 'Customer' placeholder — same guarded helpers as the
+          // already-linked branch above, now under this authoritative lock.
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
+          await applyAcceptContactEmailFill(customerId);
         } else {
-          const nameParts = (estimate.customer_name || 'New Customer').split(' ');
+          const nameParts = ((acceptContactView ? acceptContactView.customer_name : estimate.customer_name) || 'New Customer').split(' ');
+          const newProfileEmail = (acceptContactView ? acceptContactView.customer_email : estimate.customer_email) || null;
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
           // Account layer: attach-or-create BEFORE the profile insert — portal
           // login's refresh session FKs customer_accounts, and the account is
@@ -10827,10 +11082,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Lazy require: admin-customers is a route module (load-cycle risk).
           const { ensureCustomerAccount } = require('./admin-customers');
           const account = await ensureCustomerAccount(trx, {
-            firstName: nameParts[0] || 'New',
-            lastName: nameParts.slice(1).join(' ') || 'Customer',
+            // A multi-word first name the page collected stays whole.
+            firstName: contactFillFirstName || nameParts[0] || 'New',
+            // The accept-card surname verbatim (codex #5102 r3 P2): the
+            // estimates.customer_name snapshot is capped at 100 chars and
+            // could clip it; customers.last_name holds the full 50.
+            lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
-            email: estimate.customer_email || null,
+            email: newProfileEmail,
           });
           // Structured address when the free-text snapshot parses ("street,
           // city, ST zip" — the Places shape the builder stores); the legacy
@@ -10842,10 +11101,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             account_id: account.accountId,
             is_primary_profile: !account.existingCustomer,
             profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-            first_name: nameParts[0] || 'New',
-            last_name: nameParts.slice(1).join(' ') || 'Customer',
+            first_name: contactFillFirstName || nameParts[0] || 'New',
+            last_name: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
-            email: estimate.customer_email || null,
+            email: newProfileEmail,
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
             // Canonicalized unit segment (codex #3244 r7): without it the
             // primary-property backfill and every addressKey compare see a
@@ -10868,6 +11127,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
+      // Customer resolved on the pre-fill identity; from here on (billing,
+      // notifications, the success payload) the accept reads the stored
+      // contact values.
+      if (acceptContactView) {
+        Object.assign(estimate, acceptContactView);
+        firstName = contactFillFirstName || contactGapNameTokens(estimate.customer_name)[0] || firstName;
       }
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
@@ -12186,6 +12452,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     });
 
     const { customerId, reservationCommitted } = txResult;
+    // Post-commit, same as the call-capture backfill: the customer now has
+    // an email, so open customer_email_missing review cards are settled.
+    // Best-effort — a miss leaves them for the nightly auto-resolve sweep.
+    if (acceptContactEmailBackfill) {
+      try {
+        await require('../services/customer-email-fanout').resolveOpenEmailReviewCards({
+          customerId: acceptContactEmailBackfill.customerId,
+          email: acceptContactEmailBackfill.email,
+          source: 'estimate accept contact card',
+          reasonCodes: ['customer_email_missing'],
+        });
+      } catch (e) {
+        logger.warn(`[estimate-accept] email review-card resolve skipped for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
     // Sign-before-pay: the slot hold this accept did not commit is released
     // now rather than left to block the slot until its TTL sweep.
     if (isTermiteAnnualSignBeforePay) {
@@ -15650,7 +15931,16 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // unchanged state.
     let updateCount = 0;
     let memberActivatedMidWrite = false;
-    await db.transaction(async (trx) => {
+    const ownerMovedMidWrite = await db.transaction(async (trx) => {
+      // Fence the prefetched owner before either row lock. Booking, setup-fee
+      // stamping, series activation and stranded recovery all take this same
+      // key before their customer -> estimate ownership checks; serializing
+      // here prevents their row order from crossing this path's required
+      // estimate -> customer order. A merge can repoint the estimate between
+      // the caller's read and this transaction, so re-read the owner under the
+      // estimate lock and abort on ANY transition (including null <-> owned).
+      // Never acquire a newly observed owner's fence after locking the
+      // estimate: that would recreate the inversion with canonical merges.
       // Member exclusion is re-verified INSIDE the write, on a LOCKED customer
       // row. The strict live check above ran before this transaction, and a
       // plan activated in the gap would still commit new-customer terms onto
@@ -15665,7 +15955,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // Lock ORDER matches the accept path (estimate row first, customer row
       // later inside the converter) so an add racing an acceptance can never
       // deadlock (GH codex r10 P2); the CAS below still decides the write.
-      await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      await lockEstimateOwnerForUpdate(trx, estimate);
       if (!memberEvidence && !(actor === 'staff' && mode === 'restore') && estimate.customer_id) {
         const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
@@ -15743,7 +16033,14 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
               : `Customer added ${label} back to their estimate.`,
         metadata: JSON.stringify({ serviceKey, label, mode, actor, previous, next }),
       });
+    }).catch((err) => {
+      if (err instanceof EstimateOwnerMovedError) return true;
+      throw err;
     });
+    if (ownerMovedMidWrite) {
+      const ownerMovedStatus = await zeroRowMutationStatus(estimate.id);
+      return { status: ownerMovedStatus, body: zeroRowMutationBody(ownerMovedStatus) };
+    }
     if (memberActivatedMidWrite) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
@@ -17187,6 +17484,9 @@ function oneTimeItemsForRender(estResult, estData) {
     nestRemovalSelected: row.nestRemovalSelected === true,
     chemistryType: row.chemistryType || null,
     warrantyTier: row.warrantyTier || null,
+    ...(Object.prototype.hasOwnProperty.call(row, 'warrantyAdder') ? {
+      warrantyAdder: row.warrantyAdder,
+    } : {}),
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
@@ -17629,7 +17929,11 @@ function normalizeOneTimeBreakdown(estData) {
         manualReviewReasons: Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : [],
         measurementWarnings: Array.isArray(item.measurementWarnings) ? item.measurementWarnings : [],
         warrantyStatus: item.warrantyStatus || null,
-        warrantyExtendedSelected: item.warrantyExtendedSelected === true,
+        // Absent stays absent: a legacy row without the engine flag reads its
+        // status text (preSlabExtendedWarrantySelected).
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyExtendedSelected')
+          ? { warrantyExtendedSelected: item.warrantyExtendedSelected === true }
+          : {}),
         offerKey: item.offerKey || null,
         visits: item.visits || null,
         // Verified catalog identity frozen on a keyed public line (the
@@ -17654,7 +17958,15 @@ function normalizeOneTimeBreakdown(estData) {
         // trenching chemistry (repellent barriers get no colony-transfer
         // claim) and whether wasp nest removal was actually priced.
         chemistryType: item.chemistryType || null,
-        warrantyTier: item.warrantyTier || null,
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyTier')
+          ? { warrantyTier: item.warrantyTier || null }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyAdder') ? {
+          warrantyAdder: item.warrantyAdder !== '' && item.warrantyAdder != null
+            && Number.isFinite(Number(item.warrantyAdder)) && Number(item.warrantyAdder) >= 0
+            ? Number(item.warrantyAdder)
+            : null,
+        } : {}),
         nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
         warrantyEligible: item.warrantyEligible === true,
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
@@ -19901,6 +20213,253 @@ function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
   });
 
   return categories;
+}
+
+// Whether an estimate may carry an estimate-wide guarantee claim, read from
+// the same normalized rows and classifiers the page renders from (above).
+// Owner ruling: termite carries no guarantee of any kind (re-treatment needs
+// the paid bond). True when any recurring or one-time service row is termite
+// work (by the page's category, or by the canonical service-name classifier,
+// service-normalizer.js detectServiceCategory, which routes only the
+// drill/recurring termite-foam forms to termite and leaves rodent foam
+// sealing as rodent), when a
+// service row can't be classified (it might be termite work), or when nothing
+// on the estimate classifies at all. isNonServiceOneTimeItem keeps setup,
+// discount and credit rows out, and counts a positive "other one-time
+// services" residual (work stored where the one-time rows don't reach, such
+// as engine lineItems) as real unclassified work.
+const NO_GUARANTEE_TERMITE_CATEGORIES = new Set([
+  'termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
+  'bora_care', 'termite_foam', 'wdo_inspection',
+]);
+// Recurring rows that are not services (a membership line) never count.
+const NON_SERVICE_RECURRING_KEY_RX = /membership|setup|discount|credit/;
+// The recurring rows the guarantee rule reads: the page's supplemented rows
+// plus the nested results.recurring.services shape some saves persist
+// (estimate-manual-acceptance.js reads it too), which
+// recurringServicesWithSupplements does not initialize from. Classification
+// only, so a row seen twice is harmless.
+function guaranteeRecurringRows(estData) {
+  const roots = [estData?.result, estData?.engineResult]
+    .filter((root) => root && typeof root === 'object');
+  if (!roots.length && estData && typeof estData === 'object') roots.push(estData);
+  return roots.flatMap((root) => {
+    const nested = Array.isArray(root?.results?.recurring?.services) ? root.results.recurring.services : [];
+    return [...recurringServicesWithSupplements(root), ...nested];
+  });
+}
+
+// An authored proposal's own rows are its customer-visible scope
+// (acceptanceTermsApplyTo reads the same containers): building line items,
+// programs, and corrective work, classified like one-time rows by their
+// names. Codex #4982 r4.
+function guaranteeProposalRows(estData) {
+  const proposal = estData?.proposal && typeof estData.proposal === 'object' ? estData.proposal : null;
+  // Revision history can retain disabled proposals. Only the active proposal
+  // contributes customer-visible scope, matching the public proposal view.
+  if (proposal?.enabled !== true) return [];
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const asRow = (row) => ({
+    name: row?.description || row?.name || row?.title || row?.label || '',
+    service: row?.service || row?.serviceKey || null,
+  });
+  return [
+    ...list(proposal.buildings).flatMap((b) => list(b?.lineItems)).map(asRow),
+    ...list(proposal.programs).map(asRow),
+    ...list(proposal.correctiveWork).map(asRow),
+  ];
+}
+
+function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
+  const { detectServiceCategory } = require('../utils/service-normalizer');
+  const namedTermite = (row = {}) => {
+    const name = [row.key, row.service, row.name, row.label, row.displayName]
+      .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+    // detectServiceCategory returns one primary category, with lawn and
+    // mosquito taking precedence. Scan explicit termite identities too so a
+    // combined label cannot hide its termite scope. Foam stays narrow: these
+    // are the established drill/recurring forms, never rodent foam sealing.
+    const explicitTermite = /\btermites?\b|\bwdo\b|wood destroying|\bpre\s*slab\b|\btermiticide\b|\btermidor\b|\bbora\s*care\b|\btrelona\b/;
+    const termiteFoam = /foam\s*drill|drill\s*(?:and\s*)?foam|recurring\s*(?:termite\s*)?foam|foam\s*recurring/;
+    return detectServiceCategory(name) === 'termite'
+      || explicitTermite.test(name)
+      || termiteFoam.test(name);
+  };
+  let classified = 0;
+  for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
+    if (!svc || typeof svc !== 'object') continue;
+    const key = recurringServiceKey(svc);
+    if (NON_SERVICE_RECURRING_KEY_RX.test(key || '')) continue;
+    const category = categoryForRecurringServiceKey(key);
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || namedTermite(svc)) return true;
+    classified += 1;
+  }
+  for (const item of (Array.isArray(oneTimeItems) ? oneTimeItems : [])) {
+    if (!item || typeof item !== 'object' || isNonServiceOneTimeItem(item)) continue;
+    const category = serviceCategoryForOneTimeItem(item);
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || namedTermite(item)) return true;
+    classified += 1;
+  }
+  return classified === 0;
+}
+
+// Inputs-only saves are rendered by replaying the engine, and the guarantee
+// decisions classify that same complete result (its one-time work included)
+// instead of treating a sellable recurring plan as empty or losing its
+// termite add-ons. The replay runs ONCE per parsed estData object (the same
+// per-request memo shape as termiteComparisonAvailabilityMemo): every reader
+// of the page's guarantee rule asks both decisions, and a /data request asks
+// from the pricing contract, the payload and the view, so an unmemoized
+// replay ran the full engine several times per request on an unauthenticated
+// route (pre-push audit P1 on #4982). A failed replay is memoized too, so
+// each reader fails closed without replaying or warning again.
+const guaranteeReplayMemo = new WeakMap();
+function guaranteeReplayForInputsOnly(estData) {
+  if (!estData || typeof estData !== 'object') return { result: null };
+  if (guaranteeReplayMemo.has(estData)) return guaranteeReplayMemo.get(estData);
+  let replay = { result: null };
+  const engineInputs = extractEngineInputs(estData);
+  if (engineInputs) {
+    try { replay = { result: generateEstimate(engineInputs) }; }
+    catch (err) {
+      logger.warn(`[estimate-data] guarantee classification replay failed: ${err.message}`);
+      replay = { failed: true };
+    }
+  }
+  guaranteeReplayMemo.set(estData, replay);
+  return replay;
+}
+
+// The rows one root (a persisted result, the raw save or a replay)
+// contributes to the guarantee decisions.
+function guaranteeRowsOfRoot(estData, root) {
+  return {
+    recurring: guaranteeRecurringRows(root),
+    oneTime: normalizeOneTimeBreakdown({ ...estData, result: root }).items,
+  };
+}
+
+// The persisted engine roots that carry service rows, with those rows. A
+// placeholder root ({ engineInputs, result: {} }) is absent: the page prices
+// that save from its inputs (readV1Shape yields nothing, so the bundle
+// replays extractEngineInputs), and the guarantee decisions classify the
+// same replay rather than an empty result that would strip a residential
+// plan's terms (Codex on #4982, 6880c57a95).
+function persistedGuaranteeRoots(estData = {}) {
+  return [estData?.result, estData?.engineResult]
+    .filter((root) => root && typeof root === 'object')
+    .map((root) => ({ root, rows: guaranteeRowsOfRoot(estData, root) }))
+    .filter(({ rows }) => rows.recurring.length > 0 || rows.oneTime.length > 0);
+}
+
+// Every service row the estimate's guarantee decisions read. Mapped pricing
+// can omit a raw one-time line, so both persisted roots are classified, just
+// as recurring rows are, without changing displayed totals. Null when an
+// inputs-only replay fails: callers fail closed.
+function guaranteeServiceRows(estData = {}, pricingBundle = {}) {
+  let rowSets = persistedGuaranteeRoots(estData).map(({ rows }) => rows);
+  if (!rowSets.length) {
+    rowSets = [guaranteeRowsOfRoot(estData, estData)];
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (replay.failed) return null;
+    if (replay.result) rowSets.push(guaranteeRowsOfRoot(estData, replay.result));
+  }
+  return {
+    recurring: rowSets.flatMap((rows) => rows.recurring),
+    oneTime: [
+      ...rowSets.flatMap((rows) => rows.oneTime),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+      ...guaranteeProposalRows(estData),
+    ],
+  };
+}
+
+function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
+  const rows = guaranteeServiceRows(estData, pricingBundle);
+  return rows ? serviceMixMakesNoGuaranteeClaim(rows.recurring, rows.oneTime) : true;
+}
+
+// Whether a guarantee line may cover the whole estimate: every service
+// carries the recurring residential terms (callbacks, the money-back
+// guarantee). Each recurring and one-time row is residential pest, lawn,
+// mosquito or tree & shrub (palm included). Rodent, commercial, termite or
+// unclassifiable work anywhere, or an authored (commercial) proposal, means
+// no estimate-wide guarantee line (AGENTS.md estimate truth scope).
+const PLAN_TERMS_CATEGORIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
+  if (serviceMixMakesNoGuaranteeClaim(recurringServices, oneTimeItems)) return false;
+  let services = 0;
+  for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
+    if (!svc || typeof svc !== 'object') continue;
+    const key = String(recurringServiceKey(svc) || '');
+    if (NON_SERVICE_RECURRING_KEY_RX.test(key)) continue;
+    if (svc.isCommercial === true || key.startsWith('commercial_')
+      || !PLAN_TERMS_CATEGORIES.has(categoryForRecurringServiceKey(key))) return false;
+    services += 1;
+  }
+  for (const item of (Array.isArray(oneTimeItems) ? oneTimeItems : [])) {
+    if (!item || typeof item !== 'object' || isNonServiceOneTimeItem(item)) continue;
+    if (!PLAN_TERMS_CATEGORIES.has(serviceCategoryForOneTimeItem(item))) return false;
+    services += 1;
+  }
+  return services > 0;
+}
+
+// A commercial row anywhere (the engine marks them isCommercial, a mark the
+// normalized one-time rows drop) makes the estimate terms-neutral:
+// estimate-converter's estimateHasCommercialOneTime for priced one-time
+// work, and the raw marker on any other saved row.
+function estimateHasCommercialRow(estData = {}) {
+  if (require('../services/estimate-converter').estimateHasCommercialOneTime(estData || {})) return true;
+  const roots = [estData?.result, estData?.engineResult, estData].filter((root) => root && typeof root === 'object');
+  // An inputs-only save (no persisted root with rows, persistedGuaranteeRoots)
+  // carries its commercial marks only on the replayed engine rows (Codex on
+  // #4982, 236d3956d6): read the same memoized replay the guarantee rows
+  // classify, so a commercial bed-bug quote saved as inputs decides like the
+  // identical saved engine result.
+  if (!persistedGuaranteeRoots(estData).length) {
+    const replay = guaranteeReplayForInputsOnly(estData);
+    if (replay.result) roots.push(replay.result);
+  }
+  return roots.some((root) => collapseMirroredRows([
+    root.oneTime?.items, root.oneTime?.specItems, root.results?.oneTime?.items, root.results?.oneTime?.specItems,
+    root.specItems, root.lineItems, root.recurring?.services, root.results?.recurring?.services,
+  ]).some((row) => row.isCommercial === true));
+}
+
+// An authored proposal is commercial work, as is any engine-marked row.
+function estimateHasCommercialScope(estData = {}) {
+  return estData?.proposal?.enabled === true || estimateHasCommercialRow(estData);
+}
+
+function estimateCarriesPlanTerms(estData = {}, pricingBundle = {}) {
+  if (estimateHasCommercialScope(estData)) return false;
+  const rows = guaranteeServiceRows(estData, pricingBundle);
+  return rows ? serviceMixCarriesPlanTerms(rows.recurring, rows.oneTime) : false;
+}
+
+// The terms one service states on its own row (owner ruling 2026-09-27:
+// each service carries its own terms), the per-row half of
+// serviceMixCarriesPlanTerms: 'all' for residential pest, lawn, mosquito or
+// tree & shrub work, 'satisfaction' for rodent, commercial or other work
+// (every row, on an estimate with commercial scope), within the estimate's
+// scope, so termite or unclassifiable work anywhere still means 'none'. A
+// recurring section classifies by its key, or by every member key of a
+// synthetic bundle section. Null for a setup, discount or credit row, or a
+// bundle section without member keys: those follow the estimate.
+function serviceRowTermsScope(estimateScope, row, { recurring = false, commercial = false } = {}) {
+  if (!row || typeof row !== 'object') return null;
+  let carries;
+  if (recurring) {
+    const keys = Array.isArray(row.memberKeys) && row.memberKeys.length ? row.memberKeys : [row.key];
+    if (keys.some((key) => !key || key === 'bundle')) return null;
+    carries = keys.every((key) => !String(key).startsWith('commercial_')
+      && PLAN_TERMS_CATEGORIES.has(categoryForRecurringServiceKey(key)));
+  } else {
+    if (isNonServiceOneTimeItem(row)) return null;
+    carries = PLAN_TERMS_CATEGORIES.has(serviceCategoryForOneTimeItem(row));
+  }
+  return serviceGuaranteeScope(estimateScope, !commercial && row.isCommercial !== true && carries ? 'all' : 'satisfaction');
 }
 
 // Optional service-category scope for the glass release: CSV env, e.g.
@@ -23434,10 +23993,117 @@ function withCombinedLowConfidenceRange(combined, range) {
   };
 }
 
+function normalizedOneTimeRowGroups(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((root) => root && typeof root === 'object'))];
+  if (!roots.length) roots.push(estData);
+  return roots.map((result) => {
+    return {
+      rows: normalizeOneTimeBreakdown({ ...estData, result, engineResult: null }).items || [],
+      sourceItems: rawOneTimeWarrantyEvidenceItems(result),
+    };
+  });
+}
+
+function oneTimeServiceIdentity(item = {}) {
+  const trenchingIdentity = trenchingServiceIdentity(item);
+  if (trenchingIdentity === 'termite_trenching') return trenchingIdentity;
+  return String(item?.service || item?.serviceKey || item?.service_key || item?.key || '').toLowerCase();
+}
+
+function matchingRawOneTimeRow(row, rawRows = [], targetRows = [row]) {
+  const service = oneTimeServiceIdentity(row);
+  if (!service) return { row: null, ambiguous: false };
+  if (service === 'termite_trenching') {
+    return matchingTrenchingWarrantyRow(row, rawRows, targetRows);
+  }
+  const candidates = rawRows.filter((raw) => oneTimeServiceIdentity(raw) === service);
+  if (!candidates.length) return { row: null, ambiguous: false };
+  const peers = targetRows.filter((target) => oneTimeServiceIdentity(target) === service);
+  // One job and one raw row of the service pair directly. Otherwise identity
+  // decides, one to one: a raw row enriches a job only when the label (then
+  // label and amount) singles out both, so one raw row never lends its sold
+  // scope to a sibling job (front and rear wasp jobs, one with nest removal).
+  if (candidates.length === 1 && peers.length <= 1) return { row: candidates[0], ambiguous: false };
+  const rawLabel = (raw) => String(raw.label || raw.displayName || raw.name || raw.service || '');
+  const amountOf = (item) => Number(item.amount ?? item.price ?? item.total);
+  const label = String(row.label || '');
+  const sameLabel = candidates.filter((raw) => rawLabel(raw) === label);
+  const peersSameLabel = peers.filter((peer) => String(peer.label || '') === label);
+  if (sameLabel.length === 1 && peersSameLabel.length <= 1) return { row: sameLabel[0], ambiguous: false };
+  const sameAmount = sameLabel.filter((raw) => amountOf(raw) === Number(row.amount));
+  const peersSameAmount = peersSameLabel.filter((peer) => Number(peer.amount) === Number(row.amount));
+  if (sameAmount.length === 1 && peersSameAmount.length <= 1) return { row: sameAmount[0], ambiguous: false };
+  return { row: null, ambiguous: true };
+}
+
+function withReconciledContractWarranty(row, rawRowGroups = [], target = row, pricing = {}, targetRows = [target]) {
+  if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
+  const evidence = reconcilePricedTrenchingWarrantyEvidence(
+    target,
+    rawRowGroups.map((group) => group.sourceItems),
+    pricing,
+    targetRows,
+  );
+  const reconciled = { ...row };
+  delete reconciled.warrantyTier;
+  delete reconciled.warrantyAdder;
+  if (evidence && Object.prototype.hasOwnProperty.call(evidence, 'warrantyTier')) {
+    reconciled.warrantyTier = evidence.warrantyTier;
+  }
+  if (evidence && Object.prototype.hasOwnProperty.call(evidence, 'warrantyAdder')) {
+    reconciled.warrantyAdder = evidence.warrantyAdder;
+  }
+  return reconciled;
+}
+
+function rawContractRowFor(row, rawRowGroups = [], targetRows = [row]) {
+  const [currentGroup = { rows: [], sourceItems: [] }, ...fallbackGroups] = rawRowGroups;
+  if (matchingRawOneTimeRow(row, currentGroup.sourceItems, targetRows).ambiguous) return null;
+  const currentMatch = matchingRawOneTimeRow(row, currentGroup.rows, targetRows);
+  if (currentMatch.ambiguous) return null;
+  const current = currentMatch.row;
+  if (trenchingWarrantyDecision(current) !== 'unset') return current;
+
+  if (fallbackGroups.some((group) => matchingRawOneTimeRow(row, group.sourceItems, targetRows).ambiguous)) return current;
+  const fallbackMatches = fallbackGroups.map((group) => matchingRawOneTimeRow(row, group.rows, targetRows));
+  if (fallbackMatches.some((match) => match.ambiguous)) return current;
+  const fallbackRows = fallbackMatches.map((match) => match.row).filter(Boolean);
+  if (fallbackRows.length !== 1) return current || null;
+  const fallback = fallbackRows[0];
+  if (!current || !hasPurchasedTrenchingWarranty(fallback)) return current || fallback;
+
+  const currentTier = String(current.warrantyTier || '').toLowerCase().trim();
+  const fallbackTier = String(fallback.warrantyTier || '').toLowerCase().trim();
+  if (currentTier && currentTier !== fallbackTier) return current;
+  return {
+    ...fallback,
+    ...current,
+    warrantyTier: fallback.warrantyTier,
+    warrantyAdder: fallback.warrantyAdder,
+  };
+}
+
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
   const basePayload = Array.isArray(payload.frequencies)
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
+  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true || estimateMakesNoGuaranteeClaim(estData, basePayload);
+  // The same scope /data states (noGuaranteeClaims, noEstimateWideGuarantee).
+  const contractGuaranteeScope = guaranteeScope({
+    noGuaranteeClaims,
+    noEstimateWideGuarantee: !estimateCarriesPlanTerms(estData, basePayload),
+  });
+  // Each service states its own terms (serviceRowTermsScope): every section
+  // and one-time row carries termsScope, and its row copy follows it.
+  const contractCommercialScope = estimateHasCommercialScope(estData);
+  const withTermsScope = (row, options = {}) => {
+    const termsScope = serviceRowTermsScope(contractGuaranteeScope, row, { ...options, commercial: contractCommercialScope });
+    if (termsScope) return { ...row, termsScope };
+    if (!row || typeof row !== 'object' || !('termsScope' in row)) return row;
+    const { termsScope: _stale, ...rest } = row;
+    return rest;
+  };
   // Normalize breakdown labels BEFORE sections are built: the per-service
   // oneTimeContribution rows and the top-level breakdown must be the SAME
   // row objects, or the client's exclusion identity (service|label|amount)
@@ -23446,7 +24112,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Row copy never rides a regulated certificate surface (WDO in the aligned
   // OR raw rows — the aligned breakdown can drop the WDO row): the whole
   // page stays narrative-free, not just the WDO row (codex pre-push P0).
-  const rawContractRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const rawContractRowGroups = normalizedOneTimeRowGroups(estData);
+  const rawContractRows = rawContractRowGroups.flatMap((group) => group.rows);
   const rowCopyAllowed = !hasRegulatedCertificateServiceMix([], [
     ...(basePayload.oneTimeBreakdown?.items || []),
     ...rawContractRows,
@@ -23457,28 +24124,47 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // add-on as scope-less. Resolve each row against its authoritative raw
   // counterpart (same service key, label-matched when the key repeats):
   // the raw row supplies the sold-scope flags, the aligned row keeps its
-  // own label/amount (codex #3823 r9 P1). The contract row itself is
-  // unchanged — only the resolver input is enriched.
-  const rawRowFor = (row) => {
-    const service = String(row?.service || '').toLowerCase();
-    if (!service) return null;
-    const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
-    if (!candidates.length) return null;
-    return candidates.find((raw) => String(raw.label || '') === String(row.label || '')) || candidates[0];
-  };
+  // own label/amount (codex #3823 r9 P1). Proven purchased-warranty evidence
+  // also reaches the contract row so the browser's saved-copy filter uses
+  // the same evidence as the server resolver.
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
       ...basePayload,
       oneTimeBreakdown: {
         ...basePayload.oneTimeBreakdown,
         items: (() => {
-          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel);
+          const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
+            .map((row) => withTermsScope(row))
+            .map((row) => {
+              const rowScope = serviceGuaranteeScope(contractGuaranteeScope, row?.termsScope);
+              return copyAllowedInScope(row?.detail, rowScope)
+                ? row
+                : { ...row, detail: withoutClaimsOutsideScope(row.detail, rowScope, preSlabSelectedWarrantyPart(row)) };
+            });
           if (!rowCopyAllowed) return labeled;
-          const copies = resolveOneTimeRowCopies(labeled.map((row) => {
-            const raw = rawRowFor(row);
-            return raw ? { ...raw, ...row } : row;
-          }));
-          return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
+          const copyInputs = labeled.map((row) => {
+            const raw = rawContractRowFor(row, rawContractRowGroups, labeled);
+            const input = raw ? { ...raw, ...row } : row;
+            return withReconciledContractWarranty(input, rawContractRowGroups, row, payload, labeled);
+          });
+          const copies = resolveOneTimeRowCopies(copyInputs, { guaranteeScope: contractGuaranteeScope });
+          return labeled.map((row, i) => {
+            if (!copies[i]) return row;
+            const returned = { ...row, copy: copies[i] };
+            if (trenchingServiceIdentity(row) === 'termite_trenching') {
+              delete returned.warrantyTier;
+              delete returned.warrantyAdder;
+              // Keep explicit removals as well as purchases. Dropping their
+              // metadata would make downstream legacy fallback restore the
+              // very raw warranty this reconciliation just rejected.
+              for (const key of ['warrantyTier', 'warrantyAdder']) {
+                if (Object.prototype.hasOwnProperty.call(copyInputs[i], key)) {
+                  returned[key] = copyInputs[i][key];
+                }
+              }
+            }
+            return returned;
+          });
         })(),
       },
     }
@@ -23493,6 +24179,22 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     buildPricingServices(contractPayload, estimate, estData),
     lowConfidenceLines,
   );
+  // A section, and each service row inside its price card (an unsplit
+  // bundle lists several), states its own service's terms.
+  const stampRecurringTermsScope = (target, row) => {
+    const termsScope = serviceRowTermsScope(contractGuaranteeScope, row, { recurring: true, commercial: contractCommercialScope });
+    if (termsScope) target.termsScope = termsScope;
+    else delete target.termsScope;
+  };
+  for (const section of services) {
+    if (!section || typeof section !== 'object') continue;
+    stampRecurringTermsScope(section, section);
+    for (const frequency of (Array.isArray(section.frequencies) ? section.frequencies : [])) {
+      for (const row of (Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : [])) {
+        if (row && typeof row === 'object') stampRecurringTermsScope(row, { key: row.service || row.key });
+      }
+    }
+  }
   attachTermiteBondSelector(services, estData);
   attachTermiteStationRental(services, estData);
   attachCommercialInteriorSelector(services, estData);
@@ -23563,7 +24265,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // row's hero/AI/chips (codex pre-push P0).
   const oneTimeServiceCopy = !regulatedSurface
     && (contractPayload.defaultServiceMode === 'one_time' || isStructuralOneTimeOnlyEstimate(estData, estimate))
-    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows])
+    ? oneTimeOnlyIntelligenceCopy([...oneTimeBreakdownItems, ...rawOneTimeRows], { guaranteeScope: contractGuaranteeScope })
     : null;
   const askChips = regulatedSurface
     ? []
@@ -26263,6 +26965,16 @@ async function composeEstimateDataPayload(estimate, {
       recurringServicesForIntelligence,
       oneTimeItemsForCategory,
     );
+    // Termite work (or unclassifiable work) anywhere on the page's own rows:
+    // the page and its proposal document make no estimate-wide guarantee.
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(
+      estimateDataForIntelligence,
+      pricingBundle,
+    );
+    // Not every service carries the plan terms (a rodent, commercial or
+    // authored-proposal estimate): no line covering the whole estimate, on
+    // the page or in Ask Waves, may state them.
+    const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -26300,6 +27012,9 @@ async function composeEstimateDataPayload(estimate, {
           pricingBundle,
           selectedFrequency: '',
           serviceMode: defaultServiceMode,
+          noGuaranteeClaims,
+          noEstimateWideGuarantee,
+          commercialScope: estimateHasCommercialScope(estimateDataForIntelligence),
         });
         intelligence.supportSources = loadPublicEstimateSupportSources({
           question: 'What is included in this WaveGuard estimate?',
@@ -26519,15 +27234,20 @@ async function composeEstimateDataPayload(estimate, {
       || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
       try {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
-        const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const {
+          proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, proposalRowTermsScope, resolveProposalBillingContext,
+        } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
         const proposalForView = normalizeProposal(estimate, {
           recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
           livePricing: proposalBilling?.livePricing || null,
         });
+        const proposalNoGuaranteeClaims = proposalMakesNoGuaranteeClaim(proposalForView, estimate.id);
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
+          noGuaranteeClaims: proposalNoGuaranteeClaims,
+          ...(proposalCarriesPlanTerms(proposalForView, estimate.id) ? {} : { noEstimateWideGuarantee: true }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
@@ -26551,6 +27271,8 @@ async function composeEstimateDataPayload(estimate, {
               frequencyLabel: item.frequencyLabel,
               ...(item.visitsPerYear > 0 ? { visitsPerYear: item.visitsPerYear } : {}),
               taxable: item.taxable === true,
+              // The terms this line's service states in its own inclusions.
+              termsScope: proposalRowTermsScope(proposalForView, item, proposalNoGuaranteeClaims),
             })),
           })),
           totals: computeProposalTotals(proposalForView),
@@ -26642,6 +27364,22 @@ async function composeEstimateDataPayload(estimate, {
     // include-when-present so every other response stays byte-identical.
     const successReferral = await estimateReferralCardFor(estimate);
 
+    // Missing-contact prompt (owner ruling 2026-09-27): only meaningful
+    // while the estimate can still be accepted — isEstimateAcceptActive
+    // already excludes accepted/declined/expired and every off-customer-
+    // surface/unpublished state, so those never ask. Booleans only; the
+    // linked customer's own name/email are read here but never returned —
+    // computeContactGaps folds them down to lastName/email flags.
+    // A lookup error propagates (the page's load retries) rather than
+    // serving an accept surface that silently skips a required field.
+    let contactGaps = null;
+    if (isEstimateAcceptActive(estimate) && !isPdfRenderPass) {
+      const linkedCustomerForGaps = estimate.customer_id
+        ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
+        : null;
+      contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+    }
+
     // "Want us to come look first?" consultation offer (GATE_ESTIMATE_
     // CONSULTATION_OFFER + GATE_LEAD_INSPECTION_LINK, consultation-first
     // lane, owner ruling 2026-09-23): a strongly-linked recurring-intent
@@ -26700,6 +27438,7 @@ async function composeEstimateDataPayload(estimate, {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
+      ...(contactGaps ? { contactGaps } : {}),
       ...(consultationOffer ? { consultationOffer } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
       // frequency key, the program's annual application count when that
@@ -26938,6 +27677,12 @@ async function composeEstimateDataPayload(estimate, {
         // the Ask bar (codex r5 P1). Present only when true so every other
         // response stays byte-identical.
         ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
+        // The server's guarantee decision (serviceMixMakesNoGuaranteeClaim):
+        // the React page and proposal document drop "Satisfaction
+        // guaranteed" wherever they'd make an estimate-wide claim. Present
+        // only when true so every other response stays byte-identical.
+        ...(noGuaranteeClaims ? { noGuaranteeClaims: true } : {}),
+        ...(noEstimateWideGuarantee ? { noEstimateWideGuarantee: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -27329,6 +28074,10 @@ async function handleEstimateAsk(req, res, next) {
     } catch (err) {
       logger.warn(`[estimate-ask] pricing bundle failed: ${err.message}`);
     }
+    const noGuaranteeClaims = estimateMakesNoGuaranteeClaim(estData, pricingBundle);
+    // The page's own estimate-wide decision (estimateCarriesPlanTerms): an
+    // authored proposal or a commercial row stays terms-neutral here too.
+    const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estData, pricingBundle);
 
     const result = await answerEstimateQuestion({
       question,
@@ -27337,6 +28086,9 @@ async function handleEstimateAsk(req, res, next) {
       pricingBundle,
       selectedFrequency,
       serviceMode,
+      noGuaranteeClaims,
+      noEstimateWideGuarantee,
+      commercialScope: estimateHasCommercialScope(estData),
     });
 
     await db('intelligence_bar_queries').insert(buildEstimateAskQueryLog({
@@ -27467,6 +28219,14 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
+module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
+module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
+module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
+module.exports.estimateHasCommercialScope = estimateHasCommercialScope;
+module.exports.serviceMixCarriesPlanTerms = serviceMixCarriesPlanTerms;
+module.exports.serviceRowTermsScope = serviceRowTermsScope;
+module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
+module.exports.guaranteeProposalRows = guaranteeProposalRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;

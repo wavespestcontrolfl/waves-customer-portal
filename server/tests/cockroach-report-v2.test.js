@@ -299,6 +299,21 @@ describe('buildWhatsNext — the next date is a live-view fact', () => {
     expect(done.lines[2].text).toBe('Keep the bait undisturbed.');
   });
 
+  // Owner ruling 2026-09-27: the "Next steps" chip picker was retired, so a
+  // NEW completion's todaysResult.nextStep is always null — no chip-derived
+  // sentence, no "Contact us if you have any questions." filler — and the
+  // "From your technician" line must never print for one, in-progress or
+  // complete. An OLD snapshot's stored nextStep string still renders (the
+  // 'carrying the tech's own next step' test above pins that).
+  it('a new completion (nextStep null) prints no "From your technician" line — in progress or complete', () => {
+    const inProgress = buildWhatsNext({ program: program1, species: 'German', scheduleResolved: true, nextVisit: { scheduledDate: '2999-01-05' }, nextStep: null });
+    expect(inProgress.lines.map((l) => l.label)).not.toContain('From your technician');
+    const complete = buildWhatsNext({ program: { treatmentNumber: 2, treatmentsTotal: 2, complete: true }, species: 'German', scheduleResolved: true, nextStep: null });
+    expect(complete.lines.map((l) => l.label)).not.toContain('From your technician');
+    const unknownPosition = buildWhatsNext({ program: { treatmentNumber: null }, species: 'German', scheduleResolved: false, nextStep: null });
+    expect(unknownPosition.lines.map((l) => l.label)).not.toContain('From your technician');
+  });
+
   it('the next-visit plan and the between-visits copy are built ONLY from the work recorded today', () => {
     const full = buildWork(['Bait placement', 'Insect growth regulator', 'Monitoring stations placed']);
     const german = buildWhatsNext({ program: program1, species: 'German', work: full });

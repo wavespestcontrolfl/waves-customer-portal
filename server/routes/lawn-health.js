@@ -14,6 +14,7 @@ const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-he
 const { buildMowingHeightContext } = require('../services/service-report/turf-height');
 const logger = require('../services/logger');
 const { pairBeforeAfterPhotos } = require('../services/lawn-visit-input');
+const { resolvePropertyCoordinates } = require('../services/property-coordinates');
 
 const CARD_PRIORITY_RANK = { high: 1, medium: 2, low: 3 };
 
@@ -263,8 +264,8 @@ router.get('/:customerId', async (req, res, next) => {
       };
       // Use assessment weather if available, otherwise fetch current
       if (!weather.fawn_temp_f) {
-        const current = await FawnWeather.getCurrent();
-        Object.assign(weather, current);
+        const coordinates = await resolvePropertyCoordinates(customerId, sessionPropertyId ?? latest.property_id);
+        if (coordinates) Object.assign(weather, await FawnWeather.getCurrent(coordinates));
       }
       seasonalContext = FawnWeather.getSeasonalContext(month, weather);
       seasonalContext.pressureSignals = FawnWeather.getPressureSignals(month);

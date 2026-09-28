@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell from './NotificationBell';
 import api from '../utils/api';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 
 const native = vi.hoisted(() => ({ enabled: false, locked: false, request: vi.fn(), connection: vi.fn() }));
 const badge = vi.hoisted(() => ({ write: vi.fn() }));
@@ -49,6 +50,8 @@ function jsonResponse(body) {
 }
 
 beforeEach(() => {
+  Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 });
+  window.scrollTo = vi.fn();
   native.enabled = false;
   native.locked = false;
   native.request.mockReset().mockResolvedValue('granted');
@@ -466,6 +469,87 @@ describe('NotificationBell admin mobile panel offsets (UI audit F0034)', () => {
       // jsdom re-serialises env() oddly, so assert the constant term only.
       expect(panel.style.top).toMatch(/^calc\(52px \+ env\(/);
       expect(panel.style.bottom).toMatch(/^calc\(56px \+ env\(/);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+});
+
+describe('NotificationBell customer safe-area offsets', () => {
+  it('uses customer ink and 44px touch targets for the mobile panel controls', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      render(<NotificationBell type="customer" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+
+      const title = await screen.findByText('Notifications');
+      const markAll = await screen.findByRole('button', { name: 'Mark all read' });
+      const close = screen.getByRole('button', { name: 'Close' });
+      const account = screen.getByRole('button', { name: 'Account' });
+      const whatsNew = screen.getByRole('button', { name: "What's new" });
+      expect(title).toHaveStyle({ color: CUSTOMER_SURFACE.text });
+      expect(markAll).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.text });
+      expect(close).toHaveStyle({ width: '44px', height: '44px', color: CUSTOMER_SURFACE.text });
+      expect(account).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.text });
+      expect(whatsNew).toHaveStyle({ minHeight: '44px', color: CUSTOMER_SURFACE.muted });
+
+      fireEvent.click(whatsNew);
+      expect(screen.getByText('Nothing new right now')).toHaveStyle({ color: CUSTOMER_SURFACE.muted });
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+
+  it('keeps the mobile floating panel inside both horizontal safe areas', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      render(<NotificationBell type="customer" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const panel = await screen.findByRole('dialog', { name: 'Notifications' });
+      expect(document.documentElement.style.overflow).toBe('hidden');
+      expect(document.body.style.position).toBe('');
+      expect(document.body.style.top).toBe('');
+      // jsdom reorders env()'s fallback while serializing the declaration.
+      expect(panel.style.left).toMatch(/^calc\(10px \+ env\(/);
+      expect(panel.style.left).toContain('safe-area-inset-left');
+      expect(panel.style.right).toMatch(/^calc\(10px \+ env\(/);
+      expect(panel.style.right).toContain('safe-area-inset-right');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+
+  it('keeps the landscape customer sheet above the bottom navigation through 899px', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 844 });
+    try {
+      render(<NotificationBell type="customer" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const panel = await screen.findByRole('dialog', { name: 'Notifications' });
+      expect(panel.style.bottom).toContain('safe-area-inset-bottom');
+      expect(panel.style.bottom).toContain('--portal-bottom-nav-height');
+      expect(panel.style.left).toContain('safe-area-inset-left');
+      expect(panel.style.right).toContain('safe-area-inset-right');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+
+  it('keeps the desktop floating panel inside the top, right, and bottom safe areas', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    try {
+      render(<NotificationBell type="customer" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const panel = await screen.findByRole('dialog', { name: 'Notifications' });
+      expect(panel.style.top).toMatch(/^calc\(12px \+ env\(/);
+      expect(panel.style.top).toContain('safe-area-inset-top');
+      expect(panel.style.right).toMatch(/^calc\(12px \+ env\(/);
+      expect(panel.style.right).toContain('safe-area-inset-right');
+      expect(panel.style.bottom).toMatch(/^calc\(12px \+ env\(/);
+      expect(panel.style.bottom).toContain('safe-area-inset-bottom');
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
     }

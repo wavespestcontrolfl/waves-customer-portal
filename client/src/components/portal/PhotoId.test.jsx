@@ -44,7 +44,7 @@ function Harness({ onOpenRequest = () => {} }) {
   const available = gate.status === 'available';
   return (
     <>
-      {available && !open && <PhotoIdFab onOpen={() => setOpen(true)} hasBottomNav />}
+      {available && <PhotoIdFab onOpen={() => setOpen(true)} hasBottomNav hidden={open} />}
       <PhotoIdSheet
         open={open && available}
         onClose={() => setOpen(false)}
@@ -103,9 +103,13 @@ describe('gate: FAB + More-sheet entry point', () => {
     });
     render(<Harness />);
     const fab = await screen.findByRole('button', { name: /Photo ID/i });
+    expect(fab.style.bottom).toContain('--portal-bottom-nav-height');
     fireEvent.click(fab);
 
     expect(screen.getByRole('dialog', { name: 'Photo ID' })).toBeInTheDocument();
+    expect(fab).toBeInTheDocument();
+    expect(fab).toHaveAttribute('hidden');
+    expect(fab).toHaveStyle({ display: 'none' });
     expect(screen.getByText('Bug or pest')).toBeInTheDocument();
     expect(screen.getByText('Lawn spot')).toBeInTheDocument();
     expect(screen.getByText('Tree or shrub')).toBeInTheDocument();
@@ -154,6 +158,7 @@ describe('identify flow', () => {
     const fileInput = document.querySelector('input[type="file"]');
     fireEvent.change(fileInput, { target: { files: [photoFile()] } });
     await screen.findByRole('img');
+    expect(screen.getByRole('button', { name: 'Remove photo 1' })).toHaveStyle({ minWidth: '44px', minHeight: '44px' });
 
     fireEvent.change(screen.getByPlaceholderText('Anything else worth mentioning?'), {
       target: { value: 'Found it by the AC unit' },
@@ -192,6 +197,7 @@ describe('identify flow', () => {
     expect(payload.photos[0]).toMatch(/^data:image\/jpeg;base64,/);
 
     expect(await screen.findByText('Ghost ant')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Photo ID status' })).toHaveTextContent('Photo ID result ready.');
     expect(screen.getByText('High')).toBeInTheDocument();
     expect(screen.getByText('Common in Florida kitchens.')).toBeInTheDocument();
 
@@ -305,6 +311,7 @@ describe('result rendering per type + next-step CTAs', () => {
     // that only exists once the result view has actually mounted, so this
     // doesn't pass on the stale picker row still being in the document.
     expect(await screen.findByText('About this pest.')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Photo ID status' })).toHaveTextContent('Photo ID result ready.');
     expect(screen.getByText('Ghost ant')).toBeInTheDocument();
     expect(screen.getByText('Likely')).toBeInTheDocument();
     const cta = screen.getByRole('link', { name: 'Book free re-service' });
@@ -362,7 +369,7 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
     fireEvent.click(await screen.findByText('Ants'));
-    expect(await screen.findByRole('status')).toHaveTextContent('Original photos are unavailable. Add a new photo to your request.');
+    expect(await screen.findByText('Original photos are unavailable. Add a new photo to your request.')).toBeInTheDocument();
   });
 
   it('closing the sheet mid-identify discards a late response instead of resurrecting it on reopen', async () => {
@@ -430,10 +437,10 @@ describe('stale-flow safety (Codex r1 P1s)', () => {
     fireEvent.click(await screen.findByText('Front lawn'));
     await screen.findByText('Send this in');
     expect(screen.getByAltText('Saved photo 1')).toHaveAttribute('src', 'https://signed.example/photo-1.jpg');
-    expect(screen.getByRole('status')).toHaveTextContent('One saved photo could not be loaded.');
+    expect(screen.getByText('One saved photo could not be loaded.')).toBeInTheDocument();
     fireEvent.error(screen.getByAltText('Saved photo 2'));
     await waitFor(() => expect(screen.queryByAltText('Saved photo 2')).not.toBeInTheDocument());
-    expect(screen.getByRole('status')).toHaveTextContent('2 saved photos could not be loaded.');
+    expect(screen.getByText('2 saved photos could not be loaded.')).toBeInTheDocument();
     expect(screen.queryByAltText('Saved photo 1')).not.toHaveAttribute('src', expect.stringContaining('data:image/jpeg'));
     fireEvent.click(screen.getByRole('button', { name: 'Request service' }));
 
@@ -767,6 +774,32 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('Top Ant')).toBeInTheDocument();
     expect(screen.getByText('Alt Ant')).toBeInTheDocument();
     expect(screen.getByText('Smaller, rounder head.')).toBeInTheDocument();
+  });
+
+  it('renders source-backed generic medical guidance when an unapproved species cannot be named', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    const safety = 'Widow bites can be medically significant. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.';
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2medical', type: 'pest', created_at: '2026-09-26T00:00:00Z', result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'subgroup', node_id: 'widow-spiders', wording: 'group_only', headline: 'Looks like a widow spider', subhead: 'Latrodectus' },
+        group: { id: 'spiders', label: 'Spiders', generic: 'a spider' }, entry: null,
+        generic_safety_line: safety, evidence: {}, candidates: [], next_photo: null, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'A clearer photo would help.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('Looks like a widow spider')).toBeInTheDocument();
+    expect(screen.getByText(safety)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^About /i })).not.toBeInTheDocument();
   });
 
   it('an unresolved group answer with next_photo shows the retake card; tapping it returns to photos with the ask banner and keeps the existing photo', async () => {

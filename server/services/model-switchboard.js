@@ -132,7 +132,15 @@ const POLICY_SELECTOR = {
 // picker consults `accepts.catalogOnly` to stop offering a search result the
 // runtime would reject after restart. Only meaningful with `opts.parse`,
 // which is what actually enforces it at read time; this just advertises it.
-const T = (tier) => ({ kind: 'tier', key: tier });
+//   T(tier, { parse, fallbackModel }) — `parse` only for a call site that
+//                      validates the tier's value itself (voice_relay: the
+//                      relay's Anthropic allowlist); a value it refuses shows
+//                      as the call site's own `fallbackModel()`, as it runs.
+//                      A thunk, read at resolve time: this module also loads
+//                      under narrow config/models stubs (via agent-control's
+//                      lane-id check), so nothing here may dereference
+//                      MODELS.DEFAULTS at load.
+const T = (tier, opts = {}) => ({ kind: 'tier', key: tier, parse: opts.parse || null, fallbackModel: opts.fallbackModel || null });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
 const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly, allowed: opts.allowed || null });
@@ -254,9 +262,22 @@ function inboundOverrideParse(raw) {
   const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
   return isAllowedOverrideModel(raw) ? raw : null;
 }
-function inboundOverrideAllowed() {
+// The shared chain under the inbound pin — VOICE_RELAY_MODEL, then the VOICE
+// tier: the relay takes each only as an allowlisted Anthropic id
+// (resolveSessionModel — collections reads the same env and speaks only
+// Anthropic), falling to the next link and finally MODELS.DEFAULTS.VOICE, so
+// a refused value shows as rejected here rather than as what inbound runs on.
+function inboundSharedModelParse(raw) {
   const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
-  return [...ALLOWED_OVERRIDE_MODEL_IDS];
+  return ALLOWED_OVERRIDE_MODEL_IDS.has(raw) ? raw : null;
+}
+function inboundOverrideAllowed() {
+  // The production inbound allowlist — Anthropic-only even with
+  // GATE_VOICE_RELAY_OPENAI live, since OpenAI candidates resolve only in
+  // sandbox / eval-harness sessions — so the tab's displayed allowlist never
+  // goes stale relative to what resolveSessionModel accepts for this row.
+  const { allowedOverrideModelIds } = require('./voice-agent/relay-conversation');
+  return [...allowedOverrideModelIds()];
 }
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of
@@ -271,6 +292,7 @@ const LANES = [
   L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('social_judge', 'Social compliance judge', 'social-compliance-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('job_screen', 'Job application screening', 'job-application-screen.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
@@ -376,8 +398,8 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
-  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), null, { note: 'shares VOICE_RELAY_MODEL with inbound and the same allowlist walk (VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default); VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
   // ── Report writer ──
@@ -394,6 +416,7 @@ const LANES = [
   L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
+  L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
@@ -598,6 +621,7 @@ const LANE_AREA = {
   form_filler: 'content',
   signup_worker: 'content',
   link_investigator: 'content',
+  internal_link_judge: 'content',
   mentions_prober: 'content',
   mentions_sentiment: 'content',
   image_gen: 'content',
@@ -618,6 +642,7 @@ const LANE_AREA = {
   embeddings: 'ib',
   extreme_tier: 'ib',
   ask_waves: 'portal',
+  ask_waves_emergency_check: 'portal',
   portal_assistant: 'portal',
   agent_bi: 'agents',
   agent_lead: 'agents',
@@ -737,6 +762,7 @@ const LANE_DESCRIBE = {
   form_filler: 'Fills signup forms from a screenshot',
   signup_worker: 'Works through backlink signups',
   link_investigator: 'Investigates internal link paths',
+  internal_link_judge: 'Checks each automatic internal link reads right',
   mentions_prober: 'Asks each AI engine whether it mentions Waves',
   mentions_sentiment: 'Scores those mentions',
   image_gen: 'Generates blog images',
@@ -757,6 +783,7 @@ const LANE_DESCRIBE = {
   embeddings: 'Indexes knowledge for search',
   extreme_tier: 'Explicit deep audits you trigger by hand',
   ask_waves: 'Public chat on the website',
+  ask_waves_emergency_check: 'Checks each website chat for a medical emergency',
   portal_assistant: 'Assistant inside the customer portal',
   agent_bi: 'Weekly business briefing',
   agent_lead: 'Responds to new leads',
@@ -904,7 +931,9 @@ function resolveRef(ref) {
   switch (ref.kind) {
     case 'tier': {
       const sel = SELECTOR_BY_KEY[ref.key];
-      return { model: MODELS[ref.key], selector: ref.key, via: ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
+      const current = MODELS[ref.key];
+      const refused = !!ref.parse && !ref.parse(current);
+      return { model: refused ? ref.fallbackModel() : current, selector: ref.key, via: refused ? `${ref.key} rejected → code default` : ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
     }
     case 'route':
       return resolveAttributed(MODELS.ROUTES[ref.key]?.model, ROUTE_SELECTOR[ref.key], `ROUTES.${ref.key}`);

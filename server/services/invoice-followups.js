@@ -1,3 +1,4 @@
+const { billingLegDeliveryState, billingLegContactTime, originalBillingContactArgs } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -40,13 +41,14 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const EmailTemplateLibrary = require('./email-template-library');
-const { isDefiniteRejection } = require('./sendgrid-mail');
-const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
-const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
+const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const {
+  billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
+} = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
@@ -54,6 +56,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d7_reminder: 'invoice.followup_7_day',
   d14_firmer: 'invoice.followup_14_day',
   d30_final: 'invoice.followup_30_day',
+  // Day 90 ladder only (GATE_DUNNING_LADDER_90).
+  d60_reminder: 'invoice.followup_60_day',
+  d90_final_notice: 'invoice.followup_90_day',
 };
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
@@ -72,14 +77,6 @@ const STALE_TOUCH_GRACE_MS = 20 * 60 * 60 * 1000;
 
 function clean(value) {
   return String(value || '').trim();
-}
-
-function cleanEmail(value) {
-  return clean(value).toLowerCase();
-}
-
-function isEmailLike(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
 }
 
 function firstToken(value) {
@@ -126,7 +123,7 @@ function terminalFollowupEmailRefusal(result) {
   if (result?.resolved === true) return true;
   return result?.ok === false && result.retryable !== true && result.deferred !== true
     && result.deliveryOutcome !== 'uncertain' && (
-      ['billing_email_not_selected', 'email_disabled', 'missing_email', 'template_unavailable'].includes(result.reason)
+      ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
       || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
     );
 }
@@ -137,17 +134,29 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
-async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit) {
+async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
   if (result?.ok === true) {
-    return explicit && typeof ContactLedger.markDelivered === 'function'
-      && !await ContactLedger.markDelivered(ledger);
+    const originalContact = originalBillingContactArgs(result);
+    originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
+    return (explicit || originalContact.length > 0) && typeof ContactLedger.markDelivered === 'function'
+      && !await ContactLedger.markDelivered(ledger, ...originalContact);
   }
   if (followupEmailOutcomeUncertain(result, explicit)) return true;
-  await ContactLedger.markSendFailed(ledger, {
+  // A retryable refusal before the provider never reached the customer. An
+  // explicit selection's keyed reservation is left out of its own step's
+  // collections consult (currentStepLedgerIds); a no-choice attempt's
+  // unkeyed row is not, so it is stamped never_contacted (the pre-send
+  // doctrine, outbound-voice/origination.js), retried once, or the 24-hour
+  // window would refuse the retry the step is held for until the next day.
+  const neverContacted = !explicit && result?.retryable === true && result.deliveryOutcome === 'not_sent';
+  const stamp = {
     reason: result?.reason || result?.error || 'email_not_sent',
     ...(explicit && terminalFollowupEmailRefusal(result)
       ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
-  });
+    ...(neverContacted ? { never_contacted: true } : {}),
+  };
+  const stamped = await ContactLedger.markSendFailed(ledger, stamp);
+  if (!stamped && neverContacted) await ContactLedger.markSendFailed(ledger, stamp);
   return false;
 }
 
@@ -222,28 +231,25 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     return { ok: false, skipped: true, reason: 'invoice_payer_billed' };
   }
 
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customer.id })
-    .first()
-    .catch((err) => {
-      logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
-      return null;
-    });
-  if (enforceBillingPreference && prefs?.email_enabled === false) {
-    return { ok: false, skipped: true, reason: 'email_disabled' };
-  }
-  if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'invoice', 'email') === false) {
-    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
-  }
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
-    .filter((entry) => isEmailLike(entry.email));
-  if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
+  const authorityInput = {
+    customerId: customer.id, invoiceId: row.invoice_id, channel: 'email',
+    metadata: { billingDeliveryCategory: 'invoice' },
+  };
+  // Who this email may go to. The customer's billing choices, recipient and
+  // invoice ownership come from the shared billing email authority (owner
+  // ruling 2026-09-27), read here and again under its locks at the provider
+  // handoff. An operator's explicit send skips the customer's choices, as
+  // before, and rechecks ownership only.
+  const { recipient, to, refusal } = enforceBillingPreference
+    ? await billingEmailRecipient(authorityInput, 'invoice-followups')
+    : await operatorEmailRecipient(customer, 'invoice-followups');
+  if (refusal) return refusal;
 
   const payload = {
     first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
     invoice_title: ctx.invoiceTitle || latestInvoice.title || latestInvoice.service_type || 'your service',
     invoice_number: latestInvoice.invoice_number || row.invoice_number || '',
-    amount_due: currency(latestInvoice ? invoiceAmountDue(latestInvoice) : invoiceAmountDue(row)),
+    amount_due: currency(invoiceAmountDue(latestInvoice)),
     due_date: formatDateOnly(latestInvoice.due_date, { fallback: '' }),
     service_date: formatDateOnly(latestInvoice.service_date, { fallback: '' }),
     service_date_clause: ctx.serviceDate ? ` completed on ${ctx.serviceDate}` : '',
@@ -251,12 +257,14 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
   };
 
-  let providerHandoffStarted = false;
-  let emailDisabledAtHandoff = false;
+  const log = (fields) => logFollowupEmailAttempt({
+    customerId: customer.id, invoiceId: row.invoice_id, stepId: step.id, templateKey, ...fields,
+  });
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
-      to: recipient.email,
+      to,
       payload,
       recipientType: 'customer',
       recipientId: customer.id,
@@ -264,90 +272,17 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
       categories: ['invoice_followup', step.id],
       suppressionGroupKey: 'transactional_required',
-      // …and again at the provider boundary, inside the library's own handoff
-      // (local audit on r42): the recipient resolution and payload render are
-      // awaited after the read above. Fail-closed — an unreadable invoice
-      // aborts before dispatch, like every other ownership guard here.
-      withProviderHandoff: async (dispatch) => {
-        if (enforceBillingPreference) {
-          // Order the final check after any in-flight preference save and
-          // hold the same customer-comms lock through provider dispatch.
-          return withCustomerCommsLock(db, customer.id, async (trx) => {
-            const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, trx)();
-            if (verdict.ok !== true) return verdict;
-            const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
-            if (freshPrefs?.email_enabled === false) {
-              emailDisabledAtHandoff = true;
-              return { ok: false };
-            }
-            if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
-            providerHandoffStarted = true;
-            await dispatch(trx);
-            return { ok: true };
-          });
-        }
-        const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
-        if (verdict.ok !== true) return verdict;
-        providerHandoffStarted = true;
-        await dispatch();
-        return { ok: true };
-      },
+      withProviderHandoff: enforceBillingPreference
+        ? (dispatch) => dispatchUnderBillingEmailAuthority({
+          input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
+        })
+        : selfPayOnlyHandoff(row.invoice_id, state),
     });
-
-    if (emailDisabledAtHandoff && !result.sent) {
-      return { ok: false, skipped: true, reason: 'email_disabled' };
-    }
-
-    if (result.deduped) {
-      return {
-        ok: !!result.sent,
-        deduped: true,
-        blocked: !!result.blocked,
-        reason: result.reason || null,
-        messageId: result.message?.provider_message_id || null,
-      };
-    }
-
-    const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
-    await logFollowupEmailAttempt({
-      customerId: customer.id,
-      invoiceId: row.invoice_id,
-      stepId: step.id,
-      templateKey,
-      status,
-      providerMessageId: result.message?.provider_message_id || null,
-      sentAt: result.message?.sent_at || null,
-      failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
-    });
-
-    if (!result.sent) {
-      return {
-        ok: false,
-        blocked: !!result.blocked,
-        reason: result.reason || 'email_not_sent',
-      };
-    }
-    return { ok: true, messageId: result.message?.provider_message_id || null };
+    return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
-    const acceptedAtProvider = err.providerOutcome?.deliveryOutcome === 'accepted';
-    await logFollowupEmailAttempt({
-      customerId: customer.id,
-      invoiceId: row.invoice_id,
-      stepId: step.id,
-      templateKey,
-      status: acceptedAtProvider ? 'sent' : 'failed',
-      failureReason: acceptedAtProvider ? null : err.message,
+    return billingEmailSendFailure(err, state.handoffStarted, log, {
+      logTag: 'invoice-followups', label: `${step.id} for invoice ${row.invoice_id}`,
     });
-    if (acceptedAtProvider) return { ok: true, providerAccepted: true };
-    logger.error(`[invoice-followups] ${step.id} email failed for invoice ${row.invoice_id}: ${err.message}`);
-    if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
-      return { ok: false, skipped: true, reason: 'template_unavailable' };
-    }
-    const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
-      && (err.providerOutcome?.deliveryOutcome === 'not_sent'
-        || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
-          && (!providerHandoffStarted || isDefiniteRejection(err))));
-    return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
   }
 }
 
@@ -358,8 +293,46 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
  * invoice was sent (so "3-day friendly nudge" = 3 days after send), lands at
  * 10:00 AM America/New_York regardless of server timezone or DST.
  */
+// GATE_DUNNING_LADDER_90, read at call time (strict 'true'): the ladder runs
+// Day 3/10/17/30/60/90 (config.stepsThrough90) and owns its invoice to the
+// end. Off: the legacy Day 3/7/14/30 cadence, byte-identical.
+function ladderThrough90Live() {
+  return process.env.GATE_DUNNING_LADDER_90 === 'true';
+}
+
+function followupSteps() {
+  return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
+}
+
+function sequenceAnchor(row) {
+  return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
+}
+
+// The due time of a step on one specific cadence (legacy or Day 90 ladder),
+// whatever the gate says: the switch needs both to tell which cadence
+// scheduled a stored touch.
+function cadenceTouchAt(steps, anchorDate, stepIndex) {
+  const step = steps[stepIndex];
+  if (!step) return null;
+  return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
+}
+
+// Gate off after the Day 90 ladder scheduled a touch: a stored time that is
+// exactly the ladder's Day 10 or Day 17 goes back to the legacy Day 7 or
+// Day 14, unless that day already passed its send window, in which case the
+// ladder's later day stands so the touch is not lost (codex #5126 r2).
+function legacyTouchFor(row, now = new Date()) {
+  const index = Number(row.step_index);
+  if (!row.next_touch_at || config.steps[index]?.daysAfterSend === config.stepsThrough90[index]?.daysAfterSend) return null;
+  const anchor = sequenceAnchor(row);
+  const ladderAt = cadenceTouchAt(config.stepsThrough90, anchor, index);
+  const legacyAt = cadenceTouchAt(config.steps, anchor, index);
+  if (!ladderAt || !legacyAt || ladderAt.getTime() !== new Date(row.next_touch_at).getTime()) return null;
+  return isStaleTouch(legacyAt, now) ? null : legacyAt;
+}
+
 function computeNextTouchAt(anchorDate, stepIndex) {
-  const step = config.steps[stepIndex];
+  const step = followupSteps()[stepIndex];
   if (!step) return null;
   return anchorTo10amNY(new Date(anchorDate), step.daysAfterSend, config.sendWindow.hour);
 }
@@ -608,6 +581,9 @@ async function runPending() {
     return { sent: 0, skipped: 0 };
   }
 
+  const ladder = ladderThrough90Live();
+  if (ladder) await reviveLegacyFinishedSequences();
+
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
   // rather than staying armed and past-due until a restore fires a
@@ -615,7 +591,21 @@ async function runPending() {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'active')
-    .where('s.next_touch_at', '<=', now)
+    .where(function dueNowOrLadderScheduled() {
+      this.where('s.next_touch_at', '<=', now);
+      // Gate off after the Day 90 ladder scheduled a Day 10/17 touch (codex
+      // #5126 r2): pick it up while its earlier legacy day is due, so
+      // turning the ladder off restores the legacy reminder instead of
+      // holding the invoice, and the late-payment checker, until the
+      // ladder's day. The loop below leaves every other early row alone.
+      if (!ladder && LADDER_MOVED_STEPS.length) {
+        this.orWhere(function ladderScheduledTouch() {
+          this.where('s.step_index', '>=', Math.min(...LADDER_MOVED_STEPS))
+            .where('s.step_index', '<=', Math.max(...LADDER_MOVED_STEPS))
+            .where('s.next_touch_at', '<=', new Date(now.getTime() + LADDER_MAX_SHIFT_MS));
+        });
+      }
+    })
     .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
     // Third-party Bill-To: never dun a payer-billed invoice through this
     // homeowner sequence — fireStep would text the payer's bearer /pay/:token to
@@ -640,8 +630,19 @@ async function runPending() {
     );
 
   let sent = 0, skipped = 0;
-  for (const row of rows) {
+  for (const batchRow of rows) {
+    let row = batchRow;
     try {
+      // A legacy-cadence touch moved to its Day 90 ladder day is processed
+      // on that new day in this same run when the new day is today (pre-push
+      // audit P1): skipping it would let the next tick find it past its
+      // stale grace and pass it over.
+      const retimed = ladder ? await deferToLadderDay(row) : await restoreLegacyDay(row, now);
+      if (retimed === EARLY_ROW) continue;
+      if (retimed) {
+        if (!retimed.moved || retimed.due.getTime() > now.getTime()) { skipped++; continue; }
+        row = { ...row, next_touch_at: retimed.due };
+      }
       if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
         const skip = await skipStaleTouches(row, now);
         skipped++;
@@ -667,6 +668,98 @@ async function runPending() {
   }
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+/**
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
+ * or Day 90 step on a still-open invoice picks up again at that step. That
+ * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
+ * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
+ * A payment finish before Day 30 keeps its lower index and stays with the
+ * legacy checker (hasActiveSequence). The same invoice guards as the send
+ * batch apply. Each revival is guarded on the row still being that
+ * finished sequence, and a step already past its send day is passed over by
+ * the stale-touch pass in the same run, never sent late.
+ */
+async function reviveLegacyFinishedSequences() {
+  const legacyCount = config.steps.length;
+  const rows = await db('invoice_followup_sequences as s')
+    .join('invoices as i', 's.invoice_id', 'i.id')
+    .where('s.status', 'completed')
+    .where('s.step_index', '>=', legacyCount)
+    .where('s.step_index', '<', followupSteps().length)
+    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .select(
+      's.id', 's.step_index', 's.anchor_at', 's.created_at',
+      'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
+    );
+  let revived = 0;
+  for (const row of rows) {
+    const nextAt = computeNextTouchAt(sequenceAnchor(row), row.step_index);
+    if (!nextAt) continue;
+    const updated = await db('invoice_followup_sequences')
+      .where({ id: row.id, status: 'completed', step_index: row.step_index })
+      .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
+    revived += Number(updated) || 0;
+  }
+  if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
+  return revived;
+}
+
+// Steps the two cadences time differently (Day 7 vs 10, Day 14 vs 17), and
+// the widest gap between them plus a day's margin.
+const LADDER_MOVED_STEPS = config.steps
+  .map((_step, index) => index)
+  .filter((index) => config.steps[index].daysAfterSend !== config.stepsThrough90[index]?.daysAfterSend);
+const LADDER_MAX_SHIFT_MS = (Math.max(0, ...LADDER_MOVED_STEPS.map((index) => (
+  config.stepsThrough90[index].daysAfterSend - config.steps[index].daysAfterSend
+))) + 1) * 24 * 60 * 60 * 1000;
+const EARLY_ROW = Symbol('early');
+
+/**
+ * Gate off (codex #5126 r2): a row still waiting on a time the Day 90 ladder
+ * scheduled goes back to its legacy day. Returns EARLY_ROW for a row the
+ * widened batch select picked up that is not due on either cadence (left
+ * alone), otherwise null (a due row, processed as before) or
+ * { moved, due }, guarded like deferToLadderDay. A legacy day still ahead
+ * is written back so every reader sees it; the legacy stale rule applies
+ * (legacyTouchFor keeps the ladder's day when the legacy day already passed).
+ */
+async function restoreLegacyDay(row, now) {
+  if (!row.next_touch_at || new Date(row.next_touch_at).getTime() <= now.getTime()) return null;
+  const legacyAt = legacyTouchFor(row, now);
+  if (!legacyAt) return EARLY_ROW;
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .update({ updated_at: db.fn.now(), next_touch_at: legacyAt });
+  logger.info(`[invoice-followups] Day 90 ladder off: invoice ${row.invoice_id} step ${row.step_index} `
+    + `${updated ? `moved back to ${legacyAt.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
+  return { moved: Number(updated) === 1, due: legacyAt };
+}
+
+/**
+ * Day 90 ladder: a touch stored on the legacy cadence (Day 7 or Day 14)
+ * waits for its new day (Day 10 or Day 17). Guarded on the batch snapshot,
+ * like the stale skip. Returns null when no move is needed, otherwise
+ * { moved, due }: moved false means the sequence changed since the batch
+ * select and this run leaves it alone.
+ */
+async function deferToLadderDay(row) {
+  if (!ladderThrough90Live() || !row.next_touch_at) return null;
+  const due = computeNextTouchAt(sequenceAnchor(row), row.step_index);
+  if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return null;
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .update({ updated_at: db.fn.now(), next_touch_at: due });
+  logger.info(`[invoice-followups] Day 90 ladder: invoice ${row.invoice_id} step ${row.step_index} `
+    + `${updated ? `moved to ${due.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
+  return { moved: Number(updated) === 1, due };
 }
 
 // NY weekday of a touch's anchor (touches always sit at 10:00 NY, so the
@@ -697,6 +790,15 @@ function isStaleTouch(dueAt, now) {
   return now.getTime() - firstEligibleFireAt(dueAt).getTime() > STALE_TOUCH_GRACE_MS;
 }
 
+// The earliest a held step may be retried: the start of the next NY calendar
+// day. The cron fires once a day (10:16 NY, Tue–Fri), so a same-day retry
+// time would be about a day old by the next tick and skipStaleTouches would
+// pass the step by instead of retrying it. A Saturday-to-Monday date rolls
+// to Tuesday's anchor at staleness time (firstEligibleFireAt).
+function heldTouchFloor(now = new Date()) {
+  return anchorTo10amNY(now, 1, 0);
+}
+
 /**
  * Advance a sequence past touches whose eligible send day already passed,
  * without sending them. Walks the same anchored timeline fireTouch advances
@@ -713,7 +815,7 @@ async function skipStaleTouches(row, now) {
   let nextAt = new Date(row.next_touch_at);
   const skippedSteps = [];
   while (nextAt && isStaleTouch(nextAt, now)) {
-    skippedSteps.push(config.steps[nextIndex]?.id || `step_${nextIndex}`);
+    skippedSteps.push(followupSteps()[nextIndex]?.id || `step_${nextIndex}`);
     nextIndex += 1;
     nextAt = computeNextTouchAt(anchorAt, nextIndex);
   }
@@ -864,7 +966,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
 }
 
 async function fireTouch(row, { operatorInitiated = false } = {}) {
-  const step = config.steps[row.step_index];
+  const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       updated_at: db.fn.now(),
@@ -1074,6 +1176,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // a definite failed delivery stamps send_failed, while an unknown outcome
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
+  const originalDeliveryTimes = [];
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
   // A spacing-window denial keeps the selected Email owed on this step; a
   // durable one (flag, suppression) waives it so the step cannot be pinned
@@ -1098,8 +1201,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     if (emailLedger) {
       const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
         ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
-      if (claim.delivered) emailResult = { ok: true, deduped: true };
-      else if (claim.resolved) {
+      if (claim.delivered) {
+        emailResult = { ok: true, deduped: true };
+        if (emailLedger.occurred_at) originalDeliveryTimes.push(emailLedger.occurred_at);
+      } else if (claim.resolved) {
         emailResult = {
           ok: false,
           delivered: false,
@@ -1119,7 +1224,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
             })
           : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
         const attemptHeld = await settleFollowupEmailLedger(
-          ContactLedger, emailLedger, emailResult, selectedChannels !== null,
+          ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
       }
@@ -1133,6 +1238,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   let appSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
+  let smsDeferredOwned = false;
+  let smsOutcomeMayHaveDelivered = false;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
@@ -1140,8 +1247,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     const holdStep = (result = {}) => {
       smsHoldUnowned = true;
       const requested = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
-      const at = requested && !Number.isNaN(requested.getTime())
-        ? requested : new Date(Date.now() + 30 * 60 * 1000);
+      const floor = heldTouchFloor();
+      const at = requested && !Number.isNaN(requested.getTime()) && requested > floor ? requested : floor;
       if (!smsDeferUntil || at > smsDeferUntil) smsDeferUntil = at;
     };
     if (emailHold) holdStep();
@@ -1177,7 +1284,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (ledger.occurred_at) originalDeliveryTimes.push(ledger.occurred_at);
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -1201,11 +1308,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
       }
-      if (result?.deliveryOutcome === 'accepted') {
+      const delivery = billingLegDeliveryState(channel, result || {});
+      if (delivery) {
+        const occurredAt = billingLegContactTime(result);
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (delivery === 'deduped' && occurredAt) originalDeliveryTimes.push(occurredAt);
+        if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
-          && !await ContactLedger.markDelivered(ledger)) holdStep();
+          && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1279,6 +1389,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+        smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
         // Send-window block (this cron runs hourly, incl. nights): not a
@@ -1331,6 +1442,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   resolve_from_by_customer: true,
                 }),
               });
+              smsDeferredOwned = true;
               logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
             } catch (queueErr) {
               smsHoldUnowned = true;
@@ -1350,6 +1462,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   }
 
   if (!smsSent && !emailResult.ok) {
+    // A retryable email outcome (the shared billing email check could not
+    // authorize this touch yet) holds the step for any customer, not only an
+    // explicit channel selection: a customer with no explicit choice and no
+    // phone would otherwise fall to the pause below and lose every remaining
+    // follow-up over one transient refusal.
+    if (!smsDeferUntil && (emailResult.retryable === true || emailResult.deferred === true)) {
+      smsDeferUntil = heldTouchFloor();
+    }
     if (smsDeferUntil) {
       // Nothing failed — the touch fired outside the 8AM-8PM ET send
       // window and no email leg covered it. Keep the sequence active and
@@ -1409,6 +1529,19 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     return;
   }
 
+  const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
+  const originalAt = originalDeliveryTimes.length
+    ? new Date(Math.max(...originalDeliveryTimes.map((time) => new Date(time).getTime()))) : row.last_touch_at;
+  // Only an earlier accepted leg reached the customer on this path. Return
+  // this run's credit draw; the previous attempt's applied credit stays put.
+  if (!freshDelivery && !smsDeferredOwned && !smsOutcomeMayHaveDelivered && dunAppliedCredit > 0) {
+    try {
+      const { reverseAppliedCredit } = require('./customer-credit');
+      await reverseAppliedCredit({ invoiceId: row.invoice_id, amount: dunAppliedCredit, createdBy: 'system:dun_undelivered' });
+    } catch (e) {
+      logger.warn(`[invoice-followups] credit reversal after prior-delivery replay skipped for ${row.invoice_id}: ${e.message}`);
+    }
+  }
   const nextIndex = row.step_index + 1;
   // anchor_at (set when an admin edit shifted the due date) overrides the
   // send-time anchor so the whole remaining cadence stays on one timeline.
@@ -1419,13 +1552,16 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
-    last_touch_at: new Date(),
+    last_touch_at: freshDelivery ? new Date() : originalAt,
     next_touch_at: nextAt,
     status: nextAt ? 'active' : 'completed',
   });
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
+
+  // An already delivered leg advances its step without a new outbound touch.
+  if (!freshDelivery) return;
 
   // Log to customer_interactions for the 360 view
   try {
@@ -1434,7 +1570,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       interaction_type: selectedChannels === null || actualSmsSent ? 'sms_outbound'
         : appSent ? 'app_outbound' : 'email_outbound',
       subject: `Invoice follow-up — ${step.label} (${row.invoice_number || row.invoice_id})`,
-      body: `Step ${row.step_index + 1}/${config.steps.length} fired. Amount: $${amount}.`,
+      body: `Step ${row.step_index + 1}/${followupSteps().length} fired. Amount: $${amount}.`,
       metadata: JSON.stringify({
         invoice_id: row.invoice_id,
         step_id: step.id,
@@ -2038,11 +2174,78 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
  * handled by the per-invoice sequence (so we skip the account-level reminder).
  */
 async function hasActiveSequence(invoiceId) {
-  const seq = await db('invoice_followup_sequences')
+  const ladder = ladderThrough90Live();
+  const legacyCount = config.steps.length;
+  const query = db('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
-    .whereIn('status', ['active', 'paused', 'autopay_hold'])
-    .first();
+    .whereIn('status', ['active', 'paused', 'autopay_hold', ...(ladder ? ['completed'] : [])]);
+  if (ladder) {
+    // Under the Day 90 ladder a sequence that ran past the Day 30 end still
+    // owns its invoice, so the late-payment checker and the balance workflow
+    // do not pick it up afterwards (the handoff behind most customers
+    // reminded by two systems within a week). A payment finish before that
+    // (a lower step) does not: if a dispute reopens that invoice, the
+    // checker handles it as before (codex #5126 r1). Finishes at Day 60 or
+    // Day 90 on an open invoice are resumed by the ladder's next run.
+    query.whereNot(function paidBeforeDay30End() {
+      this.where('status', 'completed').where('step_index', '<', legacyCount);
+    });
+  } else {
+    // Gate off after the Day 90 ladder advanced an active row past Day 30:
+    // the legacy cadence never fires that step, so the row no longer holds
+    // the invoice and the legacy checker takes over (codex #5126 r1).
+    // Pauses and autopay holds keep holding it. Legacy rows never have an
+    // active step past the legacy count.
+    query.whereNot(function advancedByLadder() {
+      this.where('status', 'active').where('step_index', '>=', legacyCount);
+    });
+  }
+  const seq = await query.first();
   return !!seq;
+}
+
+/**
+ * When a sequence's next touch will actually fire, for readers outside this
+ * module that run before it (the annual-prepay reminder's same-day
+ * suppression, codex #5126 r1). Under the Day 90 ladder a touch stored on
+ * the legacy Day 7 or Day 14 fires on its Day 10 or Day 17, which this
+ * module's next run writes back, and a sequence finished at the Day 60 or
+ * Day 90 step on its open invoice is resumed by that run: its touch is the
+ * first step not already past its send day, the one the run would send. A
+ * step past the live cadence fires no touch at all. `seq` carries status,
+ * step_index, next_touch_at, anchor_at and created_at; the invoice supplies
+ * the send-time anchor when needed.
+ */
+async function liveNextTouchAt(invoiceId, seq, now = new Date()) {
+  if (!seq) return null;
+  const index = Number(seq.step_index);
+  const steps = followupSteps();
+  const pendingRevival = ladderThrough90Live() && seq.status === 'completed'
+    && index >= config.steps.length && index < steps.length;
+  if (!pendingRevival && (!seq.next_touch_at || index >= steps.length)) return null;
+  // Gate off, only a step the two cadences time differently can need the
+  // anchor: a touch the ladder scheduled goes back to its legacy day.
+  const cadencesDiffer = config.steps[index]?.daysAfterSend !== config.stepsThrough90[index]?.daysAfterSend;
+  if (!ladderThrough90Live() && !cadencesDiffer) return seq.next_touch_at;
+  let anchored = seq;
+  if (!seq.anchor_at) {
+    const invoice = await db('invoices').where({ id: invoiceId }).first('sent_at', 'sms_sent_at', 'created_at');
+    anchored = {
+      ...seq, invoice_sent_at: invoice?.sent_at, invoice_sms_sent_at: invoice?.sms_sent_at, invoice_created_at: invoice?.created_at,
+    };
+  }
+  if (!ladderThrough90Live()) return legacyTouchFor(anchored, now) || seq.next_touch_at;
+  if (pendingRevival) {
+    let step = index;
+    let due = computeNextTouchAt(sequenceAnchor(anchored), step);
+    while (due && isStaleTouch(due, now)) {
+      step += 1;
+      due = computeNextTouchAt(sequenceAnchor(anchored), step);
+    }
+    return due;
+  }
+  const due = computeNextTouchAt(sequenceAnchor(anchored), index);
+  return due && due.getTime() > new Date(seq.next_touch_at).getTime() ? due : seq.next_touch_at;
 }
 
 /**
@@ -2078,6 +2281,8 @@ module.exports = {
   sendNextTouchNow,
   hasActiveSequence,
   isDunningStopped,
+  followupSteps,
+  liveNextTouchAt,
   skipStaleTouches,
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,

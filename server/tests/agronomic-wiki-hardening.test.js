@@ -18,6 +18,7 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn() }));
 jest.mock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model' }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({
@@ -193,6 +194,35 @@ describe('generatePage', () => {
     const errorLog = (state.inserts.knowledge_update_log || []).find((r) => r.action === 'error');
     expect(errorLog).toBeTruthy();
     expect(errorLog.description).toMatch(/existing content preserved/);
+  });
+
+  test('never saves a page cut off at max_tokens — existing content preserved', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nHard-won existing analysis.',
+      data_point_count: 3,
+      source_treatment_ids: ['o1', 'o2', 'o3'],
+      stale_flag: false,
+    };
+    const state = useDb({ knowledge_entries: [existing] });
+    global.__anthropicCreate = jest.fn(async () => ({
+      stop_reason: 'max_tokens',
+      content: [{ type: 'text', text: '# Talstar P\n\n| Metric | Avg. Delta | Direction | |' }],
+      usage: { input_tokens: 100, output_tokens: 16000 },
+    }));
+
+    const result = await wiki.generatePage(
+      'product/talstar-p', 'product',
+      { outcomes: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }, { id: 'o4' }] },
+      'Product: Talstar P'
+    );
+
+    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.content).toBe(existing.content);
+    const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
+    expect(contentPatch).toBeUndefined();
   });
 
   test('still creates a placeholder stub for a brand-new page when the AI call fails', async () => {
@@ -933,6 +963,27 @@ describe('backfillOutcomeWeather application-moment anchor', () => {
     id: 'post-1', service_date: '2026-07-01',
     fawn_snapshot: JSON.stringify({ observation_time: observationTime }),
     fawn_temp_f: 88.2, fawn_humidity_pct: 71, fawn_rainfall_7d: 0.4,
+  });
+
+  test.each([true, false])('today fallback preserves the post-assessment property (has coordinates: %s)', async (hasCoordinates) => {
+    const now = new Date();
+    const today = require('../utils/datetime-et').etDateString(now);
+    const state = useDb({
+      treatment_outcomes: [],
+      customer_properties: [{ latitude: hasCoordinates ? 27.22 : null, longitude: -81.84 }],
+      customers: [{ latitude: 27.14, longitude: -82.34 }],
+    });
+    const fawn = require('../services/fawn-weather');
+    fawn.getCurrent.mockClear();
+    fawn.getCurrent.mockResolvedValue({ station: 'Arcadia', temp_f: 82, humidity_pct: 70, rainfall_in: null, observation_time: now.toISOString() });
+    const wrote = await backfillOutcomeWeather(outcome, {
+      id: 'post-1', customer_id: 'customer', property_id: 'secondary', service_date: today,
+    }, today, now);
+    expect(wrote).toBe(hasCoordinates);
+    expect(state.calls.customer_properties[0].ops).toContainEqual(['where', [{ id: 'secondary', customer_id: 'customer' }]]);
+    expect(state.calls.customers).toBeUndefined();
+    if (hasCoordinates) expect(fawn.getCurrent).toHaveBeenCalledWith({ latitude: 27.22, longitude: -81.84 });
+    else expect(fawn.getCurrent).not.toHaveBeenCalled();
   });
 
   test('accepts an application-time snapshot even when processing happens much later', async () => {

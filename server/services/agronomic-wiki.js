@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { loadCustomerGrassContext, irrigationTypeHasSystem } = require('./lawn-grass-context');
+const { resolvePropertyCoordinates } = require('./property-coordinates');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -343,10 +344,21 @@ async function callClaude(systemPrompt, userPrompt) {
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
-      max_tokens: 8192, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
+      // DEEP: thinking spends from max_tokens ahead of the visible answer.
+      // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
+      // exactly (avg output 7515) with thinking eating the whole cap —
+      // paid-for output was being discarded as anthropic_incomplete.
+      // knowledge/wiki-compiler.js is already 12000 — leave it.
+      max_tokens: 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
+    // A page cut off at the cap must never be saved as the page — returning
+    // null keeps the existing content (the caller's failed-generation path).
+    if (response?.stop_reason === 'max_tokens') {
+      logger.error(`[agronomic-wiki] Claude output truncated at max_tokens — discarding generation`);
+      return null;
+    }
     const text = response.content?.[0]?.text || '';
     const tokens = (response.usage?.input_tokens || 0) + (response.usage?.output_tokens || 0);
     return { text, tokens, model: response.model || MODEL };
@@ -455,7 +467,8 @@ async function backfillOutcomeWeather(outcome, post, treatmentDate, applicationM
     const weatherIncomplete = !weather
       || weather.temp_f == null || weather.humidity_pct == null || weather.rainfall_in == null;
     if (weatherIncomplete && etCalendarDayOf(treatmentDate) === etDateString()) {
-      const fawn = await require('./fawn-weather').getCurrent();
+      const coordinates = await resolvePropertyCoordinates(post.customer_id, post.property_id);
+      const fawn = coordinates ? await require('./fawn-weather').getCurrent(coordinates) : null;
       // Same ≤6h bound as the persisted-snapshot path above. The
       // STATION's observation_time is authoritative when present
       // (naive strings are ET wall-clock — parseETDateTime handles

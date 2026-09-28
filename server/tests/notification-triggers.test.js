@@ -148,6 +148,15 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/kb');
   });
 
+  test('KB audit trigger names where a generated entry is fixed', () => {
+    const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
+      count: 1,
+      entries: [{ title: 'Sample SC', summary: 'Formulation missing.', fixLabel: 'Products catalog' }],
+    });
+
+    expect(built.body).toBe('Sample SC (fix in Products catalog): Formulation missing.');
+  });
+
   test('legacy internal admin SMS redirects have a generic notification trigger', () => {
     const built = TRIGGER_REGISTRY.internal_admin_alert.build({
       title: 'Tax Deadline Alert',
@@ -160,6 +169,14 @@ describe('notification trigger push tags', () => {
       body: 'Two filings need review.',
       link: '/admin/tax',
     });
+  });
+
+  test('promise-chaser copy always states when the caller called — dispatched only by the durable sweep, after the call already ended', () => {
+    const built = TRIGGER_REGISTRY.promise_chaser.build({
+      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM', calledAtLabel: '4:15 PM',
+    });
+    expect(built.body).toBe('Fixture Lead called at 4:15 PM. We still owe them a callback promised Sep 26, 2:00 PM.');
+    expect(built.body).not.toContain('calling in now');
   });
 
   test('bundle quote trigger distinguishes inquiry from self-applied bundle', () => {
@@ -289,6 +306,20 @@ describe('triggerNotification bell outcome', () => {
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  // A second same-day callback on the SAME open promise dedupes to the
+  // committed bell — the promise-chaser bell's own dedupeKey — and must not
+  // re-buzz the phone either, even though it is a genuinely new call.
+  // Like sms_reply, a promise-chaser dedupe HIT skips the push. The sweep is
+  // stateless and never retries a push, so a dedupe hit can only be a
+  // concurrent dispatch of the same (promise, ET day) that already pushed.
+  test('a promise-chaser dedupe hit does not push again (a concurrent dispatch already did)', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
+    const stats = await triggerNotification('promise_chaser', { commitmentId: 'fixture-commitment-1', phone: '+19415550199' },
+      { dedupeKey: 'waves-promise_chaser-fixture-commitment-1-2026-09-26' });
+    expect(stats.deduped).toBe(true);
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
   test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
     db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
       : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
@@ -299,6 +330,24 @@ describe('triggerNotification bell outcome', () => {
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
     for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
       expect(build('admin-1')).toMatchObject({ tag: 'waves-sms_reply-SM-synthetic-push-only', renotify: false });
+    }
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  // With every admin bell-disabled, notifyAdmin's own dedupe lock (inside
+  // the bell-enabled branch) never runs — the push tag has to carry the
+  // dedupe identity on its own, same fix as the SMS case above.
+  test('push-only promise-chaser callbacks tag by the bell dedupeKey and avoid renotification', async () => {
+    db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
+      : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));
+    const PushService = require('../services/push-notifications');
+    const payload = { commitmentId: 'fixture-commitment-2', phone: '+19415550199' };
+    const dedupeKey = 'waves-promise_chaser-fixture-commitment-2-2026-09-26';
+    await triggerNotification('promise_chaser', payload, { dedupeKey });
+    await triggerNotification('promise_chaser', payload, { dedupeKey });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    for (const [, build] of PushService.sendToAdminUsers.mock.calls) {
+      expect(build('admin-1')).toMatchObject({ tag: dedupeKey, renotify: false });
     }
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });

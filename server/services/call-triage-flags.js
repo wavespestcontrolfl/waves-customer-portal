@@ -218,8 +218,8 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
   const flags = Array.isArray(modelFlags) ? modelFlags : [];
   if (!flags.includes('caller_not_authorized')) return flags;
   if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) {
-    // A real_estate_agent/lender WDO arranger with a confirmed time on the
-    // call is authorized (see isAuthorizedWdoArrangerBooking) — the model
+    // A real_estate_agent/lender/home_buyer WDO caller with a confirmed time
+    // on the call is authorized (see isAuthorizedWdoArrangerBooking) — the model
     // emits caller_not_authorized on these calls itself (it sees the same
     // third-party relationship), so its copy needs the same demotion the
     // deterministic derivation gets below, or the merge would reintroduce
@@ -297,13 +297,17 @@ function isWdoInspectionRequest(serviceRequest = {}) {
 // professional relationship to the property that the office does not need
 // an agent-spoken confirmation quote to trust.
 //
-// Buyers under contract are explicitly NOT covered (relationship is usually
-// 'other', sometimes misreported) — the owner ruling names lender/realtor
-// only. Direction-independent by construction: this reads only the
+// A buyer under contract ordering their own WDO inspection is covered too
+// (owner ruling 2026-09-26, the rulebook's "WDO buyers" decision). Schema
+// 1.15.0 gave buyers their own relationship value, home_buyer. Before that
+// they landed on 'other', which also covers strangers, so a rule keyed on
+// 'other' could not tell them apart. The inspection-only and confirmed-time
+// requirements below apply to buyers exactly as they do to lenders and
+// realtors. Direction-independent by construction: this reads only the
 // extraction (caller/service_request/scheduling), never call direction, so
 // an outbound call with the identical extraction shape is authorized the
 // same way an inbound one is.
-const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
+const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender', 'home_buyer']);
 // Pure (no clock): the route decision must stay a function of the call so a
 // force-reprocess under the same decision version reproduces it (codex #4890
 // r6 P1). An elapsed agreed day is refused where the visit is WRITTEN — see
@@ -2225,8 +2229,9 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // the review card enforce mode no longer raises. Only an explicit third
   // party (tenant, agent, manager, other) carries the ask.
   // Same owner-ruling exception the enforce gate applies (2026-09-26): a
-  // real_estate_agent/lender arranging a confirmed WDO inspection is
-  // authorized, so this shadow-mode review card must not re-raise it either.
+  // real_estate_agent/lender/home_buyer ordering a confirmed WDO inspection
+  // is authorized, so this shadow-mode review card must not re-raise it
+  // either.
   // v2Extraction is optional (older callers keep today's behavior) — the one
   // live call site (call-recording-processor.js) passes the full V2
   // extraction so the predicate can see service_request/scheduling.
@@ -2740,6 +2745,8 @@ module.exports = {
   CANONICAL_WRITE_BLOCKING_FLAGS,
   confirmedStartOnTheHour,
   quoteBindsConfirmedSlot,
+  turnHasNegationOrHedge,
+  turnHasUnresolvedConditional,
   normalizeCommitmentText,
   hasAgentCommittedEvidence,
   etWallClockOfConfirmedStart,

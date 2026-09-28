@@ -10,7 +10,7 @@ const { SPOKE_SITE_KEYS } = require('../services/content-astro/spoke-sites');
 
 describe('enums (plan §3)', () => {
   test('§3.5 provenance is the plan list, legacy_unknown included, no duplicates', () => {
-    expect(R.LINK_SOURCES).toEqual(['owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive', 'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink', 'lost_recovery', 'local_opportunity', 'legacy_unknown']);
+    expect(R.LINK_SOURCES).toEqual(['owner_seed', 'list_import', 'competitor_gap', 'competitor_clone', 'recursive', 'x', 'google_search', 'dataforseo', 'strategy_agent', 'existing_backlink', 'lost_recovery', 'local_opportunity', 'legacy_unknown', 'ai_citation']);
     for (const arr of [R.LINK_SOURCES, R.AGENT_STATES, R.ACQUISITION_TYPES, R.ATTEMPT_OUTCOMES, R.AUTHORITY_LEVELS, R.ATTEMPT_PROVIDERS, R.ATTEMPT_ACTIONS]) {
       expect(new Set(arr).size).toBe(arr.length);
       expect(Object.isFrozen(arr)).toBe(true);
@@ -123,6 +123,16 @@ describe('never-a-target hosts (plan §4 step 1)', () => {
     for (const h of ['example.com', 'notx.com', 'googleplex.example', 'sunny-sprinklers.test']) expect(R.isNeverTargetHost(h)).toBe(false);
     expect(R.isNeverTargetHost('')).toBe(true);
   });
+
+  // Codex P2 2026-09-28 (round 11): search-engine and map result hosts join
+  // the one never-target list — exact subdomains only where the brand's
+  // other properties are real sites (yahoo, apple, brave).
+  test('search-engine and map result hosts are never targets; their sibling properties are not caught', () => {
+    for (const h of ['www.bing.com', 'duckduckgo.com', 'search.yahoo.com', 'maps.apple.com', 'yandex.com', 'yandex.ru', 'www.baidu.com', 'www.ecosia.org', 'search.brave.com', 'www.startpage.com']) {
+      expect({ h, never: R.isNeverTargetHost(h) }).toEqual({ h, never: true });
+    }
+    for (const h of ['news.yahoo.com', 'apple.com', 'brave.com', 'notbing.com']) expect({ h, never: R.isNeverTargetHost(h) }).toEqual({ h, never: false });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -209,6 +219,20 @@ describe('ensureDomain (the one registry upsert)', () => {
     expect(db._store.domains[0].source).toBe('list_import');
     expect(db._store.sources.map((s) => s.touch_key)).toEqual(['list_import:paste:2026-08-28', 'competitor_gap:gap-1']);
     expect(db._store.updates).toEqual([]);
+  });
+  // Codex P1 2026-09-28 (round 11): the discovery-only guard reads the
+  // first-touch detail's prefix, so NO writer may create an ai_citation
+  // domain or touch without it — refused before any write.
+  test('an ai_citation touch without the ai_citation: detail prefix is refused before any write', async () => {
+    const db = fakeDb();
+    for (const sourceDetail of [null, '', 'https://www.bbb.org/x', 'paste:2026-09-28', 'ai_citation_feeder · listing · 1x · openai']) {
+      await expect(ensureBoth(db, { domain: 'bbb.org', source: 'ai_citation', sourceDetail })).rejects.toThrow(/must start with 'ai_citation:'/);
+    }
+    expect(db._store.domains).toEqual([]);
+    expect(db._store.sources).toEqual([]);
+    const ok = await ensureBoth(db, { domain: 'bbb.org', source: 'ai_citation', sourceDetail: 'ai_citation:intake https://www.bbb.org/x' });
+    expect(ok).toMatchObject({ created: true, touched: true });
+    expect(R.AI_CITATION_SOURCE_DETAIL_PREFIX).toBe(require('../services/seo/link-authority-policy').AI_CITATION_SOURCE_DETAIL_PREFIX);
   });
   test('an owner_seed touch on an existing normal row raises discovery_priority (never lowers it)', async () => {
     const db = fakeDb({ domains: [{ id: 'd9', domain: 'seed.example', source: 'competitor_gap', discovery_priority: 'normal' }] });

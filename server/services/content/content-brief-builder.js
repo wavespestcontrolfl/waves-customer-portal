@@ -167,20 +167,27 @@ const VOICE_CONSTRAINTS = {
 
 // Answer-engine (AEO) treatment. When a brief originates from an aeo_gap
 // opportunity — a city×service that answer engines (ChatGPT/Gemini/Claude/AI
-// Overview) are NOT citing Waves for — overlay extractability requirements so
+// Overview) are NOT citing Waves for — or an aeo_question_gap one (a benchmark
+// question whose target page they don't cite) — overlay extractability requirements so
 // the page can actually be quoted: a self-contained direct-answer block up top,
 // an explicit FAQ section, and FAQPage schema. The seo-completion-gate then
 // enforces that requesting FAQPage means a visible FAQ exists, so this is
-// self-reinforcing. Inert outside aeo_gap (gated upstream by GATE_AEO_GAP_MINING).
+// self-reinforcing. Inert outside those buckets (gated upstream by
+// GATE_AEO_GAP_MINING / GATE_AEO_QUESTION_GAP_MINING).
 //
 // customer-question is intentionally EXCLUDED: that contract already answers
 // the question in the first paragraph (direct answer is built in) and forbids
 // FAQPage schema (deprecated May 2026, per writer-agent-config + quality-gate).
+const AEO_GAP_BUCKETS = new Set(['aeo_gap', 'aeo_question_gap']);
 const AEO_TREATED_PAGE_TYPES = new Set([
   'city-service', 'supporting-blog', 'refresh',
 ]);
 
-function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints }) {
+// schemaFrozen: refresh publishing keeps the live page's structured data
+// (astro-publisher copies only title/meta onto the frozen frontmatter), so a
+// refresh brief must not claim FAQPage as a binding requirement it cannot
+// deliver. The visible FAQ section still applies.
+function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints, schemaFrozen = false }) {
   if (!isAeoGap || !AEO_TREATED_PAGE_TYPES.has(pageType)) {
     return { requiredSections, schemaTypes, voiceConstraints };
   }
@@ -193,7 +200,7 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
   if (!sections.some((s) => /\bFAQ\b/i.test(s))) {
     sections.push('FAQ section (3–5 Q/A pairs phrased exactly how a SWFL homeowner would ask an AI assistant)');
   }
-  const schema = Array.from(new Set([...schemaTypes, 'FAQPage']));
+  const schema = schemaFrozen ? schemaTypes : Array.from(new Set([...schemaTypes, 'FAQPage']));
   const voice = {
     ...voiceConstraints,
     aeo_notes: [
@@ -641,9 +648,10 @@ class ContentBriefBuilder {
   _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null }) {
     const pageType = decision.page_type;
 
-    // Overlay answer-engine extractability requirements for aeo_gap briefs.
+    // Overlay answer-engine extractability requirements for AEO-gap briefs.
     const aeo = applyAeoTreatment({
-      isAeoGap: opportunity.bucket === 'aeo_gap',
+      isAeoGap: AEO_GAP_BUCKETS.has(opportunity.bucket),
+      schemaFrozen: opportunity.bucket === 'aeo_question_gap' && decision.action_type === 'refresh_existing_page',
       pageType,
       requiredSections: REQUIRED_SECTIONS[pageType] || [],
       schemaTypes: SCHEMA_TYPES[pageType] || [],
@@ -837,6 +845,14 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // aeo_question_gap rows: the answer-engine evidence that admitted
+        // the question (engine names only — competitor names stay in the
+        // queue row as reviewer evidence, never in the brief). The quality
+        // gate accepts it in place of GSC impressions (isAeoQuestionGapBrief).
+        aeo_benchmark_id: opportunity.signal_metadata?.benchmark_id || null,
+        aeo_engines_missing: Array.isArray(opportunity.signal_metadata?.engines_missing)
+          ? opportunity.signal_metadata.engines_missing.map((e) => e?.platform).filter(Boolean)
+          : null,
         // listicle_family rows: `impressions` above is the FAMILY SUM, not
         // the representative query's own volume — carry the provenance so
         // the writer and reviewers see the aggregation instead of reading
