@@ -12,7 +12,9 @@ const { parsePestsNamed } = require('./visit-products');
 const MIN_CITY_VISITS = 5;
 
 /** Recomputes and upserts every city's row for one ET calendar month.
- * Deletes+re-inserts each city it finds data for (idempotent re-run). */
+ * Replaces the WHOLE month's aggregate atomically (a city with no
+ * qualifying rows this run, e.g. after a data correction, loses its old
+ * row instead of it surviving stale). */
 async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   const monthStart = etMonthStart(month);
   const monthEnd = etMonthEnd(month);
@@ -38,8 +40,8 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
 
   const summary = [];
   await conn.transaction(async (trx) => {
+    await trx('email_area_intel_monthly').where({ month: monthStart }).del();
     for (const [city, entry] of byCity) {
-      await trx('email_area_intel_monthly').where({ month: monthStart, city }).del();
       if (entry.visits < MIN_CITY_VISITS) continue;
       const toInsert = [...entry.pestCounts.entries()]
         .filter(([, count]) => count > 0)
@@ -47,10 +49,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
           month: monthStart, city, visits: entry.visits,
           pest_key: pestKey, visits_with_pest: count, computed_at: new Date(),
         }));
-      if (toInsert.length) {
-        await trx('email_area_intel_monthly').insert(toInsert)
-          .onConflict(['month', 'city', 'pest_key']).merge();
-      }
+      if (toInsert.length) await trx('email_area_intel_monthly').insert(toInsert);
       summary.push({ city, visits: entry.visits, pestsRecorded: toInsert.length });
     }
   });

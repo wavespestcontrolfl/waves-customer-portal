@@ -55,6 +55,7 @@ suite('email division against real Postgres', () => {
       { id: randomUUID(), service_record_id: visitId, product_name: 'Taurus SC', active_ingredient: 'fipronil', applied_at: new Date('2026-09-10T10:05:00Z') },
       { id: randomUUID(), service_record_id: visitId, product_name: 'LESCO 90/10 nonionic surfactant', active_ingredient: 'nonionic surfactant', applied_at: new Date('2026-09-10T10:10:00Z') },
       { id: randomUUID(), service_record_id: unknownVisitId, product_name: 'Mystery Blend 42', active_ingredient: 'unobtanium' },
+      { id: randomUUID(), service_record_id: unknownVisitId, product_name: 'Generic IGR', active_ingredient: 'pyriproxyfen' },
     ]);
     const { products, primary, secondary } = await readVisitProducts(visitId, { conn: trx });
     expect(products).toHaveLength(3);
@@ -63,8 +64,10 @@ suite('email division against real Postgres', () => {
     expect(secondary.family).toBe('contact_residual');
     expect(products.find((p) => p.family === 'adjuvant').customerVisible).toBe(false);
     const unknown = await readVisitProducts(unknownVisitId, { conn: trx });
-    expect(unknown.products[0].family).toBe('other');
-    expect(unknown.primary.family).toBe('other');
+    expect(unknown.products.find((p) => p.productName === 'Mystery Blend 42').family).toBe('other');
+    // Same family as Gentrol, but the 120-day claim is hydroprene-specific.
+    const pyriproxyfen = unknown.products.find((p) => p.productName === 'Generic IGR');
+    expect(pyriproxyfen).toMatchObject({ family: 'igr', verified: false, notes: [] });
   });
 
   test('readVisitSummary: structured fields, advisory/conditions keys, and pests named', async () => {
@@ -118,8 +121,10 @@ suite('email division against real Postgres', () => {
     const bradenton = await makeCustomer({ city: 'Bradenton' });
     await makeVisits(bradenton, 24, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
     await makeVisit(bradenton, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for a single wasp nest.' });
-
+    // Stale row from a prior recompute; must not survive a fresh one.
+    await trx('email_area_intel_monthly').insert({ month: '2026-09-01', city: 'venice', visits: 40, pest_key: 'fleas', visits_with_pest: 30 });
     const result = await computeAreaIntel({ month, conn: trx });
+    expect(await trx('email_area_intel_monthly').where({ city: 'venice' })).toHaveLength(0);
     expect(result.citiesProcessed).toBe(3); // Ellenton never gets a row
     expect(await trx('email_area_intel_monthly').where({ city: 'ellenton' })).toHaveLength(0);
     const parrishRows = await trx('email_area_intel_monthly').where({ city: 'parrish' });

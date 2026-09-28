@@ -1,18 +1,13 @@
-/**
- * Email division — per-visit product reader. Read-only; no caller sends
- * anything. Classification: active_ingredient first, then product_name,
- * both case-insensitive substring matches. Every customer-facing string is
- * worded to a verified source and marked `verified: true`; unverified
- * families get only a plain generic phrase and empty `notes` — never an
- * invented timeline (only two digit+day/week/hour claims exist at all:
- * contact_residual's 24-hour label rule, the IGR's 120-day Gentrol claim).
- */
+// Email division — per-visit product reader. Read-only; no caller sends
+// anything. Classification: active_ingredient first, then product_name.
+// Verified families cite a real source; unverified ones get a plain
+// generic phrase and empty notes — never an invented timeline.
 const db = require('../../models/db');
 
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true },
   contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.' }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true },
-  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true },
+  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true, sourceScope: { ai: ['hydroprene'], name: ['gentrol'] } },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', dryRule: null, notes: [], factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, verified: false },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', dryRule: null, notes: [], factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, verified: false },
   nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'potassium and micronutrients', dryRule: null, notes: [], factSlugs: ['fact-nutrition-unverified-timeline'], customerVisible: true, verified: false },
@@ -20,8 +15,7 @@ const FAMILIES = {
   other: { ai: [], name: [], phrase: null, dryRule: null, notes: [], factSlugs: [], customerVisible: true, verified: false },
 };
 const FAMILY_ORDER = Object.keys(FAMILIES).filter((f) => f !== 'other');
-// Customer-primacy when a visit applied more than one visible product;
-// adjuvant is never customer-visible so it's never eligible.
+// Customer-primacy ranking (adjuvant is never customer-visible, so never eligible).
 const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'igr', 'fungicide', 'herbicide', 'nutrition', 'other'];
 
 function allCustomerFacingStrings() {
@@ -42,24 +36,31 @@ function classifyProduct({ productName, activeIngredient } = {}) {
   return 'other';
 }
 
-/** Every product applied at one visit, resolved to its family, with
- * `primary`/`secondary` (highest-ranked customer-visible products).
- * Adjuvants are flagged `customerVisible: false` and never selected. */
+/** Every product applied at one visit, with `primary`/`secondary`
+ * (highest-ranked customer-visible products; adjuvants never selected). */
 async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
   const rows = await conn('service_products').where({ service_record_id: serviceRecordId }).orderBy('applied_at', 'asc');
   const products = rows.map((row) => {
     const family = classifyProduct({ productName: row.product_name, activeIngredient: row.active_ingredient });
     const def = FAMILIES[family];
+    // sourceScope narrows notes/verified to the matching product (igr's 120-day claim is hydroprene-only).
+    const inScope = !def.sourceScope || matchesAny(def.sourceScope, row.product_name, row.active_ingredient);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
-      phrase: def.phrase, dryRule: def.dryRule, notes: def.notes, factSlugs: def.factSlugs,
-      customerVisible: def.customerVisible, verified: def.verified,
+      phrase: def.phrase, dryRule: def.dryRule, notes: inScope ? def.notes : [],
+      factSlugs: inScope ? def.factSlugs : [], customerVisible: def.customerVisible, verified: inScope && def.verified,
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
     };
   });
   const { primary, secondary } = rankVisibleProducts(products);
   return { products, primary, secondary };
+}
+
+function matchesAny(scope, productName, activeIngredient) {
+  const ai = String(activeIngredient || '').toLowerCase();
+  const name = String(productName || '').toLowerCase();
+  return scope.ai.some((s) => ai.includes(s)) || scope.name.some((s) => name.includes(s));
 }
 
 /** Pure ranking step (split out for a DB-free unit test). */
@@ -69,8 +70,7 @@ function rankVisibleProducts(products) {
   return { primary: ranked[0] || null, secondary: ranked[1] || null };
 }
 
-// Pest-name parsing: canonical names only, never free text. Word-bounded so
-// "rats" never fires inside "rate"/"separate".
+// Canonical names only, never free text. Word-bounded so "rats" never fires inside "rate"/"separate".
 const PEST_KEYWORDS = [
   ['ghost ants', /\bghost ants?\b/], ['big-headed ants', /\bbig[- ]?headed ants?\b/],
   ['crazy ants', /\bcrazy ants?\b/], ['fire ants', /\bfire ants?\b/],
@@ -83,8 +83,7 @@ const PEST_KEYWORDS = [
   ['dollarweed', /\bdollarweed\b/], ['sedge', /\bsedge\b/], ['pusley', /\bpusley\b/],
 ];
 
-// Expands "ghost, big-headed, and crazy ants" (only the last item carries
-// the shared noun) so every species matches below.
+// Expands "ghost, big-headed, and crazy ants" (only the last item carries the shared noun).
 const ELISION_RE = /((?:[a-z][a-z-]*\s*,\s*)*[a-z][a-z-]*)\s*,?\s*and\s+([a-z][a-z-]*)\s+(ants|cockroaches|spiders)\b/gi;
 
 function expandElidedSpeciesLists(text) {
