@@ -24,11 +24,12 @@
  * tracker's own dedupe), so a concurrent claim from two instances can only
  * ever have one winner — no new migration needed. The loser skips the send.
  *
- * Channel: the owner gets a text; every other tech gets a push. sendSMS
+ * Channel: the owner gets a text; every other tech gets a tech-home card
+ * (kept until "Got it") plus a push. sendSMS
  * writes sms_log + a conversations thread for every text, and only owner
  * phones are filtered out of the communications views, so a hired tech's
- * cell would land in the customer inbox (Codex r2) — push is the staff
- * channel tech-line.js and tech-visit-notifications.js already use. The
+ * cell would land in the customer inbox (Codex r2) — card + push is the
+ * staff channel tech-line.js and tech-visit-notifications.js already use. The
  * owner's technicians.phone is the office line, so the text goes to
  * ADAM_PHONE (ownerCell); usableCell keeps a Waves line from ever being the
  * recipient. messageType 'internal_alert' with `allowOwnerSms`, because an
@@ -80,6 +81,9 @@ async function findOpenVisitsToday(now, technicianId = null) {
     .whereIn('s.status', OPEN_STATUSES)
     .whereNotNull('s.technician_id')
     .where((q) => q.whereNull('s.window_start').orWhere('s.window_start', '<=', nowHHMM))
+    // An uncommitted slot hold (public-estimate reservation: no customer +
+    // a reservation stamp) is not a booking — same filter as occupancy.js.
+    .where((q) => q.whereNotNull('s.customer_id').orWhereNull('s.reservation_expires_at'))
     .orderBy('s.window_start', 'asc');
   if (technicianId) query = query.where('s.technician_id', technicianId);
   return query.select(
@@ -184,15 +188,19 @@ function visitLine(visit) {
 // "Waves: 3 visits from today are still open. Tap to close out: <link>" then
 // up to MAX_LISTED lines, then "+N more". One plain-text message, no
 // signature (owner ruling: brand is just "Waves").
+function visitLines(visits) {
+  const shown = visits.slice(0, MAX_LISTED);
+  const lines = shown.map(visitLine);
+  const overflow = visits.length - shown.length;
+  if (overflow > 0) lines.push(`+${overflow} more`);
+  return lines;
+}
+
 function buildMessage(visits) {
   const count = visits.length;
   const link = `${publicPortalUrl()}/tech`;
   const header = `Waves: ${count} visit${count === 1 ? '' : 's'} from today are still open. Tap to close out: ${link}`;
-  const shown = visits.slice(0, MAX_LISTED);
-  const lines = shown.map(visitLine);
-  const overflow = count - shown.length;
-  if (overflow > 0) lines.push(`+${overflow} more`);
-  return [header, ...lines].join('\n');
+  return [header, ...visitLines(visits)].join('\n');
 }
 
 function dedupeKeyFor(technicianId, etDate) {
@@ -288,51 +296,67 @@ async function smsNudge(tech, cell, message, etDate) {
   }
 }
 
-// Every tech but the owner: one best-effort push (tech-line.js /
-// tech-visit-notifications.js pattern) — staff-only, never a customer
-// thread. Reaching no device gives the day's slot back so a re-run retries.
-async function pushNudge(tech, visits, etDate) {
+// Every tech but the owner (tech-line.js / tech-visit-notifications.js
+// pattern — staff-only, never a customer thread): the day's marker row
+// becomes a tech-home card, kept until "Got it", then one best-effort push.
+// The card is the durable copy, so a push that reaches no device still
+// leaves the reminder on the tech home.
+async function cardNudge(tech, visits, etDate) {
   const count = visits.length;
-  let delivered = 0;
+  const headline = `${count} visit${count === 1 ? '' : 's'} from today still open`;
+  try {
+    const updated = await db('tech_notifications')
+      .where({ dedupe_key: dedupeKeyFor(tech.id, etDate), type: NOTIFICATION_TYPE })
+      .update({
+        message: [`${headline}.`, ...visitLines(visits)].join('\n'),
+        payload: JSON.stringify({ headline, visit_ids: visits.flatMap((v) => v.ids), count }),
+        read: false,
+        dismissed_at: null,
+        updated_at: new Date(),
+      });
+    if (!updated) return false;
+  } catch (err) {
+    logger.error(`[tech-open-visit-nudge] card write failed for ${tech.id}: ${errTag(err)}`);
+    await releaseClaim(tech.id, etDate);
+    return false;
+  }
   try {
     const PushService = require('./push-notifications');
-    const summary = await PushService.sendToAdminUser(tech.id, {
-      title: `${count} visit${count === 1 ? '' : 's'} from today still open`,
+    await PushService.sendToAdminUser(tech.id, {
+      title: headline,
       body: 'Tap to close them out.',
       url: '/tech',
       tag: `${NOTIFICATION_TYPE}-${etDate}`,
     });
-    delivered = Number(summary?.sent || 0);
   } catch (err) {
-    logger.warn(`[tech-open-visit-nudge] push failed for ${tech.id}: ${errTag(err)}`);
+    logger.warn(`[tech-open-visit-nudge] push failed for ${tech.id} (card already written): ${errTag(err)}`);
   }
-  if (delivered > 0) return true;
-  logger.info(`[tech-open-visit-nudge] push reached no device for ${tech.id}`);
-  await releaseClaim(tech.id, etDate);
-  return false;
+  return true;
 }
 
-// Re-read this tech's open stops at the send boundary: a visit finished or
-// reassigned, or a phone changed, after the sweep read must not be listed or
-// texted to the old recipient. Nothing left open gives the slot back.
+// Re-read at the send boundary: a visit finished or reassigned, a phone
+// changed, or the tech marked out (tech-out.js leaves an absent tech's stops
+// assigned for redistribution) after the sweep read must not be listed or
+// sent. Nothing to nudge gives the slot back.
 async function deliverNudge(techId, etDate, now) {
   const live = groupByTechnician(await findOpenVisitsToday(now, techId))
     .find((g) => g.tech.id === String(techId));
-  if (!live || !isAssignable(live.tech)) {
-    logger.info(`[tech-open-visit-nudge] skip ${techId}: nothing open at send time`);
+  const absent = await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: [techId] });
+  if (!live || !isAssignable(live.tech) || absent.size > 0) {
+    logger.info(`[tech-open-visit-nudge] skip ${techId}: nothing to nudge at send time`);
     await releaseClaim(techId, etDate);
     return false;
   }
   const cell = ownerCell(live.tech);
   return cell
     ? smsNudge(live.tech, cell, buildMessage(live.visits), etDate)
-    : pushNudge(live.tech, live.visits, etDate);
+    : cardNudge(live.tech, live.visits, etDate);
 }
 
 /**
  * Runs the whole sweep once: gate check, today's open visits grouped by
  * technician, eligibility + phone filtering, per-technician dedupe claim,
- * then one SMS (owner) or push (everyone else) per technician that claimed a
+ * then one SMS (owner) or tech-home card + push (everyone else) per technician that claimed a
  * slot. Never throws — a
  * per-technician send failure is logged and counted as skipped; the sweep
  * keeps going for the rest.
@@ -346,20 +370,10 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
 
   let sent = 0;
   let skipped = 0;
-  // A tech marked out today keeps their stops until a dispatcher moves them
-  // (tech-out.js) — never tell them to close visits they didn't run.
-  const absent = groups.length
-    ? await absentTechDays(db, { dateFrom: etDate, dateTo: etDate, technicianIds: groups.map((g) => g.tech.id) })
-    : new Set();
 
   for (const { tech, visits } of groups) {
     if (!isAssignable(tech)) {
       logger.info(`[tech-open-visit-nudge] skip ${tech.id}: not assignable`);
-      skipped += 1;
-      continue;
-    }
-    if (absent.has(`${tech.id}:${etDate}`)) {
-      logger.info(`[tech-open-visit-nudge] skip ${tech.id}: marked out today`);
       skipped += 1;
       continue;
     }
@@ -403,7 +417,8 @@ module.exports = {
     claimToday,
     releaseClaim,
     ownerCell,
-    pushNudge,
+    cardNudge,
+    visitLines,
     smsNudge,
     deliverNudge,
   },

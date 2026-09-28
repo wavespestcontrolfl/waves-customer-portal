@@ -31,6 +31,7 @@ function chain(overrides = {}) {
     onConflict: jest.fn(() => c),
     ignore: jest.fn(() => c),
     returning: jest.fn().mockResolvedValue(['new-id']),
+    update: jest.fn().mockResolvedValue(1),
   };
   Object.assign(c, overrides);
   return c;
@@ -126,8 +127,8 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
       visitRow({ id: 'v2', techId: 'tech-a', techName: 'Maria Lopez', custFirst: 'Ben', custLast: 'Cole', windowStart: '13:00:00' }),
       // Prospective / not field-dispatchable — never texted.
       visitRow({ id: 'v3', techId: 'tech-b', techName: 'Ex Tech', employmentStatus: 'inactive', custFirst: 'Cy', custLast: 'Dole' }),
-      // Active + field-dispatchable, no phone on file → not the owner, so the
-      // push path; the mocked push reaches no device → skipped.
+      // Active + field-dispatchable, no phone on file → not the owner, so it
+      // gets the tech-home card (+ push) instead of a text.
       visitRow({ id: 'v4', techId: 'tech-c', techName: 'No Phone Tech', techPhone: null, custFirst: 'Dee', custLast: 'Earl' }),
     ];
     db.mockImplementation((table) => {
@@ -138,7 +139,7 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
 
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
 
-    expect(r).toEqual({ status: 'ok', techs: 3, sent: 1, skipped: 2, visits: 4 });
+    expect(r).toEqual({ status: 'ok', techs: 3, sent: 2, skipped: 1, visits: 4 });
     expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
     const [to, body] = TwilioService.sendSMS.mock.calls[0];
     expect(to).toBe('+19415550101');
@@ -360,23 +361,30 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
     expect(TwilioService.sendSMS.mock.calls[0][0]).not.toBe(officeLine);
   });
 
-  test('any tech who is not the owner gets a push, never a text (keeps staff out of customer threads)', async () => {
+  test('any tech who is not the owner gets a tech-home card + push, never a text (keeps staff out of customer threads)', async () => {
     TwilioService.isKnownOwnerPhone.mockReturnValue(false);
     PushService.sendToAdminUser.mockResolvedValue({ sent: 1 });
     const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '941-555-0144' })];
+    const notifChains = [];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain(); notifChains.push(c); return c; }
       return chain();
     });
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
     expect(r).toMatchObject({ sent: 1, skipped: 0 });
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    // The marker row is published as a visible card with the live list.
+    const card = notifChains.find((c) => c.update.mock.calls.length);
+    expect(card.update).toHaveBeenCalledWith(expect.objectContaining({
+      read: false, dismissed_at: null, message: expect.stringContaining('1 visit from today still open.'),
+    }));
     expect(PushService.sendToAdminUser).toHaveBeenCalledWith('tech-b', expect.objectContaining({
       title: '1 visit from today still open', url: '/tech',
     }));
   });
 
-  test('a push that reaches no device gives the day\'s slot back', async () => {
+  test('a push that reaches no device still leaves the card — counted as sent, slot kept', async () => {
     TwilioService.isKnownOwnerPhone.mockReturnValue(false);
     PushService.sendToAdminUser.mockResolvedValue({ sent: 0 });
     const rows = [visitRow({ id: 'v1', techId: 'tech-b', techPhone: '941-555-0144' })];
@@ -387,8 +395,8 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
       return chain();
     });
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
-    expect(r).toMatchObject({ sent: 0, skipped: 1 });
-    expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
+    expect(r).toMatchObject({ sent: 1, skipped: 0 });
+    expect(notifChains.every((c) => c.del.mock.calls.length === 0)).toBe(true);
   });
 
   test('members of one visit group are ONE stop: one line, services joined, count by stop', async () => {
@@ -429,21 +437,25 @@ describe('recipient, absence, and failure outcomes (Codex r1)', () => {
     expect(logged).not.toContain('Alexandra');
   });
 
-  test('a tech marked out today is skipped — no claim, no text', async () => {
+  test('a tech marked out today (checked at the send boundary) gets nothing and the slot goes back', async () => {
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
-    let notifChain;
+    const notifChains = [];
+    let absenceChain;
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
       if (table === 'technician_absences') {
-        return chain({ select: jest.fn().mockResolvedValue([{ technician_id: 'tech-a', absence_date: '2026-09-28' }]) });
+        absenceChain = chain({ select: jest.fn().mockResolvedValue([{ technician_id: 'tech-a', absence_date: '2026-09-28' }]) });
+        return absenceChain;
       }
-      if (table === 'tech_notifications') { notifChain = chain(); return notifChain; }
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
       return chain();
     });
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
     expect(r).toMatchObject({ sent: 0, skipped: 1 });
     expect(TwilioService.sendSMS).not.toHaveBeenCalled();
-    expect(notifChain).toBeUndefined();
+    expect(PushService.sendToAdminUser).not.toHaveBeenCalled();
+    expect(notifChains.some((c) => c.del.mock.calls.length > 0)).toBe(true);
+    expect(absenceChain.whereIn).toHaveBeenCalledWith('technician_id', ['tech-a']);
   });
 
   test('a thrown send marked not_sent releases the claim; an uncertain result keeps it', async () => {
@@ -559,4 +571,23 @@ test('a push-routed delivery (the routing layer delivered in-app) counts as sent
   const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
   expect(r).toMatchObject({ sent: 1, skipped: 0 });
   expect(notifChains.every((c) => c.del.mock.calls.length === 0)).toBe(true);
+});
+
+test('an uncommitted slot hold (no customer + reservation stamp) is filtered out in SQL', async () => {
+  process.env[GATE] = 'true';
+  let visitsChain;
+  db.mockImplementation((table) => {
+    if (table === 'scheduled_services as s') { visitsChain = chain(); return visitsChain; }
+    return chain();
+  });
+  await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+  const fns = visitsChain.where.mock.calls.map((c) => c[0]).filter((a) => typeof a === 'function');
+  const probes = fns.map((fn) => {
+    const q = { whereNull: jest.fn(() => q), orWhere: jest.fn(() => q), whereNotNull: jest.fn(() => q), orWhereNull: jest.fn(() => q) };
+    fn(q);
+    return q;
+  });
+  const hold = probes.find((q) => q.whereNotNull.mock.calls.length);
+  expect(hold.whereNotNull).toHaveBeenCalledWith('s.customer_id');
+  expect(hold.orWhereNull).toHaveBeenCalledWith('s.reservation_expires_at');
 });
