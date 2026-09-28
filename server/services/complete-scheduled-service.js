@@ -8680,7 +8680,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // machinery above — no new completion-side mint/split logic.
               const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
                 || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-                || isStampedZeroEstimate(svc.estimated_price);
+                || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
               if (isSiblingCoverageEligibleVisit({
                 sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
               })) {

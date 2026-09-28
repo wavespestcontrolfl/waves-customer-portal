@@ -164,14 +164,19 @@ function projectCompletionInvoiceAmount({ scheduledService = {}, customer = {}, 
   const estimated = positiveMoney(scheduledService.estimated_price);
   if (estimated > 0) return estimated;
   // A stamped estimated_price of exactly 0 (not null/blank) is authoritative
-  // — the visit's own deliberate price, never "unpriced" — and must never
-  // fall back to the monthly rate (owner ruling 2026-09-28: the Termite
-  // Inspection Service ships at $0; billing-lane.js's completionInvoiceAmount
-  // applies the same rule for per-application visits — see
-  // isStampedZeroEstimate there for why a bare stamped 0 needs no
-  // primary_line_price provenance to be authoritative here, unlike
-  // hasAuthoritativeZeroPrice's narrower monthly/legacy-lane predicate).
-  if (isStampedZeroEstimate(scheduledService.estimated_price)) return 0;
+  // ONLY for a per-application customer — mirrors billing-lane.js's
+  // completionInvoiceAmount, which scopes the same rule to
+  // perApplicationBilling because monthly_membership/legacy-null customers
+  // must keep falling through to monthly_rate below (waves-billing skill
+  // invariant #6; Codex pre-push P1: a lane-independent short-circuit here
+  // would let a monthly customer's $0 termite inspection — or any other
+  // project visit stamped 0 — skip its own dues/monthly_rate billing
+  // instead of preserving main's legacy fallback). Owner ruling 2026-09-28:
+  // the Termite Inspection Service ships at $0 for per-application
+  // customers specifically.
+  if (customer?.billing_mode === 'per_application' && isStampedZeroEstimate(scheduledService.estimated_price)) {
+    return 0;
+  }
   // Callbacks (re-services, e.g. pest_re_service / lawn_re_service) are free
   // for recurring/WaveGuard customers — they must never fall back to the
   // monthly rate, or the completion billing guard would either bill a month's

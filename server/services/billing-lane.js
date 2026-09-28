@@ -1123,10 +1123,25 @@ async function combinedInvoiceVoidedWithoutLiveReplacement(svc, dbConn, { lockRo
 // exactly that customer. Same lane-independent predicate as completion.
 async function perApplicationCompletionVoidHold({
   isCallback, serviceType, svc, dbConn,
+  // Codex pre-push P0: a bare stamped $0 only counts as "this visit has its
+  // own price" for a CURRENTLY per-application customer — see
+  // completionInvoiceAmount's own per-application branch for why. Credit it
+  // unconditionally here and a monthly_membership/legacy-null customer's
+  // estimate-linked $0 visit, still genuinely covered by a sibling's
+  // combined invoice, stops looking like "unpriced" — isSiblingCoverageEligibleVisit
+  // then reads it as ineligible, this function returns null (no hold
+  // found), and the caller proceeds as if nothing needs review while
+  // completionInvoiceAmount (unaffected by this per-application-only flag)
+  // still resolves that customer's ordinary monthly_rate fallback — minting
+  // a SECOND charge beside the sibling's live invoice. Callers that don't
+  // pass this (the historical, lane-independent header note above still
+  // holds for every OTHER input here) get byte-identical behavior to
+  // before this predicate existed.
+  perApplicationBilling = false,
 }) {
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price)
-    || isStampedZeroEstimate(svc?.estimated_price);
+    || (perApplicationBilling && isStampedZeroEstimate(svc?.estimated_price));
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!isCallback, serviceType,
   })) return null;
@@ -1358,10 +1373,19 @@ async function enrichCoveredSiblingPrediction(prediction, svc, inv, dbConn) {
 // credits it) feeds the SAME isSiblingCoverageEligibleVisit shape predicate
 // every other sibling-coverage caller gates on, plus the DB/estimate/date
 // fields this lookup itself needs in order to run at all.
-function scheduleSiblingCoverageEligible(svc, dbConn) {
+// `perApplicationBilling` (Codex pre-push P0): a bare stamped $0 only
+// counts as "this visit has its own price" for a CURRENTLY per-application
+// customer, same scoping as completionInvoiceAmount's own per-application
+// branch and perApplicationCompletionVoidHold above — crediting it for
+// every lane let a monthly_membership/legacy-null customer's estimate-
+// linked $0 visit, still covered by a sibling's combined invoice, read as
+// ineligible for the sibling-coverage lookup, hiding the coverage the
+// schedule sheet's own money-gap warning depends on. Default false keeps
+// every existing caller byte-identical.
+function scheduleSiblingCoverageEligible(svc, dbConn, { perApplicationBilling = false } = {}) {
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null)
-    || isStampedZeroEstimate(svc?.estimated_price);
+    || (perApplicationBilling && isStampedZeroEstimate(svc?.estimated_price));
   const baseShape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
   const hasBaseFields = !!(svc?.source_estimate_id && svc?.customer_id && svc?.scheduled_date && dbConn);
   return hasBaseFields && isSiblingCoverageEligibleVisit(baseShape);
@@ -1389,8 +1413,8 @@ function scheduleSiblingCoverageEligible(svc, dbConn) {
  * as an explicit param so this module stays DB-free for pure unit tests
  * except where a caller opts in, same as monthlyDuesCollected above.
  */
-async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
-  if (!scheduleSiblingCoverageEligible(svc, dbConn)) {
+async function siblingCoverageForSchedule({ svc, dbConn, perApplicationBilling = false } = {}) {
+  if (!scheduleSiblingCoverageEligible(svc, dbConn, { perApplicationBilling })) {
     return { coverage: NO_SIBLING_COVERAGE, prediction: null };
   }
   let verdict;

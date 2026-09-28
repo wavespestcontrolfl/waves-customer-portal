@@ -164,31 +164,49 @@ describe('project completion helpers', () => {
       scheduledService: { is_callback: true, estimated_price: '75.00' },
       customer: { monthly_rate: '99.00' },
     })).toBe(75);
-    // Owner ruling 2026-09-28: the Termite Inspection Service ships at $0 —
-    // a stamped estimated_price of exactly 0 (not null/blank) is the
-    // visit's OWN deliberate price and must never fall back to monthly_rate,
-    // even with create_invoice_on_complete true (mirrors billing-lane.js's
-    // completionInvoiceAmount per-application fix — see isStampedZeroEstimate).
+    // Owner ruling 2026-09-28: the Termite Inspection Service ships at $0
+    // for PER-APPLICATION customers — a stamped estimated_price of exactly
+    // 0 (not null/blank) is that visit's OWN deliberate price and must
+    // never fall back to monthly_rate, even with create_invoice_on_complete
+    // true (mirrors billing-lane.js's completionInvoiceAmount per-application
+    // fix — see isStampedZeroEstimate).
     expect(projectCompletionInvoiceAmount({
       scheduledService: { estimated_price: 0, create_invoice_on_complete: true, is_callback: false },
-      customer: { monthly_rate: '99.00' },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
     })).toBe(0);
     expect(projectCompletionInvoiceAmount({
       scheduledService: { estimated_price: '0', create_invoice_on_complete: true, is_callback: false },
-      customer: { monthly_rate: '99.00' },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
     })).toBe(0);
-    // A genuinely blank (null/undefined/'') price is UNCHANGED — it still
-    // falls through to monthly_rate exactly as before.
+    // Codex pre-push P1: a MONTHLY (or legacy-null) customer's stamped-0
+    // project visit MUST keep falling through to monthly_rate exactly as on
+    // main — the per-application short-circuit above must never apply
+    // lane-independently, or a $0 termite inspection would silently skip a
+    // monthly member's dues billing.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, create_invoice_on_complete: true, is_callback: false },
+      customer: { billing_mode: 'monthly_membership', monthly_rate: '99.00' },
+    })).toBe(99);
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, create_invoice_on_complete: true, is_callback: false },
+      customer: { monthly_rate: '99.00' }, // legacy-null billing_mode
+    })).toBe(99);
+    // A genuinely blank (null/undefined/'') price is UNCHANGED for any lane
+    // — it still falls through to monthly_rate exactly as before.
     expect(projectCompletionInvoiceAmount({
       scheduledService: { estimated_price: null, create_invoice_on_complete: true, is_callback: false },
-      customer: { monthly_rate: '99.00' },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
     })).toBe(99);
     expect(projectCompletionInvoiceAmount({
       scheduledService: { estimated_price: '', create_invoice_on_complete: true, is_callback: false },
       customer: { monthly_rate: '99.00' },
     })).toBe(99);
     // A stamped 0 on a callback is unaffected either way — callbacks already
-    // bill nothing.
+    // bill nothing, for every lane.
+    expect(projectCompletionInvoiceAmount({
+      scheduledService: { estimated_price: 0, is_callback: true, create_invoice_on_complete: true },
+      customer: { billing_mode: 'per_application', monthly_rate: '99.00' },
+    })).toBe(0);
     expect(projectCompletionInvoiceAmount({
       scheduledService: { estimated_price: 0, is_callback: true, create_invoice_on_complete: true },
       customer: { monthly_rate: '99.00' },

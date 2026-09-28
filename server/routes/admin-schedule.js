@@ -5220,7 +5220,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // client/src/lib/siblingInvoiceCoverage.js is pure copy formatting of it,
   // never its own classifier.
   const { coverage: siblingCoverage, prediction: siblingPrediction } = svc?.source_estimate_id
-    ? await siblingCoverageForSchedule({ svc, dbConn: db }).catch(() => ({ coverage: null, prediction: null }))
+    ? await siblingCoverageForSchedule({ svc, dbConn: db, perApplicationBilling: svc?.billing_mode === 'per_application' }).catch(() => ({ coverage: null, prediction: null }))
     : { coverage: null, prediction: null };
   billingLane.siblingCoverage = siblingCoverage || {
     state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null,
@@ -15796,7 +15796,16 @@ async function resolveScheduledServiceCharge({
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
     || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
-    || isStampedZeroEstimate(estimatedPrice);
+    // Codex pre-push P0: only for a CURRENTLY per-application customer — see
+    // completionInvoiceAmount's own per-application branch. Crediting a bare
+    // stamped $0 for EVERY lane let a monthly_membership/legacy-null
+    // customer's estimate-linked $0 visit, still covered by a sibling's
+    // combined invoice, read as ineligible for the sibling lookup below —
+    // this resolver then skipped straight to completionInvoiceAmount's
+    // monthly_rate fallback and minted a SECOND charge beside the sibling's
+    // live invoice (repro: monthlyRate 74.7, estimated_price null → refused
+    // by the sibling guard; estimated_price 0 → returned 74.7).
+    || (billingMode === 'per_application' && isStampedZeroEstimate(estimatedPrice));
   // Codex P1 (round 6): this used to gate on the CUSTOMER'S CURRENT billing
   // mode — so a combined pay-per-application trip that already has its
   // first-application invoice on a sibling, whose customer later moves to a
@@ -15902,9 +15911,12 @@ async function resolveScheduledServiceCharge({
 // recheck, byte-identical to before.
 function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
+  // Codex pre-push P0: gated to per-application only — see
+  // resolveScheduledServiceCharge's own hasOwnPrice above for the exact
+  // double-charge repro this must avoid for monthly/legacy-null customers.
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice)
-    || isStampedZeroEstimate(svc?.estimated_price);
+    || (svc?.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc?.estimated_price));
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
@@ -16781,7 +16793,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // those, since none of them ever bill anything at completion either.
       const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
         || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-        || isStampedZeroEstimate(svc.estimated_price);
+        || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
       const clearerCopy = isSiblingCoverageEligibleVisit({
         sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
       });
