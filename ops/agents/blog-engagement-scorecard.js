@@ -27,6 +27,25 @@
 // days. Beacon counts are exact while Cloudflare loads are sampled, so a small
 // post's rates are rough.
 //
+// Traffic-source breakdown (research item E3): every fresh navigation onto a
+// blog post from outside the site gets classified by its referrer host —
+// Google (any google.* host, including news.google.com and google.co.uk, so
+// both organic search and other Google properties count; a lookalike like
+// notgoogle.com does not), Facebook (facebook.com, www.facebook.com,
+// m.facebook.com, l.facebook.com, lm.facebook.com, fb.me), Other (any other
+// external host), or Direct/none (no referrer at all) — with its own
+// page-load count and an onward-click rate, so Google-only engagement is
+// visible next to the all-sources figure. Cloudflare RUM carries no visitor
+// id, so a specific onward click can't be traced back to the referrer that
+// first landed that reader on the post: a source's rate is the onward rate
+// of the posts it actually lands readers on (the SAME per-post rate as the
+// table below), weighted by how much of each post's landing volume came
+// from that source. Investigated and not used: the Facebook in-app browser
+// is not its own `userAgentBrowser` value in this account's RUM data — it
+// reports the underlying rendering engine (MobileSafari, ChromeMobileWebview,
+// …), same as any other embedded browser — so it is classified by referrer
+// host like everything else, with no separate bucket.
+//
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
 // from the environment; CF_RUM_SITE_TAG overrides the site lookup. Read depth
 // also needs DATABASE_PUBLIC_URL (the Postgres service's public proxy; the
@@ -163,6 +182,50 @@ function isInternalHost(host) {
   return HUB_HOSTS.has(String(host || '').trim().toLowerCase());
 }
 
+// Facebook's own web + link-shim hosts (owner-supplied list); the in-app
+// browser is not separately detectable (see the file header) so it is not
+// included here.
+const FACEBOOK_HOSTS = new Set([
+  'facebook.com',
+  'www.facebook.com',
+  'm.facebook.com',
+  'l.facebook.com',
+  'lm.facebook.com',
+  'fb.me',
+]);
+
+const TRAFFIC_SOURCE_LABELS = {
+  google: 'Google',
+  facebook: 'Facebook',
+  other: 'Other',
+  direct: 'Direct/none',
+};
+
+/**
+ * True for any google.* host — google.com, google.co.uk, news.google.com,
+ * etc. — never for a lookalike like notgoogle.com or googleusercontent.com,
+ * whose hostname has no label that is exactly "google".
+ */
+function isGoogleHost(host) {
+  const labels = String(host || '').trim().toLowerCase().split('.');
+  const i = labels.indexOf('google');
+  return i !== -1 && i < labels.length - 1;
+}
+
+/**
+ * Which traffic-source bucket an EXTERNAL referrer host belongs to: 'google',
+ * 'facebook', 'other', or 'direct' for no referrer at all. Only meaningful
+ * for a non-internal host — call isInternalHost first for on-site referrals,
+ * which are not a traffic source.
+ */
+function classifyTrafficSource(host) {
+  const h = String(host || '').trim();
+  if (!h) return 'direct';
+  if (isGoogleHost(h)) return 'google';
+  if (FACEBOOK_HOSTS.has(h.toLowerCase())) return 'facebook';
+  return 'other';
+}
+
 function toCount(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -182,6 +245,10 @@ function toCount(value) {
 function summarize(groups) {
   const posts = new Map();
   const destinations = new Map();
+  // Landing volume per post, split by traffic source, for the source
+  // breakdown below — external (non-internal) blog-post views only.
+  const postSourceViews = new Map();
+  const sourceViews = { google: 0, facebook: 0, other: 0, direct: 0 };
   let blogEntries = 0;
   let blogViews = 0;
   let onwardClicks = 0;
@@ -208,6 +275,10 @@ function summarize(groups) {
       if (!internal) {
         target.entries += views;
         blogEntries += views;
+        const source = classifyTrafficSource(g.refererHost);
+        sourceViews[source] += views;
+        if (!postSourceViews.has(dest)) postSourceViews.set(dest, { google: 0, facebook: 0, other: 0, direct: 0 });
+        postSourceViews.get(dest)[source] += views;
       }
     }
     if (!internal || classifyPath(from) !== 'blog-post') continue;
@@ -222,17 +293,38 @@ function summarize(groups) {
     .map((p) => ({ ...p, rate: p.views > 0 ? p.onward / p.views : null }))
     .sort((a, b) => b.views - a.views || b.onward - a.onward || a.path.localeCompare(b.path));
 
+  // Per-source onward rate: no visitor id ties a specific onward click back
+  // to the referrer that landed that reader, so a source's rate is the
+  // onward rate of the posts it lands readers on (rateByPath, the same
+  // per-post rate as `rows`), weighted by its share of each post's landing
+  // volume — mathematically the onward clicks each source's landings would
+  // produce if they clicked onward at that post's overall rate.
+  const rateByPath = new Map(rows.map((p) => [p.path, p.rate]));
+  const sources = Object.keys(sourceViews).map((key) => {
+    const views = sourceViews[key];
+    let onwardEstimate = 0;
+    for (const [path, bySource] of postSourceViews) {
+      const n = bySource[key];
+      const rate = rateByPath.get(path);
+      if (n && rate != null) onwardEstimate += n * rate;
+    }
+    return { source: key, label: TRAFFIC_SOURCE_LABELS[key], views, rate: views > 0 ? onwardEstimate / views : null };
+  });
+  const googleSource = sources.find((s) => s.source === 'google');
+
   return {
     totals: {
       blogEntries,
       blogViews,
       onwardClicks,
       onwardRate: blogViews > 0 ? onwardClicks / blogViews : null,
+      googleOnwardRate: googleSource ? googleSource.rate : null,
     },
     destinations: [...destinations.entries()]
       .map(([cls, views]) => ({ cls, label: CLASS_LABELS[cls] || cls, views }))
       .sort((a, b) => b.views - a.views || a.cls.localeCompare(b.cls)),
     posts: rows,
+    sources,
   };
 }
 
@@ -333,7 +425,8 @@ function formatReadDepth(lines, readDepth, top) {
 }
 
 function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
-  const { totals, destinations, posts } = summary;
+  const { totals, destinations, posts, sources } = summary;
+  const googleSource = (sources || []).find((s) => s.source === 'google') || { views: 0 };
   const lines = [];
   lines.push(`## Blog engagement scorecard, ${start} to ${end}`);
   lines.push('');
@@ -341,12 +434,21 @@ function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   lines.push('');
   lines.push(`- Blog post views (fresh navigations): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
   lines.push(`- Onward page views referred by a post: ${totals.onwardClicks} (${pct(totals.onwardRate)} per post view)`);
+  lines.push(`- Onward rate, Google referrers only: ${pct(totals.googleOnwardRate)} per post view (${googleSource.views} page loads)`);
   lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 onward views per 8,220 post views)');
   lines.push('');
   lines.push('| Where onward clicks went | Views |');
   lines.push('|---|---:|');
   if (destinations.length === 0) lines.push('| (none) | 0 |');
   for (const d of destinations) lines.push(`| ${d.label} | ${d.views} |`);
+  lines.push('');
+  lines.push('### Traffic source (blog-post landings)');
+  lines.push('');
+  lines.push('| Source | Page loads | Onward rate |');
+  lines.push('|---|---:|---:|');
+  for (const s of sources || []) lines.push(`| ${s.label} | ${s.views} | ${pct(s.rate)} |`);
+  lines.push('');
+  lines.push("Onward rate per source is the onward rate of the posts that source lands readers on, weighted by its landing volume on each post — Cloudflare RUM carries no visitor id, so a specific onward click can't be traced back to which referrer first landed that reader.");
   lines.push('');
   lines.push(`| Post (top ${top} by views) | Views | Entries | Onward | Rate | To estimate/service |`);
   lines.push('|---|---:|---:|---:|---:|---:|');
@@ -530,6 +632,7 @@ module.exports = {
   addReadDepth,
   blogPostLoads,
   classifyPath,
+  classifyTrafficSource,
   countsAsPageView,
   formatMarkdown,
   isInternalHost,
