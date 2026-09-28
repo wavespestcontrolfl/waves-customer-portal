@@ -3471,14 +3471,6 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
-      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
-          a findings/season-picked offer ("We noted roach activity today...").
-          Absent for the unchanged ladder pick. */}
-      {offer.reason && (
-        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
-          {offer.reason}
-        </p>
-      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
