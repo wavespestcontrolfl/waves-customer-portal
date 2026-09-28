@@ -424,7 +424,11 @@ async function riderLivenessSkipReason(trx, riderParent, hostParent, riderParent
     .orderBy('resolved_at', 'desc')
     .orderBy('id', 'desc')
     .first('resolved_action');
-  if (!revive && latestDecision && ['cancel_series', 'let_lapse'].includes(latestDecision.resolved_action)) {
+  // revive (convert_ongoing) undoes an office let_lapse only. A
+  // cancel_series decision is the customer's own cancellation of this
+  // series and always refuses.
+  const stoppedBy = latestDecision?.resolved_action;
+  if (stoppedBy === 'cancel_series' || (stoppedBy === 'let_lapse' && !revive)) {
     return 'plan_stopped';
   }
   if (cols.property_id && hostParent.property_id && riderParent.property_id

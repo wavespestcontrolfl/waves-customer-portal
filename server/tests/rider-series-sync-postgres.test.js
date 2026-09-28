@@ -1231,6 +1231,19 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(rowsAfter.some((r) => r.scheduled_date.toISOString().slice(0, 10) > PEST_START)).toBe(true);
   });
 
+  test('revive never overrides a cancel_series decision: the customer cancelled this series', async () => {
+    const { pestParent } = await linkedPair();
+    await trx('recurring_plan_alerts').insert({
+      recurring_parent_id: pestParent.id, customer_id: customerId, alert_type: 'plan_ending',
+      resolved_at: new Date(), resolved_action: 'cancel_series',
+    });
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false, revive: true });
+    expect(result.skipped).toBe('plan_stopped');
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
   test('syncRiderSeries refuses a rider whose recurring_ongoing is false (not_ongoing), nothing written', async () => {
     const { pestParent } = await linkedPair();
     await trx('scheduled_services')
