@@ -837,6 +837,7 @@ const DECLINE_REFUSAL_MESSAGES = {
   not_active: 'This plan is not currently eligible to decline renewal.',
   conflict: 'Something changed while we were saving this. Please refresh and try again.',
   not_covered: 'This plan will not renew, and its coverage is no longer active.',
+  renewal_payment_clearing: 'Your renewal payment is still processing, so this plan can’t be changed right now. Please try again once it clears.',
 };
 
 router.post('/termite-annual-plan/decline', async (req, res, next) => {

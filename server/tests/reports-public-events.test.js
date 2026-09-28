@@ -581,7 +581,7 @@ describe('planSummary opt-in ("Your plan" card, GATE_REPORT_PLAN_SUMMARY)', () =
 
   test('the option defaults to OFF and is forwarded to the builder', () => {
     expect(src).toMatch(/planSummary = false,/);
-    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,\n/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,[^\n]*\bplanSummary,[^\n]*\n/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {
@@ -600,7 +600,7 @@ describe('upcomingVisitsCard opt-in ("Your upcoming visits" card, GATE_REPORT_UP
 
   test('the option defaults to OFF and is forwarded to the builder', () => {
     expect(src).toMatch(/upcomingVisitsCard = false,/);
-    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,\n/);
+    expect(src).toMatch(/propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,[^\n]*\bupcomingVisitsCard,\n/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {

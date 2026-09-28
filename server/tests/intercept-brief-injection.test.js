@@ -36,10 +36,18 @@ function opportunityFor(briefId, overrides = {}) {
 
 beforeEach(() => {
   // _countExistingBriefs: db('content_briefs').where().count().first()
+  // A new_supporting_blog decision also runs _loadRelatedPosts, which calls
+  // related-posts.js's getRelatedPostsForBrief — db('blog_posts').select(),
+  // db('autonomous_runs').leftJoin().where().whereNotNull().select(), and
+  // db('content_registry').select(). This suite is not testing related-post
+  // selection (content-brief-builder.test.js and related-posts.test.js own
+  // that), so every branch resolves to an empty result set here.
   const chain = {
     where: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
     limit: jest.fn(() => chain),
+    leftJoin: jest.fn(() => chain),
+    whereNotNull: jest.fn(() => chain),
     select: jest.fn(() => Promise.resolve([])),
     count: jest.fn(() => chain),
     first: jest.fn(() => Promise.resolve({ c: 0 })),

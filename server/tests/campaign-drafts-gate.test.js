@@ -48,6 +48,7 @@ function makeBuilder(table, cfg = {}) {
   for (const m of [
     'join', 'leftJoin', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot',
     'orWhere', 'orWhereNull', 'orderBy', 'select', 'groupBy', 'limit', 'max',
+    'whereRaw', 'orWhereExists', 'orWhereNotNull', 'from',
   ]) b[m] = jest.fn(() => b);
   b.where = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(b, b);
@@ -340,6 +341,43 @@ describe('unified 30d cooldown (HOLD)', () => {
     enqueue('annual_prepay_terms', { first: undefined });
     await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
     expect(db.schema.hasColumn.mock.calls.length).toBeGreaterThan(probesAfterFirst);
+    _resetNoticeColumnCacheForTests();
+  });
+
+  // Codex #4971 r4 P2: the renewal charge counts as a customer touch only
+  // on DURABLE contact — the renewal invoice's delivery stamps or a charge
+  // attempt that reached Stripe (recentTermiteRenewalContact) — never the
+  // lane's own bookkeeping columns. Those are no longer notice columns; the
+  // lane column only says the schema is present.
+  test('the renewal-charge bookkeeping columns are never cooldown columns; durable renewal contact is its own check, once the lane is present', async () => {
+    const { _resetNoticeColumnCacheForTests } = require('../services/campaign-drafts-gate');
+    const present = new Set(['notice_45_sent_at', 'renewal_charge_attempted_at', 'renewal_charge_skipped_at']);
+    db.schema = { hasColumn: jest.fn(async (_t, c) => present.has(c)) };
+    _resetNoticeColumnCacheForTests();
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    enqueue('message_drafts', { first: undefined });
+    enqueue('sms_log', { first: undefined });
+    enqueue('annual_prepay_terms', { first: undefined });
+    enqueue('annual_prepay_terms as t', { first: { id: 'succ-1' } });
+    const verdict = await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    const apt = builders.find((b) => b._table === 'annual_prepay_terms');
+    expect(apt.orWhere.mock.calls.map((c) => c[0])).toEqual(['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at', 'notice_45_sent_at']);
+    const contact = builders.find((b) => b._table === 'annual_prepay_terms as t');
+    expect(contact.join).toHaveBeenCalledWith('invoices as i', 'i.id', 't.prepay_invoice_id');
+    expect(contact.orWhere).toHaveBeenCalledWith('i.sms_sent_at', '>', expect.any(String));
+    expect(contact.orWhereExists).toHaveBeenCalled();
+    expect(verdict).toMatchObject({ ok: false, code: 'cooldown_active', reason: 'recent_renewal_charge_contact' });
+
+    // Lane not deployed yet: no contact query at all.
+    present.delete('renewal_charge_attempted_at');
+    _resetNoticeColumnCacheForTests();
+    builders.length = 0;
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    enqueue('message_drafts', { first: undefined });
+    enqueue('sms_log', { first: undefined });
+    enqueue('annual_prepay_terms', { first: undefined });
+    await expect(evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' })).resolves.toMatchObject({ ok: true });
+    expect(builders.find((b) => b._table === 'annual_prepay_terms as t')).toBeUndefined();
     _resetNoticeColumnCacheForTests();
   });
 

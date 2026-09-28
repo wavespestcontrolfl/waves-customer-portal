@@ -3460,6 +3460,21 @@ class AutonomousRunner {
     // live metaTitle, the live meta description, and the prior body the
     // structure gates grandfather.
     const options = deriveSyncGuardrailOptions(opp, brief);
+    // The related-post list was verified live when the brief was composed;
+    // a linked post can be unpublished, noindexed or moved while the draft
+    // waits. Recheck now and deny any path that is no longer live. If the
+    // recheck itself fails, quarantine every related path (fail closed).
+    if (Array.isArray(options.relatedPostLinks) && options.relatedPostLinks.length) {
+      try {
+        const { getLiveRelatedPaths, _internals } = require('./related-posts');
+        const live = await getLiveRelatedPaths(options.relatedPostLinks, { hosts: options.relatedPostHosts });
+        options.staleRelatedPostLinks = options.relatedPostLinks
+          .filter((p) => !live.has(_internals.normalizePathForCompare(p)));
+      } catch (err) {
+        logger.warn?.(`[autonomous-runner] related-post liveness recheck failed: ${err.message}`);
+        options.relatedPostLinksLive = false;
+      }
+    }
     if (brief.action_type !== 'refresh_existing_page') return options;
 
     const publisher = getAstroPublisher();

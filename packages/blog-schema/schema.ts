@@ -196,6 +196,31 @@ export const blogPostFrontmatter = z.object({
 
   // Internal linking
   hub_link: z.string().optional(),
+  // Optional hand-picked "related posts" (blog ids or slugs), honored
+  // first (in listed order) by src/lib/blog-related.ts's ranking, ahead of
+  // its topic/keyword scoring. Optional — most posts rely on the ranking
+  // alone. Unknown ids are dropped at render time, never a build failure.
+  related_posts: z.array(z.string()).optional(),
+  // Cost-guide "typical price" card (owner decision D1, 2026-09-27) —
+  // pricing-ranges.ts service keys to show, sourced from the SAME feed the
+  // calculator uses. This vendored schema only checks shape (a non-empty
+  // string array); the Astro build (src/content.config.ts) is the source of
+  // truth for which keys actually exist and fails the build on a typo'd one.
+  price_range: z.array(z.string().min(1)).optional(),
+  // "What did you find?" next-step row (A4, 2026-09-27 blog engagement
+  // research), matching src/content.config.ts's blog schema. Rendered by
+  // integrations/remark-blog-next-steps.mjs; hrefs unresolvable to a real
+  // page at build time are dropped there, never a build failure — so this
+  // stays permissive (shape only) rather than validating href reachability.
+  next_steps: z
+    .array(
+      z.object({
+        label: z.string().min(1),
+        href: z.string().min(1),
+      }),
+    )
+    .max(4)
+    .optional(),
   // Object form per content-ops/blog-linking-strategy.md, matching
   // src/content.config.ts `spokeLinkSchema` (the render-side contract).
   // Max 1: SpokeLinkCallout only consumes spoke_links[0]. The corpus is
@@ -522,6 +547,7 @@ export const componentPropSchemas = {
   // "Where we inspect & treat" schematic — default zone list baked in;
   // renders standalone with zero props (all props are overrides).
   HomeZoneMap: z.object({
+    inspectionOnly: z.boolean().optional(),
     title: z.string().min(1).optional(),
     zones: z
       .array(
