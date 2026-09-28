@@ -547,6 +547,29 @@ async function activate(itemId, overrides = {}) {
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).status).toBe('active');
   });
 
+  test('a stale login-required failure cannot re-park a connection that recovered meanwhile', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockImplementationOnce(async () => {
+      // while this request hangs, another sync succeeds / the operator reconnects
+      await mockPg('plaid_items').where({ id: itemId }).update({ status: 'active', last_error: null, sync_cursor: 'newer', updated_at: mockPg.fn.now() });
+      throw new plaid.PlaidError('Plaid /transactions/sync: ITEM_LOGIN_REQUIRED — stale', { errorCode: 'ITEM_LOGIN_REQUIRED' });
+    });
+    const out = await plaidSync.syncItem(itemId);
+    expect(out.status).toBeNull(); // superseded, not recorded
+    const item = await mockPg('plaid_items').where({ id: itemId }).first();
+    expect(item).toMatchObject({ status: 'active', last_error: null, sync_cursor: 'newer' });
+  });
+
+  test('a connection still in setup does not count as live CSV coverage', async () => {
+    const itemId = await connect();
+    const cov = await plaidSync.feedCoverageForLabel(mockPg, 'capital-one-card-1234', ['2026-09-20']);
+    expect(cov.liveFrom).toBeNull();
+    expect(cov.isCovered('2026-09-20')).toBe(false);
+    await activate(itemId, { 'acc-card': { syncFrom: '2026-09-01' } });
+    expect((await plaidSync.feedCoverageForLabel(mockPg, 'capital-one-card-1234', ['2026-09-20'])).isCovered('2026-09-20')).toBe(true);
+  });
+
   test('pagination restarts from the starting cursor on a mid-pagination mutation', async () => {
     const itemId = await connect();
     await activate(itemId);

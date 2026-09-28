@@ -224,7 +224,9 @@ async function feedCoverageForLabel(conn, label, dates = []) {
   const canonical = String(label).trim();
   const live = await conn('plaid_accounts as pa')
     .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
-    .whereNot('pi.status', 'removed')
+    // 'setup' = mapping not confirmed yet, nothing imports; setupItem
+    // checks CSV overlap when it is confirmed
+    .whereNotIn('pi.status', ['removed', 'setup'])
     .where('pa.enabled', true)
     .whereRaw('upper(trim(pa.account_label)) = upper(?)', [canonical])
     .min('pa.sync_from as cutoff')
@@ -678,18 +680,33 @@ async function supersedeUnmatchedRow(trx, rowId, values) {
   return row.id;
 }
 
-async function recordFailure(itemId, err) {
+// Conditioned on the item row as this sync observed it (row_version): a
+// reconnect or another sync that landed meanwhile is newer than this
+// failure, so a stale ITEM_LOGIN_REQUIRED can't re-park a connection that
+// already recovered. Returns the recorded status, or null when superseded.
+async function recordFailure(item, err) {
   const status = isLoginRequired(err) ? 'login_required' : 'error';
-  await db('plaid_items').where({ id: itemId }).whereNot({ status: 'removed' }).update({
-    status,
-    last_error: String(err.message || 'sync failed').slice(0, 500),
-    updated_at: db.fn.now(),
-  }).catch((e) => logger.error(`[plaid-sync] could not record failure for item ${itemId}: ${e.message}`));
-  return status;
+  try {
+    const n = await db('plaid_items')
+      .where({ id: item.id })
+      .whereRaw('updated_at::text = ?', [item.row_version])
+      .whereNot({ status: 'removed' })
+      .update({
+        status,
+        last_error: String(err.message || 'sync failed').slice(0, 500),
+        updated_at: db.fn.now(),
+      });
+    return n ? status : null;
+  } catch (e) {
+    logger.error(`[plaid-sync] could not record failure for item ${item.id}: ${e.message}`);
+    return status;
+  }
 }
 
 async function syncItem(itemId, { runMatching = true } = {}) {
-  const item = await db('plaid_items').where({ id: itemId }).first();
+  // row_version = updated_at as exact text (a JS Date would drop the
+  // microseconds and never compare equal) — recordFailure's CAS token
+  const item = await db('plaid_items').where({ id: itemId }).first('*', db.raw('updated_at::text as row_version'));
   if (!item) { const e = new Error('connection not found'); e.status = 404; throw e; }
   if (item.status === 'removed') return { itemId, skipped: 'removed' };
   if (item.status === 'setup') return { itemId, skipped: 'setup' };
@@ -724,7 +741,7 @@ async function syncItem(itemId, { runMatching = true } = {}) {
       return counts;
     });
   } catch (err) {
-    const status = await recordFailure(itemId, err);
+    const status = await recordFailure(item, err);
     logger.warn(`[plaid-sync] item ${itemId} sync failed (${status}): ${err.message}`);
     return { itemId, error: err.message, status };
   }

@@ -107,7 +107,7 @@ const mockDb = jest.fn((table) => {
   // no feed on any label in these tests
   if (table === 'plaid_accounts as pa') {
     const f = {};
-    for (const m of ['join', 'whereNot', 'where', 'whereRaw', 'min']) f[m] = jest.fn(() => f);
+    for (const m of ['join', 'whereNot', 'whereNotIn', 'where', 'whereRaw', 'min']) f[m] = jest.fn(() => f);
     f.first = jest.fn(() => Promise.resolve({ cutoff: null }));
     return f;
   }
