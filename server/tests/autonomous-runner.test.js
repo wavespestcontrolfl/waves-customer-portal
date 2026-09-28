@@ -2724,7 +2724,8 @@ describe('runNext post-publish bookkeeping', () => {
       },
     )).resolves.toMatchObject({ publish_status: 'no_changes' });
     expect(publisher.publishRefresh).toHaveBeenCalledTimes(1);
-    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'destroy', 'release']);
+    // The write phase's lock, then the no-op ownership recheck's lock.
+    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'destroy', 'release', 'lock', 'unlock', 'destroy', 'release']);
     expect(lock.conn.__knex__disposed).toMatch(/page-edit advisory unlock failed: connection reset/);
     expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
     expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
@@ -2794,6 +2795,47 @@ describe('runNext post-publish bookkeeping', () => {
       expect(write).not.toHaveBeenCalled();
       // Never acquired, so never unlocked; the pooled connection still goes back.
       expect(lock.events).toEqual(['lock_busy', 'release']);
+    });
+
+    test('a backfill superseded during unlocked validation is not accepted as a no-op', async () => {
+      // publishRefresh returns no_changes without running the write guard;
+      // the page was superseded meanwhile.
+      const lock = pageEditLockHarness({
+        ...lockedRow, signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+      });
+      const publisher = { publishRefresh: jest.fn(async () => ({ status: 'no_changes' })) };
+      const queue = {
+        ...backfillQueue('opp_noop_superseded'),
+        _internals: { pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded) },
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_noop_superseded'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
+      expect(lock.events).toEqual(['lock', 'unlock', 'release']);
+    });
+
+    test('the acquire deadline also bounds a pool checkout that never returns', async () => {
+      process.env.CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS = '20';
+      const lock = pageEditLockHarness(lockedRow);
+      let deliver;
+      lock.client.acquireConnection = jest.fn(() => new Promise((resolve) => { deliver = resolve; }));
+      const write = jest.fn();
+      const runner = loadRunnerWith({
+        queue: backfillQueue('opp_pool'), briefBuilder: {}, publisher: { publishRefresh: guardedPublishRefresh(write) },
+        dbQuery: lock.query, dbClient: lock.client,
+      });
+
+      await expect(runner._publishAndDistribute(
+        { body: 'draft' }, { action_type: 'refresh_existing_page' }, backfillRun('opp_pool'),
+      )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST', message: expect.stringMatching(/database connection/) });
+      expect(write).not.toHaveBeenCalled();
+      // A checkout that arrives late goes straight back to the pool.
+      deliver(lock.conn);
+      await new Promise((r) => setImmediate(r));
+      expect(lock.client.releaseConnection).toHaveBeenCalledWith(lock.conn);
+      expect(lock.conn.query).not.toHaveBeenCalled();
     });
 
     test('a GitHub call that outlives the hold deadline fails and the lock is still released', async () => {

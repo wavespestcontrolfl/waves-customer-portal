@@ -111,6 +111,24 @@ const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
 const PAGE_EDIT_LOCK_POLL_MS = 250;
 const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
 
+// Check a connection out of the pool, giving up at `deadlineAt`. A checkout
+// that completes after the deadline is returned to the pool at once.
+async function acquireConnectionBy(deadlineAt) {
+  const checkout = db.client.acquireConnection();
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out waiting for a database connection')), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([checkout, expired]);
+  } catch (err) {
+    checkout.then((conn) => db.client.releaseConnection(conn)).catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function releasePageEditLockConnection(lockConn, unlockError) {
   // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
   // close it now so the session lock clears, then release the checkout so
@@ -1751,9 +1769,11 @@ class AutonomousRunner {
     const acquireMs = envInt('CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS', PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT);
     // A zero hold would fail every GitHub call, so it falls back to the default.
     const holdMs = envInt('CONTENT_PAGE_EDIT_LOCK_HOLD_MS', PAGE_EDIT_LOCK_HOLD_MS_DEFAULT) || PAGE_EDIT_LOCK_HOLD_MS_DEFAULT;
+    // One deadline bounds both the pool checkout and the lock polling, so a
+    // saturated pool cannot stretch the advertised wait.
+    const waitUntil = Date.now() + acquireMs;
     try {
-      lockConn = await db.client.acquireConnection();
-      const waitUntil = Date.now() + acquireMs;
+      lockConn = await acquireConnectionBy(waitUntil);
       for (;;) {
         const res = await lockConn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
         if (res?.rows?.[0]?.locked === true) break;
@@ -4209,6 +4229,12 @@ class AutonomousRunner {
       const r = backfill
         ? await publish({ commitGuard: ownedWrite })
         : await publish();
+      // An unchanged refresh returns before the write guard runs. Recheck
+      // ownership under the lock so a backfill an ordinary edit superseded
+      // during validation is retired as superseded, not completed as a no-op.
+      if (backfill && r?.status === 'no_changes') {
+        await this._withPageEditLock((lockConn) => this._assertBackfillPageOwnership(lockConn, run));
+      }
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact
