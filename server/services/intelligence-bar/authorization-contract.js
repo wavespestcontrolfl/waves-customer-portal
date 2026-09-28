@@ -429,7 +429,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
-    push('operational', 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card); no confirmation text is sent now');
+    // A booking with a time texts the booking confirmation exactly as a
+    // Schedule-screen booking does (owner 2026-09-27); a windowless one
+    // registers a non-delivering placeholder: its confirmation is marked
+    // handled, so setting a time later re-arms only the 72h/24h reminders.
+    push('operational', params?.time_window
+      ? 'Registers the 72h/24h reminder rows (sent later by the reminder schedule; a registration failure is reported as a warning on this card)'
+      : 'Registers placeholder reminder rows: no booking confirmation is sent for a booking with no time, even after a time is set later; setting a time re-arms only the 72h/24h reminders');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
@@ -742,9 +748,11 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // attributed to one (GH r17 P2) — vendor/partner replies are outbound
   // mail, not customer contact.
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
+  // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
+  const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
-    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact);
+    : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText);
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
@@ -752,6 +760,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (bookingConfirmationText) {
+      // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
+      // send window (appointment-reminders.js reminderSendWindowHold — 'email'
+      // is never held, and the 'both' channel sends its email leg right away
+      // and defers only the text). The old wording said the WHOLE
+      // confirmation waited until 8 AM, which is false for an email-only or
+      // email+text customer.
+      contactLabel = 'Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
+    }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
     // must not claim an impossible send and then warn about it after.

@@ -1486,9 +1486,14 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
 // status is already committed and visible here. Terminal set mirrors the
 // reminder cron's SELF_HEAL_TERMINAL_STATUSES (keep in sync);
 // 'rescheduled' stays armed for the rebook, same as the cron's live-status
-// guard. Best-effort: never fails the caller.
+// guard. Best-effort: never fails the caller. Returns true when the visit
+// was found terminal (and its reminder cancelled) — a caller that also
+// schedules a confirmation SMS off the same registration (the IB create
+// path, tools.js) uses this to skip sending one for a visit that is no
+// longer live (Codex r3 on #5093, P1). Existing callers (spawned/extension
+// visits, which send no confirmation) ignore the return value.
 async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, logContext) {
-  if (!scheduledServiceId) return;
+  if (!scheduledServiceId) return false;
   try {
     const visitNow = await conn('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -1499,8 +1504,13 @@ async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, lo
         .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
         .update({ cancelled: true, updated_at: new Date() });
       logger.info(`[${logContext}] Spawned-visit reminder cancelled — visit ${scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
+      return true;
     }
-  } catch (e) { logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`); }
+    return false;
+  } catch (e) {
+    logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`);
+    return false;
+  }
 }
 
 // Void any still-open invoices minted for a now-cancelled scheduled service
@@ -1537,6 +1547,8 @@ const {
   frozenCapsFromRow,
   resolveStoredDiscountCaps,
   pruneObsoleteFrozenAddonCaps,
+  stampPrimaryLineDiscount,
+  capsSnapshotFromPricing,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -2321,11 +2333,18 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
   return { amount: Math.round(amount * 100) / 100, dollars };
 }
 
-async function loadInvoiceDiscount(discountId) {
+// conn defaults to the module db so every existing caller (invoice create,
+// discount presets, the restack replay) is unaffected; a locked recheck
+// (the IB create_appointment executor's trx re-derivation, ADMIN-BUG-R12)
+// passes its trx, and the row is share-locked there (Codex r13 on #5093):
+// the discount editor updates it FOR UPDATE, so an edit or deactivation
+// either commits first — and this read sees it — or waits for the booking.
+async function loadInvoiceDiscount(discountId, conn = db) {
   if (!discountId) return null;
-  const discount = await db('discounts')
-    .where({ id: discountId, is_active: true, show_in_invoices: true })
-    .first();
+  let query = conn('discounts')
+    .where({ id: discountId, is_active: true, show_in_invoices: true });
+  if (conn !== db) query = query.forShare();
+  const discount = await query.first();
   if (!discount) throw httpError(400, 'Selected discount is not available for invoices');
   return discount;
 }
@@ -2457,16 +2476,21 @@ function addonStackGroupConflictRows(normalizedAddons, groupMetaById) {
     .filter(Boolean);
 }
 
-async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
+// conn: same locked-recheck pass-through as loadInvoiceDiscount above — a
+// caller re-deriving pricing on a trx (IB create_appointment's commit-time
+// recheck) must have BOTH the discount row and its eligibility read joined
+// to that same trx, or the recheck can pass against a snapshot the write
+// already invalidated (Codex r2 on #5093, P2).
+async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}, conn = db) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
-  const row = await loadInvoiceDiscount(discountId);
+  const row = await loadInvoiceDiscount(discountId, conn);
   const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
     subtotal: baseAmount,
     serviceKey: serviceContext.serviceKey || null,
     serviceCategory: serviceContext.serviceCategory || null,
     recurringMembershipBooking: !!serviceContext.recurringMembershipBooking,
-  });
+  }, conn);
   if (failures.length) {
     throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
   }
@@ -2497,9 +2521,16 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
 // amount (edits there must keep working); recurring-plan members keep the
 // engine's canonical one-time perk in both cases — membership derived via the
 // file's one predicate (hasMembership) so tier sentinels stay in one place.
+// recurringOverride: the caller's own live-recurring-coverage evidence
+// (Codex r2 on #5093, P1) ORs into the membership check — a tierless
+// customer with live recurring coverage (the "or recurring customers" half
+// of the owner's 2026-09-27 rule) gets the same member ladder rate a
+// tiered/dues member does, not the flat nonmember price. The caller is
+// responsible for only ever setting this from evidence that already passed
+// the active-customer guard (activeCustomerHasLiveRecurringCoverage).
 // Returns null when the caller's own catalog fallback should apply as-is.
-function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
-  const isRecurringCustomer = hasMembership(customer || {});
+function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null, { recurringOverride = false } = {}) {
+  const isRecurringCustomer = !!recurringOverride || hasMembership(customer || {});
   const lotSqFt = Number(customer?.lot_sqft);
   if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
     try {
@@ -2598,7 +2629,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
@@ -2607,10 +2638,14 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   // 2026-07-28) instead of the flat catalog price. An explicitly typed price
   // still wins; catalog base_price remains the fallback when the customer has
   // no lot size on file. Applied per line (primary here, add-on lines below)
-  // so a grouped booking never silently bills mosquito at $0.
+  // so a grouped booking never silently bills mosquito at $0. recurringMembershipBooking
+  // ORs into the ladder's own hasMembership check (Codex r2 on #5093, P1): a
+  // tierless customer whose live recurring coverage is the ONLY reason this
+  // call carries the flag (IB's mosquito one-off path) must get the member
+  // ladder rate too — not just a WaveGuard-plan sale in progress.
   let mosquitoLadderDefault = null;
   if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
-    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price);
+    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price, { recurringOverride: recurringMembershipBooking });
   }
   const primaryBaseFallback = mosquitoLadderDefault != null
     ? mosquitoLadderDefault
@@ -2620,7 +2655,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     serviceKey: serviceRecord?.service_key,
     serviceCategory: serviceRecord?.category,
     recurringMembershipBooking,
-  });
+  }, conn);
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
@@ -2634,13 +2669,13 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
-      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
+      ? await conn('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
     // Blank-priced one-time mosquito add-on lines get the same lot-ladder
     // default as the primary (catalog base_price as the no-lot-data
     // fallback) — a grouped booking must never silently bill mosquito at $0.
     if (base == null && addonService?.service_key === 'mosquito_one_time') {
-      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price);
+      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price, { recurringOverride: recurringMembershipBooking });
       const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     }
@@ -2648,7 +2683,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceKey: addonService?.service_key,
       serviceCategory: addonService?.category,
       recurringMembershipBooking,
-    });
+    }, conn);
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
@@ -2690,7 +2725,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   let resolvedAppointmentDiscount = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
-    appointmentDiscount = await loadInvoiceDiscount(discountId);
+    appointmentDiscount = await loadInvoiceDiscount(discountId, conn);
     let appointmentDiscountBase = subtotal;
     // Hoisted so the canonical-restack block below (after the appointment
     // discount's own dollars are resolved) can read which lines this
@@ -2724,7 +2759,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         serviceKey: eligibilityContext.serviceKey || null,
         serviceCategory: eligibilityContext.serviceCategory || null,
         recurringMembershipBooking: !!recurringMembershipBooking,
-      });
+      }, conn);
       if (failures.length) {
         throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
       }
@@ -2834,29 +2869,6 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
     } : null,
-  };
-}
-
-// The caps a CREATE-time booking priced against (GitHub Codex round 1,
-// PRRT_kwDOR3YQi86kllyD): pricing.primaryDiscount / pricing.addonLines[i]
-// .discount already carry the catalog's max_discount_dollars, resolved
-// live once per request by resolveLineDiscount — the SAME set every
-// seeded child/booster in this request shares (a due-add-on subset never
-// changes which catalog cap a given discount_id maps to), so one snapshot
-// built here is reused across the parent + every child/booster's own
-// stampPricingRegimeMarker call, matching resolveStoredDiscountCaps'
-// { line, addons } shape exactly.
-function capsSnapshotFromPricing(pricing) {
-  const addons = {};
-  for (const line of pricing?.addonLines || []) {
-    if (line.discount?.discountId != null) addons[line.discount.discountId] = line.discount.maxDiscountDollars ?? null;
-  }
-  // Round 4: the line slot is keyed to its own discount id (matching
-  // resolveStoredDiscountCaps' { id, cap } shape) — see that function's
-  // own comment for why a bare cap number is no longer trustworthy.
-  return {
-    line: { id: pricing?.primaryDiscount?.discountId ?? null, cap: pricing?.primaryDiscount?.maxDiscountDollars ?? null },
-    addons,
   };
 }
 
@@ -8159,11 +8171,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
       if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
       if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
-      if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
-      if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
-      if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
-      if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-      if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+      stampPrimaryLineDiscount(insertData, pricing, cols);
       // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
       // extension's own restack tell a null primary_line_price genuinely
       // means "no primary" apart from a legacy/unstructured row (see
@@ -24867,6 +24875,31 @@ module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // create_appointment proposal and executor, so an IB booking carries exactly
 // the price a Schedule-screen booking would (owner 2026-09-27).
 module.exports.buildAppointmentPricing = buildAppointmentPricing;
+// The percent-discount exclusion predicate (termite bond, rodent bait,
+// bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
+// create_appointment member-discount auto-apply (tools.js) so its automatic
+// line discount honors the SAME catalog exclusion the Schedule screen's own
+// appointment-level discount already enforces (Codex r2 on #5093, P1): an
+// operator-picked discount is scoped by this file's own appointmentDiscount
+// block above, but an automatically-applied one had no equivalent gate.
+module.exports.lineExcludedFromPercentDiscount = lineExcludedFromPercentDiscount;
+module.exports.isPercentDiscountType = isPercentDiscountType;
+// The catalog's own readiness gate + prime trigger — every in-router
+// calculator gets the catalog primed for free (router.use above awaits
+// primePercentDiscountExclusions before any handler runs), but the IB
+// booking path has no such middleware, so its automatic member discount
+// (tools.js memberOneOffDiscount) awaits priming and asserts readiness
+// itself before consulting lineExcludedFromPercentDiscount (Codex r3 on
+// #5093, P1) — the same fail-closed contract the in-router calculators get.
+module.exports.assertPercentExclusionCatalogReady = assertPercentExclusionCatalogReady;
+module.exports.primePercentDiscountExclusions = primePercentDiscountExclusions;
+// The spawned-visit post-registration terminal recheck — also consumed by
+// the IB create_appointment executor (tools.js) after ITS OWN reminder
+// registration, so a series cancel (or any other terminal flip) landing in
+// the registration window cancels the fresh reminder and skips the
+// confirmation text the same way the canonical spawned-visit paths do
+// (Codex r3 on #5093, P1).
+module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVisitTerminal;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
