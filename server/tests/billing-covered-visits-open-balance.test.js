@@ -271,3 +271,34 @@ describe('liveInvoice reaches direct and indirect invoices alike', () => {
     expect((await findBillingCoveredVisits(conn, [{ id: 'v1' }])).size).toBe(0);
   });
 });
+
+// Estimate-scoped commitments (Codex r8 P1 on #5253): money keyed on the
+// estimate, not the visit, still refuses a re-price.
+describe('findEstimateScopedCommitment', () => {
+  const { findEstimateScopedCommitment } = require('../routes/admin-schedule');
+  const conn = (byTable) => {
+    const c = makeConn({ byTable });
+    c.raw = jest.fn(async () => ({ rows: [] }));
+    return c;
+  };
+
+  test('no source estimate: nothing to check', async () => {
+    expect(await findEstimateScopedCommitment(conn({}), null)).toBeNull();
+  });
+
+  test('a received, unapplied deposit refuses — read under the deposit-ledger lock', async () => {
+    const c = conn({ estimate_deposits: [{ id: 'd1', amount: 49, credited_amount: 0, refunded_amount: 0 }] });
+    expect(await findEstimateScopedCommitment(c, 'est-1')).toMatch(/estimate deposit/);
+    expect(c.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), expect.arrayContaining(['est-1']));
+  });
+
+  test('a fully credited deposit does not refuse', async () => {
+    const c = conn({ estimate_deposits: [{ id: 'd1', amount: 49, credited_amount: 49, refunded_amount: 0 }] });
+    expect(await findEstimateScopedCommitment(c, 'est-1')).toBeNull();
+  });
+
+  test('a payment_pending annual-prepay term with a live invoice refuses', async () => {
+    const c = conn({ 'annual_prepay_terms as t': [{ id: 't1' }] });
+    expect(await findEstimateScopedCommitment(c, 'est-1')).toMatch(/annual prepay invoice/);
+  });
+});

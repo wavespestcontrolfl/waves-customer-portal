@@ -13487,16 +13487,36 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const priceGuardSelect = ['id', ...postedPriceKeys.filter((key) => priceGuardCols[key])];
         if (priceGuardCols.annual_prepay_term_id) priceGuardSelect.push('annual_prepay_term_id');
         if (priceGuardCols.prepaid_amount) priceGuardSelect.push('prepaid_amount');
+        if (priceGuardCols.source_estimate_id) priceGuardSelect.push('source_estimate_id');
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
         const priceActuallyChanging = postedPriceKeys.some((key) => moneyValuesDiffer(priceGuardRow?.[key], updates[key]));
         if (priceActuallyChanging) {
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
-          if (covered.size > 0) {
-            const [, reason] = [...covered.entries()][0];
+          const estimateReason = covered.size > 0 ? null
+            : await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id);
+          if (covered.size > 0 || estimateReason) {
+            const reason = estimateReason || [...covered.entries()][0][1];
             throw Object.assign(
               httpError(409, `Can't change this visit's price: it's ${reason}. Void or release that first, then set the new price.`),
               { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
             );
+          }
+          // A /secure card confirmation mid-finish ('completing') is not
+          // durable yet, so the rails above can't see it (Codex r8 P1 on
+          // #5253). Refuse with a retry rather than race it. The consent
+          // amount itself is LEAST-stamped at render and caps the charge, so
+          // a confirmation that lands after this save can never charge more
+          // than the customer was shown.
+          if (await trx.schema.hasTable('appointment_card_requests')) {
+            const finishing = await trx('appointment_card_requests')
+              .where({ scheduled_service_id: req.params.id, status: 'completing' })
+              .first('id');
+            if (finishing) {
+              throw Object.assign(
+                new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+              );
+            }
           }
         }
       }
@@ -17418,6 +17438,34 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // service sibling propagation before this option was threaded onto it) ever
 // needed to know about an invoice nobody has paid — so this stays opt-in,
 // default false, keeping every pre-existing call byte-identical.
+// Money committed at the ESTIMATE level for a visit created or adopted from
+// one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
+// keys on the visit: a received, not-yet-applied estimate deposit (keyed by
+// estimate_id; read under the deposit-ledger lock so a concurrent receipt
+// can't slip between this check and the price write), and an annual-prepay
+// term still payment_pending whose prepay invoice is live (a pending term
+// deliberately stamps nothing onto its visits until payment). Returns a
+// refusal reason, or null.
+async function findEstimateScopedCommitment(conn, estimateId) {
+  if (!estimateId) return null;
+  if (await conn.schema.hasTable('estimate_deposits')) {
+    const Deposits = require('../services/estimate-deposits');
+    await Deposits.acquireEstimateDepositLedgerLock(conn, estimateId);
+    const pending = await Deposits.pendingDepositCredit(estimateId, conn);
+    if (pending && pending.amount > 0) return 'carrying an estimate deposit that has not been applied yet';
+  }
+  if (await conn.schema.hasTable('annual_prepay_terms')) {
+    const term = await conn('annual_prepay_terms as t')
+      .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
+      .where('t.source_estimate_id', estimateId)
+      .where('t.status', 'payment_pending')
+      .whereNotIn('inv.status', ['void', 'refunded', 'canceled', 'cancelled'])
+      .first('t.id');
+    if (term) return 'on an annual prepay invoice that is still open at the old price';
+  }
+  return null;
+}
+
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
@@ -25790,6 +25838,7 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB
 // create_appointment proposal and executor for its single visit
 // (ADMIN-BUG-R12), same avoid-a-route-load-cycle reason as above.
