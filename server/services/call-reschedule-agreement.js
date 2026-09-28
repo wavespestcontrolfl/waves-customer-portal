@@ -409,7 +409,8 @@ const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening
 const DESCRIBED_THINGS = new Set(['appointment', 'appointments', 'visit', 'visits', 'slot', 'slots', 'time', 'service', 'treatment']);
 function halvesSaid(quote) {
   const toks = normalize(quote).split(' ');
-  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && !DESCRIBED_THINGS.has(toks[i + 1])
+  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t)
+    && (t === 'am' || t === 'pm' || !DESCRIBED_THINGS.has(toks[i + 1])) // "2 PM appointment" keeps its PM
     && (t !== 'am' || amIsMeridiem(toks[i - 1], toks[i - 2])))
     .map((t) => HALF_WORDS[t]);
 }

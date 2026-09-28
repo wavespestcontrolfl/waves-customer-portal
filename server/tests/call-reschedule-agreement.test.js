@@ -279,6 +279,7 @@ describe('groundRescheduleAgreement', () => {
     // the old appointment is not.
     expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two in the a.m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(plain(THURSDAY_2PM, 'I will move your morning appointment to Thursday at two.', 'two').ok).toBe(true);
+    expect(plain('2026-09-24T02:00:00-04:00', 'You have the Thursday at two AM appointment.', 'two')).toMatchObject({ ok: false });
     // "Am" the verb is not a period.
     expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
     // Nor one said just past the end of the quote, in the same sentence.
