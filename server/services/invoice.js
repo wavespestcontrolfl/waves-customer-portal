@@ -450,6 +450,34 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
+  // A combined-visit packet invoice bills EVERY member stamped with its id,
+  // not only the owner resolved below — a member re-priced to $0 after the
+  // void would ride back in on the restored combined charge. Same
+  // per-application scope as the owner's $0 check; fails closed. (The
+  // restore transaction already holds these member rows FOR SHARE.)
+  if (invoiceRow.visit_completion_packet_id) {
+    let freeMember = null;
+    try {
+      let q = conn("visit_completion_packet_items as p")
+        .join("scheduled_services as s", "s.id", "p.scheduled_service_id")
+        .join("customers as c", "c.id", "s.customer_id")
+        .where("p.packet_id", invoiceRow.visit_completion_packet_id)
+        .where("p.invoice_id", invoiceRow.id)
+        .where("c.billing_mode", "per_application")
+        .where("s.estimated_price", 0);
+      if (lock) q = q.forShare("s");
+      freeMember = await q.first("s.id");
+    } catch (err) {
+      throw new Error(
+        `Could not verify the combined invoice's visits — refusing to unvoid (${err.message})`,
+      );
+    }
+    if (freeMember) {
+      throw new Error(
+        "Cannot unvoid — a visit on this combined invoice is now priced at $0; re-price that visit before restoring a charge",
+      );
+    }
+  }
   // Most post-completion invoices carry only service_record_id — resolve the
   // visit through the service record so every linked-visit guard (including
   // the $0 one) covers them too.

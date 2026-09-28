@@ -485,6 +485,52 @@ describe('InvoiceService.unvoidInvoice', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  // A combined-visit packet invoice bills every member stamped with its id —
+  // the owner alone is not enough (Codex r11 on #5161).
+  function packetMemberChain(freeMember) {
+    const q = {};
+    for (const m of ['join', 'where', 'forShare']) q[m] = jest.fn(() => q);
+    q.first = jest.fn(async () => freeMember);
+    return q;
+  }
+
+  test('refuses a combined invoice when a NON-owner billed member is now priced at $0 (per-application)', async () => {
+    const members = packetMemberChain({ id: 'svc-2' });
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1', visit_completion_packet_id: 'pk-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(members);
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/a visit on this combined invoice is now priced at \$0/);
+    expect(db).toHaveBeenCalledWith('visit_completion_packet_items as p');
+    // Only members billed on THIS invoice, per-application, priced exactly $0.
+    expect(members.where).toHaveBeenCalledWith('p.packet_id', 'pk-1');
+    expect(members.where).toHaveBeenCalledWith('p.invoice_id', 'inv-1');
+    expect(members.where).toHaveBeenCalledWith('c.billing_mode', 'per_application');
+    expect(members.where).toHaveBeenCalledWith('s.estimated_price', 0);
+    expect(members.forShare).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a combined invoice with no free billed member falls through to the owner checks', async () => {
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1', visit_completion_packet_id: 'pk-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(packetMemberChain(undefined))
+      .mockReturnValueOnce(chain({ first: { id: 'svc-1', status: 'cancelled' } }));
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/linked service visit is cancelled/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('fails closed when the combined invoice members cannot be read', async () => {
+    const members = packetMemberChain(undefined);
+    members.first = jest.fn(async () => { throw new Error('db down'); });
+    db
+      .mockReturnValueOnce(chain({ first: voidInvoice({ scheduled_service_id: 'svc-1', visit_completion_packet_id: 'pk-1' }) }))
+      .mockReturnValueOnce(noRow())
+      .mockReturnValueOnce(members);
+    await expect(InvoiceService.unvoidInvoice('inv-1')).rejects.toThrow(/Could not verify the combined invoice's visits/);
+  });
+
   test('re-checks the linked visit on the LOCKED row — a cancellation landing mid-restore rolls it back (Codex #3493 r3/r8)', async () => {
     const inTrxVisitChain = chain({ first: { id: 'svc-1', status: 'cancelled' } });
     db
