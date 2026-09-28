@@ -71,6 +71,7 @@ const express = require('express');
 const db = require('../models/db');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const reportsRouter = require('../routes/reports-public');
+const { etDateString } = require('../utils/datetime-et');
 
 function chain(overrides = {}) {
   return {
@@ -101,11 +102,10 @@ async function withServer(fn) {
 }
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
-// Today (UTC-midnight, matching how a DATE column round-trips) — well
-// within isRecentServiceDate's window, so nothing but the missing opt-in
-// stops the forecast fetch.
-const TODAY = new Date();
-const SERVICE_DATE = `${TODAY.getUTCFullYear()}-${String(TODAY.getUTCMonth() + 1).padStart(2, '0')}-${String(TODAY.getUTCDate()).padStart(2, '0')}`;
+// Today in the portal's Eastern calendar (codex r1 on #5265): a UTC-derived
+// date is tomorrow in ET between UTC midnight and ET midnight, so the
+// same-day branch must be built with the repo's ET date utility.
+const SERVICE_DATE = etDateString();
 
 function mockDb() {
   const structuredNotes = JSON.stringify({});
@@ -183,5 +183,32 @@ describe('POST /reports/:token/ask never resolves pest expectations weather', ()
       expect(status).toBe(200);
     });
     expect(mockGetDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
+
+  // Positive control (codex r1 on #5265): with every other condition held
+  // identical, the opt-in alone decides whether the forecast is fetched, so
+  // the /ask assertion above cannot pass because some other guard (recency,
+  // gate, premiumExperience) happened to short-circuit first.
+  test('the opt-in alone decides the forecast fetch for the same same-day service', async () => {
+    mockDb();
+    const service = {
+      id: 'service-1',
+      customer_id: 'customer-1',
+      report_template_version: 'service_report_v1',
+      structured_notes: JSON.stringify({}),
+      service_date: SERVICE_DATE,
+      zip: '34205',
+    };
+    const { buildServiceReportV1ResponseData } = reportsRouter;
+
+    await buildServiceReportV1ResponseData(service, VALID_TOKEN, { mode: 'live', pestExpectationsWeather: true });
+    expect(mockGetDailyRainOutlookBounded).toHaveBeenCalledTimes(1);
+    expect(buildReportV1Data.mock.calls[0][3].pestWeekWeather).toBe(true);
+
+    mockGetDailyRainOutlookBounded.mockClear();
+    buildReportV1Data.mockClear();
+    await buildServiceReportV1ResponseData(service, VALID_TOKEN, { mode: 'live' });
+    expect(mockGetDailyRainOutlookBounded).not.toHaveBeenCalled();
+    expect(buildReportV1Data.mock.calls[0][3].pestWeekWeather).toBe(false);
   });
 });

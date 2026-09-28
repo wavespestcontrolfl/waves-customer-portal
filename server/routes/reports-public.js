@@ -2811,5 +2811,6 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
+module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
 module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
 module.exports.isRecentServiceDate = isRecentServiceDate;
