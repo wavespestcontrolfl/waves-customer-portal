@@ -16,6 +16,7 @@
  */
 const { findGbpLocationByUtmContent } = require('../config/locations');
 const { SPOKE_SITES } = require('./content-astro/spoke-sites');
+const { findAiAssistant, hostnameOf } = require('./ai-referral-sources');
 
 // Single source of truth for the spoke fleet: the domains determineLeadSource()
 // matches for organic domain_website attribution are derived from SPOKE_SITES (the
@@ -65,34 +66,11 @@ function areaForLandingUrl(url) {
   return null;
 }
 
-// Hostname for a referrer/landing URL, normalized like the spoke/hub domain
-// matching above (lowercased, "www." stripped); null on garbage so a bad URL
-// can never satisfy a host check.
-function hostnameOf(url) {
-  if (!url) return null;
-  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
-}
-
-// AI-assistant referral detection — utm_source values AND referrer hosts that
-// name a known AI answer engine. Real citation links from ChatGPT carry
-// utm_source=chatgpt.com (or utm_source=openai, seen in real citations); a
-// plain link with no UTMs still arrives with document.referrer set to the
-// assistant's own domain. Data-driven so a new assistant is one row, not a
-// new branch — `detail` is the exact label the classifier returns.
-const AI_ASSISTANT_SOURCES = [
-  { detail: 'ChatGPT', utmSources: ['chatgpt.com', 'chatgpt', 'openai'], hosts: ['chatgpt.com', 'chat.openai.com'] },
-  { detail: 'Perplexity', utmSources: ['perplexity', 'perplexity.ai'], hosts: ['perplexity.ai', 'www.perplexity.ai'] },
-  { detail: 'Gemini', utmSources: ['gemini'], hosts: ['gemini.google.com', 'bard.google.com'] },
-  { detail: 'Copilot', utmSources: ['copilot'], hosts: ['copilot.microsoft.com'] },
-  { detail: 'Claude', utmSources: ['claude', 'claude.ai'], hosts: ['claude.ai'] },
-  { detail: 'Other AI', utmSources: ['you.com'], hosts: ['you.com'] },
-];
-
-function findAiAssistant(source, referrerHost) {
-  return AI_ASSISTANT_SOURCES.find((row) =>
-    (source && row.utmSources.includes(source)) || (referrerHost && row.hosts.includes(referrerHost))
-  ) || null;
-}
+// findAiAssistant/hostnameOf/AI_ASSISTANT_SOURCES now live in
+// ./ai-referral-sources.js, SHARED with lead-source-resolver.js (the
+// quote-wizard's property-lookup/quote-calculate path) so the two
+// resolution paths can never judge the same AI referral differently
+// (codex pre-push P1, AGENTS.md "extend the existing mechanism").
 
 function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid, referrer) {
   const url = landingUrl || pageUrl || '';
