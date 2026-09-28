@@ -9,9 +9,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getAdminAuthToken, getAdminDisplayName } from '../../lib/adminAuth';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../../utils/ibImages';
+import { useAutoGrowTextarea } from '../../hooks/useAutoGrowTextarea';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const D = { bg: '#0f1923', card: '#1e293b', border: '#334155', teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', text: '#e2e8f0', muted: '#94a3b8', white: '#fff' };
+// Owner-reported bug (#5218 was the admin fix, this is the owner-approved
+// tech-bar follow-up): the composer was a single-line <input>, so dictated
+// or long typed text couldn't be seen or edited past the cut-off. Tech
+// portal is mostly phones, so both composers use the same mobile-friendly
+// cap the admin mobile sheet uses — roughly 6 lines, then scroll internally.
+const TECH_COMPOSER_MAX_HEIGHT = () => Math.min(148, window.innerHeight * 0.4);
 
 function techFetch(path, options = {}) {
   const token = getAdminAuthToken();
@@ -56,8 +63,13 @@ export default function TechIntelligenceBar() {
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
+  const inputRef = useRef(null);
+  const followUpRef = useRef(null);
 
   const techName = getAdminDisplayName('Tech');
+
+  useAutoGrowTextarea(inputRef, prompt, TECH_COMPOSER_MAX_HEIGHT);
+  useAutoGrowTextarea(followUpRef, prompt, TECH_COMPOSER_MAX_HEIGHT);
 
   const setAttachmentBusy = useCallback((busy) => {
     attachmentsLoadingRef.current = busy;
@@ -129,7 +141,15 @@ export default function TechIntelligenceBar() {
   }, [prompt, loading, conversationHistory, techName, attachments, resetAttachments]);
 
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    // isComposing / keyCode 229 is the Enter that confirms an IME
+    // (Japanese/Chinese/Korean, etc.) candidate — it must never submit.
+    const composing = e.nativeEvent?.isComposing || e.keyCode === 229;
+    if (e.key === 'Enter' && !e.shiftKey && !composing) {
+      e.preventDefault();
+      submit();
+    }
+    // Shift+Enter falls through unhandled — the textarea's own default
+    // behavior inserts a newline.
   };
 
   const clear = () => { setConversationHistory([]); setResponse(null); setExpanded(false); resetAttachments(); };
@@ -140,24 +160,27 @@ export default function TechIntelligenceBar() {
       marginBottom: 16, overflow: 'hidden',
     }}>
       {/* Input */}
-      <div style={{ padding: '10px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ padding: '10px 12px', display: 'flex', alignItems: 'flex-end', gap: 8 }}>
         <div style={{
           width: 28, height: 28, borderRadius: 8,
           background: `linear-gradient(135deg, ${D.teal}, #6366f1)`,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 13, flexShrink: 0,
         }}>⚡</div>
-        <input
+        <textarea
+          ref={inputRef}
+          rows={1}
           id="tech-intelligence-prompt"
           name="tech-intelligence-prompt"
           aria-label="Ask Waves AI"
           value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
           onFocus={() => setExpanded(true)}
           placeholder="Ask anything..."
+          enterKeyHint="send"
           style={{
             flex: 1, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`,
             borderRadius: 8, color: D.text, fontSize: 14, fontFamily: "'Nunito Sans', sans-serif",
-            outline: 'none', boxSizing: 'border-box',
+            outline: 'none', boxSizing: 'border-box', resize: 'none',
           }}
         />
         {!loading && (
@@ -241,10 +264,14 @@ export default function TechIntelligenceBar() {
             {renderMarkdown(response)}
           </div>
           {/* Follow-up */}
-          <div style={{ marginTop: 10, display: 'flex', gap: 6 }}>
-            <input aria-label="Follow-up question" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
+          <div style={{ marginTop: 10, display: 'flex', gap: 6, alignItems: 'flex-end' }}>
+            <textarea
+              ref={followUpRef}
+              rows={1}
+              aria-label="Follow-up question" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Follow up..."
-              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, fontFamily: "'Nunito Sans', sans-serif", outline: 'none' }} />
+              enterKeyHint="send"
+              style={{ flex: 1, padding: '7px 10px', background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 13, fontFamily: "'Nunito Sans', sans-serif", outline: 'none', boxSizing: 'border-box', resize: 'none' }} />
             <button onClick={() => submit()} disabled={!prompt.trim() || attachmentsLoading} style={{
               padding: '7px 12px', background: D.teal, color: D.white, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700,
               cursor: prompt.trim() && !attachmentsLoading ? 'pointer' : 'not-allowed', opacity: prompt.trim() && !attachmentsLoading ? 1 : 0.4,
