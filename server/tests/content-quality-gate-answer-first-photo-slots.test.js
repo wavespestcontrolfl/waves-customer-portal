@@ -809,3 +809,15 @@ test('#5272 r2: a credit directly below an image whose alt wraps a line passes',
   expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
 });
 
+// ── Codex r3 on #5272 ────────────────────────────────────────────────
+describe('#5272 r3: multi-line reference definitions, one credit per copy', () => {
+  test('a multi-line reference definition between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][pest]\n\n[pest]:\n  ${PHOTO_URL}\n  "A title"\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+  test('two copies on one line cannot share one credit', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL}) ![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+});
+

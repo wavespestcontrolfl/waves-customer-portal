@@ -324,3 +324,18 @@ test('a pluralized catalog-only head noun still names a pest', () => {
   expect(matchSpecies('southern black widows or huntsman spider')).toBeNull();
 });
 
+// Codex r3 on #5272 ("Match complete catalog aliases around connectors"):
+// a topic that names any other catalog organism by its full name or alias
+// is a comparison, whatever joins the two.
+describe('a second pest named by its full catalog name', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['huntsman spider and daddy long legs', null],
+    ['fire ants and no-see-ums', null],
+    ['florida huntsman spider identification guide', 'huntsman spider'],
+    ['red imported fire ants in lawns', 'fire ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+

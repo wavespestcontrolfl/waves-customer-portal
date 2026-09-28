@@ -444,10 +444,17 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null, { ap
 // The brief's frozen related-post list (voice_constraints.related_posts),
 // derived exactly as the runner derives it (guardrail-options). A lookup
 // error THROWS — the caller withholds this tick (transient).
+// A run with no brief (citability backfill and other brief-less lanes)
+// was never granted related-post allowances — the pre-publish guard only
+// admits body/next_steps links to the brief's frozen list — so there is
+// nothing brief-frozen to recheck; its rail is still rechecked. No code
+// deletes content_briefs (brief_id SET NULL is the FK rule only), but a
+// brief_id whose row is missing is reported unavailable and withholds
+// (Codex r3 on #5272).
 async function frozenRelatedPostsForRun(run) {
   if (!run?.brief_id) return { paths: [], hosts: undefined };
   const brief = await db('content_briefs').where('id', run.brief_id).first();
-  if (!brief) return { paths: [], hosts: undefined };
+  if (!brief) return { unavailable: true };
   const options = require('./guardrail-options').deriveSyncGuardrailOptions({}, brief);
   return {
     paths: Array.isArray(options.relatedPostLinks) ? options.relatedPostLinks : [],

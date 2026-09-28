@@ -1321,7 +1321,6 @@ const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|sting
 // this is the fail-closed backstop for whatever reaches this check
 // without that having held.
 const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
-const REFERENCE_DEFINITION_LINE_RE = /^ {0,3}\[[^\]]+\]:\s*\S/;
 const BOX_PHONE_RE = /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}\b/;
 const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
 function checkCtaAfterVerdictBox(draft, brief, context) {
@@ -1368,7 +1367,7 @@ const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page']
 // next non-blank rendered line after the image's line is the exact
 // attribution line (a credit in a distant footer, or one credit shared by
 // two copies of the photo, does not count).
-function validateLibraryPhoto(photo, alt, url, renderedBody, line) {
+function validateLibraryPhoto(photo, alt, url, renderedBody, line, { viewLines = null, usedCreditLines = new Set() } = {}) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
   if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
@@ -1378,12 +1377,19 @@ function validateLibraryPhoto(photo, alt, url, renderedBody, line) {
     if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
     return null;
   }
+  // Lines the publisher's rendered view leaves blank — blank lines and
+  // non-rendered reference definitions, one line or several (Codex r1/r3 on
+  // #5272) — are skipped; the credit TEXT is read from the visible body.
+  // Each credit line is consumed by ONE image: two copies ending on the same
+  // line cannot share it (Codex r3 on #5272).
   const lines = renderedBody.split('\n');
-  // Blank lines and non-rendered reference definitions ("[photo]: /images/…"
-  // for a reference-style image) are skipped (Codex r1 on #5272).
+  const skip = (i) => !(viewLines ? viewLines[i] || '' : lines[i]).trim();
   let next = line + 1;
-  while (next < lines.length && (!lines[next].trim() || REFERENCE_DEFINITION_LINE_RE.test(lines[next]))) next += 1;
-  if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo)) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  while (next < lines.length && skip(next)) next += 1;
+  if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo) || usedCreditLines.has(next)) {
+    return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  }
+  usedCreditLines.add(next);
   return null;
 }
 // Every rendered image FORM is collected — Codex r5 on #5216 (3rd round on
@@ -1461,20 +1467,25 @@ function allowedIdentificationPhotoSrcs(brief, context) {
 function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
   const body = String(draft.body || '');
-  // Codex r6: the attribution must be READER-VISIBLE — comments and code
-  // blanked, then every definitely-hidden container (hidden, aria-hidden,
-  // display:none…) through the guardrails' own walker. Every image in the
-  // raw body is still judged (a hidden image still ships), but only a
-  // visible one counts as showing its slot.
-  const cg = require('./content-guardrails');
-  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
-  const allowed = allowedIdentificationPhotoSrcs(brief, context);
   // Same Markdown/MDX flavor the publisher reads the target with (a legacy
   // .md refresh renders Markdown inside raw HTML as literal text) — Codex r7.
   const mdx = !markdownOnlyTarget(brief);
+  // Codex r6: the attribution must be READER-VISIBLE — comments and code
+  // blanked, then every definitely-hidden container (hidden, aria-hidden,
+  // display:none…) through the guardrails' own walker. The publisher's
+  // rendered view of the same text says which lines render at all (Codex r3
+  // on #5272: multi-line reference definitions). Every image in the raw body
+  // is still judged (a hidden image still ships), but only a visible one
+  // counts as showing its slot.
+  const cg = require('./content-guardrails');
+  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
+  const { renderedBodyView } = require('../content-astro/astro-publisher')._internals;
+  const viewLines = renderedBodyView(cg.blankDefinitelyHiddenContent(body), { mdx }).text.split('\n');
+  const allowed = allowedIdentificationPhotoSrcs(brief, context);
   const occurrences = collectBodyImageOccurrences(body, { mdx });
+  const usedCreditLines = new Set();
   for (const { alt, url, form, line } of occurrences) {
-    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody, line);
+    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody, line, { viewLines, usedCreditLines });
     if (failure) return failure;
     // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
     // validateBodyImageRefs parks it at publish — so a library photo shipped

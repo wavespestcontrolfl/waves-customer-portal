@@ -4629,6 +4629,14 @@ describe('refresh quality gate receives the live frontmatter', () => {
       withRuns([{ published_url: 'https://wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
       expect(await _internals.publishedAsCustomerQuestion('https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/')).toBe(true);
     });
+    // Codex r3 on #5272: a relative target is the hub's page, never a
+    // wildcard across fleet domains.
+    test('a relative target matches only a hub run at that path', async () => {
+      withRuns([{ published_url: 'https://www.bradentonflpestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(false);
+      withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(true);
+    });
     test('null when the ledger cannot be read', async () => {
       withRuns([], { fail: true });
       expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBeNull();

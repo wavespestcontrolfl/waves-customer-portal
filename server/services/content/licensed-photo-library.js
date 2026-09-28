@@ -205,84 +205,51 @@ const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\
 // identification of the named species itself.
 const SUFFIX_LIKE_RE = /\w-like\b/i;
 
-// Codex r10 on #5216 ("Restrict comparison matching to comparison
-// phrases"): "and"/"or"/"from"/"not" are ordinary connector words that also
-// turn up in plain single-species identification phrasing — "where do fire
-// ants come from", "fire ant signs and identification", "is it a fire ant
-// or not" — so matching them unconditionally nulled every one of those.
-// They read as a comparison only when a pest is named on BOTH sides of the
-// SAME occurrence ("fire ants or red ants", "carpenter ants from
-// termites"). PEST_NOUN_RE is a small, generic, plural-tolerant list of
-// pest nouns, widened below with the catalog's organism head nouns, so a
-// species named without a generic noun on either side ("brown recluse and
-// huntsman spider" — the whole reason this guard exists) still counts.
-const CONNECTOR_RE = /\b(and|or|from|not)\b/gi;
+// Codex r3 on #5272 (the third round on connector words): a comparison is
+// judged by COUNTING the pests a topic names, not by reading the words
+// between them. Once the matched species' own names are taken out (its
+// library aliases plus every catalog name/alias of that species), the topic
+// must name no other pest: no generic pest noun (below) and no complete
+// name or alias of any other organism in the approved species catalog
+// (species-catalog.js, read on first use). "brown recluse and huntsman
+// spider", "huntsman spider and daddy long legs" and "fire ants and
+// no-see-ums" name two; "where do fire ants come from" and "fire ant signs
+// and identification" name one. An unreadable catalog fails closed.
 const PEST_NOUN_RE = /\b(ants?|roach(?:es)?|cockroach(?:es)?|spiders?|beetles?|bugs?|termites?|wasps?|bees?|hornets?|fl(?:y|ies)|moths?|mosquito(?:e?s)?|ticks?|fleas?|mites?|lizards?|geckos?|anoles?|snakes?|rodents?|rats?|mouse|mice|caterpillars?|worms?|grubs?|earwigs?|silverfish|centipedes?|millipedes?|scorpions?|weevils?|aphids?|whitefl(?:y|ies)|crickets?|grasshoppers?)\b/i;
-
-// The generic list cannot name every species ("brown recluse", "southern
-// black widow" carry no generic noun), so the approved species catalog's
-// organism names add their head nouns (the last word of each common name
-// and alias: recluse, widow, orbweaver…). Sign/plant/disease entries are
-// left out, and so are head words that are ordinary topic words. If the
-// catalog cannot be read, every connector counts as a comparison again
-// (fail closed — the pre-r10 behaviour).
-const NON_PEST_HEAD_WORDS = new Set(['adult', 'colony', 'frass', 'gals', 'holes', 'hive', 'legs', 'larva', 'larvae', 'swarm', 'wall', 'ums', 'poly']);
-function organismHeadNouns(entry) {
-  if (entry?.kind !== 'organism') return [];
-  return [entry.common_name, ...(entry.aliases || [])]
-    .map((name) => (String(name || '').toLowerCase().match(/[a-z]+/g) || []).pop())
-    .filter((head) => head && head.length >= 3 && !NON_PEST_HEAD_WORDS.has(head));
+// A name as a whole word/phrase, ordinary plural tolerated.
+function namePattern(name, flags = 'i') {
+  return new RegExp(`\\b${escapeRegExp(name)}(?:e?s)?\\b`, flags);
 }
-// Read through the canonical, cached catalog module (species-catalog.js
-// listEntries) — never a second parse of the entry files (Codex r1 on
-// #5272).
-function loadCatalogPestHeads() {
-  try {
-    const heads = new Set();
-    for (const entry of require('../species-catalog').listEntries({ kind: 'organism' })) {
-      for (const head of organismHeadNouns(entry)) heads.add(head);
+// undefined = not loaded yet, null = unreadable.
+let catalogOrganisms;
+function getCatalogOrganisms() {
+  if (catalogOrganisms === undefined) {
+    try {
+      catalogOrganisms = require('../species-catalog').listEntries({ kind: 'organism' }).map((entry) => {
+        const names = [entry.common_name, ...(entry.aliases || [])]
+          .map((name) => String(name || '').trim().toLowerCase())
+          .filter((name) => name.length >= 3);
+        return { slug: entry.slug, names, patterns: names.map((name) => namePattern(name)) };
+      });
+    } catch {
+      catalogOrganisms = null;
     }
-    return heads.size ? heads : null;
-  } catch {
-    return null;
   }
+  return catalogOrganisms;
 }
-// Loaded on first use, not at module load (never a load-time require
-// between the two modules); undefined = not loaded yet, null = unreadable.
-let catalogPestHeads;
-function getCatalogPestHeads() {
-  if (catalogPestHeads === undefined) catalogPestHeads = loadCatalogPestHeads();
-  return catalogPestHeads;
-}
-// A plural drops only what it added: "recluses" → "recluse" (s), and
-// "roaches" → "roach" (es) — never "reclus" (Codex r2 on #5272).
-function singularForms(word) {
-  const forms = [word];
-  if (word.endsWith('s')) forms.push(word.slice(0, -1));
-  if (word.endsWith('es')) forms.push(word.slice(0, -2));
-  return forms;
-}
-function namesPest(text) {
-  if (PEST_NOUN_RE.test(text)) return true;
-  const heads = getCatalogPestHeads();
-  for (const word of String(text).match(/[a-z]+/g) || []) {
-    if (singularForms(word).some((form) => heads.has(form))) return true;
+function namesAnotherPest(text, entry) {
+  const organisms = getCatalogOrganisms();
+  if (!organisms) return true;
+  const own = organisms.find((o) => o.slug === entry.catalog_slug);
+  // Blank every span any of the species' own names covers — overlapping
+  // names ("florida huntsman" + "huntsman spider") leave no stray noun.
+  const covered = new Array(text.length).fill(false);
+  for (const name of [...(entry.aliases || []), ...(own ? own.names : [])]) {
+    for (const m of text.matchAll(namePattern(name, 'gi'))) covered.fill(true, m.index, m.index + m[0].length);
   }
-  return false;
-}
-
-// True when some connector occurrence names a pest both before and after
-// it — the shape of an actual comparison ("X and Y", "X from Y").
-function isConnectorComparison(text) {
-  CONNECTOR_RE.lastIndex = 0;
-  let match;
-  while ((match = CONNECTOR_RE.exec(text))) {
-    if (!getCatalogPestHeads()) return true;
-    const before = text.slice(0, match.index);
-    const after = text.slice(match.index + match[0].length);
-    if (namesPest(before) && namesPest(after)) return true;
-  }
-  return false;
+  const rest = [...text].map((ch, i) => (covered[i] ? ' ' : ch)).join('');
+  if (PEST_NOUN_RE.test(rest)) return true;
+  return organisms.some((o) => o.slug !== entry.catalog_slug && o.patterns.some((re) => re.test(rest)));
 }
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as
@@ -307,9 +274,7 @@ function matchSpeciesEntry(topic) {
   const norm = String(topic || '').trim().toLowerCase();
   if (!norm) return null;
   const comparisonTestText = norm.replace(TERMINAL_LOOKS_LIKE_RE, '').trim();
-  if (COMPARISON_WORDS_RE.test(comparisonTestText)
-    || SUFFIX_LIKE_RE.test(comparisonTestText)
-    || isConnectorComparison(comparisonTestText)) return null;
+  if (COMPARISON_WORDS_RE.test(comparisonTestText) || SUFFIX_LIKE_RE.test(comparisonTestText)) return null;
   const matched = new Set();
   for (const entry of PHOTO_LIBRARY) {
     // Trailing e?s? tolerates the ordinary plural ("fire ants").
@@ -317,8 +282,11 @@ function matchSpeciesEntry(topic) {
     if (hits(entry.aliases) && !hits(entry.not_if)) matched.add(entry);
   }
   // "florida carpenter ant" and "carpenter ant" are one entry; a topic
-  // matching two ENTRIES is ambiguous.
-  return matched.size === 1 ? [...matched][0] : null;
+  // matching two ENTRIES is ambiguous, and so is one that names any other
+  // pest besides the matched species.
+  if (matched.size !== 1) return null;
+  const [entry] = matched;
+  return namesAnotherPest(comparisonTestText, entry) ? null : entry;
 }
 function matchSpecies(topic) {
   return matchSpeciesEntry(topic)?.species || null;

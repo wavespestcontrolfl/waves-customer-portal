@@ -5122,11 +5122,14 @@ async function refreshTargetFields(publisher, targetUrl) {
  * from autonomous_runs (page_type + published_url, path-compared), null when
  * the ledger cannot be read.
  */
-// Host + path of a URL; host is null for a bare path. www. is ignored.
+// Host + path of a URL. A bare path is the hub's (the brief builder keeps
+// relative page_url values for hub pages) — never a wildcard across fleet
+// domains (Codex r3 on #5272). www. is ignored.
+const LEDGER_HUB_HOST = 'wavespestcontrol.com';
 function ledgerUrlKey(value) {
   const { _internals: { normalizePathForCompare } } = require('./related-posts');
   const raw = String(value || '').trim();
-  let host = null;
+  let host = LEDGER_HUB_HOST;
   if (/^https?:\/\//i.test(raw)) {
     try { host = new URL(raw).hostname.toLowerCase().replace(/^www\./, ''); } catch { host = null; }
   }
@@ -5145,7 +5148,7 @@ async function publishedAsCustomerQuestion(targetUrl) {
     // domains can carry different posts at one path (Codex r2 on #5272).
     return rows.some((row) => {
       const run = ledgerUrlKey(row.published_url);
-      return run.path === target.path && (!run.host || !target.host || run.host === target.host);
+      return run.path === target.path && run.host !== null && run.host === target.host;
     });
   } catch (err) {
     logger.warn(`[autonomous-runner] customer-question ledger read failed: ${err.message}`);
