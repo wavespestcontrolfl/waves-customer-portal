@@ -518,6 +518,12 @@ describe('classifyTopic (the replay\'s raw outcome)', () => {
     await expect(classifyTopic(lawnVisit)).resolves.toMatchObject({ topic: { topic: 'grass not growing' }, refusal: null });
   });
 
+  test('a completion-sourced topic must cite the literal "completion" id, or it is refused (no untraceable provenance)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'ants by the door', kind: 'service_concern', source: 'completion', evidence_id: 's-1', service_line: 'pest', confidence: 0.9 } });
+    const pestVisit = { completion: { concernText: 'ants by the door' }, serviceLines: ['pest'], texts: [] };
+    await expect(classifyTopic(pestVisit)).resolves.toMatchObject({ topic: null, refusal: 'ungrounded' });
+  });
+
   test('a confidence outside 0-1 (a percentage like 85) is refused, never read as confident', async () => {
     mockDispatch.mockResolvedValue({ ok: true, json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-6', service_line: 'pest', confidence: 85 } });
     const pestVisit = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-6', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };

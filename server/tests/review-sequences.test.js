@@ -5535,8 +5535,10 @@ describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => 
     expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
     const body = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(body).toMatch(/First treatment's done/);
-    // A row that never held a Day-0 topic gets no ask_context write.
-    expect(seq).not.toHaveProperty('ask_context');
+    // GATE_REVIEW_DAY0_CONTEXT: a swap off the recurring plan clears the
+    // topic whatever this step read earlier — the detached classifier may
+    // have stored one after the read.
+    expect(seq).toHaveProperty('ask_context', null);
   });
 
   test('GATE_REVIEW_DAY0_CONTEXT: a recurring sequence reclassified at first send drops its Day-0 topic in the same write', async () => {

@@ -6254,18 +6254,19 @@ const ReviewService = {
         }
         if (re.plan && JSON.stringify(re.plan) !== JSON.stringify(plan)) {
           // GATE_REVIEW_DAY0_CONTEXT: a Day-0 topic is recurring-only, so it
-          // leaves with the recurring plan — in the same write, and only on
-          // a row that holds one.
-          const dropAskContext = seq.ask_context != null && !isRecurringAskPlan(re.plan);
+          // leaves with the recurring plan in the same write — whatever this
+          // step's earlier read saw, since the detached classifier may have
+          // stored one since.
+          const clearAskContext = !isRecurringAskPlan(re.plan);
           await db("review_sequences").where({ id: seq.id, status: "active" }).update({
             plan: JSON.stringify(re.plan),
             series_final: re.seriesFinal === true,
-            ...(dropAskContext ? { ask_context: null } : {}),
+            ...(clearAskContext ? { ask_context: null } : {}),
             updated_at: new Date(),
           });
           plan = re.plan;
           seq.series_final = re.seriesFinal === true;
-          if (dropAskContext) seq.ask_context = null;
+          if (clearAskContext) seq.ask_context = null;
         }
       } catch {
         // Same posture as re.error (codex r19): a blip mid-swap must defer,

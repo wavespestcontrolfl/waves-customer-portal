@@ -252,7 +252,9 @@ function buildTopicUserMessage(evidence, firstName) {
 }
 
 function resolveCitedText(evidence, source, evidenceId) {
-  if (source === "completion") return evidence?.completion?.concernText || "";
+  // The completion's own id is the literal "completion" — any other id is a
+  // provenance the stored topic could not be traced back to.
+  if (source === "completion") return evidenceId === "completion" ? evidence?.completion?.concernText || "" : "";
   if (source === "sms") {
     const row = (evidence?.texts || []).find((t) => String(t.id) === String(evidenceId));
     return row ? row.body : "";
