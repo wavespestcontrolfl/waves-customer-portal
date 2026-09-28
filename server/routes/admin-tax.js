@@ -1891,8 +1891,13 @@ const { PlaidError } = require('../services/plaid-client');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// With the feed switched off, rows it already imported can still carry a
+// bank change that blocks every claim — resolving it (local only) and
+// revoking a connection stay available; connecting and syncing do not.
+const PLAID_ROUTES_OPEN_WHEN_OFF = /^\/(rows\/[^/]+\/bank-change|items\/[^/]+\/disconnect)$/;
+
 router.use('/bank-import/plaid', (req, res, next) => {
-  if (!gateEnvValue('GATE_PLAID_SYNC')) return res.status(404).json({ error: 'not found' });
+  if (!gateEnvValue('GATE_PLAID_SYNC') && !PLAID_ROUTES_OPEN_WHEN_OFF.test(req.path)) return res.status(404).json({ error: 'not found' });
   next();
 });
 

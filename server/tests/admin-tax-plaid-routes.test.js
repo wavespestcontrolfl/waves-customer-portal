@@ -75,6 +75,13 @@ test('dark unless BOTH gates are on; bank-import status reports the nested gate'
   delete process.env.GATE_PLAID_SYNC;
   expect((await fetch(`${baseUrl}/admin/tax/bank-import/plaid/status`)).status).toBe(404);
   expect((await post('/link-token')).status).toBe(404);
+  expect((await post(`/items/${ITEM}/sync`)).status).toBe(404);
+  expect(plaidSync.syncItem).not.toHaveBeenCalled();
+  // switched off after import: resolving a staged bank change and revoking
+  // a connection stay reachable (else those rows stay blocked from claims)
+  expect((await post(`/rows/${ITEM}/bank-change`, {})).status).toBe(400); // reached validation
+  expect((await post(`/items/${ITEM}/disconnect`)).status).toBe(200);
+  expect(plaidSync.disconnectItem).toHaveBeenCalledWith(ITEM, { confirmedRemovedAtPlaid: false });
   expect(await (await fetch(`${baseUrl}/admin/tax/bank-import/status`)).json()).toMatchObject({ enabled: true, plaidEnabled: false });
 
   process.env.GATE_PLAID_SYNC = 'true';

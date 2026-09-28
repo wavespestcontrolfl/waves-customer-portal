@@ -497,6 +497,23 @@ describe("Finance workflow preservation", () => {
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
         .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
   });
+  it("keeps bank-change Dismiss reachable after the Plaid feed is switched off", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: false, bankChanges: 1, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({
+      hasMore: false,
+      transactions: [{ id: "row-gone", txn_date: "2026-09-05", account_label: "card", account_type: "card", direction: "debit",
+        amount: 10, description: "Withdrawn purchase", status: "matched_expense", suggestion: { plaidRemoved: true } }],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change", () => response({ success: true }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
+    await waitFor(() =>
+      expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change")?.body)
+        .toEqual({ action: "dismiss", expected: { plaidModified: null, plaidRemoved: true } }));
+  });
   it("resumes Plaid Link on the Bank Import tab after a bank's OAuth redirect", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ enabled: true, plaidEnabled: true, counts: {} }));

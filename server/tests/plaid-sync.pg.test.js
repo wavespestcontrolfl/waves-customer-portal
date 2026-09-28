@@ -210,6 +210,18 @@ async function activate(itemId, overrides = {}) {
     expect((await mockPg('plaid_items').where({ id: kept.id }).first()).status).toBe('removed');
   });
 
+  test('setup refuses an account id that is not one UUID (no delimiter collapsing stored ids)', async () => {
+    const itemId = await connect();
+    const accts = await accountsOf(itemId);
+    const joined = { id: accts.map(a => a.id).join(','), accountLabel: 'x', accountType: 'bank', syncFrom: '2026-09-01', enabled: false };
+    await expect(plaidSync.setupItem(itemId, [joined])).rejects.toMatchObject({ status: 400 });
+    // same count, one id repeated: still not the stored set
+    const dup = accts.map(a => ({ id: accts[0].id, accountLabel: `${a.account_label}`, accountType: a.account_type, syncFrom: '2026-09-01', enabled: false }));
+    await expect(plaidSync.setupItem(itemId, dup)).rejects.toMatchObject({ status: 400 });
+    expect(await mockPg('plaid_items').where({ id: itemId }).first('status')).toEqual({ status: 'setup' });
+    await plaidSync.disconnectItem(itemId);
+  });
+
   test('setup enforces the label→type invariant and unique labels', async () => {
     await mockPg('bank_transactions').insert({
       account_label: 'capone-checking', account_type: 'bank', txn_date: '2026-08-01',
@@ -328,6 +340,19 @@ async function activate(itemId, overrides = {}) {
     const row = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-a' }).first();
     expect(Number(row.amount)).toBe(12);
     expect(row.suggestion?.plaidModified).toBeUndefined(); // A can no longer be re-applied
+  });
+
+  test('a manual sync that only corrected rows still runs the matching pass', async () => {
+    const bankImport = require('../services/bank-import');
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockResolvedValueOnce(page([txn('t-a', 'acc-card', 10, '2026-09-05')], [], [], 'cursor-1'));
+    await plaidSync.syncItem(itemId);
+    bankImport.runDeterministicMatching.mockClear();
+    plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-a', 'acc-card', 11, '2026-09-05')], [], 'cursor-2'));
+    expect(await plaidSync.syncItem(itemId)).toMatchObject({ inserted: 0, updated: 1 });
+    expect(bankImport.runDeterministicMatching).toHaveBeenCalledTimes(1);
+    await plaidSync.disconnectItem(itemId);
   });
 
   test('a correction to a staged row applies even before the start date or after the feed is switched off', async () => {

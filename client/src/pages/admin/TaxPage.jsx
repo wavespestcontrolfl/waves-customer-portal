@@ -6089,42 +6089,42 @@ function BankImportTab() {
                       {r.suggestion.plaidRemoved
                         ? "The bank withdrew this transaction."
                         : `The bank changed this to $${Number(r.suggestion.plaidModified.amount).toFixed(2)} ${r.suggestion.plaidModified.direction} on ${r.suggestion.plaidModified.txn_date}${r.status === "unmatched" ? "." : r.status === "created_expense" ? " — edit the expense created from this row to match, then dismiss." : " — unlink to apply it."}`}
-                      {plaidEnabled && (
-                        <span className="ml-2 inline-flex gap-2">
-                          {r.suggestion.plaidModified &&
-                            !r.suggestion.plaidRemoved &&
-                            r.status === "unmatched" && (
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                disabled={!!busy}
-                                onClick={() =>
-                                  act(
-                                    "bank-change",
-                                    `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
-                                    { action: "apply", expected: shownBankChange(r) },
-                                  )
-                                }
-                              >
-                                Apply bank's change
-                              </Button>
-                            )}
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={!!busy}
-                            onClick={() =>
-                              act(
-                                "bank-change",
-                                `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
-                                { action: "dismiss", expected: shownBankChange(r) },
-                              )
-                            }
-                          >
-                            Dismiss
-                          </Button>
-                        </span>
-                      )}
+                      {/* resolvable with the feed switched off too — the row
+                          stays blocked from every claim until then */}
+                      <span className="ml-2 inline-flex gap-2">
+                        {r.suggestion.plaidModified &&
+                          !r.suggestion.plaidRemoved &&
+                          r.status === "unmatched" && (
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              disabled={!!busy}
+                              onClick={() =>
+                                act(
+                                  "bank-change",
+                                  `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                                  { action: "apply", expected: shownBankChange(r) },
+                                )
+                              }
+                            >
+                              Apply bank's change
+                            </Button>
+                          )}
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={!!busy}
+                          onClick={() =>
+                            act(
+                              "bank-change",
+                              `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                              { action: "dismiss", expected: shownBankChange(r) },
+                            )
+                          }
+                        >
+                          Dismiss
+                        </Button>
+                      </span>
                     </div>
                   )}
                   {/* a transfer-flagged CREDIT with candidates falls through

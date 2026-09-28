@@ -32,7 +32,8 @@ const { etDateString } = require('../utils/datetime-et');
 const MAX_SYNC_PAGES = 400;             // 400 × 500 = 200k transactions per run (two years for a small business is a few thousand)
 const MAX_PAGINATION_RESTARTS = 3;
 const MAX_MATCHING_PASSES = 20;           // × 500 rows per hourly run; the next hour continues
-const MAX_AMOUNT = 9999999999.99;       // numeric(12,2) ceiling, as the CSV parser
+const MAX_AMOUNT = 9999999999.99;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;       // numeric(12,2) ceiling, as the CSV parser
 
 // ── token vault ─────────────────────────────────────────────────────────────
 
@@ -393,7 +394,7 @@ async function setupItem(itemId, input) {
   const today = etDateString(new Date());
   const cleaned = input.map((a) => {
     const label = typeof a.accountLabel === 'string' ? a.accountLabel.trim() : '';
-    if (typeof a.id !== 'string') throw badRequest('each account needs its id');
+    if (typeof a.id !== 'string' || !UUID_RE.test(a.id)) throw badRequest('each account needs its id');
     if (!label || label.length > 100) throw badRequest('account label is required (max 100 chars)');
     if (!['bank', 'card'].includes(a.accountType)) throw badRequest("account type must be 'bank' or 'card'");
     if (!isDateStr(a.syncFrom)) throw badRequest('start date must be YYYY-MM-DD');
@@ -410,8 +411,8 @@ async function setupItem(itemId, input) {
     if (!item || item.status === 'removed') { const e = new Error('connection not found'); e.status = 404; throw e; }
     const current = await trx('plaid_accounts').where({ plaid_item_id: itemId });
     // exactly the stored account set: every id once, none missing
-    const idList = (list) => list.map(a => a.id).sort().join(',');
-    if (idList(cleaned) !== idList(current)) {
+    const ids = new Set(cleaned.map(a => a.id));
+    if (ids.size !== cleaned.length || ids.size !== current.length || current.some(a => !ids.has(a.id))) {
       throw badRequest('account list does not match this connection — reload and try again');
     }
     const byId = new Map(current.map(a => [a.id, a]));
@@ -850,7 +851,8 @@ async function syncItem(itemId, { runMatching = true } = {}) {
 
   let matching = null;
   let matchingError = null;
-  if (runMatching && result.inserted > 0) {
+  // a correction replaces its row (updated) — fresh values to match too
+  if (runMatching && (result.inserted > 0 || result.updated > 0)) {
     try {
       matching = await bankImport.runDeterministicMatching({ limit: 500 });
     } catch (err) {
