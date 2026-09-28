@@ -61,7 +61,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -8549,6 +8549,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
               const c = siblingFirstApplication.canceledSetupFee;
               terminalCompletionInvoice = { id: c.id, invoice_number: c.invoice_number, status: c.status };
               completionTerminalIncludedSetupFee = true;
+            } else if (!existingCompletionInvoice) {
+              // Owner ruling — REFUSE AFTER A VOID (billing-lane.js
+              // combinedInvoiceVoidedWithoutLiveReplacement's own header):
+              // findFirstApplicationInvoiceForEstimateService's own query
+              // EXCLUDES 'void' entirely, so a voided combined
+              // first-application invoice — and a canceled recognized one
+              // with no setup-fee line — are BOTH invisible to it and to
+              // the canceledSetupFee check above, indistinguishable from
+              // "nothing was ever minted for this trip." An UNPRICED,
+              // estimate-linked, sibling-eligible visit (never the PRICED
+              // reserved row itself — completing or charging IT bills the
+              // combined amount once, which is correct, and the office
+              // handles the rest by hand) must never auto-mint the
+              // per-application fee for a trip whose combined invoice
+              // died. Reuses the EXISTING terminal-invoice park/alert
+              // machinery above — no new completion-side mint/split logic.
+              const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
+                || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+              if (isSiblingCoverageEligibleVisit({
+                sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
+              })) {
+                const voidedCombined = await combinedInvoiceVoidedWithoutLiveReplacement(svc, db);
+                if (voidedCombined) {
+                  terminalCompletionInvoice = {
+                    id: voidedCombined.id, invoice_number: voidedCombined.invoice_number, status: voidedCombined.status,
+                  };
+                }
+              }
             }
           }
         }

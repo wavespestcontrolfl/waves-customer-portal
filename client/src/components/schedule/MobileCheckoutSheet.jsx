@@ -315,9 +315,13 @@ export default function MobileCheckoutSheet({
   // (round-8 P1: no extras-only invoice on a covered visit at all) — Charge
   // stays disabled for EVERY non-'none' state, not only 'review'.
   const siblingCoverageVerdict = service.billingLane?.siblingCoverage || null;
-  // Not scoped to `!hasOwnPrice`: the server also marks a PRICED visit
-  // 'review' when its voided combined invoice's sibling was billed
-  // separately (pricedSiblingCoverageVerdict), and Charge Now 409s it.
+  // Not scoped to `!hasOwnPrice`: the server's siblingCoverageForSchedule
+  // (billing-lane.js) never marks a PRICED reserved row 'review' (owner
+  // ruling — REFUSE AFTER A VOID: only the unpriced sibling refuses, in
+  // either charging order), so this is a defensive read, not a live path —
+  // harmless either way, and keeps this sheet agreeing with whatever state
+  // the server ever sends without needing to know which visits can carry
+  // it.
   const siblingNeedsReview = siblingCoverageVerdict?.state === 'review';
   const siblingCoverage = !hasOwnPrice && predictionKind === 'covered_sibling_invoice'
     ? siblingCoverageCopy(siblingCoverageVerdict, { siblingServiceType: service.billingLane?.prediction?.siblingServiceType || null })

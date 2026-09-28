@@ -60,17 +60,10 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId =
     q.where = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
-    // codex pre-push P0 (round 10): a priced svc linked to an estimate now
-    // also runs siblingCoverageRecheckInTrx's PRICED counterpart
-    // (pricedSiblingCoverageVerdict) under this same transaction — its own
-    // `.whereIn(status, [...])` / `.whereNull` / `.join` / `.noWait` calls
-    // need to resolve here too. Every existing test in this file wants "no
-    // voided first-application invoice, no unrecognized sibling invoice"
-    // (the ordinary case), so `.first()` stays `undefined` regardless.
-    q.whereIn = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
     q.join = jest.fn(() => q);
     q.noWait = jest.fn(() => q);
+    q.select = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.first = jest.fn(async () => {
@@ -86,6 +79,16 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId =
       }
       return undefined;
     });
+    // Owner ruling — REFUSE AFTER A VOID: an UNPRICED svc linked to an
+    // estimate runs siblingInvoiceCoverageVerdict's combinedInvoiceVoidedWithoutLiveReplacement
+    // guard under this same transaction — its 'invoices as i' query is
+    // AWAITED DIRECTLY (thenable — mirrors knex's `.select()`), never
+    // through `.first()`. Every existing test in this file wants "nothing
+    // on the estimate" (the ordinary case), so this resolves to `[]`.
+    if (table === 'invoices as i') {
+      q.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      q.catch = (reject) => Promise.resolve([]).catch(reject);
+    }
     return q;
   };
   trx.raw = jest.fn(async () => undefined);
@@ -315,11 +318,11 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
         q.whereNot = jest.fn(() => q);
         q.whereNotIn = jest.fn(() => q);
         q.whereNull = jest.fn(() => q);
-        // codex pre-push P0 (round 10): this priced svc (estimated_price:
-        // 100, source_estimate_id set) now ALSO runs
-        // pricedSiblingCoverageVerdict's own `.whereIn(status, [...])`
-        // query — resolves to "no voided first-application invoice" here,
-        // same as every other query on this stub.
+        // Owner ruling — REFUSE AFTER A VOID: this priced svc's own mint
+        // never asks the sibling-coverage question at all
+        // (isSiblingCoverageEligibleVisit requires !hasOwnPrice), so no
+        // extra query shape is needed here — these chain methods are kept
+        // only for parity with the other stubs in this file.
         q.whereIn = jest.fn(() => q);
         q.join = jest.fn(() => q);
         q.forUpdate = jest.fn(() => q);
