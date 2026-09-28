@@ -151,6 +151,28 @@ describe('verdict classification', () => {
     expect(result.verdict).toBe('ok');
   });
 
+  // Local audit P1 (PR #5123): challenge detection needs interstitial-specific
+  // evidence — generic words in a healthy page's HTML must not flag it.
+  test.each([
+    ['a CAPTCHA form widget', '<div id="captcha" class="g-recaptcha"></div>'],
+    ['"access denied" in ordinary copy', '<p>Roof rats can find access denied to them elsewhere, so they move into attics.</p>'],
+    ['Cloudflare JavaScript Detections script', '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>'],
+  ])('a healthy page with %s stays ok', (_label, extra) => {
+    const body = PAGE_BODY.replace('</body>', `${extra}</body>`);
+    const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/x/', {
+      finalUrl: 'https://wavespestcontrol.com/x/', status: 200, headers: {}, body, hops: [{ url: 'https://wavespestcontrol.com/x/', status: 200 }],
+    });
+    expect(result.verdict).toBe('ok');
+  });
+
+  test('interstitial-only Cloudflare markup classifies as challenge even with a normal title', () => {
+    const body = '<html><head><title>Pest control costs</title><script>window._cf_chl_opt={cvId:"3"};</script></head><body><form id="challenge-form"></form></body></html>';
+    const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/x/', {
+      finalUrl: 'https://wavespestcontrol.com/x/', status: 200, headers: {}, body, hops: [{ url: 'https://wavespestcontrol.com/x/', status: 200 }],
+    });
+    expect(result.verdict).toBe('challenge');
+  });
+
   // Codex r1 (PR #5123): a broken deploy or edge rule serving a blank page
   // must never read as healthy.
   test.each([

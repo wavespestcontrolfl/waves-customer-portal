@@ -262,16 +262,33 @@ function extractCanonicalHref(html, requestedUrl) {
 // since every site shares the same BaseLayout template. Cast a slightly
 // wider net for any other soft-404 wording a page might carry.
 const SOFT_404_RE = /\b(page not found|404[\s:—-]|we can.?t find that page|this page (doesn.?t|does not) exist)\b/i;
-const CHALLENGE_RE = /\b(just a moment|verify you are human|checking your browser|attention required|access denied|captcha|cf-browser-verification|please enable cookies)\b/i;
+// Challenge detection uses interstitial-SPECIFIC evidence only — never generic
+// words in the raw HTML (a healthy page with a `<div id="captcha">` form
+// widget, or "access denied" in its copy, must stay ok). Three signals:
+// an interstitial <title>; interstitial-only Cloudflare markup (cf_chl_opt /
+// chl_page / challenge-form — NOT the /cdn-cgi/challenge-platform/scripts/jsd
+// script that Cloudflare's JavaScript Detections inject into normal pages);
+// or challenge wording as the visible text of a SHORT page.
+const CHALLENGE_TITLE_RE = /^\s*(just a moment|attention required|access denied|verify you are human|checking your browser|security check|please wait)\b/i;
+const CHALLENGE_MARKUP_RE = /(cf_chl_opt|window\._cf_chl|\bchl_page\b|id=["']challenge-(form|running|stage)["']|cf-browser-verification)/i;
+const CHALLENGE_TEXT_RE = /\b(verify you are human|checking (your browser|if the site connection is secure)|enable javascript and cookies to continue|complete the security check)\b/i;
+const CHALLENGE_MAX_VISIBLE_CHARS = 1500;
+
+function isChallengePage(title, body) {
+  if (CHALLENGE_TITLE_RE.test(title)) return true;
+  if (CHALLENGE_MARKUP_RE.test(body)) return true;
+  const text = visibleText(body);
+  return text.length <= CHALLENGE_MAX_VISIBLE_CHARS && CHALLENGE_TEXT_RE.test(text);
+}
 
 const MIN_VISIBLE_TEXT_CHARS = 64;
 
-function visibleTextLength(html) {
+function visibleText(html) {
   return String(html || '')
     .replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim().length;
+    .trim();
 }
 
 function isNoindexSignal(metaRobots, headers) {
@@ -324,7 +341,7 @@ function classifyOwnedUrlHealth(requestedUrl, chain) {
     return { verdict: 'fetch_blocked', httpStatus: status, finalUrl, detail: { ...detailBase, reason: 'response_truncated' } };
   }
   const title = extractTitle(body);
-  if (CHALLENGE_RE.test(body) || CHALLENGE_RE.test(title)) {
+  if (isChallengePage(title, body)) {
     return { verdict: 'challenge', httpStatus: status, finalUrl, detail: { ...detailBase, title } };
   }
   if (SOFT_404_RE.test(title) || SOFT_404_RE.test(body.slice(0, 4000))) {
@@ -346,7 +363,7 @@ function classifyOwnedUrlHealth(requestedUrl, chain) {
   // A 204, or a 2xx with no visible text, is a page a human cannot read —
   // never a clean result (e.g. a broken deploy or edge rule serving a blank
   // body). Real fleet pages carry thousands of visible characters.
-  const visibleChars = visibleTextLength(body);
+  const visibleChars = visibleText(body).length;
   if (status === 204 || visibleChars < MIN_VISIBLE_TEXT_CHARS) {
     return { verdict: 'soft_404', httpStatus: status, finalUrl, detail: { ...detailBase, title, reason: 'empty_body', visibleChars } };
   }
