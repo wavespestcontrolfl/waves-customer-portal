@@ -781,67 +781,152 @@ async function anchorSoleProperty(target, cols, conn = db) {
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
-// Dead evidence for mostRecentAddressedSeriesSibling below: a cancelled,
-// skipped, no-show, or rescheduled-awaiting-replacement row never counts as
-// where a series lives. JOIN_INELIGIBLE_STATUSES also lists 'completed',
-// but a completed visit's stamped address is exactly the evidence prod
-// 2026-09-28 needed (a completed Square-imported parent's LATER completed
-// child carried the real property) — so that one status is kept live here.
+// Dead evidence for seriesAddressEvidence below: a cancelled, skipped,
+// no-show, or rescheduled-awaiting-replacement row never counts as where a
+// series lives. JOIN_INELIGIBLE_STATUSES also lists 'completed', but a
+// completed visit's stamped address is exactly the evidence prod 2026-09-28
+// needed (a completed Square-imported parent's LATER completed child
+// carried the real property) — so that one status is kept live here. A
+// NULL status (never observed today, but not excluded by the CHECK
+// constraint either) is treated as LIVE, not dead — round-1 Codex P1: a
+// bare `whereNotIn` drops NULL rows in Postgres three-valued logic
+// (`NULL NOT IN (...)` is UNKNOWN, never TRUE), silently discarding
+// perfectly good evidence; the query below says so explicitly.
 const DEAD_SIBLING_STATUSES = require('./visit-context/statuses')
   .JOIN_INELIGIBLE_STATUSES.filter((s) => s !== 'completed');
 
 /**
- * Most recent ADDRESSED sibling in the same recurring series — precedence 2
- * of anchorSeriesAddress below, for a series whose PARENT carries no address
- * of its own (an imported/legacy parent, or one that predates the
- * property-linkage migration) so anchorSoleProperty would otherwise fall
- * through straight to the customer's current primary address, which can be
- * a different house than every visit the series has actually been running
- * at (prod 2026-09-28: a Square-imported quarterly series' parent had no
+ * Pure decision: does the series' own evidence agree on ONE location?
+ * Exported for unit testing without a DB. `rows` must already be the
+ * CANDIDATE evidence rows for the series (dead-status and inactive-property
+ * rows excluded by the caller's query, see seriesAddressEvidence below),
+ * ordered newest-first (scheduled_date DESC, created_at DESC) — ties within
+ * one location key never matter, since every row sharing a key resolves to
+ * the same stamp.
+ *
+ * Each row is either PROPERTY evidence (`property_id` set — its location
+ * key is the property id) or ADDRESS-ONLY evidence (`property_id` null,
+ * `service_address_line1` non-blank — its key is the normalized street +
+ * 5-digit zip, so re-typing the same address under a new visit's stamp
+ * still reads as the same location). Any disagreement among the candidates
+ * — more than one distinct key — returns null: a single one-off visit
+ * address move (planAppointmentAddress(..., 'visit'), which stamps only
+ * that one row and never touches the series template) must never get
+ * promoted to "the series' address" just because it happens to be the
+ * newest row (round-1 Codex P1). No evidence at all also returns null.
+ *
+ * Unanimous PROPERTY evidence hydrates the stamp from that property's OWN
+ * current row (never a row's possibly-stale historical service_address_*
+ * copy) — property_id, address, coordinates — and returns null if that
+ * property is itself missing a street/city/state/zip (should not happen
+ * given the caller's active-property join, but never stamp a broken
+ * address). Unanimous ADDRESS-ONLY evidence stamps from the newest row's
+ * own service_address_* fields and lat/lng.
+ */
+function seriesAddressStampFromEvidence(rows) {
+  if (!rows || !rows.length) return null;
+  const locationKey = (row) => (row.property_id
+    ? `p:${row.property_id}`
+    : `a:${normStreet(row.service_address_line1)}|${normalizeZip(row.service_address_zip)}`);
+  const keys = new Set(rows.map(locationKey));
+  if (keys.size !== 1) return null;
+  const newest = rows[0];
+  if (newest.property_id) {
+    if (!newest.cp_address_line1 || !newest.cp_city || !newest.cp_state || !newest.cp_zip) return null;
+    return {
+      property_id: newest.property_id,
+      service_address_line1: newest.cp_address_line1,
+      service_address_line2: newest.cp_address_line2 || '',
+      service_address_city: newest.cp_city,
+      service_address_state: newest.cp_state,
+      service_address_zip: newest.cp_zip,
+      lat: newest.cp_latitude ?? null,
+      lng: newest.cp_longitude ?? null,
+    };
+  }
+  return {
+    property_id: null,
+    service_address_line1: newest.service_address_line1,
+    service_address_line2: newest.service_address_line2 || '',
+    service_address_city: newest.service_address_city,
+    service_address_state: newest.service_address_state,
+    service_address_zip: newest.service_address_zip,
+    lat: newest.lat ?? null,
+    lng: newest.lng ?? null,
+  };
+}
+
+/**
+ * The series' own address evidence — precedence 2 of anchorSeriesAddress
+ * below, for a series whose PARENT carries no address of its own (an
+ * imported/legacy parent, or one that predates the property-linkage
+ * migration) so anchorSoleProperty would otherwise fall through straight to
+ * the customer's current primary address, which can be a different house
+ * than every visit the series has actually been running at (prod
+ * 2026-09-28: a Square-imported quarterly series' parent had no
  * property_id/address; its children were linked to a non-primary rental;
  * extending the series stamped the new rows with the customer's current
  * main address instead).
  *
- * Walks the series (id = parentId OR recurring_parent_id = parentId, same
- * customer) newest-first (scheduled_date DESC, created_at DESC tiebreak),
- * skipping DEAD_SIBLING_STATUSES rows, and returns the first candidate that
- * carries a property_id or a non-empty service_address_line1 AND, when it
- * names a property_id, that property is still ACTIVE for this customer (a
- * deactivated property is not evidence of where the next visit belongs —
- * the walk keeps looking at the next-most-recent candidate rather than
- * giving up). Runs in a SAVEPOINT inside a caller transaction — same
- * discipline as soleActivePropertyId — so a failed read here cannot poison
- * the caller's transaction. Best-effort: null on error or no match.
+ * ONE query — a series is bounded, so no LIMIT (round-1 Codex P2: a limit
+ * applied before the active-property filter could miss an older valid row
+ * entirely; it is gone here since active-ness is now a JOIN condition, not
+ * a per-row follow-up query). Reads every live-enough row in the series
+ * (id = parentId OR recurring_parent_id = parentId, same customer_id),
+ * LEFT JOINed to its own customer_properties row (matched on id AND
+ * customer_id), keeping only rows that are CANDIDATE evidence: a
+ * property_id whose property is still ACTIVE for this customer, or no
+ * property_id with a non-blank service_address_line1. Hands the ordered
+ * result to the pure seriesAddressStampFromEvidence above. Runs in a
+ * SAVEPOINT inside a caller transaction — same discipline as
+ * soleActivePropertyId — so a failed read here cannot poison the caller's
+ * transaction. Best-effort: null on error or no unanimous match.
  */
-async function mostRecentAddressedSeriesSibling(parentId, customerId, cols, conn = db) {
+async function seriesAddressEvidence(parentId, customerId, cols, conn = db) {
   if (!parentId || !customerId || !cols || !cols.property_id) return null;
   const read = async (c) => {
-    const rows = await c('scheduled_services')
-      .where({ customer_id: customerId })
-      .andWhere(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
-      .whereNotIn('status', DEAD_SIBLING_STATUSES)
-      .andWhere(function () {
-        this.whereNotNull('property_id');
+    const query = c('scheduled_services as ss')
+      .leftJoin('customer_properties as cp', function ownProperty() {
+        this.on('cp.id', '=', 'ss.property_id').andOn('cp.customer_id', '=', 'ss.customer_id');
+      })
+      .where('ss.customer_id', customerId)
+      .andWhere(function seriesMembership() { this.where('ss.id', parentId).orWhere('ss.recurring_parent_id', parentId); })
+      .andWhere(function liveStatus() {
+        // NULL NOT IN (...) is UNKNOWN in Postgres, so a NULL status must be
+        // admitted explicitly — it is live evidence, not dead (see
+        // DEAD_SIBLING_STATUSES' own comment; round-1 Codex P1).
+        this.whereNull('ss.status').orWhereNotIn('ss.status', DEAD_SIBLING_STATUSES);
+      })
+      .andWhere(function candidateEvidence() {
+        this.where(function propertyEvidence() {
+          this.whereNotNull('ss.property_id').andWhere('cp.active', true);
+        });
         if (cols.service_address_line1) {
-          this.orWhere(function () {
-            this.whereNotNull('service_address_line1').andWhere('service_address_line1', '!=', '');
+          this.orWhere(function addressEvidence() {
+            this.whereNull('ss.property_id').whereRaw("trim(ss.service_address_line1) <> ''");
           });
         }
       })
-      .orderBy('scheduled_date', 'desc')
-      .orderBy('created_at', 'desc')
-      .limit(20)
-      .select('*');
-    for (const row of rows) {
-      if (row.property_id) {
-        const active = await c('customer_properties')
-          .where({ id: row.property_id, customer_id: customerId, active: true })
-          .first('id');
-        if (!active) continue;
-      }
-      return row;
-    }
-    return null;
+      .orderBy('ss.scheduled_date', 'desc')
+      .orderBy('ss.created_at', 'desc')
+      .select(
+        'ss.property_id as property_id',
+        'ss.service_address_line1 as service_address_line1',
+        'ss.service_address_line2 as service_address_line2',
+        'ss.service_address_city as service_address_city',
+        'ss.service_address_state as service_address_state',
+        'ss.service_address_zip as service_address_zip',
+        'ss.lat as lat',
+        'ss.lng as lng',
+        'cp.address_line1 as cp_address_line1',
+        'cp.address_line2 as cp_address_line2',
+        'cp.city as cp_city',
+        'cp.state as cp_state',
+        'cp.zip as cp_zip',
+        'cp.latitude as cp_latitude',
+        'cp.longitude as cp_longitude',
+      );
+    return seriesAddressStampFromEvidence(await query);
   };
   const inSavepoint = (fn) => (conn.isTransaction ? conn.transaction((sp) => fn(sp)) : fn(conn));
   try {
@@ -859,33 +944,35 @@ async function mostRecentAddressedSeriesSibling(parentId, customerId, cols, conn
  *  1. Whatever copyStampedServiceAddressFields already stamped from the
  *     parent (or its recurring_template_overrides.appointment_address) —
  *     never touched here.
- *  2. Still no property_id AND no service_address_line1: the most recent
- *     addressed, live-enough sibling in the SAME series — see
- *     mostRecentAddressedSeriesSibling above.
+ *  2. Still no property_id AND no service_address_line1: the series' own
+ *     UNANIMOUS address evidence — see seriesAddressEvidence above. A
+ *     mixed/ambiguous series (or one with no evidence) yields null and
+ *     falls straight through to (3).
  *  3. Otherwise, the existing sole-active-property fallback.
  * `parentId` is the series parent's id (recurring_parent_id on every
  * child). Same estimate-linkage guard as anchorSoleProperty: an
  * estimate-linked row (target.source_estimate_id set) is left for the
- * estimate linkage to stamp and never reaches the sibling lookup.
+ * estimate linkage to stamp and never reaches the evidence lookup.
  */
 async function anchorSeriesAddress(target, parentId, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
   if (cols.service_address_line1 && target.service_address_line1) return;
   if (cols.source_estimate_id && target.source_estimate_id) return;
-  const sibling = await mostRecentAddressedSeriesSibling(parentId, target.customer_id, cols, conn);
-  if (sibling) {
-    const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
-    // The sibling's address is adopted as ONE unit. The parent stamped no
-    // address (checked above), so any lat/lng it left on the row describe
-    // some other place, usually the customer's main-address geocode; keeping
-    // them would pin the new visit at a different house than its address.
-    // A null sibling zone keeps the parent's zone rather than blanking it.
-    for (const [field, value] of Object.entries(recurringServiceAddress(sibling))) {
-      if (!cols[field]) continue;
-      if (field === 'zone' && value == null) continue;
-      target[field] = value;
+  const stamp = await seriesAddressEvidence(parentId, target.customer_id, cols, conn);
+  if (stamp) {
+    // Adopted as ONE unit: the parent stamped no address (checked above),
+    // so any lat/lng it left on the row describe some other place, usually
+    // the customer's main-address geocode — every field the evidence names
+    // overwrites whatever the addressless parent left. The zone is always
+    // CLEARED (never copied) rather than kept from the parent — the old
+    // zone described the OLD property's routing, and every reader derives
+    // the zone fresh once it is falsy, same as an explicit address move
+    // (appointment-address.js's own `zone: null` stamp; round-1 Codex P1).
+    for (const [field, value] of Object.entries(stamp)) {
+      if (cols[field]) target[field] = value;
     }
+    if (cols.zone) target.zone = null;
   }
   await anchorSoleProperty(target, cols, conn);
 }
@@ -1161,6 +1248,8 @@ module.exports = {
   soleActivePropertyId,
   anchorSoleProperty,
   anchorSeriesAddress,
+  seriesAddressEvidence,
+  seriesAddressStampFromEvidence,
   bookingPropertyStamp,
   OCCUPANCY_TYPES,
   normStreet,
