@@ -237,14 +237,23 @@ function isMergedAwaySibling(sibling) {
  * one-off that merely lacks a recurrence label. Merged-away rows are
  * excluded — see isMergedAwaySibling.
  */
+// Distinct occurrences, keyed by ET calendar day — not ingestion rows. Two
+// unmerged feeds listing the same one-time event on the same day are ONE
+// occurrence; otherwise a recurrence_type='unknown' one-time event would read
+// as recurring and be dropped for lacking continuity before digest dedup runs.
+function occurrenceKey(row) {
+  const t = row?.start_at ? new Date(row.start_at) : null;
+  return t && !Number.isNaN(t.getTime()) ? etDateString(t) : `id:${row?.id}`;
+}
+
 function identityOccurrenceCount(event, pool) {
-  let count = 1;
+  const occurrences = new Set([occurrenceKey(event)]);
   for (const sibling of (Array.isArray(pool) ? pool : [])) {
     if (!sibling || String(sibling.id) === String(event?.id)) continue;
     if (isMergedAwaySibling(sibling)) continue;
-    if (isSameSeriesSibling(event, sibling)) count += 1;
+    if (isSameSeriesSibling(event, sibling)) occurrences.add(occurrenceKey(sibling));
   }
-  return count;
+  return occurrences.size;
 }
 
 /**
@@ -383,14 +392,27 @@ async function filterRepeatedDateIdentities(
     // debut carve-out applies ONLY to the series' first occurrence in the
     // pool. Both remain subject to every row-level gate
     // (isEligibleForFreshDigest).
-    if (event?.admin_status === 'featured') return event;
-
     // Owner ruling 2026-09-27: ANY recurring identity — including the
     // annual/seasonal/unknown-with-repeats types the routine list above
     // never covered — is eligible only for its first occurrence of the ET
     // calendar year.
     const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
     const isRecurringIdentity = isRecurringIdentityEvent(event, { occurrenceCount });
+
+    if (event?.admin_status === 'featured') {
+      // The star bypasses this filter's drops, but still carries the same
+      // verified recurrence evidence final validation computes, so the
+      // downstream isEligibleForFreshDigest check judges a starred
+      // continuity-proven series exactly as validation will.
+      if (!isRecurringIdentity) return event;
+      const starredFirstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
+      const starredDebut = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+      if (starredFirstOfYear && !starredDebut && isRoutineRecurringEvent(event)) {
+        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount };
+      }
+      return { ...event, __recurrenceOccurrenceCount: occurrenceCount };
+    }
+
     if (isRecurringIdentity) {
       const firstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
       // Reaching here already proves isRecurringFirstOfYearExempt(true, firstOfYear)

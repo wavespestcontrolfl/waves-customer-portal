@@ -18,6 +18,7 @@ const {
 } = require('../services/event-freshness');
 const {
   filterRepeatedDateIdentities,
+  identityOccurrenceCount,
   isPreviouslyFeaturedIdentity,
   assessFlagshipEventSelection,
 } = require('../services/newsletter-event-selection');
@@ -288,5 +289,49 @@ describe('operator star override still bypasses the calendar-year rule', () => {
       start_at: '2026-07-25T22:00:00Z',
       title: 'Weekly Yoga',
     }, REFERENCE)).toBe(false);
+  });
+
+  test('a starred continuity-proven first occurrence keeps the verified first-of-year marker', async () => {
+    const priorYear = weeklyEvent('prior-2025', { start_at: '2025-08-02T14:00:00Z' });
+    const starred = weeklyEvent('first-2026', { start_at: '2026-01-10T14:00:00Z', admin_status: 'featured' });
+    const second = weeklyEvent('second-2026', { start_at: '2026-01-17T14:00:00Z' });
+
+    const rows = await filterRepeatedDateIdentities([starred], {
+      reference: REFERENCE,
+      identityPool: [priorYear, starred, second],
+      yearPool: [priorYear, starred, second],
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].__recurringFirstOfYear).toBe(true);
+  });
+
+  test('two feeds listing the same one-time event on the same day count as one occurrence', async () => {
+    const oneTime = (id, sourceId) => ({
+      id,
+      title: 'Harvest Moon Lantern Walk',
+      admin_status: 'approved',
+      event_url: `https://events.example/${id}`,
+      event_type: 'one_time',
+      recurrence_type: 'unknown',
+      freshness_status: 'fresh_one_time',
+      venue_name: 'Bayfront Park',
+      city: 'Sarasota',
+      source_id: sourceId,
+      start_at: '2026-10-17T23:00:00Z',
+      times_featured: 0,
+      last_featured_at: null,
+      merged_into: null,
+    });
+    const a = oneTime('feed-a', 's1');
+    const b = oneTime('feed-b', 's2');
+
+    expect(identityOccurrenceCount(a, [a, b])).toBe(1);
+    const rows = await filterRepeatedDateIdentities([a], {
+      reference: REFERENCE,
+      identityPool: [a],
+      yearPool: [a, b],
+    });
+    expect(rows.map((row) => row.id)).toEqual(['feed-a']);
   });
 });
