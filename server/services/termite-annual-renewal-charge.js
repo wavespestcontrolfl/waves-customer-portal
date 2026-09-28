@@ -1009,6 +1009,17 @@ async function mintRenewalSuccessorUnderGate(
     // re-trying it ahead of newer ones. Column-tolerant: NULL (no notice
     // witnessed yet, or a pre-migration row) freezes nothing.
     const noticedFee = parent.renewal_noticed_fee == null || parent.renewal_noticed_fee === '' ? null : Number(parent.renewal_noticed_fee);
+    // Codex #4971 r24 P1: FAIL CLOSED on a witnessed notice with no frozen
+    // fee (a row noticed before 20260928030000 landed — the notice is never
+    // re-sent, so nothing would ever freeze it): the customer was told SOME
+    // fee we cannot verify, so the automatic renewal holds (its own bell)
+    // until staff record the noticed fee. Schema-tolerant by row shape: a
+    // row without the column at all (pre-migration deploy) is not judged.
+    const feeColumnPresent = Object.prototype.hasOwnProperty.call(parent, 'renewal_noticed_fee');
+    if (feeColumnPresent && parent.notice_45_sent_at && noticedFee == null) {
+      await ringRenewalBell(parent, 'notice_fee_unfrozen', `the renewal notice went out ${dateOnlyString(parent.notice_45_sent_at)} but the fee it quoted was never recorded on the term (renewal_noticed_fee is empty)`);
+      return null;
+    }
     if (noticedFee != null && Number.isFinite(noticedFee) && Math.round(noticedFee * 100) !== Math.round(prepayAmount * 100)) {
       await ringRenewalBell(parent, 'fee_changed_after_notice', `the term's fee is now $${prepayAmount.toFixed(2)} but the renewal notice quoted $${noticedFee.toFixed(2)}`);
       return null;
@@ -2346,6 +2357,14 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — fee changed after the renewal notice, auto-renewal on hold',
     body: `Customer ${parent.customer_id}'s termite annual renewal was NOT minted or charged: ${reason}. The customer was notified of the earlier fee. Restore that fee on the term (or agree the new fee with the customer and record it) — the automatic renewal stays on hold until the term's fee matches the noticed fee.`,
   }),
+  // Codex #4971 r24 P1: a witnessed 45-day notice with NO frozen fee (a row
+  // noticed before renewal_noticed_fee existed) — the fee the customer was
+  // told cannot be verified, so nothing is minted or charged until staff
+  // record it.
+  notice_fee_unfrozen: (parent, reason) => ({
+    title: 'Termite annual renewal — noticed fee not on record, auto-renewal on hold',
+    body: `Customer ${parent.customer_id}'s termite annual renewal was NOT minted or charged: ${reason}. Confirm the fee the customer was notified of and record it as the term's noticed fee — the automatic renewal stays on hold until then.`,
+  }),
   ambiguous: (successor, reason) => ({
     title: 'Termite annual renewal — charge outcome unclear, needs reconciliation',
     body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal may or may not have gone through (${reason}). Check Stripe and the invoice before collecting any other way — the saved method will NOT be retried automatically.`,
@@ -2555,8 +2574,13 @@ async function payLinkVerdict(successor, conn) {
   const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first();
   if (!stillPending) return { kind: 'handled', durable: true, reason: 'the renewal is no longer payment_pending' };
   if (successorDisputeSuspended(stillPending)) return { kind: 'dispute', durable: false, reason: 'the renewal payment is under dispute' };
-  const refusal = await successorRecoveryRefusal(successor, conn);
-  return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal } : null;
+  // Codex #4971 r24 P1: the refusal check reads the row AS RE-READ UNDER THE
+  // GATE (stillPending), never the caller's pre-gate object — an
+  // annual-prepay edit that won the gate first (a moved successor
+  // term_start, say) is visible only in the fresh row, and the stale one
+  // would still read as aligned with the parent.
+  const refusal = await successorRecoveryRefusal(stillPending, conn);
+  return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal, fresh: stillPending } : null;
 }
 
 async function actOnPayLinkVerdict(successor, verdict, conn, context) {
@@ -2565,7 +2589,7 @@ async function actOnPayLinkVerdict(successor, verdict, conn, context) {
     await stampSweepDeferred(successor, conn);
     return 'deferred';
   }
-  return actOnRecoveryRefusal(successor, verdict.refusal, conn, context);
+  return actOnRecoveryRefusal(verdict.fresh || successor, verdict.refusal, conn, context);
 }
 
 // Codex #4971 r11 P1 — the renewal send's AUTHORITATIVE clearance, run by
@@ -3405,6 +3429,13 @@ async function processGraceLapseSequence(term, conn) {
 
   const voidOutcome = await voidLapsedInvoice(term, conn);
   if (voidOutcome) return voidOutcome;
+  // Codex #4971 r24 P1: the station-retrieval task is a durable side effect
+  // the parent gate is meant to serialize (a concurrent manual renew/switch
+  // must not commit while it is raised) — a gate session lost since the
+  // void above means the lock is already released, so re-assert it here
+  // exactly as every provider boundary does. A lost gate throws; the sweep
+  // logs it and this lapse resumes next tick (lapseVoidAlreadyRanFor).
+  assertRenewalLockAlive();
   if (!(await raiseGraceLapseRetrievalTask(term, conn))) {
     return holdLapse(term, conn, { manualReview: false, reason: 'the station-retrieval step is not confirmed yet' });
   }
@@ -4147,6 +4178,7 @@ module.exports = {
     whereAttemptSubmitted,
     whereAttemptPresented,
     renewalWasPresented,
+    payLinkVerdict,
     withdrawRenewalSuccessor,
     classifyVoidRefusal,
     checkStillEligibleForRenewalAction,

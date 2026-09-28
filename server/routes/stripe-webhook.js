@@ -3045,6 +3045,11 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
       customerId: failedAttemptInvoice.customer_id,
       stripePaymentIntentId: piId,
       failureMessage: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
+      // Codex #4971 r24 P1: payment_intent.payment_failed is a CUSTOMER-side
+      // outcome by definition (bank return, async decline) — its code is
+      // the attempt's decline_code, so the renewal's recovery treats it as
+      // a decline (failure notice + pay link).
+      declineCode: paymentIntent.last_payment_error?.decline_code || failureCode || 'payment_failed',
     });
     if (attemptResolved) {
       logger.info(`[stripe-webhook] Released failed saved-card attempt ${failedSavedCardAttempt.id} for PI ${piId}`);

@@ -380,6 +380,28 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
     }
   });
 
+  // Codex #4971 r24 P1: a DIRECT (operator/admin) sendViaSMSAndEmail of a
+  // renewal invoice holds the renewal gate through its whole provider
+  // handoff too — not only the scheduled worker's path.
+  test('a direct sendViaSMSAndEmail of a renewal invoice takes withRenewalGate; a plain invoice does not', async () => {
+    const Charge = require('../services/termite-annual-renewal-charge');
+    const gate = jest.spyOn(Charge, 'withRenewalGate');
+    try {
+      const plain = await fixture({ renewal: false });
+      await Invoice.sendViaSMSAndEmail(plain.invoiceId, { firstDeliveryOnly: true });
+      expect(gate).not.toHaveBeenCalled();
+
+      const { invoiceId } = await fixture();
+      const successor = await db('annual_prepay_terms').where({ prepay_invoice_id: invoiceId }).first('id', 'renewed_from_term_id');
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly: true });
+      expect(result.ok).toBe(true);
+      expect(gate).toHaveBeenCalledWith(expect.objectContaining({ id: successor.id, renewed_from_term_id: successor.renewed_from_term_id }), expect.any(Function));
+      expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent' });
+    } finally {
+      gate.mockRestore();
+    }
+  });
+
   // Codex #4971 r16 P1 — finding 1: the queued/scheduled send
   // (processScheduledSends -> withRenewalSendGate -> sendViaSMSAndEmail)
   // never asserted the gate's own session liveness before its provider

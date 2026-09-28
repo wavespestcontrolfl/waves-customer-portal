@@ -97,6 +97,8 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
       term_start: '2025-09-27',
       term_end: '2026-09-26',
       notice_45_sent_at: new Date('2026-08-12T14:00:00Z'),
+      // r23/r24: the fee that notice quoted, frozen with its witness.
+      renewal_noticed_fee: 249,
       installation_anchored_at: new Date('2025-09-27T14:00:00Z'),
     });
     await db('customers').insert({ id: customerId });
@@ -188,6 +190,16 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     const result = await _private.mintRenewalSuccessor(parentId, db, TODAY);
     expect(result.minted).toBe(true);
     expect(await db('invoices')).toHaveLength(1);
+  });
+
+  // Codex #4971 r24 P1: a witnessed notice whose quoted fee was never frozen
+  // (noticed before the column existed) fails closed — nothing minted.
+  test('a witnessed notice with NO frozen fee on record mints nothing', async () => {
+    await db('annual_prepay_terms').where({ id: parentId }).update({ renewal_noticed_fee: null });
+    const { _private } = require('../services/termite-annual-renewal-charge');
+    await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
+    expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
+    expect(await db('invoices')).toHaveLength(0);
   });
 
   test('a parent whose on-time 45-day notice witness is gone mints nothing', async () => {

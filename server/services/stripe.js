@@ -489,6 +489,11 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
   customerId,
   stripePaymentIntentId,
   failureMessage,
+  // Codex #4971 r24 P1: the asynchronous failure's own code (a bank
+  // return, an async card decline) — persisted as decline_code so the
+  // termite renewal's crash recovery reads this as the CUSTOMER-side
+  // failure it is (a failure notice + pay link), never as a bare refusal.
+  declineCode = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId || !customerId || !stripePaymentIntentId) return false;
@@ -559,6 +564,7 @@ async function resolveFailedInvoiceSavedCardChargeAttempt({
         status: 'failed',
         stripe_payment_intent_id: stripePaymentIntentId,
         error_message: String(failureMessage || 'Stripe reported payment failure').slice(0, 1000),
+        ...(declineCode ? { decline_code: String(declineCode).slice(0, 100) } : {}),
         resolved_at: new Date(),
         updated_at: new Date(),
       });

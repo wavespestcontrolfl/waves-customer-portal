@@ -884,6 +884,31 @@ describe('termite annual renewal charge', () => {
         expect.stringMatching(/\$249\.00.*\$200\.00/), expect.objectContaining({ dedupeKey: 'termite-renewal-charge:parent-1:fee_changed_after_notice' }));
     });
 
+    // Codex #4971 r24 P1: a witnessed 45-day notice with NO frozen fee (a
+    // row noticed before renewal_noticed_fee existed) fails CLOSED — the fee
+    // the customer was told cannot be verified.
+    test('Codex #4971 r24 P1: a witnessed notice with no frozen fee on record is NOT minted — bell + null', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const parent = baseParent({ prepay_amount: '249.00', notice_45_sent_at: new Date('2026-08-12T14:00:00Z'), renewal_noticed_fee: null });
+      const { trx } = makeMintTrx({ parent });
+      const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
+      const { createTermForAnnualPrepay } = mockMintDeps();
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        withParentDecisionLock: jest.fn(async (_termId, fn) => fn()),
+        createTermForAnnualPrepay,
+        recordDecision: jest.fn(),
+        TERMITE_RENEWAL_GRACE_DAYS: 30,
+        termiteRenewalGraceDeadlineFor: jest.fn(() => '2099-01-01'),
+      }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      await expect(_private.mintRenewalSuccessor('parent-1', conn)).resolves.toBeNull();
+      expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/noticed fee not on record/i),
+        expect.stringContaining('2026-08-12'), expect.objectContaining({ dedupeKey: 'termite-renewal-charge:parent-1:notice_fee_unfrozen' }));
+    });
+
     test('Codex #4971 r23 P1: a parent whose fee still matches the noticed fee (or was never noticed) mints normally', async () => {
       for (const noticed of ['249.00', null]) {
         jest.resetModules();
@@ -2695,7 +2720,7 @@ describe('termite annual renewal charge', () => {
 
   function mockLapseDeps({
     voidInvoiceImpl, raiseTermiteRetrievalTaskImpl, recordDecisionImpl, assertNoInvoiceChargeReconciliationPendingImpl,
-    otherLiveTermiteCoverageImpl,
+    otherLiveTermiteCoverageImpl, assertParentDecisionLockAliveImpl,
   } = {}) {
     const voidInvoice = jest.fn(voidInvoiceImpl || (async () => ({})));
     jest.doMock('../services/invoice', () => ({ voidInvoice }));
@@ -2719,13 +2744,18 @@ describe('termite annual renewal charge', () => {
     // the ordinary raise unchanged unless it explicitly passes its own
     // otherLiveTermiteCoverageImpl.
     const otherLiveTermiteCoverage = jest.fn(otherLiveTermiteCoverageImpl || (async () => null));
-    jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision, withParentDecisionLock, otherLiveTermiteCoverage }));
+    // Codex #4971 r24 P1: the gate-liveness assertion the lapse re-runs
+    // immediately before raising the station-retrieval task (a durable side
+    // effect the parent gate serializes). Default: alive.
+    const assertParentDecisionLockAlive = jest.fn(assertParentDecisionLockAliveImpl || (() => undefined));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision, withParentDecisionLock, otherLiveTermiteCoverage, assertParentDecisionLockAlive }));
     const assertNoInvoiceChargeReconciliationPending = jest.fn(
       assertNoInvoiceChargeReconciliationPendingImpl || (async () => undefined),
     );
     jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending }));
     return {
       voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending, withParentDecisionLock, otherLiveTermiteCoverage,
+      assertParentDecisionLockAlive,
     };
   }
 
@@ -2906,6 +2936,50 @@ describe('termite annual renewal charge', () => {
     // the sequence (voidInvoice self-heals as a no-op, then retrieval +
     // parent decision + complete), never be misread as "settled by
     // something else" and retired with the retrieval/decision skipped.
+    // Codex #4971 r24 P1: the station-retrieval task is a durable side effect
+    // the parent gate serializes — the lapse re-asserts the gate session is
+    // alive immediately before raising it, and a lost gate raises nothing.
+    test('Codex #4971 r24 P1: the lapse asserts the gate is alive right before raising retrieval', async () => {
+      mockCommon();
+      const { raiseTermiteRetrievalTask, assertParentDecisionLockAlive } = mockLapseDeps();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { conn } = makeLapseConn({
+        freshSuccessor: { status: 'cancelled', renewal_decision: null, prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'void', paid_at: null },
+      });
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      await expect(_private.processGraceLapseForTerm(term, conn)).resolves.toBe('lapsed');
+      expect(assertParentDecisionLockAlive).toHaveBeenCalled();
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      const lastAssert = Math.max(...assertParentDecisionLockAlive.mock.invocationCallOrder.filter((n) => n < raiseTermiteRetrievalTask.mock.invocationCallOrder[0]));
+      expect(Number.isFinite(lastAssert)).toBe(true);
+    });
+
+    test('Codex #4971 r24 P1: a gate session lost before retrieval raises NOTHING — the lapse throws and resumes next tick', async () => {
+      mockCommon();
+      const { raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        assertParentDecisionLockAliveImpl: () => { throw Object.assign(new Error('parent-decision lock session lost'), { code: 'PARENT_DECISION_LOCK_LOST' }); },
+      });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { conn, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'cancelled', renewal_decision: null, prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'void', paid_at: null },
+      });
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      await expect(_private.processGraceLapseForTerm(term, conn)).rejects.toThrow('lock session lost');
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_outcome: 'lapsed' }));
+    });
+
     test('P1: a crash after voidInvoice committed (successor cancelled, invoice void, renewal_decision NULL) resumes and completes — never retired', async () => {
       mockCommon();
       const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();

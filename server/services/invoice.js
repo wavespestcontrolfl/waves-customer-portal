@@ -6274,16 +6274,38 @@ const InvoiceService = {
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
       _zeroDueRetried = false,
+      // Internal-only: set by the renewal-gate re-entry below so the inner
+      // call does not re-read the term link. Never set by a real caller.
+      _underRenewalGate = false,
     } = {},
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true, _underRenewalGate,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
     const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+    // Codex #4971 r24 P1: a termite RENEWAL invoice's send holds the renewal
+    // gate through its ENTIRE provider handoff — not only while the claim is
+    // checked (claimRenewalInvoiceForSend's clearance) — for EVERY caller,
+    // the direct operator/admin sends included, not just the scheduled
+    // worker (withRenewalSendGate) and the renewal sweep. Otherwise a parent
+    // cancellation or refund committing while the invoice is 'sending' still
+    // lets the SMS/email deliver a live pay link. Re-entrant: a caller that
+    // already holds these keys (the worker, the sweep) runs straight through
+    // withParentDecisionLock's held-key skip; the flag only spares the
+    // re-read on the inner call.
+    if (!_underRenewalGate && accrualPre?.annual_prepay_term_id) {
+      const renewal = await termiteRenewalTermForInvoice(invoiceId, accrualPre.annual_prepay_term_id);
+      if (renewal) {
+        return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
+          requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
+          emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+        }));
+      }
+    }
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }

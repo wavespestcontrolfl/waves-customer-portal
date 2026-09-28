@@ -1445,6 +1445,32 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     });
   });
 
+  // Codex #4971 r24 P1: the pay-link clearance judges the successor AS
+  // RE-READ UNDER THE GATE, never the caller's pre-gate object — an
+  // annual-prepay edit that won the gate first (a moved successor
+  // term_start) is visible only in the fresh row.
+  describe('r24: payLinkVerdict reads the fresh successor row', () => {
+    test('a successor whose term_start moved after the caller fetched it is refused as parent_term_moved from the fresh row', async () => {
+      const parent = await insertParent({ term_end: daysFromToday(-35) });
+      const invoice = await insertInvoice({ status: 'draft' });
+      const inserted = await insertSuccessor(parent, invoice, { term_start: daysFromToday(-34), created_at: new Date() });
+      const stale = await db('annual_prepay_terms').where({ id: inserted.id }).first();
+      // The edit lands between the caller's read and the gate.
+      await db('annual_prepay_terms').where({ id: inserted.id }).update({ term_start: daysFromToday(-30) });
+      const verdict = await Charge._private.payLinkVerdict(stale, db);
+      expect(verdict).toMatchObject({ kind: 'refused', durable: true, reason: expect.stringContaining('parent_term_moved') });
+      expect(verdict.fresh.term_start instanceof Date ? verdict.fresh.term_start.toISOString().slice(0, 10) : String(verdict.fresh.term_start)).toBe(daysFromToday(-30));
+    });
+
+    test('an unmoved successor clears exactly as before', async () => {
+      const parent = await insertParent({ term_end: daysFromToday(-35) });
+      const invoice = await insertInvoice({ status: 'draft' });
+      const inserted = await insertSuccessor(parent, invoice, { term_start: daysFromToday(-34), created_at: new Date() });
+      const row = await db('annual_prepay_terms').where({ id: inserted.id }).first();
+      await expect(Charge._private.payLinkVerdict(row, db)).resolves.toBeNull();
+    });
+  });
+
   // Codex #4971 r10 P1s — the charge's provider boundary (stripe.js, under
   // the invoice / customer locks; its own suite) refuses a payer-stamped
   // invoice (PAYER_BILLED_GUARD) and a deleted account (CUSTOMER_DELETED).
