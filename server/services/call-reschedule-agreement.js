@@ -346,12 +346,20 @@ function statesSlotWords(quote, words) {
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say
-// the recorded hour, on the hour (periodIsTheHours's minute check), and any
-// day words the slot records.
-function commitsToSlot(quote, words) {
+// the recorded hour, on the hour (periodIsTheHours's minute check), any day
+// words the slot records, and no am/pm or part of the day but the slot's.
+function commitsToSlot(quote, words, hour24) {
   const withoutPeriod = { ...words, period: null };
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    && (typeof words.day !== 'string' || holds(quote, words.day));
+    && (typeof words.day !== 'string' || holds(quote, words.day))
+    && halvesSaid(quote).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+}
+
+// The halves of the day this quote's am/pm and part-of-day words state
+// ("at two AM" -> am), so a commitment in the other half never counts.
+const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
+function halvesSaid(quote) {
+  return normalize(quote).split(' ').filter((t) => Object.hasOwn(HALF_WORDS, t)).map((t) => HALF_WORDS[t]);
 }
 
 // The recorded words the slot quote must hold.
@@ -401,7 +409,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
-  if (!commitments.some((q) => commitsToSlot(q, words))) return fail('agent_commitment_not_the_slot');
+  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 

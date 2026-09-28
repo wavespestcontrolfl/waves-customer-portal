@@ -121,7 +121,9 @@ describe('groundRescheduleAgreement', () => {
     ] }), `Caller: Thursday at two in the afternoon works for me.\nAgent: ${commit}.`);
     expect(committed('We will see you Friday at three')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Okay we will see you then')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('We will see you Thursday at two AM')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Great, we will see you Thursday at two').ok).toBe(true);
+    expect(committed('Great, we will see you Thursday at two PM').ok).toBe(true);
   });
 
   test('a quote under three words must be the whole turn, never a fragment of a longer one', () => {
