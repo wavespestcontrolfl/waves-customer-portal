@@ -162,6 +162,14 @@ describe('watering questions answer with the weekly plan when the report carries
       'I spotted fungus; do we need to run the sprinklers?',
       'I observed dry spots; do I still need to water?',
       'I found mushrooms; is it okay to still water?',
+      // Passive / impersonal subjects and other modals (PR #5033 P2).
+      'I found mushrooms; may I water?',
+      'I found mushrooms; would I water this week?',
+      'I found mushrooms; should the lawn be watered?',
+      'I spotted dry areas; is the lawn getting watered enough?',
+      'I observed dry spots; was it watered?',
+      'I found dry spots; does it need water?',
+      'I spotted fungus; does my lawn still need watering?',
     ]) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
@@ -244,6 +252,14 @@ describe('watering questions answer with the weekly plan when the report carries
       'I found mushrooms; is it still okay to water?',
       'I found mushrooms; is it fine to water?',
       'I spotted fungus; am I allowed to water?',
+      // Passive / impersonal subjects and other modals (PR #5033 P2).
+      'I found mushrooms; may I water?',
+      'I found mushrooms; would I water this week?',
+      'I found mushrooms; should the lawn be watered?',
+      'I spotted dry areas; is the lawn getting watered enough?',
+      'I observed dry spots; was it watered?',
+      'I found dry spots; does it need water?',
+      'I spotted fungus; does my lawn still need watering?',
     ]) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(expected);
@@ -256,6 +272,8 @@ describe('watering questions answer with the weekly plan when the report carries
       'What did you find by the sprinkler?',
       'How much fungus did you find by the sprinkler?',
       'I observed mushrooms by the sprinkler, do you know what they are?',
+      // Water as a noun modifier is not a watering ask.
+      'I found mushrooms by the sprinkler; is it water damage?',
     ]) {
       const findingsAnswer = answerServiceReportQuestion({ question, data });
       expect(findingsAnswer).toMatch(/Sprinkler area checked/);

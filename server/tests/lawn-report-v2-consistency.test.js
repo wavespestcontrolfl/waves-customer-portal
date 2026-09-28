@@ -103,6 +103,7 @@ describe('unconfirmed product directions take precedence throughout the report',
 describe('aftercare verdict fixture table (PR #5033 findings)', () => {
   const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
   const { buildAftercare } = require('../services/service-report/lawn-report-v2');
+  const { applyLawnReportNarrative } = require('../services/service-report/lawn-report-narrative');
   const CONFIRM = /Confirm the product watering directions/;
   const PLAN_CONDITION = /before applying the plan below/;
   const RUN_PLAN = { title: 'This week: run once', detail: 'One turf cycle before Friday.', action: 'run' };
@@ -120,6 +121,34 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       reportV2: { aftercare: reviewAftercare(), water },
     },
   });
+
+  const creditedAftercare = () => ({
+    watering: 'Water in with 0.25 inches today.', waterInRequired: true, neutral: false,
+    creditableWaterIn: true, evidenceSource: 'product_instruction', wateringHold: false, needsReview: false,
+  });
+  const neutralAftercare = () => ({ watering: 'No special watering is needed because of today’s treatment.', neutral: true });
+  // Drought-signal report (the only one the overlay rewrites) whose model
+  // output swaps every customer action for generic drought advice.
+  const GENERIC_DROUGHT = 'Add extra irrigation every day this week to beat the drought.';
+  const rewrite = async (aftercare, observations) => {
+    const report = buildLawnReportV2({ lawnAssessment: CASES.deficit });
+    report.aftercare = aftercare;
+    const before = JSON.parse(JSON.stringify(report));
+    const callModel = jest.fn(async () => ({ ok: true, json: {
+      customerAction: GENERIC_DROUGHT,
+      insights: report.insights.map(() => ({ customerAction: GENERIC_DROUGHT })),
+    } }));
+    return { before, callModel, out: await applyLawnReportNarrative(report, { observations }, { callModel }) };
+  };
+  const keepsCreditedActions = ({ before, callModel, out }) => {
+    expect(before.water.droughtSignal).toBe(true);
+    expect(callModel).toHaveBeenCalledTimes(1);
+    expect(out.aftercare).toEqual(creditedAftercare());
+    expect(out.snapshot.customerAction).toBeTruthy();
+    expect(out.snapshot.customerAction).toBe(before.snapshot.customerAction);
+    expect(out.insights.map((i) => i.customerAction)).toEqual(before.insights.map((i) => i.customerAction));
+    expect(JSON.stringify(out)).not.toContain(GENERIC_DROUGHT);
+  };
 
   test.each([
     ['P1 hero watering advice waits on aftercare review', () => render('deficit', RUN_PLAN), (report) => {
@@ -151,7 +180,20 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       expect(aftercare.watering).not.toMatch(/not recorded/);
       expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
     }],
-  ])('%s', (_finding, run, check) => check(run()));
+    ['P1 narrative rewrite keeps credited aftercare customer actions', () => rewrite(creditedAftercare(), 'Credited aftercare rewrite.'), keepsCreditedActions],
+    ['P1 narrative cache never serves another aftercare verdict', async () => {
+      await rewrite(neutralAftercare(), 'Shared narrative facts.');
+      return rewrite(creditedAftercare(), 'Shared narrative facts.');
+    }, keepsCreditedActions],
+    ['P2 passive watering question outranks findings wording', () => ['I found mushrooms; should the lawn be watered?', 'I found mushrooms; may I water?', 'You found dry spots; does it need water?']
+      .map((question) => ask(question, { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } })), (answers) => {
+      for (const answer of answers) {
+        expect(answer).toMatch(PLAN_CONDITION);
+        expect(answer).toContain(RUN_PLAN.title);
+        expect(answer).not.toMatch(/Mushrooms observed/);
+      }
+    }],
+  ])('%s', async (_finding, run, check) => check(await run()));
 });
 
 describe('structured moisture evidence owns sprinkler advice', () => {

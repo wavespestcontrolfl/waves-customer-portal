@@ -37,7 +37,19 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
-const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could)\s+(?:i|we)\s+|do\s+(?:i|we)\s+(?:(?:still\s+)?(?:need|have)\s+to\s+)?|is\s+it\s+(?:still\s+)?(?:okay|ok|fine|alright|all\s+right|safe)\s+to\s+|(?:am\s+i|are\s+we)\s+(?:still\s+)?allowed\s+to\s+)(?:still\s+)?(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
+// A question whose ask is watering itself: an auxiliary or modal and its
+// subject (the customer, the lawn, "it"), then only need / permission /
+// voice words before the watering verb — active ("May I water?", "Do I need
+// to water?") or passive ("Should the lawn be watered?", "Is it getting
+// watered?", "Does it need water?"). Any other word between them ("Did you
+// find mushrooms by the sprinkler?") leaves the question its own intent, and
+// water as a noun modifier ("Is it water damage?") is not a watering ask.
+const WATERING_ASK_SRC = String.raw`(?:should|shall|can|could|may|might|must|would|will|do|does|did|is|are|was|were|am|has|have)\s+(?:i|we|you|it|they|(?:the|my|our|your)\s+(?:lawn|grass|yard|turf|zones?|sprinklers?))\s+(?:(?:still|also|even|really|ever|already|be|get|getting|being|been|need|needs|have|has|to|allowed|okay|ok|fine|alright|all\s+right|safe)\s+){0,4}`;
+const WATERING_TERM_SRC = String.raw`(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b(?!\s+(?:damage|stains?|meters?|lines?|leaks?|bills?|pooling|puddles?)\b)`;
+const WATERING_ADVICE_QUESTION_RE = new RegExp(
+  String.raw`\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:${WATERING_ASK_SRC})?|${WATERING_ASK_SRC})${WATERING_TERM_SRC}`
+  + String.raw`|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b`,
+);
 // A request for the customer's own next move ("What do I need to do about
 // the mushrooms I observed?", "Anything we should do…", "Any action needed…",
 // "How do I handle…"). Observation words inside it qualify the request; they
@@ -710,7 +722,7 @@ function answerServiceReportQuestion({
   // must fall through to the appointment router (codex gh-r46).
   const zoneRuntimeIntent = !/\btime\s*zones?\b/.test(q)
     && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
-  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
+  const wateringIntent = /\b(water(?:s|ed|ing)?|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
 
   const rules = questionRoutingRules({
     data, nextAppointment, weekPlan, aftercare, wateringIntent,

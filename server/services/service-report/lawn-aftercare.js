@@ -6,7 +6,8 @@ const LEGACY_NOTE_CONFIRMATION = 'Confirm the product watering directions with y
 
 // The one resolved verdict on this visit's watering aftercare. Every surface
 // that credits a watering-in, suppresses watering advice, or states a
-// customer task (hero, insights, follow-up card, report assistant) reads it
+// customer task (hero, insights, follow-up card, narrative rewrite, report
+// assistant) reads it
 // through the helpers below — never the raw flags.
 //   review — the recorded direction is unverified; the customer confirms it
 //   hold   — a product instruction restricts watering
@@ -78,6 +79,7 @@ function normalizeLawnAftercare(aftercare, { recordedWateringNotes = [] } = {}) 
 module.exports = {
   LEGACY_WATER_IN_COPY,
   WATER_IN_CONFIRMATION,
+  aftercareVerdict,
   hasCreditableWaterIn,
   wateringRestrictionAction,
   wateringPlanCondition,
