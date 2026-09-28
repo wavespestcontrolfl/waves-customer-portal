@@ -367,9 +367,19 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
 // EXISTING standing row a dedupeKey found, so a refresh only re-bells on
 // genuine new news — a resolved standing row (should not normally happen:
 // resolveOpsDigest drops the dedupeKey on resolve) also rings, for safety.
-function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
+//
+// ringOnFirstIdentity (opt-in, per sender): a standing row written before
+// its sender reported item identity has no list or hash to compare, so a
+// same-count swap would stay quiet. With this flag the first refresh that
+// brings identity to such a row rings once; later refreshes compare
+// normally. Opt-in so other senders' pre-identity rows don't all re-ring
+// together on the first run after deploy.
+function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity = false }) {
   return (existingRow, existingMeta) => {
     if (existingMeta?.resolved === true) return true;
+    // (A shrinking list still never rings, even on first identity.)
+    if (ringOnFirstIdentity && itemSetHash && !existingMeta?.itemSetHash && !Array.isArray(existingMeta?.itemKeys)
+      && !(metaCount(existingMeta) !== null && Number(count) < metaCount(existingMeta))) return true;
     return ringDecision({
       newCount, count, priorCount: metaCount(existingMeta),
       itemKeys, priorItemKeys: Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : undefined,
@@ -388,7 +398,7 @@ function ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) {
 // sender whose kind flips between runs (gbp-sync-health FIX<->ACT) is always
 // gated by the CURRENT emission's audience, never a cached one. Pulled out
 // to keep deliverOpsDigest's own complexity down.
-function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash }) {
+function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity }) {
   const ownerAudience = resolvedAudience === 'owner';
   // A FRESH insert — keyed or not — is compared with the prior ring of its
   // class: a sender that rotates its dedupeKey (agent-gap-digest, by ET
@@ -403,7 +413,7 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
-        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash }) } : {}),
+        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys, itemSetHash, ringOnFirstIdentity }) } : {}),
       } : {}),
     };
   }
@@ -517,7 +527,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, ringOnFirstIdentity = false, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -563,7 +573,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
-      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys, itemSetHash }),
+      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys, itemSetHash, ringOnFirstIdentity }),
       metadata: {
         opsKey: key,
         subject,

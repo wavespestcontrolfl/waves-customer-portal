@@ -449,6 +449,20 @@ describe('_assessReviewSyncHealth (escalation)', () => {
   // with no pulledCount given classifies stats_stale at all 4 locations
   // (no _stats row) — the same fixture the quiet-repeat/FIX->ACT tests above
   // use; only the class label matters here, not which one it is.
+  test('a pre-identity standing row rings on its first identified same-count refresh (codex r1 on #5282)', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = {
+      id: 'n_legacy_identity', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 4 }, // no itemKeys/itemSetHash
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(updates[2].read_at).toBeNull(); // rang: first identity at an equal count (4 -> 4)
+  });
+
   test('the direct rewrite stamps itemKeys/itemSetHash unconditionally, like count', async () => {
     const t1 = new Date(NOW - 3 * 3600000).toISOString();
     const t3 = new Date(NOW - 3600000).toISOString();

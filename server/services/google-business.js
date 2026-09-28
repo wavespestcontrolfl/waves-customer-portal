@@ -199,7 +199,7 @@ async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary,
   // FIX -> ACT is news to the owner even at an equal count (the FIX row may
   // have been read in Activity), so entering the owner audience rings.
   const shouldRing = fields.audience !== 'owner' || audienceFlipped
-    || ringOnRefreshFrom({ count: findings.length, itemKeys, itemSetHash })(standingRow, standingMeta);
+    || ringOnRefreshFrom({ count: findings.length, itemKeys, itemSetHash, ringOnFirstIdentity: true })(standingRow, standingMeta);
   const applyRouting = shouldRing || audienceFlipped;
   await trx('notifications').where({ id: standingRow.id }).update({
     title: next.title,
@@ -1998,6 +1998,9 @@ class GoogleBusinessService {
               summary,
               count: findings.length,
               itemKeys,
+              // A standing digest from before item identity rings on its
+              // first identified refresh (see ringOnRefreshFrom).
+              ringOnFirstIdentity: true,
               link: '/admin/reviews',
               metadata: { observedAt },
               trx: savepoint,

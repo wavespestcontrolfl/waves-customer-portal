@@ -186,6 +186,20 @@ describe('fullSetItemKeys', () => {
   });
 });
 
+describe('ringOnRefreshFrom — ringOnFirstIdentity', () => {
+  const legacy = { count: 4 };
+  test('opt-in: the first identified refresh of a pre-identity row rings at an equal count', () => {
+    expect(ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h', ringOnFirstIdentity: true })({}, legacy)).toBe(true);
+  });
+  test('never on a shrinking count, and not without the opt-in', () => {
+    expect(ringOnRefreshFrom({ count: 3, itemKeys: ['a'], itemSetHash: 'h', ringOnFirstIdentity: true })({}, legacy)).toBe(false);
+    expect(ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h' })({}, legacy)).toBe(false);
+  });
+  test('once the row carries identity, the normal comparison applies', () => {
+    expect(ringOnRefreshFrom({ count: 4, itemKeys: ['a'], itemSetHash: 'h', ringOnFirstIdentity: true })({}, { count: 4, itemKeys: ['a'], itemSetHash: 'h' })).toBe(false);
+  });
+});
+
 describe('decideRingForNewRow', () => {
   test('no prior row at all -> rings', async () => {
     const conn = makeConn(null);
