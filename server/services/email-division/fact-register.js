@@ -107,8 +107,20 @@ function planFactSync(fact, row, { today } = {}) {
     return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
   }
   if (expired) return row.active ? { action: 'retire', reason: 'expired' } : { action: 'unchanged' };
-  if (!legacy && meta.register_hash === shippedHash && row.active) return { action: 'unchanged' };
-  return { action: 'update', legacy, reactivate: !row.active };
+  const sameWording = !legacy && meta.register_hash === shippedHash;
+  if (sameWording && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
+  return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording };
+}
+
+// The metadata the register manages outside the wording fingerprint. An
+// expiry extended (or removed), a derived flag or the verification date
+// changing must reach the row even when no word of the fact changed —
+// otherwise hasProvenance keeps rejecting the fact at its FORMER deadline.
+function managedMetadataCurrent(meta, fact) {
+  return (meta.expires_on ?? null) === (fact.expiresOn ?? null)
+    && (meta.derived === true) === (fact.derived === true)
+    && meta.verified_on === VERIFIED_ON
+    && meta.source_url === fact.sourceUrls[0];
 }
 
 /**
@@ -127,8 +139,10 @@ function planStraySync(row) {
 }
 
 function rowValues(fact, existingMeta, now) {
+  // A row coming back from retirement drops its retirement stamps.
+  const { retired_on: _retiredOn, retired_reason: _retiredReason, ...carried } = existingMeta || {};
   const meta = {
-    ...(existingMeta || {}),
+    ...carried,
     source_url: fact.sourceUrls[0],
     source_urls: fact.sourceUrls,
     quote: fact.quote,
@@ -213,7 +227,7 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, re
         version: (Number(row.version) || 1) + 1,
       });
       await audit(trx, hasAuditLog, AUDIT_ACTIONS.updated, row, {
-        legacy_row: plan.legacy === true, reactivated: plan.reactivate === true,
+        legacy_row: plan.legacy === true, reactivated: plan.reactivate === true, metadata_only: plan.metadataOnly === true,
         previous_hash: meta.register_hash || null, register_hash: factFingerprint(fact),
       });
       result.updated.push(fact.slug);

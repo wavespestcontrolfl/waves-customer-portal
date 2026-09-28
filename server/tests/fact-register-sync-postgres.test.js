@@ -190,6 +190,36 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect(await rowOf(fact(9).slug)).toBeUndefined();
   });
 
+  test('an expiry-only change reaches the row, and an extended expiry brings a retired fact back without its retirement stamps', async () => {
+    const f = fact(1, { expiresOn: '2026-09-20' });
+    // Seed it live (before its expiry), then let it expire and retire.
+    await syncFactRegister({ conn: trx, now: new Date('2026-09-01T12:00:00Z'), facts: [f], retireStrays: false });
+    const retired = await sync([f]);
+    expect(retired.retired).toEqual([f.slug]);
+    expect((await rowOf(f.slug)).active).toBe(false);
+
+    // The notice is extended: same wording, later expiry.
+    const extended = { ...f, expiresOn: '2026-12-01' };
+    const r = await sync([extended]);
+    expect(r.updated).toEqual([f.slug]);
+    const back = await rowOf(f.slug);
+    expect(back.active).toBe(true);
+    expect(back.metadata.expires_on).toBe('2026-12-01');
+    expect(back.metadata.retired_on).toBeUndefined();
+    expect(back.metadata.retired_reason).toBeUndefined();
+    expect(back.metadata.register_hash).toBe(_internals.factFingerprint(extended));
+    const updates = await audits(back.id, 'knowledge_base.fact_updated');
+    expect(updates).toHaveLength(1);
+    expect(updates[0].metadata).toMatchObject({ reactivated: true, metadata_only: true });
+
+    // A further expiry-only change on the live row updates metadata again; an identical run is a no-op.
+    const r2 = await sync([{ ...extended, expiresOn: '2027-01-01' }]);
+    expect(r2.updated).toEqual([f.slug]);
+    expect((await rowOf(f.slug)).metadata.expires_on).toBe('2027-01-01');
+    const r3 = await sync([{ ...extended, expiresOn: '2027-01-01' }]);
+    expect(r3.unchanged).toEqual([f.slug]);
+  });
+
   test('a register row whose slug left the register is retired; a foreign row under a register slug is held untouched', async () => {
     const facts = [fact(1), fact(2)];
     await sync(facts);

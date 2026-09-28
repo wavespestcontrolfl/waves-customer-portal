@@ -19,7 +19,7 @@ const db = require('../models/db');
 const {
   listFacts, findUnverifiedClaims, factsPromptBlock, ensureFactRegister, SOURCE, _internals,
 } = require('../services/email-division/fact-register');
-const { FACTS } = require('../services/email-division/fact-register-data');
+const { FACTS, VERIFIED_ON } = require('../services/email-division/fact-register-data');
 const { planFactSync, planStraySync, factFingerprint, rowFingerprint, hasProvenance, resetEnsureStamp } = _internals;
 
 const NOW = new Date('2026-09-28T12:00:00Z');
@@ -172,11 +172,18 @@ describe('planFactSync (pure)', () => {
   const shipped = factFingerprint(fact);
   const TODAY = '2026-09-28';
 
+  function syncedMeta(extra = {}) {
+    return meta({
+      source_url: fact.sourceUrls[0], source_urls: fact.sourceUrls, quote: fact.quote, register_hash: shipped,
+      verified_on: VERIFIED_ON, derived: fact.derived === true, expires_on: fact.expiresOn || null, ...extra,
+    });
+  }
+
   function syncedRow(overrides = {}) {
     // Exactly what the sync writes for `fact`, with the hash stamped.
     return row({
       slug: fact.slug, title: fact.title, summary: fact.quote, content: fact.content, tags: fact.tags,
-      metadata: meta({ source_urls: fact.sourceUrls, register_hash: shipped }),
+      metadata: syncedMeta(),
       ...overrides,
     });
   }
@@ -211,12 +218,30 @@ describe('planFactSync (pure)', () => {
 
   test('an untouched row whose shipped content changed is updated', () => {
     const plan = planFactSync({ ...fact, content: `${fact.content} New sentence.` }, syncedRow(), { today: TODAY });
-    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false });
+    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: false });
   });
 
   test('a register row from before fingerprinting (no register_hash) is brought under management as a legacy update', () => {
     const legacy = syncedRow({ content: 'retailer-sourced content from the first seed', metadata: meta({ register_hash: undefined }) });
-    expect(planFactSync(fact, legacy, { today: TODAY })).toEqual({ action: 'update', legacy: true, reactivate: false });
+    expect(planFactSync(fact, legacy, { today: TODAY })).toEqual({ action: 'update', legacy: true, reactivate: false, metadataOnly: false });
+  });
+
+  test.each([
+    ['an expiry added', { expiresOn: '2027-01-01' }, syncedMeta()],
+    ['an expiry extended', { expiresOn: '2027-01-01' }, syncedMeta({ expires_on: '2026-10-02' })],
+    ['an expiry removed', {}, syncedMeta({ expires_on: '2026-12-01' })],
+    ['the derived flag changed', { derived: true }, syncedMeta()],
+    ['the verification date moved', {}, syncedMeta({ verified_on: '2026-09-01' })],
+    ['the primary source URL changed (same wording)', {}, syncedMeta({ source_url: 'https://ask.ifas.ufl.edu/publication/OLD' })],
+  ])('managed metadata that changed with no change of wording still updates the row: %s', (_label, factChange, metadata) => {
+    const plan = planFactSync({ ...fact, ...factChange }, syncedRow({ metadata }), { today: TODAY });
+    expect(plan).toEqual({ action: 'update', legacy: false, reactivate: false, metadataOnly: true });
+  });
+
+  test('a fact retired at its old expiry comes back, restamped, when the register extends the expiry', () => {
+    const retired = syncedRow({ active: false, metadata: syncedMeta({ expires_on: '2026-09-20', retired_on: '2026-09-20', retired_reason: 'expired' }) });
+    expect(planFactSync({ ...fact, expiresOn: '2026-12-01' }, retired, { today: TODAY }))
+      .toEqual({ action: 'update', legacy: false, reactivate: true, metadataOnly: true });
   });
 
   test('metadata stored as a JSON string is read the same way', () => {
@@ -228,8 +253,8 @@ describe('planFactSync (pure)', () => {
     const expired = { ...fact, expiresOn: '2026-09-28' };
     expect(planFactSync(expired, syncedRow(), { today: TODAY })).toEqual({ action: 'retire', reason: 'expired' });
     expect(planFactSync(expired, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'unchanged' });
-    // the day before expiry it is still a live fact
-    expect(planFactSync(expired, syncedRow(), { today: '2026-09-27' })).toEqual({ action: 'unchanged' });
+    // the day before expiry it is still a live fact (its row already carries that expiry)
+    expect(planFactSync(expired, syncedRow({ metadata: syncedMeta({ expires_on: '2026-09-28' }) }), { today: '2026-09-27' })).toEqual({ action: 'unchanged' });
   });
 
   test('an expired fact never overwrites a person\'s edit, even to retire it', () => {
@@ -238,7 +263,7 @@ describe('planFactSync (pure)', () => {
   });
 
   test('a retired-then-restored fact reactivates its untouched row', () => {
-    expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: true });
+    expect(planFactSync(fact, syncedRow({ active: false }), { today: TODAY })).toEqual({ action: 'update', legacy: false, reactivate: true, metadataOnly: true });
   });
 });
 
