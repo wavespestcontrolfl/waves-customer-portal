@@ -591,3 +591,20 @@ test('cancel_queued_message never sends anything and is not classified as custom
   expect(policy.cancel_queued_message).toMatchObject({ module: 'comms-tools.js', approval: 'ui_confirm', scope: 'record' });
   expect(policy.list_queued_messages).toMatchObject({ module: 'comms-tools.js', kind: 'read', scope: 'record' });
 });
+
+// Codex round 11 on #5224, P1: the confirmation card itself (not only the
+// model) shows WHICH queued text the irreversible cancel hits.
+test('the cancel card shows customer, masked recipient, send time and body preview — never just ids', () => {
+  jest.isolateModules(() => {
+    const { confirmationDisplayParams } = require('../routes/admin-intelligence-bar');
+    const shown = confirmationDisplayParams('cancel_queued_message', { message_id: MESSAGE_ID, customer_id: CUSTOMER_ID, channel: 'sms' }, {
+      proposal: true, customer_id: CUSTOMER_ID, customer_name: 'Synthetic Fixture', masked_recipient: '…0100',
+      kind: 'manual', scheduled_time: '2099-01-01T12:00:00.000Z', body_preview: 'Synthetic body',
+    });
+    expect(shown).toEqual({
+      customer: 'Synthetic Fixture', recipient: '…0100', kind: 'manual',
+      scheduled: '2099-01-01T12:00:00.000Z', message: 'Synthetic body',
+    });
+    expect(shown).not.toHaveProperty('message_id');
+  });
+});
