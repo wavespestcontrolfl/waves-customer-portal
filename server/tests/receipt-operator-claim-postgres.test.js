@@ -280,4 +280,13 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true })).toEqual({ alreadySent: true });
     expect(await job(invoiceId)).toBeUndefined();
   });
+
+  test('a text-only delivery stamps the invoice before the queued job is handed back (it still owes the email)', async () => {
+    const invoiceId = await seedJob();
+    await mockPg('invoices').insert({ id: invoiceId, receipt_sent_at: null });
+    const claim = await claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true });
+    await releaseOperatorReceiptClaim(claim, { emailDelivered: false, smsDelivered: true });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).receipt_sent_at).toBeInstanceOf(Date);
+    expect(await job(invoiceId)).toMatchObject({ status: 'queued', locked_by: null });
+  });
 });

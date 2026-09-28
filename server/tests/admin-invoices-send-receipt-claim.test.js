@@ -101,7 +101,7 @@ describe('POST /:id/send-receipt', () => {
     await withServer((base) => post(base, `/${INVOICE_ID}/send-receipt`, { via: 'sms' }));
     expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(recordOperatorReceiptEmail).not.toHaveBeenCalled();
-    expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ emailDelivered: false }));
+    expect(releaseOperatorReceiptClaim).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ emailDelivered: false, smsDelivered: true }));
   });
 
   test('a leg that throws still releases the claim', async () => {

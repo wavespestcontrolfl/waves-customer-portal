@@ -1582,7 +1582,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
           });
         }
       } finally {
-        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailOk, smsResult: { sent: smsOk }, emailResult: emailRes });
+        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailOk, smsDelivered: smsOk, smsResult: { sent: smsOk }, emailResult: emailRes });
       }
 
       if (emailOk || smsOk) {
@@ -2572,7 +2572,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
         });
       }
     } finally {
-      await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult.ok === true, smsResult, emailResult });
+      await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult.ok === true, smsDelivered: smsResult.ok === true, smsResult, emailResult });
     }
 
     if (emailResult.ok || smsResult.ok) {

@@ -480,15 +480,17 @@ async function recordOperatorReceiptEmail(claim) {
 // it was — it still owes the email — and a row the claim itself created is
 // removed, or queued if an enqueue took it over. Scoped to this claim's
 // token; a failure logs and leaves the row to recoverStaleLocks.
-async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsResult = null, emailResult = null } = {}) {
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsDelivered = false, smsResult = null, emailResult = null } = {}) {
   if (!claim?.id) return;
   const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
   try {
-    if (emailDelivered) {
-      // The invoice is stamped first (the caller's own stamp may have
-      // failed): if this write fails too, the claim stays running with its
-      // email evidence and recoverStaleLocks stamps and closes it later.
+    // Anything delivered stamps the invoice first (the caller's own stamp may
+    // have failed) — before a job is handed back, so its text leg skips. If
+    // this write fails too, the claim stays running for recoverStaleLocks.
+    if (emailDelivered || smsDelivered) {
       await db('invoices').where({ id: claim.invoiceId }).whereNull('receipt_sent_at').update({ receipt_sent_at: db.fn.now() });
+    }
+    if (emailDelivered) {
       await mine().update({
         status: 'completed',
         sms_result: smsResult,
