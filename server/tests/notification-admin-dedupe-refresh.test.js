@@ -187,6 +187,26 @@ test('a quiet refresh with NO audience change drops feed/quiet from the merge, s
   expect(meta.quiet).toBe(false);
 });
 
+// A refresh that rings must be visible: the ingest route precomputes quiet
+// from its 7-day lookback (which can find this very row), while the ring
+// itself comes from ringOnRefresh — a ringing refresh never lands quiet.
+test('a ringing refresh whose caller marked it quiet still lands in the bell (quiet false, feed cleared)', async () => {
+  await NotificationService.notifyAdmin('ops_digest', 'Voicemail — 2 calls to return', null, {
+    dedupeKey: 'k-ring-quiet', refreshOnDedupe: true, metadata: { kind: 'ACT', audience: 'owner', feed: null, quiet: false, count: 2 },
+  });
+  mockRows.notifications[0].read_at = new Date('2026-09-01T12:00:00Z');
+  const grew = await NotificationService.notifyAdmin('ops_digest', 'Voicemail — 3 calls to return', null, {
+    dedupeKey: 'k-ring-quiet', refreshOnDedupe: true, ringOnRefresh: () => true,
+    metadata: { kind: 'ACT', audience: 'owner', feed: 'activity', quiet: true, count: 3 },
+  });
+  expect(grew.rung).toBe(true);
+  const row = mockRows.notifications[0];
+  expect(row.read_at).toBeNull();
+  const meta = JSON.parse(row.metadata);
+  expect(meta.quiet).toBe(false);
+  expect(meta.feed).toBeNull();
+});
+
 // ringGate (admin-alerts-ring scope 2026-09-28): for a PLAIN (no dedupeKey)
 // admin row — the shape most senders use, one fresh insert per run — this
 // decides whether THIS insert rings, inside the same transaction as the

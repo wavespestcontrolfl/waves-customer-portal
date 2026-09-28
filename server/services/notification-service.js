@@ -187,6 +187,12 @@ function normalizeAdminNotificationText({ category, title, body, detail }) {
 // digestRowFields); a change to any of them is a real refresh.
 const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
 
+// Did this emission change anything a standing keyed row shows or routes by?
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged }) {
+  return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
+    || existing.link !== nextLink || detailChanged || routingChanged;
+}
+
 // notifyAdmin's refreshOnDedupe branch (admin-alerts-ring scope 2026-09-28):
 // omitted `ringOnRefresh` defaults to true — byte-identical to the
 // pre-existing "any content change re-bells" behavior.
@@ -202,8 +208,17 @@ async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
 // whatever `quiet` this emission carries alongside it) always applies even
 // on a quiet refresh — a FIX->ACT flip must never leave the owner's action
 // hidden behind a stale feed:'activity'.
+//
+// Ringing: this refresh clears read_at, so it must also be visible. A
+// caller that precomputed quiet:true from a different baseline (the ingest
+// route's 7-day lookback can find this very row) would otherwise ring a row
+// hidden behind feed:'activity' — `quiet` only ever rides on owner rows, so
+// clearing it restores the owner bell feed.
 function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
-  if (shouldRing) return { ...existingMeta, ...metadata };
+  if (shouldRing) {
+    const merged = { ...existingMeta, ...metadata };
+    return merged.quiet === true ? { ...merged, quiet: false, feed: null } : merged;
+  }
   const audienceFlipped = Object.prototype.hasOwnProperty.call(metadata, 'audience')
     && (existingMeta.audience ?? null) !== (metadata.audience ?? null);
   if (audienceFlipped) return { ...existingMeta, ...metadata };
@@ -414,7 +429,7 @@ const NotificationService = {
           // #5236). Only keys this emission actually carries are compared.
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
-          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged || routingChanged)) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged })) {
             const shouldRing = await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
