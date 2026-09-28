@@ -732,6 +732,15 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
           attempts: 0,
           last_error: null,
           exit_reason: exitReason || null,
+          // Recipient fields refresh too (codex P1): the shadow row's
+          // stored address is whatever it was when shadow mode created it,
+          // days or weeks before this live replay — `recipient` here is
+          // this call's freshly resolved value (under-lock re-read for a
+          // customer id), so a since-corrected email is honored on
+          // promotion instead of dispatchRun sending to the stale address.
+          recipient_type: recipient.type || null,
+          recipient_id: recipient.id || null,
+          recipient_email: recipient.email,
           payload: JSON.stringify(payload || {}),
           context: JSON.stringify(context || {}),
           completed_at: status === 'skipped' ? new Date() : null,

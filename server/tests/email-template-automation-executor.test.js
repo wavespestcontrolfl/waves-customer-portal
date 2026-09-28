@@ -1621,6 +1621,35 @@ describe('email template automation executor', () => {
       }));
     });
 
+    test('shadow -> email correction -> live replay: promotion refreshes the stored recipient email, never dispatching to the stale shadow-era address', async () => {
+      // The shadow row was created under an OLD address; the customer's
+      // email has since been corrected, and this live replay's payload
+      // (and the under-lock customers re-read) carry the NEW one.
+      const existingShadowRun = run({ status: 'shadow', recipient_email: 'old@example.com' });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      const promotedRunQuery = chain({ returning: [{ ...existingShadowRun, status: 'scheduled', recipient_email: 'sam@example.com' }] });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery],
+      });
+
+      await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        recipient_email: 'sam@example.com',
+      }));
+    });
+
     test('a shadow replay of an existing shadow row still dedupes (no promotion while mode stays shadow)', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
       try {
