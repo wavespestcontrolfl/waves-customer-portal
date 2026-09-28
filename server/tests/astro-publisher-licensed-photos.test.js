@@ -27,7 +27,7 @@ jest.mock('../services/content-astro/github-client', () => ({
 const gh = require('../services/content-astro/github-client');
 const pub = require('../services/content-astro/astro-publisher');
 const {
-  rehostLicensedIdentificationPhotos, resolveBodyImages,
+  rehostLicensedIdentificationPhotos, resolveBodyImages, matchLicensedPhotoLine,
   fetchAndVerifyLicensedPhoto, assertLicensedPhotoUrlAllowed, readCappedResponseBody,
   LICENSED_PHOTO_MAX_BYTES,
 } = pub._internals;
@@ -164,6 +164,67 @@ describe('rehostLicensedIdentificationPhotos', () => {
     const result = await rehostLicensedIdentificationPhotos({ body, slug: 'fire-ant-id', brief: photoSlotsBrief(), mdx: true });
     expect(result.body).toBe(body);
     expect(result.files).toEqual([]);
+  });
+
+  // Codex P1 (6th round): content-quality-gate's photo_slots_licensed_only
+  // (collectBodyImageOccurrences) also approves a raw <img> tag — this pass
+  // must re-host that form too, or a gate-approved draft could reach
+  // validateBodyImageRefs with an un-rehosted remote URL still in the body.
+  test('re-hosts a licensed photo embedded as a raw <img> tag, same as the inline markdown form', async () => {
+    const png = await tinyPngBuffer();
+    mockFetchOnce({ contentType: 'image/jpeg', body: png });
+    const body = [
+      '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+      '',
+      'Fire ants build sandy mounds.',
+      '',
+      `<img src="${LICENSED_URL}" alt="${LICENSED_ALT}">`,
+    ].join('\n');
+    const result = await rehostLicensedIdentificationPhotos({ body, slug: 'fire-ant-id', brief: photoSlotsBrief(), mdx: true });
+    expect(result.files).toHaveLength(1);
+    expect(result.images[0]).toMatchObject({ src: '/images/blog/fire-ant-id/body-1.webp', alt: LICENSED_ALT, licensed: true, sourceUrl: LICENSED_URL });
+    expect(result.body).not.toContain(LICENSED_URL);
+    expect(result.body).not.toContain('<img');
+  });
+
+  test('an <img> tag with an unlicensed src is left alone (not silently rewritten, never a false positive)', async () => {
+    const body = '<img src="https://example.com/unrelated.jpg" alt="something else">';
+    const result = await rehostLicensedIdentificationPhotos({ body, slug: 'fire-ant-id', brief: photoSlotsBrief(), mdx: true });
+    expect(result.body).toBe(body);
+    expect(result.files).toEqual([]);
+  });
+
+  // Reference-style (`![alt][ref]` + a separate `[ref]: url` definition) is
+  // a DELIBERATE scope decision, not an oversight: the writer prompt never
+  // instructs this form, and validateBodyImageRefs already fails CLOSED on
+  // an un-rehosted one (parks for human review — never a silent hotlink).
+  test('reference-style images are deliberately left un-rehosted (documented scope decision, not a miss)', async () => {
+    const body = `![${LICENSED_ALT}][pic]\n\n[pic]: ${LICENSED_URL}`;
+    const result = await rehostLicensedIdentificationPhotos({ body, slug: 'fire-ant-id', brief: photoSlotsBrief(), mdx: true });
+    expect(result.body).toBe(body);
+    expect(result.files).toEqual([]);
+  });
+});
+
+describe('matchLicensedPhotoLine', () => {
+  test('matches a bare inline markdown image alone on its own line', () => {
+    expect(matchLicensedPhotoLine(`![${LICENSED_ALT}](${LICENSED_URL})`)).toEqual({ alt: LICENSED_ALT, url: LICENSED_URL });
+  });
+
+  test('matches a raw <img> tag alone on its own line', () => {
+    expect(matchLicensedPhotoLine(`<img src="${LICENSED_URL}" alt="${LICENSED_ALT}">`)).toEqual({ alt: LICENSED_ALT, url: LICENSED_URL });
+  });
+
+  test('an <img> tag with no src at all does not match', () => {
+    expect(matchLicensedPhotoLine('<img alt="no src here">')).toBeNull();
+  });
+
+  test('plain prose does not match', () => {
+    expect(matchLicensedPhotoLine('Fire ants build sandy mounds.')).toBeNull();
+  });
+
+  test('an image NOT alone on its own line does not match (inline within prose)', () => {
+    expect(matchLicensedPhotoLine(`See this: ![${LICENSED_ALT}](${LICENSED_URL}) for reference.`)).toBeNull();
   });
 });
 

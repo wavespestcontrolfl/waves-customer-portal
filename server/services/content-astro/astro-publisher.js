@@ -2920,6 +2920,28 @@ const LICENSED_PHOTO_FETCH_TIMEOUT_MS = 20000;
 // occurrence is left for validateBodyImageRefs to reject normally
 // (fail-closed: parked for human review, never silently mishandled).
 const LICENSED_PHOTO_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
+// Codex P1 (6th round): content-quality-gate's photo_slots_licensed_only
+// (collectBodyImageOccurrences) approves a licensed photo embedded as a
+// raw `<img>` tag too — content-guardrails allowlists `img` as passive
+// markup, so a gate-approved draft could reach this point with one. This
+// pass now re-hosts that form as well, so a gate-approved draft can never
+// reach validateBodyImageRefs with an un-rehosted remote URL still in the
+// body (which would otherwise park with BLOG_BODY_IMAGES_FAILED even
+// though the gate already cleared it). Reference-style images
+// (`![alt][ref]` + a separate `[ref]: url` definition) are DELIBERATELY
+// NOT re-hosted here: the writer prompt instructs the single inline form
+// only, the gate's reference-style recognition exists purely as a
+// defense-in-depth detection net (never a form the writer is told to
+// produce), and validateBodyImageRefs already fails CLOSED (parks for
+// human review, never a silent hotlink) on one if it's ever used — the
+// same "reference-style image is validated like an inline one" contract
+// blog-astro-pipeline.test.js already pins.
+const LICENSED_PHOTO_IMG_TAG_RE = /^\s*<img\b([^>]*)>\s*$/i;
+function attrValue(attrs, name) {
+  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
+  const m = re.exec(attrs);
+  return m ? (m[2] ?? m[3] ?? '') : null;
+}
 function licensedPhotoError(slug, url, detail) {
   const err = new Error(`autonomous blog body images: licensed identification photo for ${slug} (${url}) ${detail}`);
   err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -3037,6 +3059,21 @@ async function allocateLicensedPhotoName(slug, takenNames, counter) {
   }
 }
 
+// Matches a single body line against either recognized licensed-photo
+// form (bare inline markdown, or a raw <img> tag alone on the line) and
+// returns { alt, url } for whichever one hits, or null.
+function matchLicensedPhotoLine(line) {
+  const inline = LICENSED_PHOTO_LINE_RE.exec(line);
+  if (inline) return { alt: String(inline[1] || '').trim(), url: String(inline[2] || '').trim() };
+  const imgTag = LICENSED_PHOTO_IMG_TAG_RE.exec(line);
+  if (imgTag) {
+    const src = attrValue(imgTag[1] || '', 'src');
+    if (!src) return null;
+    return { alt: String(attrValue(imgTag[1] || '', 'alt') || '').trim(), url: src.trim() };
+  }
+  return null;
+}
+
 async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
@@ -3051,15 +3088,15 @@ async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
   const takenNames = new Set();
   const out = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = LICENSED_PHOTO_LINE_RE.exec(lines[i]);
-    const photo = m ? byUrl.get(String(m[2]).trim()) : null;
+    const match = matchLicensedPhotoLine(lines[i]);
+    const photo = match ? byUrl.get(match.url) : null;
     if (!photo) { out.push(lines[i]); continue; }
     const buffer = await fetchAndVerifyLicensedPhoto(photo.url, slug);
     const { src, repoPath } = await allocateLicensedPhotoName(slug, takenNames, counter);
     takenNames.add(src);
     // The draft's own alt (the writer copied photo.alt verbatim per the
     // prompt) wins when present; the catalog alt is the fallback.
-    const alt = String(m[1] || '').trim() || String(photo.alt || '').trim();
+    const alt = match.alt || String(photo.alt || '').trim();
     files.push({ path: repoPath, buffer });
     images.push({ src, alt, reused: false, licensed: true, sourceUrl: photo.url });
     placements.push({ insertAt: out.length, src, alt });
@@ -5491,6 +5528,7 @@ module.exports = {
     resolveAutonomousHero,
     resolveBodyImages,
     rehostLicensedIdentificationPhotos,
+    matchLicensedPhotoLine,
     fetchAndVerifyLicensedPhoto,
     assertLicensedPhotoUrlAllowed,
     readCappedResponseBody,
