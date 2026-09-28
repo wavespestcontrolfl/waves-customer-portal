@@ -279,6 +279,15 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     expect(rows.map((r) => r.id)).toEqual([candidateId]);
   });
 
+  test('rows with no venue and no city match on title alone, like the JS filter', async () => {
+    const title = 'TEST Weekly Trivia No Location';
+    const { laterDay, earlierDay } = sameYearDays();
+    await insertEvent({ title, venue_name: null, city: null, admin_status: 'approved', start_at: etAt(earlierDay) });
+    const laterId = await insertEvent({ title, venue_name: null, city: 'sarasota', start_at: etAt(laterDay) });
+    const rows = await buildCurationCandidateQuery(500);
+    expect(rows.map((r) => r.id)).not.toContain(laterId);
+  });
+
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
     const expiredId = await insertEvent({
       title: 'TEST Expired Row No Sibling',

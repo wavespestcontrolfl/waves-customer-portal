@@ -43,7 +43,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
-const { mergeEvents, pickSurvivor } = require('./event-dedup');
+const { mergeEvents, pickSurvivor, EVENT_MERGE_LOCK_KEY } = require('./event-dedup');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
 // (a feed correcting/rescheduling a previously-expired event), re-queue the row
@@ -856,11 +856,18 @@ async function reconcileLegacyKey(sourceId, currentKey, legacyKey) {
         // The live survivor is the legacy row itself: move the current key
         // off the merged-away row onto it, so this and later pulls update
         // the live row instead of the dead one.
+        // Same advisory lock mergeEvents takes, so a concurrent merge can't
+        // move either row mid-transfer; both updates must land or it rolls
+        // back (the caller's upsert then just updates the dead row, as before).
         await db.transaction(async (trx) => {
-          await trx('events_raw').where({ id: currentRow.id })
+          await trx.raw('SELECT pg_advisory_xact_lock(?)', [EVENT_MERGE_LOCK_KEY]);
+          const retired = await trx('events_raw')
+            .where({ id: currentRow.id, external_id: currentKey })
+            .whereNotNull('merged_into')
             .update({ external_id: `retired:${currentRow.id}`, updated_at: trx.fn.now() });
-          await trx('events_raw').where({ id: legacyRow.id }).whereNull('merged_into')
+          const moved = await trx('events_raw').where({ id: legacyRow.id }).whereNull('merged_into')
             .update({ external_id: currentKey, updated_at: trx.fn.now() });
+          if (retired !== 1 || moved !== 1) throw new Error('legacy-key transfer raced a merge — rolled back');
         });
       } else if (survivorId) {
         // Survivor is another listing (cross-source dedup): the merged row

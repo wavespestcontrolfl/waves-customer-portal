@@ -521,4 +521,18 @@ describe('operator star override still bypasses the calendar-year rule', () => {
     expect(rows.map((r) => r.id)).toEqual(['first-2027']);
     expect(rows[0].__recurringFirstOfYear).toBe(true);
   });
+
+  test('a merged-away duplicate that shipped last year still proves continuity', async () => {
+    const mergedShipped = weeklyEvent('merged-2025', {
+      start_at: '2026-06-06T14:00:00Z', // its feed advanced it in place before the merge
+      merged_into: 'survivor-2026',
+      admin_status: 'rejected',
+      last_featured_occurrence_at: '2025-08-02T14:00:00Z',
+    });
+    const survivor = weeklyEvent('survivor-2026', { start_at: '2026-01-10T14:00:00Z' });
+    const rows = await filterRepeatedDateIdentities([survivor], {
+      reference: REFERENCE, identityPool: [survivor], yearPool: [mergedShipped, survivor],
+    });
+    expect(rows.map((r) => r.id)).toEqual(['survivor-2026']);
+  });
 });

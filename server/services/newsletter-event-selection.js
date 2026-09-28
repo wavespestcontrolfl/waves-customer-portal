@@ -355,9 +355,12 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   if (Number.isNaN(start)) return false;
   const eventYear = etYearOf(event.start_at, reference);
 
-  const siblings = (Array.isArray(pool) ? pool : []).filter((sibling) => (
+  // Continuity evidence reads merged-away siblings too: a duplicate merged
+  // into another source's survivor still carries the shipped-occurrence stamp
+  // and its own past date. Merged rows are excluded only from occurrence
+  // ordering (part a, hasEarlierOccurrenceThisYear).
+  const evidenceSiblings = (Array.isArray(pool) ? pool : []).filter((sibling) => (
     sibling && String(sibling.id) !== String(event?.id)
-      && !isMergedAwaySibling(sibling)
       && isSameSeriesSibling(event, sibling)
   ));
 
@@ -384,7 +387,7 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   const inPriorYear = (value) => Boolean(value) && etYearOf(value, reference) === eventYear - 1;
   const hasPriorYearOccurrence = inPriorYear(event.last_featured_occurrence_at)
     || hasLegacyContinuityEvidence(event, eventYear, reference)
-    || siblings.some((sibling) => inPriorYear(sibling.start_at)
+    || evidenceSiblings.some((sibling) => inPriorYear(sibling.start_at)
       || inPriorYear(sibling.last_featured_occurrence_at)
       || hasLegacyContinuityEvidence(sibling, eventYear, reference));
   if (hasPriorYearOccurrence) return true; // (b) continuity

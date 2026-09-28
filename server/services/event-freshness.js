@@ -373,6 +373,12 @@ function buildRoutineFirstOfYearAdmission(alias) {
           AND ${contextPresent(sib('city'))} AND ${contextPresent(outer('city'))}
           AND ${sqlSeriesContext(sib('city'))} = ${sqlSeriesContext(outer('city'))}
         )
+        OR (
+          -- No venue pair and no city pair to compare: same title alone is
+          -- the same series, exactly as isSameSeriesSibling falls through.
+          (NOT ${contextPresent(sib('venue_name'))} OR NOT ${contextPresent(outer('venue_name'))})
+          AND (NOT ${contextPresent(sib('city'))} OR NOT ${contextPresent(outer('city'))})
+        )
       )
   )`;
 }
