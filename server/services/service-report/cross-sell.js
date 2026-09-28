@@ -1113,7 +1113,37 @@ async function buildReportCrossSell(service, database, {
       : null;
     // cockroach_control is never priced through the estimator below — its
     // fully-composed, already-fingerprinted card returns as-is.
-    if (v2?.fullPayload) return v2.fullPayload;
+    if (v2?.fullPayload) {
+      // Resolved-property commercial re-check (codex round-2 P2): every
+      // target priced below re-checks isCommercialProperty against the
+      // pricing lookup's RESOLVED property.propertyType, not just the
+      // stored column above (codex #3367 r4 — a blank/stale
+      // customer.property_type with a trusted commercial cached-lookup
+      // classification must still refuse the card). cockroach_control is
+      // priced OUTSIDE the estimator, so it never runs that lookup on its
+      // own and this early return bypassed the guard entirely. Resolve it
+      // here through the SAME resolvePropertyContext the pricer uses (this
+      // function's own propertyLookup — cache-only by default) and apply
+      // the SAME isCommercialProperty predicate already declared above, so
+      // this can never disagree with the guard every other target
+      // enforces. Best-effort: an unreadable resolution demotes only this
+      // check (the stored-column guard above already passed), never the
+      // whole card.
+      let cockroachResolvedPropertyType = null;
+      try {
+        const { resolvePropertyContext } = require('../customer-pricing-ai');
+        const cockroachPropertyContext = await resolvePropertyContext({ customer, turfProfile: null, propertyLookup });
+        // The RESOLVED type lives at propertyInput.propertyType (the same
+        // path summarizeProperty reads it from for the ladder's own
+        // result.property.propertyType below) — the context object's own
+        // top level carries no propertyType field.
+        cockroachResolvedPropertyType = cockroachPropertyContext?.propertyInput?.propertyType || null;
+      } catch (err) {
+        logger.warn(`[report-cross-sell] cockroach resolved-property check skipped (code=${err?.code || 'none'})`);
+      }
+      if (isCommercialProperty({ propertyType: cockroachResolvedPropertyType })) return null;
+      return v2.fullPayload;
+    }
     // Reason-tied copy for a V2-picked target rides the payload built below;
     // absent for the unchanged ladder pick (never customer-facing then).
     const reportOfferReason = v2?.reason || null;

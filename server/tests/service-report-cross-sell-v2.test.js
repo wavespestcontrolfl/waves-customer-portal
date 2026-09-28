@@ -614,6 +614,28 @@ describe('buildReportCrossSell integration: GATE_REPORT_CROSS_SELL_V2 wiring', (
     expect(Array.isArray(result)).toBe(false);
     expect(result).not.toBeNull();
   });
+
+  // P2 fix (codex round-2): the cockroach V2 early return used to bypass
+  // the resolved-property commercial re-check every other target runs
+  // after its own pricing lookup. A blank stored customer.property_type
+  // passes the early stored-column check, but a trusted commercial
+  // classification from the property LOOKUP must still refuse the card.
+  test('gate on: a commercial property resolved via the property lookup (blank stored property_type) refuses the cockroach offer', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    const service = { ...SERVICE(), ...withTypedSnapshot({ primary: { type: 'pest' }, companions: [{ type: 'cockroach', values: { activity_level: 'Moderate' } }] }) };
+    const commercialLookup = async () => ({ enriched: { propertyType: 'Commercial' } });
+    const result = await buildReportCrossSell(
+      service,
+      dbFor({
+        customer: CUSTOMER({ property_type: null }),
+        serviceTypes: ['Pest Control'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+        catalogServices: [ACTIVE_COCKROACH_ROW],
+      }),
+      { propertyLookup: commercialLookup },
+    );
+    expect(result).toBeNull();
+  });
 });
 
 // ============================================================

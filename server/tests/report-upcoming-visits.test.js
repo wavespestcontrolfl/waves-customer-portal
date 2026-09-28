@@ -100,6 +100,37 @@ function makeKnex(fixtures) {
   return knex;
 }
 
+// Wraps makeKnex so the ONE lookup that resolves THIS report's own linked
+// scheduled_services row (`.where({ id: failingId })`, unique to that
+// query — the candidate-visits scan always filters by `customer_id`
+// instead) rejects, simulating a transient read failure rather than a
+// genuinely missing/deleted row. Every other query on every other table
+// (including other `scheduled_services` reads) passes through unchanged.
+function makeKnexWithFailingReportLookup(fixtures, failingId) {
+  const base = makeKnex(fixtures);
+  return (table) => {
+    const real = base(table);
+    if (table !== 'scheduled_services') return real;
+    let targetsFailingRow = false;
+    const wrapped = {
+      ...real,
+      where(criteria, value) {
+        if (criteria && typeof criteria === 'object' && Object.keys(criteria).length === 1 && criteria.id === failingId) {
+          targetsFailingRow = true;
+          return wrapped;
+        }
+        real.where(criteria, value);
+        return wrapped;
+      },
+      first(...args) {
+        if (targetsFailingRow) return Promise.reject(new Error('simulated transient read failure'));
+        return real.first(...args);
+      },
+    };
+    return wrapped;
+  };
+}
+
 const BASE_SERVICE = {
   id: 'service-upcoming',
   scheduled_service_id: 'scheduled-current',
@@ -135,7 +166,11 @@ const LIVE = { mode: 'live' };
 
 afterEach(() => { delete process.env.GATE_REPORT_UPCOMING_VISITS; });
 
-test('gate off: upcomingVisitsCard is absent (null), even with matching upcoming visits', async () => {
+// P0 fix (codex round-2): the KEY itself, not just its value, must be
+// absent while the gate is dark — a null-valued key still changes every
+// live payload's shape while GATE_REPORT_UPCOMING_VISITS is unset,
+// contradicting the documented "gate off: the field is absent" contract.
+test('gate off: upcomingVisitsCard KEY is absent from the payload entirely, even with matching upcoming visits', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
     scheduled_services: [
@@ -144,7 +179,7 @@ test('gate off: upcomingVisitsCard is absent (null), even with matching upcoming
     ],
   });
   const data = await buildReportV1Data(BASE_SERVICE, 'token-off', knex, LIVE);
-  expect(data.upcomingVisitsCard).toBeNull();
+  expect(data).not.toHaveProperty('upcomingVisitsCard');
 });
 
 test('gate on but not live mode: upcomingVisitsCard stays null (pdf/static builds)', async () => {
@@ -211,10 +246,38 @@ test('caps at 6 visits', async () => {
     service_type: `Visit ${i}`,
     window_start: '09:00:00',
   }));
-  const knex = makeKnex({ ...BASE_FIXTURES, scheduled_services: rows });
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // the report's own (unlinked, unstamped) row — must resolve so the
+      // report's identity isn't mistaken for an unresolvable link.
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+      ...rows,
+    ],
+  });
   const data = await buildReportV1Data(BASE_SERVICE, 'token-cap', knex, LIVE);
   expect(data.upcomingVisitsCard.visits).toHaveLength(6);
   expect(data.upcomingVisitsCard.visits[0].serviceType).toBe('Visit 0');
+});
+
+// P2 fix (codex round-2): scheduled_date + window_start alone is not a
+// TOTAL order — two rows tied on both give the paged LIMIT/OFFSET scan no
+// stable ordering to page over. `id` breaks the tie. The fixture inserts
+// 'scheduled-b' before 'scheduled-a' (same date/window) so this only
+// passes when the query's own ORDER BY actually includes `id` — insertion
+// order alone would keep b before a.
+test('rows tied on scheduled_date + window_start still order deterministically, by id', async () => {
+  process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+      { id: 'scheduled-b', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Visit B', window_start: '09:00:00' },
+      { id: 'scheduled-a', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Visit A', window_start: '09:00:00' },
+    ],
+  });
+  const data = await buildReportV1Data(BASE_SERVICE, 'token-tiebreak', knex, LIVE);
+  expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Visit A', 'Visit B']);
 });
 
 describe('multi-property scoping', () => {
@@ -466,6 +529,32 @@ describe('multi-property scoping', () => {
     expect(data.upcomingVisitsCard).toBeNull();
   });
 
+  // P1 fix (codex round-2): a transient error reading the report's OWN
+  // linked scheduled_services row must fail closed exactly like a
+  // genuinely unresolvable property_id above — NEVER fall back to
+  // "genuinely unlinked" (which would use the customer mirror and could
+  // expose a different, primary property's visits on this token).
+  test('linked report whose OWN scheduled_services row read THROWS (transient failure) → card omitted, never falls back to the customer mirror', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    const knex = makeKnexWithFailingReportLookup({
+      ...BASE_FIXTURES,
+      scheduled_services: [
+        // Unstamped, unlinked — would COALESCE to the customer mirror
+        // everywhere else, and the mirror fixture address matches
+        // BASE_SERVICE's. Must still be excluded: the report's own link
+        // read failed, so nothing may be shown.
+        { id: 'scheduled-mirror-match', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (no fallback to mirror on a read failure)', window_start: '09:00:00' },
+      ],
+    }, BASE_SERVICE.scheduled_service_id);
+    const data = await buildReportV1Data(
+      { ...BASE_SERVICE, service_date: '2026-05-16' },
+      'token-report-lookup-throws',
+      knex,
+      LIVE,
+    );
+    expect(data.upcomingVisitsCard).toBeNull();
+  });
+
   test('unlinked report (no scheduled_service_id link at all): the mirror fallback still works — the ordinary single-property case', async () => {
     process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
     const knex = makeKnex({
@@ -574,6 +663,43 @@ describe('multi-property scoping', () => {
         ],
       });
       const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-unit-embedded', knex, LIVE);
+      expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
+    });
+  });
+
+  // P1 fix (codex round-2): reuses estimate-property-linkage.js's
+  // scopeKeyLacksLocality rule (the SAME standard cross-sell's own property
+  // scoping already applies) — a street-only stamp with neither city nor
+  // zip is UNPROVABLE, since two genuinely different premises sharing a
+  // street/unit name collapse to the same opaque addressKey once locality
+  // is stripped out of it. Either city or zip alone is enough evidence;
+  // only BOTH missing fails closed.
+  describe('locality guard (street-only stamps are unprovable)', () => {
+    const NO_LOCALITY_STREET = '500 Anywhere Rd';
+
+    test('same street, NEITHER side has city or zip → excluded (fail closed)', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: NO_LOCALITY_STREET },
+          { id: 'scheduled-no-locality', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Should never appear (neither side has city or zip)', window_start: '09:00:00', service_address_line1: NO_LOCALITY_STREET },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-locality-none', knex, LIVE);
+      expect(data.upcomingVisitsCard).toBeNull();
+    });
+
+    test('same street + SAME zip (no city needed) → included', async () => {
+      process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+      const knex = makeKnex({
+        ...BASE_FIXTURES,
+        scheduled_services: [
+          { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'Pest Control', service_address_line1: NO_LOCALITY_STREET, service_address_zip: '34211' },
+          { id: 'scheduled-with-zip', customer_id: 'customer-1', scheduled_date: todayPlus(5), status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '09:00:00', service_address_line1: NO_LOCALITY_STREET, service_address_zip: '34211' },
+        ],
+      });
+      const data = await buildReportV1Data({ ...BASE_SERVICE, service_date: '2026-05-16' }, 'token-locality-zip', knex, LIVE);
       expect(data.upcomingVisitsCard.visits.map((v) => v.serviceType)).toEqual(['Lawn Care Treatment']);
     });
   });

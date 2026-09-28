@@ -5060,6 +5060,17 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   if (opts.mode === 'live' && process.env.GATE_REPORT_UPCOMING_VISITS === 'true') {
     try {
       const { addressKey } = require('../customer-properties');
+      // A street-only addressKey (no city, no zip) is UNPROVABLE (codex
+      // round-2 P1) — two different premises that happen to share a
+      // street/unit collapse to the SAME opaque key once locality is
+      // stripped away by addressKey's own normalization. Reuses the exact
+      // rule estimate-property-linkage.js's scopeKeyLacksLocality already
+      // applies to cross-sell's own property scoping (a key "lacks
+      // locality" only when BOTH city and zip are absent; either one alone
+      // is usable evidence) — same standard, applied here directly against
+      // the raw fields since addressKey's output has no delimiter to parse
+      // a scope key back out of.
+      const hasLocality = (fields = {}) => !!String(fields.city || '').trim() || !!String(fields.zip || '').trim();
       // THIS report's property identity. A linked visit's own stamp /
       // property_id is the truth (a phone-booked rental's report must
       // never list another property's visits) — an unlinked/legacy report
@@ -5068,6 +5079,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // live-only field on this report (map, cross-sell) is anchored to.
       let reportPropertyId = null;
       let reportStampAddressKey = null;
+      let reportStampHasLocality = false;
+      // A link was EXPECTED (scheduled_service_id present) but the row
+      // could not be resolved — a transient read error is indistinguishable
+      // here from a genuinely missing/deleted row, and EITHER must fail
+      // closed (codex round-2 P1): treating it as "genuinely unlinked"
+      // below would fall back to the customer mirror, which can name a
+      // DIFFERENT (e.g. primary) property than the one this report was
+      // actually linked to — exposing that other property's visits on a
+      // secondary-property report's token.
+      let reportLinkUnresolved = false;
       if (service.scheduled_service_id) {
         const reportSs = await knex('scheduled_services')
           .where({ id: service.scheduled_service_id })
@@ -5087,7 +5108,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               city: reportSs.service_address_city,
               zip: reportSs.service_address_zip,
             }) || null;
+            reportStampHasLocality = hasLocality({ city: reportSs.service_address_city, zip: reportSs.service_address_zip });
           }
+        } else {
+          reportLinkUnresolved = true;
         }
       }
       const mirrorAddressKey = addressKey({
@@ -5096,6 +5120,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         city: service.city,
         zip: service.zip,
       }) || null;
+      const mirrorAddressHasLocality = hasLocality({ city: service.city, zip: service.zip });
       // Resolve THIS report's own property address when it's linked but
       // unstamped (property_id and the stamp are normally written
       // together — an edge case). PRIVACY (P1 2026-09-28): a linked
@@ -5105,21 +5130,35 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // property link at all may use the mirror fallback (the ordinary
       // single-property case).
       let reportPropertyOwnAddressKey = null;
+      let reportPropertyOwnHasLocality = false;
       if (reportPropertyId && !reportStampAddressKey) {
         const ownPropertyRow = await knex('customer_properties')
           .where({ id: reportPropertyId })
           .first('address_line1', 'address_line2', 'city', 'zip')
           .catch(() => null);
         reportPropertyOwnAddressKey = ownPropertyRow ? (addressKey(ownPropertyRow) || null) : null;
+        reportPropertyOwnHasLocality = ownPropertyRow ? hasLocality(ownPropertyRow) : false;
       }
-      const reportAddressKey = reportPropertyId
-        // Linked: the visit's own stamp, else the linked property's own
-        // resolved address — NEVER the mirror. Null (fail closed) when
-        // neither resolves, so the block below never runs.
-        ? (reportStampAddressKey || reportPropertyOwnAddressKey || null)
-        // Unlinked/legacy: the mirror is the only candidate (the property
-        // this report belongs to IS the customer's primary in that case).
-        : (reportStampAddressKey || mirrorAddressKey);
+      const reportAddressKey = reportLinkUnresolved
+        // A link was expected but its row could not be read — fail closed,
+        // never the mirror (see reportLinkUnresolved above).
+        ? null
+        : (reportPropertyId
+          // Linked: the visit's own stamp, else the linked property's own
+          // resolved address — NEVER the mirror. Null (fail closed) when
+          // neither resolves, so the block below never runs.
+          ? (reportStampAddressKey || reportPropertyOwnAddressKey || null)
+          // Unlinked/legacy: the mirror is the only candidate (the property
+          // this report belongs to IS the customer's primary in that case).
+          : (reportStampAddressKey || mirrorAddressKey));
+      // Locality flag for whichever source actually won reportAddressKey
+      // above — mirrors the SAME fallback order so it can never disagree
+      // about which source resolved the key.
+      const reportAddressHasLocality = reportLinkUnresolved
+        ? false
+        : (reportPropertyId
+          ? (reportStampAddressKey ? reportStampHasLocality : reportPropertyOwnHasLocality)
+          : (reportStampAddressKey ? reportStampHasLocality : mirrorAddressHasLocality));
 
       if (reportAddressKey) {
         // ET CALENDAR days, not elapsed 24h periods (codex round-1 P1): a
@@ -5149,6 +5188,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const matched = [];
         const propertyKeyById = new Map();
         let mirrorKey = null;
+        let mirrorKeyHasLocality = false;
         let mirrorKeyResolved = false;
 
         for (let page = 0; page < MAX_PAGES && matched.length < 6; page += 1) {
@@ -5162,6 +5202,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             })
             .orderBy('scheduled_date', 'asc')
             .orderBy('window_start', 'asc')
+            // `id` breaks ties (codex round-2 P2): scheduled_date +
+            // window_start alone is not a TOTAL order (same-day/same-window
+            // rows tie), so paging by LIMIT/OFFSET over it can duplicate or
+            // skip a row across pages once ties exist. A unique tie-breaker
+            // key gives every page a stable, non-overlapping slice.
+            .orderBy('id', 'asc')
             .limit(PAGE_SIZE)
             .offset(page * PAGE_SIZE)
             .select('id', 'service_type', 'scheduled_date', 'window_start', 'property_id',
@@ -5185,7 +5231,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .select('id', 'address_line1', 'address_line2', 'city', 'zip')
               .catch(() => []);
             for (const row of (Array.isArray(propertyRows) ? propertyRows : [])) {
-              propertyKeyById.set(row.id, addressKey(row) || null);
+              propertyKeyById.set(row.id, { key: addressKey(row) || null, hasLocality: hasLocality(row) });
             }
           }
 
@@ -5195,6 +5241,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
               .first('address_line1', 'address_line2', 'city', 'zip')
               .catch(() => null);
             mirrorKey = customerRow ? (addressKey(customerRow) || null) : null;
+            mirrorKeyHasLocality = customerRow ? hasLocality(customerRow) : false;
             mirrorKeyResolved = true;
           }
 
@@ -5214,6 +5261,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             // already resolved the same way, above). Fails closed when
             // either key does not resolve.
             let rowKey = null;
+            let rowHasLocality = false;
             if (row.service_address_line1) {
               // address_line2 rides this key too — same unit-privacy rule
               // as reportStampAddressKey/mirrorAddressKey above: a keyless
@@ -5225,12 +5273,24 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 city: row.service_address_city,
                 zip: row.service_address_zip,
               }) || null;
+              rowHasLocality = hasLocality({ city: row.service_address_city, zip: row.service_address_zip });
             } else if (row.property_id) {
-              rowKey = propertyKeyById.get(row.property_id) || null;
+              const resolved = propertyKeyById.get(row.property_id);
+              rowKey = resolved ? resolved.key : null;
+              rowHasLocality = resolved ? resolved.hasLocality : false;
             } else {
               rowKey = mirrorKey;
+              rowHasLocality = mirrorKeyHasLocality;
             }
-            return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey;
+            // Locality guard (codex round-2 P1): refuse a match — even a
+            // key-equal one — unless BOTH sides carry at least one
+            // locality field. A street-only stamp/address is unprovable:
+            // two different premises sharing a street/unit name (a
+            // different city, or a different building on the same named
+            // road elsewhere) would otherwise collapse to the same opaque
+            // addressKey once locality is stripped away.
+            return !!rowKey && !!reportAddressKey && rowKey === reportAddressKey
+              && reportAddressHasLocality && rowHasLocality;
           };
 
           for (const row of candidates) {
@@ -5812,8 +5872,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     nextAppointment,
     // "Your upcoming visits" card (GATE_REPORT_UPCOMING_VISITS) — live-view
     // only, stripped for pdf/static by stripLiveOnlyScheduleFields below,
-    // same as nextAppointment.
-    upcomingVisitsCard,
+    // same as nextAppointment. The KEY itself (not just its value) is
+    // omitted entirely while the gate is dark (codex round-2 P0): a
+    // null-valued key still changes the shape of every live payload while
+    // the gate is unset, contradicting the documented "gate off: the field
+    // is absent" contract. Read directly at call time, same convention as
+    // the flag's own gating above.
+    ...(process.env.GATE_REPORT_UPCOMING_VISITS === 'true' ? { upcomingVisitsCard } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static

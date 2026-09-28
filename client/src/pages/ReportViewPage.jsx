@@ -3333,7 +3333,14 @@ function UpcomingVisitsCard({ data, mode }) {
   if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
   return (
     <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
-      <div className="section-eyebrow">Your upcoming visits</div>
+      {/* h2, not .section-eyebrow (codex round-2 P2): the glass theme hides
+          EVERY .section-eyebrow outside the hero kicker
+          (html[data-glass-theme] .service-report-v1 .section-eyebrow), so
+          the title was invisible under glass. .report-card h2 already
+          carries real, deliberate styling (same pattern the companion
+          section heading and the generic .report-card/.sr-section rule
+          use) and the glass rule never targets headings. */}
+      <h2>Your upcoming visits</h2>
       <div className="service-status-grid">
         {visits.map((visit, index) => (
           <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
@@ -7350,6 +7357,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        /* Customer-facing body copy floor is 16px; 14px stays reserved for
+           labels (codex round-2 P2). Scoped to the upcoming-visits card only
+           — .sr-cell-value/.sr-cell-note are shared with other cards whose
+           existing 15px/14px sizing is unchanged here. */
+        .upcoming-visits-card .sr-cell-value,
+        .upcoming-visits-card .sr-cell-note {
+          font-size: 16px;
+        }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);

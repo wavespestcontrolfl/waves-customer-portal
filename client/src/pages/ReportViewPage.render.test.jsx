@@ -1190,3 +1190,30 @@ describe('Consolidated lawn report', () => {
     expect(document.body.textContent).not.toContain(payload.protocol.structuredObservations[1]);
   });
 });
+
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS) — regression coverage for codex round-2 P2:
+// the glass theme hides EVERY .section-eyebrow outside the hero kicker
+// (html[data-glass-theme] .service-report-v1 .section-eyebrow), so the
+// card's title must ride a real heading element instead, the same way its
+// sibling live-report cards (e.g. the companion section header) do.
+describe('ReportViewPage — "Your upcoming visits" card title', () => {
+  it('renders the title as a real <h2> heading, not a glass-suppressed .section-eyebrow', async () => {
+    const payload = {
+      ...pestReportV2,
+      upcomingVisitsCard: {
+        visits: [
+          { serviceType: 'Lawn Care Treatment', scheduledDate: '2026-12-01', windowStart: '09:00:00' },
+        ],
+      },
+    };
+    renderReport(payload);
+
+    const heading = await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(heading.tagName).toBe('H2');
+    // The glass suppression rule targets .section-eyebrow specifically —
+    // the title must not ALSO ride on one inside this card.
+    expect(heading.closest('[data-section="upcoming-visits"]')?.querySelector('.section-eyebrow')).toBeNull();
+    expect(screen.getByText('Dates and windows are subject to change')).toBeInTheDocument();
+  });
+});
