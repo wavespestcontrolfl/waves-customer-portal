@@ -619,7 +619,10 @@ const ContentScheduler = {
         // active attempt's 'publishing' state (hence the publish_status
         // guard on every branch).
         if (claimed) {
-          if (terminalFailure || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
+          // A company-check failure that is NOT an outage (the post is over
+          // the extraction input bound) fails the same way every attempt.
+          const terminalOwnerListCheck = err.code === 'BLOG_OWNER_LIST_UNVERIFIED' && err.retryable !== true;
+          if (terminalFailure || terminalOwnerListCheck || DETERMINISTIC_PUBLISH_CODES.has(err.code)) {
             await db('blog_posts').where('id', blog.id).where('publish_status', 'publishing')
               .update({
                 publish_status: 'failed',
