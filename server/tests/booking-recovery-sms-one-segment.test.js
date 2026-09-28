@@ -22,10 +22,11 @@ const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const smsTemplates = require('../routes/admin-sms-templates');
 const { _internals } = require('../services/booking-abandon-recovery');
 
-// The stock body: what 20260801000001_sms_house_voice_sweep wrote for
+// The stock body: what 20260928210000_sms_brand_just_waves wrote for
 // booking_abandonment_recovery (an /admin edit since would differ — the guard
-// below covers whatever renders).
-const STOCK_BODY = "Hello {first_name}! Your {service_type} spot isn't reserved yet. Pick a time and you're set: {booking_url}\n\nReply STOP to opt out.";
+// below covers whatever renders). "Waves " costs 6 characters, so the longer
+// labels now greet generically for longer names.
+const STOCK_BODY = "Hello {first_name}! Your Waves {service_type} spot isn't reserved yet. Pick a time and you're set: {booking_url}\n\nReply STOP to opt out.";
 
 beforeEach(() => {
   // Render exactly as getTemplate does for the stock row: substitute, strip the portal scheme.
@@ -41,11 +42,15 @@ const intent = (over = {}) => ({ id: 'bi_1', first_name: 'Christopher', service_
 describe('booking recovery SMS — one segment', () => {
   const ALL_SERVICES = [...Object.keys(_internals.SERVICE_LABELS), 'unknown_service'];
 
-  test('every service label with an 11-character name keeps the name → one GSM-7 segment, scheme-less link', async () => {
+  test('every service label with an 11-character name → one GSM-7 segment, scheme-less link; the name is kept where it fits', async () => {
+    // The three longest labels spill with an 11-character name and fall back
+    // to the generic greeting; Termite Inspection does for any name.
+    const GENERIC = new Set(['mosquito', 'termite', 'rodent']);
     for (const service_id of ALL_SERVICES) {
       const body = await _internals.renderOneSegmentSms(intent({ service_id, first_name: 'Christopher Lee' }));
       const c = countSegments(body);
-      expect({ service_id, encoding: c.encoding, segments: c.segmentCount, named: body.startsWith('Hello Christopher!') }).toEqual({ service_id, encoding: 'GSM_7', segments: 1, named: true });
+      expect({ service_id, encoding: c.encoding, segments: c.segmentCount, named: body.startsWith('Hello Christopher!') })
+        .toEqual({ service_id, encoding: 'GSM_7', segments: 1, named: !GENERIC.has(service_id) });
       expect(body).not.toContain('https://');
       expect(body).toContain('portal.wavespestcontrol.com/l/k3j9m7p2xq');
     }
@@ -58,7 +63,7 @@ describe('booking recovery SMS — one segment', () => {
       expect(countSegments(body)).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
       outcomes[service_id] = body.startsWith('Hello Mary-Catherine!') ? 'named' : body.startsWith('Hello there!') ? 'generic' : 'other';
     }
-    expect(outcomes.pest_control).toBe('named');
+    expect(outcomes.lawn_care).toBe('named');
     expect(Object.values(outcomes)).not.toContain('other');
   });
 
@@ -72,7 +77,7 @@ describe('booking recovery SMS — one segment', () => {
   test('a name that still spills the budget is replaced by the generic greeting, nothing else changes', async () => {
     const forty = 'Wolfeschlegelsteinhausenbergerdorffvonhal'; // 41 → firstNameOf caps at 40
     const body = await _internals.renderOneSegmentSms(intent({ first_name: forty, service_id: 'bora_care' }));
-    expect(body).toMatch(/^Hello there! Your Bora-Care spot/);
+    expect(body).toMatch(/^Hello there! Your Waves Bora-Care spot/);
     expect(countSegments(body).segmentCount).toBe(1);
     expect(smsTemplates.getTemplate).toHaveBeenCalledTimes(2);
     // Both renders pin the base row so the comparison is the same body with a different greeting.
