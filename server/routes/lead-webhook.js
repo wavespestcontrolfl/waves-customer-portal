@@ -231,6 +231,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceKey,
       timeline,
       leadSource,
+      heardAbout,
       signHost,
     } = intake;
     // The visitor's declared timeline sets urgency directly; null when the
@@ -558,6 +559,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // The visitor just submitted from a browser carrying this unit id — a
       // call-pipeline lead attaching to a web submission gains the join too.
       ...(anonId ? { anon_id: anonId } : {}),
+      ...(heardAbout ? { heard_about: heardAbout } : {}),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -965,6 +967,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fbc: fbc || null,
           fbp: fbp || null,
           anon_id: anonId || null,
+          heard_about: heardAbout || null,
           is_residential: true,
         }).returning('*');
         leadRecord = newLead;
@@ -1572,6 +1575,12 @@ function getLeadWebhookAttribution(body = {}) {
   return {
     pageUrl: body.page_url || body['Page Url'] || body.referrer || attr.referrer || synthesizedFromDomain || '',
     landingUrl: body.landing_url || body['Landing Url'] || attr.landing_url || synthesizedFromDomain || '',
+    // Distinct from pageUrl above (which falls back to the referrer only when
+    // no page_url/landing_url is present) — the AI-assistant classifier branch
+    // needs the RAW document.referrer even when a landing_url won the pageUrl
+    // fallback race, so a ChatGPT/Perplexity/etc. referred visit that landed
+    // on a tracked page is still detected by referrer host.
+    referrer: body.referrer || attr.referrer || '',
     utmSource: body.utm_source || body['Utm Source'] || attrUtm.source || '',
     utmMedium: body.utm_medium || body['Utm Medium'] || attrUtm.medium || '',
     utmCampaign: body.utm_campaign || body['Utm Campaign'] || attrUtm.campaign || '',
@@ -1611,6 +1620,24 @@ function normalizeSignHost(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return Array.from(cleaned).slice(0, SIGN_HOST_MAX_LENGTH).join('').trim();
+}
+
+// "How did you hear about us?" — self-reported discovery channel from the
+// optional quote-form question (owner-approved 2026-09-27). Validated against
+// a FIXED allowlist shared with the Astro quote form's select options — any
+// other value (including free text) is silently dropped, never stored. Kept
+// SEPARATE from leadSource: leadSource is technically-observed attribution
+// (UTM/referrer/click-id); this is what the visitor typed themselves, and
+// unknown stays unknown (null) rather than being guessed at.
+const HEARD_ABOUT_OPTIONS = new Set([
+  'google_search', 'google_maps', 'chatgpt', 'other_ai',
+  'facebook_instagram', 'nextdoor', 'yelp', 'friend_neighbor',
+  'truck_yard_sign', 'other',
+]);
+
+function sanitizeHeardAbout(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return HEARD_ABOUT_OPTIONS.has(key) ? key : null;
 }
 
 function buildLeadWebhookIntake(body = {}) {
@@ -1654,6 +1681,7 @@ function buildLeadWebhookIntake(body = {}) {
     attribution.gclid,
     attribution.wbraid,
     attribution.gbraid,
+    attribution.referrer,
   );
 
   return {
@@ -1673,6 +1701,7 @@ function buildLeadWebhookIntake(body = {}) {
     serviceKey,
     timeline,
     leadSource,
+    heardAbout: sanitizeHeardAbout(body.heard_about),
     // Exact key only, like `message` below — and kept OUT of `message`.
     signHost: normalizeSignHost(body.sign_host),
     // Free-prose message body — the readiness gate's commercial-signal scan
@@ -2066,4 +2095,5 @@ module.exports._test = {
   determineLeadSource,
   isHoneypotTripped,
   enrollNewLeadAutomation,
+  sanitizeHeardAbout,
 };

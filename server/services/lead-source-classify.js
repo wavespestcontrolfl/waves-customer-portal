@@ -36,7 +36,65 @@ const SPOKE_AREA = {
   'waveslawncare.com': 'SW Florida',
 };
 
-function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid) {
+// Hub city detection for a wavespestcontrol.com landing path — hoisted to
+// module scope so both the hub branch below and the AI-assistant area lookup
+// (areaForLandingUrl) read the exact same table. Anchor single-word cities to
+// the "-fl" city/quote-page suffix so an incidental mention in a slug isn't
+// read as a city — most importantly "palmetto-bug" (a FL cockroach) must NOT
+// resolve to Palmetto and skew office routing. Compound names (north-port,
+// lakewood-ranch) are unambiguous on their own and need no anchor.
+const HUB_CITIES = [
+  [/north[-_ ]?port/i, 'North Port'], [/lakewood[-_ ]?ranch/i, 'Lakewood Ranch'],
+  [/bradenton-fl/i, 'Bradenton'], [/parrish-fl/i, 'Parrish'], [/sarasota-fl/i, 'Sarasota'],
+  [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
+];
+
+// Area for a landing URL using the SAME domain/hub detection the
+// domain_website / waves_website branches use below — reused by the
+// AI-assistant branch so an AI-referred visitor still gets office-routing
+// area enrichment instead of a bare null. Read-only lookup; never classifies
+// a source itself.
+function areaForLandingUrl(url) {
+  const spokeDomain = SPOKE_DOMAIN_KEYS.find((domain) => url.includes(domain));
+  if (spokeDomain) return SPOKE_AREA[spokeDomain] || null;
+  if (url.includes('wavespestcontrol.com')) {
+    const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
+    const hit = HUB_CITIES.find(([re]) => re.test(path));
+    return hit ? hit[1] : null;
+  }
+  return null;
+}
+
+// Hostname for a referrer/landing URL, normalized like the spoke/hub domain
+// matching above (lowercased, "www." stripped); null on garbage so a bad URL
+// can never satisfy a host check.
+function hostnameOf(url) {
+  if (!url) return null;
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+}
+
+// AI-assistant referral detection — utm_source values AND referrer hosts that
+// name a known AI answer engine. Real citation links from ChatGPT carry
+// utm_source=chatgpt.com (or utm_source=openai, seen in real citations); a
+// plain link with no UTMs still arrives with document.referrer set to the
+// assistant's own domain. Data-driven so a new assistant is one row, not a
+// new branch — `detail` is the exact label the classifier returns.
+const AI_ASSISTANT_SOURCES = [
+  { detail: 'ChatGPT', utmSources: ['chatgpt.com', 'chatgpt', 'openai'], hosts: ['chatgpt.com', 'chat.openai.com'] },
+  { detail: 'Perplexity', utmSources: ['perplexity', 'perplexity.ai'], hosts: ['perplexity.ai', 'www.perplexity.ai'] },
+  { detail: 'Gemini', utmSources: ['gemini'], hosts: ['gemini.google.com', 'bard.google.com'] },
+  { detail: 'Copilot', utmSources: ['copilot'], hosts: ['copilot.microsoft.com'] },
+  { detail: 'Claude', utmSources: ['claude', 'claude.ai'], hosts: ['claude.ai'] },
+  { detail: 'Other AI', utmSources: ['you.com'], hosts: ['you.com'] },
+];
+
+function findAiAssistant(source, referrerHost) {
+  return AI_ASSISTANT_SOURCES.find((row) =>
+    (source && row.utmSources.includes(source)) || (referrerHost && row.hosts.includes(referrerHost))
+  ) || null;
+}
+
+function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampaign, utmContent, fbclid, fbc, gclid, wbraid, gbraid, referrer) {
   const url = landingUrl || pageUrl || '';
   const source = String(utmSource || '').trim().toLowerCase();
   const medium = String(utmMedium || '').trim().toLowerCase();
@@ -76,6 +134,18 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   // (_fbp alone is NOT counted — Meta sets it on every visit, organic included.)
   if (fbclid || fbc) return { source: 'facebook', detail: fbclid ? 'Meta click (fbclid)' : 'Meta click (_fbc)', channel: 'paid' };
 
+  // AI-assistant referral (owner-approved 2026-09-27): a visitor who asked an
+  // AI answer engine and followed its citation link. Checked after every
+  // paid/explicit UTM branch above (a click id would already have won) and
+  // BEFORE the domain/hub fallback below, so an AI-referred visit isn't
+  // silently folded into domain_website/waves_website. Self-reported
+  // "How did you hear about us?" answers are a SEPARATE field (leads.heard_about)
+  // — this branch is technically-observed attribution only.
+  const aiAssistant = findAiAssistant(source, hostnameOf(referrer));
+  if (aiAssistant) {
+    return { source: 'ai_assistant', detail: aiAssistant.detail, channel: 'organic', area: areaForLandingUrl(url) };
+  }
+
   // Domain-based attribution. The spoke fleet is single-sourced from SPOKE_SITES
   // (see SPOKE_DOMAIN_KEYS / SPOKE_AREA above) so it can't drift from the Astro
   // build's domain list — a spoke added there attributes here automatically. A
@@ -93,15 +163,11 @@ function determineLeadSource(pageUrl, landingUrl, utmSource, utmMedium, utmCampa
   if (url.includes('wavespestcontrol.com')) {
     const path = String(url).replace(/^https?:\/\/[^/]+/i, '').split(/[?#]/)[0].replace(/\/+$/, '');
     const seg = path.split('/').filter(Boolean).pop() || '';
-    // Anchor single-word cities to the "-fl" city/quote-page suffix so an incidental
-    // mention in a slug isn't read as a city — most importantly "palmetto-bug" (a FL
-    // cockroach) must NOT resolve to Palmetto and skew office routing. Compound names
+    // HUB_CITIES (module scope, above) anchors single-word cities to the
+    // "-fl" city/quote-page suffix so an incidental mention in a slug isn't
+    // read as a city — most importantly "palmetto-bug" (a FL cockroach) must
+    // NOT resolve to Palmetto and skew office routing. Compound names
     // (north-port, lakewood-ranch) are unambiguous on their own and need no anchor.
-    const HUB_CITIES = [
-      [/north[-_ ]?port/i, 'North Port'], [/lakewood[-_ ]?ranch/i, 'Lakewood Ranch'],
-      [/bradenton-fl/i, 'Bradenton'], [/parrish-fl/i, 'Parrish'], [/sarasota-fl/i, 'Sarasota'],
-      [/venice-fl/i, 'Venice'], [/palmetto-fl/i, 'Palmetto'], [/ellenton-fl/i, 'Ellenton'],
-    ];
     const hit = HUB_CITIES.find(([re]) => re.test(path));
     return { source: 'waves_website', detail: seg ? `${seg} page` : 'Main site', channel: 'organic', area: hit ? hit[1] : undefined };
   }
