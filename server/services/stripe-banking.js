@@ -941,6 +941,10 @@ async function createStandardPayout(amountDollars, opts = {}) {
  * List payouts still `pending` in Stripe — read live, not from the local
  * `stripe_payouts` sync table, because only a payout Stripe still considers
  * pending AT CANCEL TIME can be cancelled and the local row can lag.
+ *
+ * Instant payouts are left out: `cancelPayout` refuses them unconditionally
+ * (they settle within minutes), so listing one here would advertise a
+ * candidate the companion action can never act on (Codex r1 P2 on #5184).
  */
 async function listPendingPayouts(limit = 20) {
   const stripe = getStripe();
@@ -949,7 +953,7 @@ async function listPendingPayouts(limit = 20) {
   try {
     const capped = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     const result = await stripe.payouts.list({ status: 'pending', limit: capped });
-    const payouts = (result.data || []).map((p) => ({
+    const payouts = (result.data || []).filter((p) => p.method !== 'instant').map((p) => ({
       id: p.id,
       amount: p.amount / 100,
       currency: p.currency,
@@ -983,10 +987,12 @@ function payoutCancelError(message, status = 409) {
  *
  * Idempotent on retry: the live status is read fresh on every call, so a
  * retry that lands after this same cancel already succeeded finds the
- * payout already `canceled` and is refused with that same terminal status
- * — never a second call to Stripe, and never a confusing error. A genuinely
- * NEW cancel of a genuinely pending payout is the only path that reaches
- * Stripe.
+ * payout already `canceled` and returns it as an already-completed success
+ * (`already_canceled: true`) — never a second call to Stripe, and never a
+ * failure reported for a state that was reached (Codex r1 P2 on #5184).
+ * The other terminal statuses (`in_transit`, `paid`, `failed`) are refused.
+ * A genuinely NEW cancel of a genuinely pending payout is the only path
+ * that reaches Stripe.
  * @param {string} payoutId — Stripe payout ID (po_xxx)
  * @param {object} opts
  * @param {string} [opts.idempotencyKey] — forwarded to Stripe's cancel call
@@ -1010,6 +1016,20 @@ async function cancelPayout(payoutId, opts = {}) {
 
   if (payout.method === 'instant') {
     throw payoutCancelError('Instant payouts settle within minutes and cannot be cancelled.');
+  }
+  if (payout.status === 'canceled') {
+    // The requested state is already reached (a retry after a lost response,
+    // or a cancel from another surface). Report success without a second
+    // Stripe call rather than a failure the operator would act on.
+    return {
+      payout_id: payout.id,
+      status: payout.status,
+      amount: payout.amount / 100,
+      currency: payout.currency,
+      arrival_date: payout.arrival_date ? new Date(payout.arrival_date * 1000).toISOString() : null,
+      method: payout.method,
+      already_canceled: true,
+    };
   }
   if (payout.status !== 'pending') {
     throw payoutCancelError(

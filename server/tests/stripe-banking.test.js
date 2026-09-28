@@ -556,6 +556,21 @@ describe('stripe banking service', () => {
       });
     });
 
+    test('leaves instant payouts out — cancelPayout can never act on them', async () => {
+      stripeClient.payouts.list.mockResolvedValue({
+        data: [
+          { id: 'po_pending_std', amount: 1000, currency: 'usd', arrival_date: 1780000000, method: 'standard', status: 'pending' },
+          { id: 'po_pending_inst', amount: 2000, currency: 'usd', arrival_date: 1780000000, method: 'instant', status: 'pending' },
+        ],
+        has_more: false,
+      });
+
+      const result = await service.listPendingPayouts(10);
+
+      expect(result.payouts.map((p) => p.id)).toEqual(['po_pending_std']);
+      expect(result.total).toBe(1);
+    });
+
     test('defaults and caps the limit', async () => {
       stripeClient.payouts.list.mockResolvedValue({ data: [], has_more: false });
 
@@ -607,8 +622,27 @@ describe('stripe banking service', () => {
       expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
     });
 
-    test.each(['in_transit', 'paid', 'failed', 'canceled'])(
-      'refuses a payout already %s without calling cancel — idempotent on a retry after success',
+    test('a payout already canceled is reported as success without a second Stripe call — retry after a lost response', async () => {
+      stripeClient.payouts.retrieve.mockResolvedValue({
+        id: 'po_done_1', status: 'canceled', method: 'standard', amount: 5000, currency: 'usd', arrival_date: 1780000000,
+      });
+
+      const result = await service.cancelPayout('po_done_1', { idempotencyKey: 'cpo_confirm_retry1' });
+
+      expect(stripeClient.payouts.cancel).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        payout_id: 'po_done_1',
+        status: 'canceled',
+        amount: 50,
+        currency: 'usd',
+        arrival_date: new Date(1780000000 * 1000).toISOString(),
+        method: 'standard',
+        already_canceled: true,
+      });
+    });
+
+    test.each(['in_transit', 'paid', 'failed'])(
+      'refuses a payout already %s without calling cancel',
       async (status) => {
         stripeClient.payouts.retrieve.mockResolvedValue({ id: 'po_terminal_1', status, method: 'standard', amount: 5000, currency: 'usd' });
 

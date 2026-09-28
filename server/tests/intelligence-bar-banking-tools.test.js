@@ -156,15 +156,32 @@ describe('intelligence bar banking tools', () => {
       });
     });
 
+    // A retry after the cancel already succeeded (lost response) comes back
+    // from the service as an already-completed success; the executor says so
+    // instead of reporting a failure for a state that was reached.
+    test('reports an already-cancelled payout as done, not as an error', async () => {
+      StripeBanking.cancelPayout.mockResolvedValue({
+        payout_id: 'po_synthetic_done', status: 'canceled', amount: 50, currency: 'usd',
+        arrival_date: null, method: 'standard', already_canceled: true,
+      });
+
+      const result = await executeBankingTool(
+        'cancel_pending_payout',
+        { payout_id: 'po_synthetic_done' },
+        { confirmed: true },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.already_canceled).toBe(true);
+      expect(result.note).toBe('Payout po_synthetic_done was already cancelled (status: canceled); nothing further was done.');
+    });
+
     // Stripe refuses to cancel anything but a still-pending payout — the
-    // executor surfaces that refusal as a plain error, not a thrown 500,
-    // and a retry after a payout already reached its terminal `canceled`
-    // state is refused the same clear way (idempotent: no second Stripe call).
+    // executor surfaces that refusal as a plain error, not a thrown 500.
     test.each([
       ['in_transit', 'This payout is already in transit and can no longer be cancelled — only a payout still pending can be cancelled.'],
       ['paid', 'This payout is already paid and can no longer be cancelled — only a payout still pending can be cancelled.'],
       ['failed', 'This payout is already failed and can no longer be cancelled — only a payout still pending can be cancelled.'],
-      ['canceled', 'This payout is already canceled and can no longer be cancelled — only a payout still pending can be cancelled.'],
     ])('refuses a %s payout with a clear message', async (status, message) => {
       StripeBanking.cancelPayout.mockRejectedValue(new Error(message));
 

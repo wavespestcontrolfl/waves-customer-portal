@@ -469,7 +469,9 @@ async function cancelPendingPayoutTool(input, context) {
     const result = await StripeBanking.cancelPayout(payoutId, options);
     return {
       ...result,
-      note: `Payout ${result.payout_id} cancelled (status: ${result.status}).`,
+      note: result.already_canceled
+        ? `Payout ${result.payout_id} was already cancelled (status: ${result.status}); nothing further was done.`
+        : `Payout ${result.payout_id} cancelled (status: ${result.status}).`,
     };
   } catch (err) {
     return { error: err.message };
