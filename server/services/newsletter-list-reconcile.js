@@ -49,6 +49,26 @@ async function fetchCandidateRows(conn) {
   return result.rows || [];
 }
 
+// Re-verifies ONE customer is STILL a live candidate (same predicate as
+// fetchCandidateRows) and returns its CURRENT email/name/city — closes the
+// gap where an archive, pipeline-stage change, or email edit mid-batch would
+// otherwise leave a stale row importable.
+async function fetchLiveCandidateNow(conn, customerId) {
+  const result = await conn.raw(
+    `SELECT id AS customer_id, email, first_name, last_name, city
+       FROM customers
+      WHERE id = ?
+        AND deleted_at IS NULL
+        AND active = true
+        AND churned_at IS NULL
+        AND (pipeline_stage IN ('active_customer', 'won') OR pipeline_stage IS NULL)
+        AND email IS NOT NULL
+        AND TRIM(email) <> ''`,
+    [customerId],
+  );
+  return result.rows?.[0] || null;
+}
+
 // Highest-priority existing subscriber row for this customer (same match
 // rule as the candidate query). Ordered so a still-active row (a race with
 // the candidate fetch, or the write-time recheck) always wins the read.
@@ -201,15 +221,18 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
   let imported = 0;
   if (write) {
     await guardedEach(importableRows, (row) => ({ customerId: row.customer_id }), async (row) => {
-      // Re-check immediately before writing: a customer who unsubscribes,
-      // gets suppressed, or flips marketing_offers off between the read
-      // and this write must be skipped, never imported.
-      if (await classifyCustomer(conn, row)) return;
+      // Re-check immediately before writing: reload the customer (an
+      // archive, pipeline-stage change, or email edit mid-batch drops it)
+      // and re-classify consent/suppression on the FRESH row — a customer
+      // who unsubscribes, gets suppressed, or flips marketing_offers off
+      // in between must be skipped, never imported.
+      const fresh = await fetchLiveCandidateNow(conn, row.customer_id);
+      if (!fresh || await classifyCustomer(conn, fresh)) return;
 
       const result = await subscribeOrResubscribe({
-        email: row.email,
-        firstName: row.first_name || null,
-        lastName: row.last_name || null,
+        email: fresh.email,
+        firstName: fresh.first_name || null,
+        lastName: fresh.last_name || null,
         source: 'customer_import',
         strict: false,
         requireConfirmation: false,
@@ -217,7 +240,7 @@ async function reconcileCustomers({ dryRun = true, conn = db } = {}) {
       });
       if (!['created', 'resubscribed', 'confirmed'].includes(result.action)) return;
       imported += 1;
-      const zone = cityToZone(row.city);
+      const zone = cityToZone(fresh.city);
       if (zone && result.subscriber?.id) {
         await conn('newsletter_subscribers')
           .where({ id: result.subscriber.id })

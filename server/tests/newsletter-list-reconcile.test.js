@@ -56,6 +56,11 @@ function makeConn(state) {
     if (sql.includes('FROM customers c') && sql.includes('NOT EXISTS')) {
       return { rows: state.customers.filter(isCandidate).filter((c) => !hasActive(c)).map((c) => ({ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city })) };
     }
+    if (sql.includes('WHERE id = ?')) {
+      const [customerId] = bindings;
+      const c = state.customers.find((x) => x.id === customerId && isCandidate(x));
+      return { rows: c ? [{ customer_id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, city: c.city }] : [] };
+    }
     if (sql.includes('ORDER BY CASE status')) {
       const [customerId, email] = bindings;
       const matches = state.subscribers.filter((s) => s.customer_id === customerId || (s.email || '').toLowerCase() === key(email));
@@ -157,6 +162,23 @@ test('re-check before write: a customer who unsubscribes between the read and th
   const result = await reconcileCustomers({ dryRun: false, conn });
   expect(result.importable).toBe(1); // the pre-write snapshot still counted it
   expect(result.imported).toBe(0); // the recheck caught the mid-flight unsubscribe
+  expect(subscribeOrResubscribe).not.toHaveBeenCalled();
+});
+
+test('re-check reloads the customer: one archived between the read and the write is skipped, not imported', async () => {
+  const state = { customers: [cust({ id: 'c1', email: 'gone@example.com' })], subscribers: [], prefs: [{ customer_id: 'c1', marketing_offers: true }] };
+  subscribeOrResubscribe.mockImplementation(async () => { throw new Error('must not be called'); });
+  const conn = makeConn(state);
+  const rawImpl = conn.raw.getMockImplementation();
+  conn.raw = jest.fn(async (sql, bindings) => {
+    // Archive the customer right before the write-time reload reads it (the
+    // batch classification loop never calls this query at all).
+    if (sql.includes('WHERE id = ?')) state.customers[0].deleted_at = new Date();
+    return rawImpl(sql, bindings);
+  });
+  const result = await reconcileCustomers({ dryRun: false, conn });
+  expect(result.importable).toBe(1); // the pre-write snapshot still counted it
+  expect(result.imported).toBe(0);
   expect(subscribeOrResubscribe).not.toHaveBeenCalled();
 });
 
