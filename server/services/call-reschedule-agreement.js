@@ -404,17 +404,22 @@ function namesAnyDay(quote) {
 // The halves of the day this quote's am/pm and part-of-day words state
 // ("at two AM" -> am), so a commitment in the other half never counts.
 const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
+// A part of the day right before one of these describes that thing, not a
+// time ("your morning appointment", "the afternoon slot").
+const DESCRIBED_THINGS = new Set(['appointment', 'appointments', 'visit', 'visits', 'slot', 'slots', 'time', 'service', 'treatment']);
 function halvesSaid(quote) {
   const toks = normalize(quote).split(' ');
-  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && (t !== 'am' || amIsMeridiem(toks[i - 1])))
+  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && !DESCRIBED_THINGS.has(toks[i + 1])
+    && (t !== 'am' || amIsMeridiem(toks[i - 1], toks[i - 2])))
     .map((t) => HALF_WORDS[t]);
 }
 
 // "Am" is also the verb ("I am moving you to two"): it is the morning only
-// right after a number, "o'clock" or a day ("10 AM", "Thursday AM").
-function amIsMeridiem(prev) {
+// right after a number, "o'clock", a day or "in the" ("10 AM", "Thursday
+// AM", "two in the a.m.").
+function amIsMeridiem(prev, prev2) {
   return Boolean(prev) && (/^\d+$/.test(prev) || Object.hasOwn(HOUR_WORDS, prev) || prev === 'clock' || prev === 'oclock'
-    || DAY_WORDS.has(prev));
+    || DAY_WORDS.has(prev) || (prev === 'the' && prev2 === 'in'));
 }
 
 // The recorded words the slot quote must hold.
