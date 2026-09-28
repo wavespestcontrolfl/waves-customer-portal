@@ -37,6 +37,7 @@ const { ensureReportToken } = require('../service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../service-report/delivery-queue');
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const { detectServiceLine } = require('../service-report/service-line-configs');
 const {
   getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
@@ -107,6 +108,13 @@ async function reportEmailBlocker(status, recordRow, knex) {
   if (!['completed', 'complete'].includes(String(recordRow.status || '').toLowerCase())) return 'service record is not completed';
   const notes = parseNotes(recordRow.structured_notes);
   if (notes.backfill === true) return 'backfilled completion — quiet by contract';
+  // Lawn reports: completion holds the email until the grounded
+  // recommendations settle, and the worker only re-verifies grounding for
+  // those held jobs — an immediate repair enqueue could email stale copy.
+  // Classified exactly as the worker does (delivery-queue.js isLawnDelivery).
+  if ((recordRow.service_line || detectServiceLine(recordRow.service_type)) === 'lawn') {
+    return 'lawn report — grounding readiness is only verified by completion; send it from the report';
+  }
   if (posture !== 'auto_send') return `report posture is ${posture || 'unrecorded'}, not auto_send`;
   if (notes.serviceReportV1EmailStatus) return `report email already ${notes.serviceReportV1EmailStatus}`;
   if (recordRow.recap_sms_sent_at) return 'a recap text already claimed this report';
@@ -159,7 +167,7 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   const recordId = status.reportRecordId || null;
   const recordRow = recordId
     ? await knex('service_records').where({ id: recordId })
-      .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id')
+      .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id', 'service_line', 'service_type')
     : null;
 
   let contact = null;

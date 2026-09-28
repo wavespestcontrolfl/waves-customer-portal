@@ -54,6 +54,7 @@ function status({ facts = {}, packet = null } = {}) {
 const RECORD = {
   id: 'rec-1', status: 'completed', report_template_version: 'service_report_v1',
   report_view_token: null, structured_notes: {}, recap_sms_sent_at: null, customer_id: 'cust-1', scheduled_service_id: SVC,
+  service_line: 'pest', service_type: 'Pest Control',
 };
 
 const MISSING_REPORT = {
@@ -305,4 +306,14 @@ test('the card names the customer, the visit and the masked recipients, and nobo
   const off = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
   expect(off.steps.map((s) => s.step)).toEqual(['publish_report']);
   expect(off.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/no report email recipient/) })]));
+});
+
+test('lawn reports never get a repair email — grounding is only verified by completion', async () => {
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  for (const lawn of [{ service_line: 'lawn' }, { service_line: null, service_type: 'Lawn Care Visit' }]) {
+    db.mockImplementation(fakeDb({ service_records: [{ ...RECORD, ...lawn }] }));
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(preview.steps.map((s) => s.step)).toEqual(['publish_report']);
+    expect(preview.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/lawn report/) })]));
+  }
 });
