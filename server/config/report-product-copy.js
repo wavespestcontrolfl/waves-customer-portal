@@ -86,21 +86,21 @@ const REPORT_PRODUCT_COPY = [
     names: ['advion evolution cockroach gel bait'],
     howItWorks: 'Roaches eat the gel and share it back where they hide, so it reaches roaches we never see. The placements stay attractive for weeks.',
     alsoLabeledFor: 'German, American and smoky brown cockroaches.',
-    petsKids: 'No wait to go back in. Please leave the small bait placements alone.',
+    petsKids: 'Please leave the small bait placements alone.',
   },
   {
     epaReg: '100-1498',
     names: ['advion ant bait gel'],
     howItWorks: 'Worker ants carry the gel home and feed it to the queen and young — that’s how whole colonies go down, not just the ants you see.',
     alsoLabeledFor: 'Ghost ants, big-headed ants, crazy ants and pharaoh ants.',
-    petsKids: 'No re-entry wait for living spaces; leave the placements undisturbed.',
+    petsKids: 'Leave the placements undisturbed.',
   },
   {
     epaReg: '100-1483',
     names: ['advion wdg granular'],
     howItWorks: 'A granular bait scattered in beds and along the foundation. Ants and crickets eat it and carry it back to where they live.',
     alsoLabeledFor: 'Ghost ants, big-headed ants, crickets including mole crickets, and silverfish.',
-    petsKids: 'No re-entry wait for living spaces; leave the granules undisturbed.',
+    petsKids: 'Leave the granules undisturbed.',
   },
   {
     epaReg: '2724-351',
@@ -121,7 +121,7 @@ const REPORT_PRODUCT_COPY = [
     names: ['delta dust'],
     howItWorks: 'A waterproof dust puffed into wall voids, weep holes and outlets, where pests travel and hide. It keeps working there for months.',
     alsoLabeledFor: 'Ghost ants, German cockroaches, paper wasps and silverfish.',
-    petsKids: 'No re-entry wait for living spaces; the treated voids stay undisturbed.',
+    petsKids: 'The treated voids stay undisturbed.',
   },
   {
     // Spray adjuvant, not a pesticide — no EPA registration to match on, so
