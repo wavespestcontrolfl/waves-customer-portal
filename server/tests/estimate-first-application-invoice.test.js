@@ -6,6 +6,7 @@ const {
   invoiceContainsSetupFeeLine,
   invoiceHasPositiveSetupFeeLine,
   classifyAcceptedEstimateInvoiceCoverage,
+  isPricedCoveredMemberVisit,
 } = require('../services/estimate-first-application-invoice');
 
 function makeItemizeKnex(first, members) {
@@ -537,5 +538,71 @@ describe('findFirstApplicationInvoiceForEstimateService — honours the stamp (C
     const found = await findFirstApplicationInvoiceForEstimateService({ ...movedSibling, scheduled_date: null }, knex);
     expect(found).toEqual({ invoice: combined, liveBeside: null });
     expect(knex.calls.some((c) => c[2] === 'first_visit.scheduled_date')).toBe(false);
+  });
+});
+
+// Minimal fake conn for isPricedCoveredMemberVisit: only 'invoices' (the
+// anchor-identity read) and 'scheduled_services' (readFirstApplicationStamp's
+// narrow-select fallback) ever get touched by this predicate.
+function fakeAnchorLookupConn({ invoiceById = {}, stampRow } = {}) {
+  return (table) => {
+    if (table === 'invoices') {
+      return { where: (cond) => ({ first: async () => invoiceById[cond.id] || null }) };
+    }
+    if (table === 'scheduled_services') {
+      return { where: () => ({ first: async () => stampRow }) };
+    }
+    throw new Error(`unexpected table: ${table}`);
+  };
+}
+
+describe('isPricedCoveredMemberVisit — priced-covered-member widening gate (Codex r21 P1, PR #5021 follow-up)', () => {
+  test('a NON-ANCHOR row stamped to an invoice whose OWN anchor is a different row → true', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } } });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  test('the ANCHOR row itself (stamped invoice.scheduled_service_id === svc.id) → false', async () => {
+    const svc = { id: 'pest-anchor', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } } });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+
+  test('no stamp at all → false, and never queries the invoices table', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: null };
+    let invoicesQueried = false;
+    const conn = (table) => {
+      if (table === 'invoices') { invoicesQueried = true; return { where: () => ({ first: async () => null }) }; }
+      throw new Error(`unexpected table: ${table}`);
+    };
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+    expect(invoicesQueried).toBe(false);
+  });
+
+  test('a svc without the column (narrow select) reads the stamp by id first, same as readFirstApplicationStamp', async () => {
+    const svc = { id: 'lawn-sibling' };
+    const conn = fakeAnchorLookupConn({
+      stampRow: { first_application_invoice_id: 'combined-inv' },
+      invoiceById: { 'combined-inv': { scheduled_service_id: 'pest-anchor' } },
+    });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(true);
+  });
+
+  test('the stamped invoice row is unreadable (deleted/orphaned) → false, never throws', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = fakeAnchorLookupConn({ invoiceById: {} });
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
+  });
+
+  test('missing svc.id or conn → false', async () => {
+    await expect(isPricedCoveredMemberVisit({}, fakeAnchorLookupConn())).resolves.toBe(false);
+    await expect(isPricedCoveredMemberVisit({ id: 'lawn-sibling', first_application_invoice_id: 'x' }, null)).resolves.toBe(false);
+  });
+
+  test('a throwing conn fails toward false, never toward an unhandled rejection', async () => {
+    const svc = { id: 'lawn-sibling', first_application_invoice_id: 'combined-inv' };
+    const conn = () => { throw new Error('db down'); };
+    await expect(isPricedCoveredMemberVisit(svc, conn)).resolves.toBe(false);
   });
 });

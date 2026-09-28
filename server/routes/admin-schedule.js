@@ -15996,8 +15996,19 @@ async function resolveScheduledServiceCharge({
   // unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
+  // Priced-covered-member widening (Codex r21 P1 on PR #5021, deferred to
+  // this follow-up — see isSiblingCoverageEligibleVisit's own header,
+  // billing-lane.js): a NON-ANCHOR row staff priced AFTER its trip's
+  // combined invoice already existed must still be asked — only this one
+  // extra DB round trip (itself a no-op DB call for the common unstamped
+  // row — see isPricedCoveredMemberVisit's own fast path), and an anchor's
+  // own priced mint never reaches it (the same predicate keeps anchors out
+  // on their own scheduled_service_id match).
+  const isPricedCoveredMember = hasOwnPrice && svc && dbConn
+    ? await require('../services/estimate-first-application-invoice').isPricedCoveredMemberVisit(svc, dbConn)
+    : false;
   const eligibleForCoverageLookup = isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType, isPricedCoveredMember,
   });
   if (eligibleForCoverageLookup && svc && dbConn) {
     let verdict;
@@ -16089,10 +16100,30 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+  // Priced-covered-member widening (see resolveScheduledServiceCharge's own
+  // header just above): a priced row with NO stamp at all can never be a
+  // covered member — read straight off svc's own already-selected
+  // first_application_invoice_id column (readFirstApplicationStamp's fast
+  // path), never an extra DB call just to rule this out synchronously — so
+  // the ordinary hasOwnPrice gate below still returns null for it exactly
+  // as before. A priced row that DOES carry a stamp might be the anchor or
+  // a covered member; that can only be told apart under the lock (the
+  // invoice's own anchor id), so the closure below re-decides eligibility
+  // itself before ever running the recheck.
+  const maybePricedCoveredMember = hasOwnPrice && !!svc?.first_application_invoice_id;
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    isPricedCoveredMember: maybePricedCoveredMember,
   })) return null;
   return async (trx) => {
+    if (hasOwnPrice) {
+      const { isPricedCoveredMemberVisit } = require('../services/estimate-first-application-invoice');
+      const isPricedCoveredMember = await isPricedCoveredMemberVisit(svc, trx);
+      if (!isSiblingCoverageEligibleVisit({
+        sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+        isPricedCoveredMember,
+      })) return;
+    }
     let recheck;
     try {
       // noWait (codex round-6 P1): this recheck runs AFTER

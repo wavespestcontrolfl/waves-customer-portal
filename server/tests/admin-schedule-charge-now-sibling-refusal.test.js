@@ -623,6 +623,120 @@ describe('POST /:id/invoice — the PRICED reserved row is never refused (owner 
   });
 });
 
+// resolveScheduledServiceCharge — priced-covered-member widening (Codex r21
+// P1 on PR #5021, deferred to this follow-up). Pre-fix, a NON-ANCHOR row
+// staff priced AFTER its trip's combined invoice already existed made
+// isSiblingCoverageEligibleVisit's `!hasOwnPrice` gate false, so this
+// resolver skipped the sibling lookup entirely and minted a SECOND charge
+// beside the sibling's live invoice. Driven directly (not through the HTTP
+// handler — its own "existing invoice on this row" reuse query is a
+// SEPARATE concern from this resolver, and would otherwise collide with
+// mockDb's crude single-row 'invoices' stand-in used below for the
+// priced-covered-member anchor-identity check).
+describe('resolveScheduledServiceCharge — priced-covered-member widening (Codex r21 P1, PR #5021 follow-up)', () => {
+  const { resolveScheduledServiceCharge } = adminScheduleRouter._test;
+  const callResolver = (svc) => resolveScheduledServiceCharge({
+    estimatedPrice: svc.estimated_price, isCallback: svc.is_callback, monthlyRate: svc.cust_monthly_rate,
+    billingMode: svc.cust_billing_mode, serviceType: svc.service_type, svc, dbConn: mockDb,
+  });
+
+  test('a PRICED non-anchor sibling stamped to a DIFFERENT row\'s PAID combined invoice refuses (was a silent second mint pre-fix)', async () => {
+    const svc = { ...SVC_ROW, estimated_price: 65, first_application_invoice_id: 'inv-1' };
+    mockDb.__existingInvoiceRow = { scheduled_service_id: 'svc-pest' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'paid', total: 153.6 },
+      liveBeside: null,
+    });
+    await expect(callResolver(svc)).resolves.toEqual({
+      refused: true, reason: 'sibling_invoice_covered',
+      message: expect.stringMatching(/combined trip invoice/i),
+    });
+  });
+
+  test('...and a still-OPEN (sent) combined invoice refuses the same way', async () => {
+    const svc = { ...SVC_ROW, estimated_price: 65, first_application_invoice_id: 'inv-1' };
+    mockDb.__existingInvoiceRow = { scheduled_service_id: 'svc-pest' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    await expect(callResolver(svc)).resolves.toEqual({
+      refused: true, reason: 'sibling_invoice_covered',
+      message: expect.stringMatching(/combined trip invoice/i),
+    });
+  });
+
+  test('...and a VOID combined invoice with no live recognized replacement refuses with sibling_invoice_needs_review', async () => {
+    const svc = { ...SVC_ROW, estimated_price: 65, first_application_invoice_id: 'inv-void' };
+    mockDb.__existingInvoiceRow = { scheduled_service_id: 'svc-pest' };
+    // No live/refunded match via the ordinary (void-excluding) lookup —
+    // combinedInvoiceVoidedWithoutLiveReplacement's own candidate query is
+    // what finds the void row.
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    mockDb.__invoiceRows = [RECOGNIZED_VOIDED_INVOICE];
+    await expect(callResolver(svc)).resolves.toEqual({
+      refused: true, reason: 'sibling_invoice_needs_review',
+      message: expect.stringMatching(/manual review/i),
+    });
+  });
+
+  test('the PRICED ANCHOR row — stamped to ITS OWN invoice — never refuses, mints the ordinary priced amount unchanged', async () => {
+    const svc = { ...SVC_ROW, id: 'svc-pest', estimated_price: 153.6, first_application_invoice_id: 'inv-1' };
+    mockDb.__existingInvoiceRow = { scheduled_service_id: 'svc-pest' };
+    await expect(callResolver(svc)).resolves.toBe(153.6);
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+  });
+
+  test('an UNSTAMPED priced row never refuses, mints the ordinary priced amount unchanged', async () => {
+    const svc = { ...SVC_ROW, estimated_price: 65 };
+    await expect(callResolver(svc)).resolves.toBe(65);
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+  });
+});
+
+// siblingCoverageRecheckInTrx — same priced-covered-member widening, but for
+// the in-transaction recheck the mint runs right before committing. A
+// priced row with NO stamp at all stays null synchronously (no DB call
+// spent ruling it out); a priced STAMPED row returns a closure whose OWN
+// under-lock anchor-identity check decides whether to actually re-run the
+// coverage verdict — an anchor's own stamp is a permanent no-op, a
+// non-anchor member's re-proves coverage exactly like the unpriced path
+// always has.
+describe('siblingCoverageRecheckInTrx — priced-covered-member widening (Codex r21 P1, PR #5021 follow-up)', () => {
+  const { siblingCoverageRecheckInTrx } = adminScheduleRouter._test;
+  const fakeTrxWithAnchor = (anchorId) => (table) => {
+    if (table === 'invoices') return { where: (cond) => ({ first: async () => ({ scheduled_service_id: anchorId }) }) };
+    throw new Error(`unexpected table: ${table}`);
+  };
+
+  test('a priced, STAMPED non-anchor sibling returns a recheck closure (not null)', () => {
+    const svc = { ...SVC_ROW, estimated_price: 65, first_application_invoice_id: 'inv-1' };
+    expect(typeof siblingCoverageRecheckInTrx(svc)).toBe('function');
+  });
+
+  test('...and that closure throws SIBLING_COVERAGE_CHANGED when the sibling invoice is still live under the lock', async () => {
+    const svc = { ...SVC_ROW, estimated_price: 65, first_application_invoice_id: 'inv-1' };
+    const recheckInTrx = siblingCoverageRecheckInTrx(svc);
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    await expect(recheckInTrx(fakeTrxWithAnchor('svc-pest'))).rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
+  });
+
+  test('the ANCHOR\'s own priced closure is a permanent no-op — never throws, never even runs the coverage recheck', async () => {
+    const svc = { ...SVC_ROW, id: 'svc-pest', estimated_price: 153.6, first_application_invoice_id: 'inv-1' };
+    const recheckInTrx = siblingCoverageRecheckInTrx(svc);
+    await expect(recheckInTrx(fakeTrxWithAnchor('svc-pest'))).resolves.toBeUndefined();
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+  });
+
+  test('an UNSTAMPED priced row returns null (unchanged) — no recheck closure at all, no DB call to rule it out', () => {
+    const svc = { ...SVC_ROW, estimated_price: 65 };
+    expect(siblingCoverageRecheckInTrx(svc)).toBeNull();
+  });
+});
+
 // mintOrReuseScheduledServiceInvoice backs the Mark-prepaid / prepaid-receipt
 // mint (generatePrepaidReceiptForService). It never throws to its caller —
 // it must translate resolveScheduledServiceCharge's structured refusal into

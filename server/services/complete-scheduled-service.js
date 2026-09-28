@@ -129,6 +129,7 @@ const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|al
 
 const {
   findFirstApplicationInvoiceForEstimateService,
+  isPricedCoveredMemberVisit,
 } = require('../services/estimate-first-application-invoice');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const {
@@ -8680,8 +8681,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // machinery above — no new completion-side mint/split logic.
               const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
                 || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
+              // Priced covered member still refuses (r21 P1, #5021).
               if (isSiblingCoverageEligibleVisit({
                 sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
+                isPricedCoveredMember: hasOwnPrice ? await isPricedCoveredMemberVisit(svc, db) : false,
               })) {
                 const voidedCombined = await combinedInvoiceVoidedWithoutLiveReplacement(svc, db);
                 if (voidedCombined) {

@@ -37,6 +37,7 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
 const {
   siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, combinedInvoiceVoidedWithoutLiveReplacement,
+  perApplicationCompletionVoidHold,
 } = require('../services/billing-lane');
 
 // Minimal knex-like stand-in. 'scheduled_services' distinguishes the two
@@ -52,8 +53,12 @@ const {
 // every EXISTING verdict unchanged. `invoiceQueryCalls` (optional, out
 // param) collects each chain call made against the `invoices` query so a
 // test can assert the query is correctly SCOPED without a real database.
+// `invoiceById` (plain `invoices` table, distinct from the `invoices as i`
+// alias below) backs isPricedCoveredMemberVisit's own anchor-identity read
+// (`.where({id}).first('scheduled_service_id')`) — the priced-covered-member
+// widening gate, never the sibling-invoice lookup itself.
 function fakeDbConn({
-  byId = {}, members = [], invoiceRows = [], invoiceQueryCalls = null,
+  byId = {}, members = [], invoiceRows = [], invoiceQueryCalls = null, invoiceById = {},
 } = {}) {
   return (table) => {
     if (table === 'scheduled_services') {
@@ -69,6 +74,9 @@ function fakeDbConn({
           };
         },
       };
+    }
+    if (table === 'invoices') {
+      return { where: (cond) => ({ first: async () => invoiceById[cond.id] || null }) };
     }
     if (table === 'invoices as i') {
       const q = {};
@@ -523,6 +531,51 @@ describe('siblingCoverageForSchedule', () => {
     expect(prediction).toBeNull();
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
+
+  // Priced-covered-member widening (Codex r21 P1 on PR #5021, deferred to
+  // this follow-up): a NON-ANCHOR row staff priced AFTER its trip's combined
+  // invoice already existed is stamped to a DIFFERENT row's invoice
+  // (invoice.scheduled_service_id !== svc.id) — still covered, the SAME
+  // verdict the unpriced path already reached. Distinguishes this row from
+  // the "PRICED visit never enters" test above, which is the UNSTAMPED case.
+  test('a PRICED non-anchor sibling stamped to a DIFFERENT row\'s PAID invoice still reads settled', async () => {
+    const PRICED_LAWN_SVC = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-1' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'paid', total: 153.6 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ invoiceById: { 'inv-1': { scheduled_service_id: 'svc-pest' } } });
+
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: PRICED_LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' });
+    expect(prediction.kind).toBe('covered_sibling_invoice');
+  });
+
+  test('a PRICED non-anchor sibling stamped to a DIFFERENT row\'s OPEN invoice still reads collect_on_combined_invoice', async () => {
+    const PRICED_LAWN_SVC = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-1' };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ invoiceById: { 'inv-1': { scheduled_service_id: 'svc-pest' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: PRICED_LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null });
+  });
+
+  // The ANCHOR itself, even when stamped (to its OWN invoice), never enters
+  // this prediction — completing/charging it bills the combined amount
+  // once, which is correct (same rule as the unstamped priced case above;
+  // this pins the STAMPED-but-still-the-anchor shape specifically).
+  test('a PRICED ANCHOR row — stamped to ITS OWN invoice — never enters this prediction, unchanged', async () => {
+    const PEST_SVC = { ...LAWN_SVC, id: 'svc-pest', estimated_price: 153.6, first_application_invoice_id: 'inv-1' };
+    const dbConn = fakeDbConn({ invoiceById: { 'inv-1': { scheduled_service_id: 'svc-pest' } } });
+
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: PEST_SVC, dbConn });
+    expect(coverage.state).toBe('none');
+    expect(prediction).toBeNull();
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+  });
 });
 
 // Codex pre-push P0 (x2): a MINT decision (resolveScheduledServiceCharge,
@@ -784,5 +837,60 @@ describe('combinedInvoiceVoidedWithoutLiveReplacement', () => {
   test('missing estimate/customer/date shape reads as null, never a query attempt', async () => {
     const brokenDbConn = () => { throw new Error('should not be called'); };
     expect(await combinedInvoiceVoidedWithoutLiveReplacement({ id: 'svc-x' }, brokenDbConn)).toBeNull();
+  });
+});
+
+// perApplicationCompletionVoidHold — the completion-side (and closeout-
+// status.js / annual-prepay-renewals.js projection) counterpart of the
+// Charge Now REFUSE AFTER A VOID guard above: same combinedInvoiceVoidedWithoutLiveReplacement,
+// gated by the SAME isSiblingCoverageEligibleVisit shape. Priced-covered-
+// member widening (Codex r21 P1 on PR #5021, deferred to this follow-up):
+// a NON-ANCHOR row staff priced after its trip's combined invoice died
+// still needs the hold; the ANCHOR's own priced mint never does.
+describe('perApplicationCompletionVoidHold — priced-covered-member widening (r21 P1, #5021 follow-up)', () => {
+  test('a PRICED non-anchor sibling, combined invoice voided with no live replacement → the hold fires (was a silent pass-through pre-fix)', async () => {
+    const PRICED_LAWN_SVC = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-void' };
+    const dbConn = fakeDbConn({
+      invoiceRows: [RECOGNIZED_VOIDED_INVOICE],
+      invoiceById: { 'inv-void': { scheduled_service_id: 'svc-pest' } },
+    });
+    const hold = await perApplicationCompletionVoidHold({
+      isCallback: false, serviceType: PRICED_LAWN_SVC.service_type, svc: PRICED_LAWN_SVC, dbConn,
+    });
+    expect(hold).toEqual(RECOGNIZED_VOIDED_INVOICE);
+  });
+
+  test('the PRICED ANCHOR row (stamped to its OWN invoice) never holds, even with that same invoice voided', async () => {
+    const PEST_SVC = { ...LAWN_SVC, id: 'svc-pest', estimated_price: 153.6, first_application_invoice_id: 'inv-void' };
+    const dbConn = fakeDbConn({
+      invoiceRows: [RECOGNIZED_VOIDED_INVOICE],
+      invoiceById: { 'inv-void': { scheduled_service_id: 'svc-pest' } },
+    });
+    const hold = await perApplicationCompletionVoidHold({
+      isCallback: false, serviceType: PEST_SVC.service_type, svc: PEST_SVC, dbConn,
+    });
+    expect(hold).toBeNull();
+  });
+
+  test('an UNSTAMPED priced row never holds — unchanged (no DB call spent deciding isPricedCoveredMember beyond the fast no-stamp path)', async () => {
+    const PEST_SVC = { ...LAWN_SVC, id: 'svc-pest', estimated_price: 153.6 };
+    const dbConn = fakeDbConn({ invoiceRows: [RECOGNIZED_VOIDED_INVOICE] });
+    const hold = await perApplicationCompletionVoidHold({
+      isCallback: false, serviceType: PEST_SVC.service_type, svc: PEST_SVC, dbConn,
+    });
+    expect(hold).toBeNull();
+  });
+
+  test('a PRICED non-anchor sibling with a LIVE replacement on the anchor never holds (correctly "covered", not void)', async () => {
+    const PRICED_LAWN_SVC = { ...LAWN_SVC, estimated_price: 56.4, first_application_invoice_id: 'inv-void' };
+    const replacement = { ...RECOGNIZED_VOIDED_INVOICE, id: 'inv-live', status: 'sent', scheduled_service_id: 'svc-pest' };
+    const dbConn = fakeDbConn({
+      invoiceRows: [RECOGNIZED_VOIDED_INVOICE, replacement],
+      invoiceById: { 'inv-void': { scheduled_service_id: 'svc-pest' } },
+    });
+    const hold = await perApplicationCompletionVoidHold({
+      isCallback: false, serviceType: PRICED_LAWN_SVC.service_type, svc: PRICED_LAWN_SVC, dbConn,
+    });
+    expect(hold).toBeNull();
   });
 });
