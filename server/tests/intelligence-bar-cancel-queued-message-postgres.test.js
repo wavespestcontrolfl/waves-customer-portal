@@ -105,7 +105,65 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     expect(out.messages[0].channel).toBe('email');
   });
 
-  test('cancels exactly one scheduled text and leaves a sibling untouched', async () => {
+  // Owner ruling 2026-09-28: the bar cancels only STANDALONE messages. A
+  // deferred-replay entry point with an onTerminal hook is workflow-owned
+  // (a bare cancel would strand that workflow's obligation) — excluded from
+  // the list, refused by name in the preview, pointed at the Communications
+  // inbox instead.
+  test('a workflow-owned sms_log row is excluded from the list and refused in the preview, but an ordinary sibling still lists and cancels', async () => {
+    const { TERMINAL_HOOK_ENTRY_POINTS } = require('../services/messaging/deferred-replay-registry');
+    const entryPoint = TERMINAL_HOOK_ENTRY_POINTS[0];
+    const custId = await customer();
+    const workflowOwnedId = await scheduledSms(custId, { metadata: { entry_point: entryPoint } });
+    const ordinaryId = await scheduledSms(custId);
+
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
+    expect(listed.messages.map((m) => m.message_id)).toEqual([ordinaryId]);
+
+    const refused = await executeCommsTool('cancel_queued_message', { message_id: workflowOwnedId, customer_id: custId, channel: 'sms' });
+    expect(refused.error).toMatch(/workflow/i);
+    expect(refused.error).toMatch(/communications inbox/i);
+
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: ordinaryId, customer_id: custId, channel: 'sms' });
+    expect(preview.proposal).toBe(true);
+    const confirmed = await executeCommsTool('cancel_queued_message', {
+      message_id: ordinaryId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+    expect(confirmed.success).toBe(true);
+    // The workflow-owned row is completely untouched.
+    expect((await trx('sms_log').where({ id: workflowOwnedId }).first()).status).toBe('scheduled');
+  });
+
+  test.each([
+    ['finalize_only', { finalize_only: true }],
+    ['review_delivery_uncertain_exhausted', { review_delivery_uncertain_exhausted: true }],
+  ])('a %s sms_log row is excluded from the list and refused as already-delivered', async (_label, metaFlag) => {
+    const custId = await customer();
+    const alreadyDeliveredId = await scheduledSms(custId, { metadata: metaFlag });
+
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'sms' });
+    expect(listed.messages).toEqual([]);
+
+    const out = await executeCommsTool('cancel_queued_message', { message_id: alreadyDeliveredId, customer_id: custId, channel: 'sms' });
+    expect(out.error).toMatch(/already reached the provider/i);
+    expect((await trx('sms_log').where({ id: alreadyDeliveredId }).first()).status).toBe('scheduled'); // untouched
+  });
+
+  // Codex round 1 on #5224 (P1): status alone cannot tell a truly-idle
+  // queued email from one whose SendGrid request is in flight RIGHT NOW —
+  // provider_handoff_phase is the real marker, and it must be checked at
+  // PREVIEW time too, not only inside the commit CAS.
+  test('an email whose provider handoff already started is refused at the preview, never proposable', async () => {
+    const custId = await customer();
+    const sendingId = await queuedEmail(custId, { provider_handoff_phase: 'started' });
+    const listed = await executeCommsTool('list_queued_messages', { customer_id: custId, channel: 'email' });
+    expect(listed.messages).toEqual([]);
+    const out = await executeCommsTool('cancel_queued_message', { message_id: sendingId, customer_id: custId, channel: 'email' });
+    expect(out.proposal).not.toBe(true);
+    expect(out.error).toMatch(/currently being sent/i);
+  });
+
+  test('cancels exactly one scheduled text (physically deleted, the shared inbox workflow\'s ordinary case) and leaves a sibling untouched', async () => {
     const custId = await customer();
     const targetId = await scheduledSms(custId);
     const siblingId = await scheduledSms(custId);
@@ -120,8 +178,37 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL)', () =>
     });
     expect(confirmed).toMatchObject({ success: true, cancelled: true, channel: 'sms', message_id: targetId, messages_sent: false });
 
-    expect((await trx('sms_log').where({ id: targetId }).first()).status).toBe('cancelled');
+    // scheduled-sms-cancel.js's ordinary case physically deletes the row
+    // (the same shared workflow the admin SMS inbox's DELETE route uses).
+    expect(await trx('sms_log').where({ id: targetId }).first()).toBeUndefined();
     expect((await trx('sms_log').where({ id: siblingId }).first()).status).toBe('scheduled');
+  });
+
+  // Owner ruling / Codex round 1 on #5224: the IB cancel must run the SAME
+  // shared workflow the admin SMS inbox uses — proven here by the exact
+  // review-ask-reservation-in-place special case that workflow exists for.
+  // A bare status flip (this tool's pre-fix behavior) would have deleted
+  // this row, erasing the 72h ask-spacing evidence review-ask-history's
+  // lastManualAskAt reads regardless of status.
+  test('cancels a review-ask-reservation-marked scheduled text IN PLACE, preserving the reservation as spacing evidence', async () => {
+    const custId = await customer();
+    const targetId = await scheduledSms(custId, {
+      metadata: { review_ask_reservation: true, scheduled_sms_attempts: 3 },
+    });
+
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: targetId, customer_id: custId, channel: 'sms' });
+    expect(preview.proposal).toBe(true);
+
+    const confirmed = await executeCommsTool('cancel_queued_message', {
+      message_id: targetId, customer_id: custId, channel: 'sms', confirmed: true,
+      _verified_message_version: preview._version,
+    });
+    expect(confirmed).toMatchObject({ success: true, cancelled: true, channel: 'sms', message_id: targetId });
+
+    const row = await trx('sms_log').where({ id: targetId }).first();
+    expect(row).toBeDefined();
+    expect(row.status).toBe('canceled'); // single L — scheduled-sms-cancel.js's in-place marker, not a delete
+    expect(row.metadata).toMatchObject({ review_ask_reservation: true, scheduled_sms_attempts: 3 });
   });
 
   test('cancels exactly one queued email and leaves a sibling untouched', async () => {

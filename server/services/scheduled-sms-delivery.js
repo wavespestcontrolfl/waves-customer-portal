@@ -274,23 +274,4 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   return { ...result, scheduledHold: true };
 }
 
-// Cancel a still-scheduled row before the claim worker picks it up — the
-// Intelligence Bar's cancel_queued_message tool. claimDueScheduledSms
-// (scheduler.js) flips status 'scheduled' -> 'sending' the instant it
-// claims a row (a single UPDATE ... WHERE status = 'scheduled'), so the CAS
-// below — scoped to the EXACT scheduled_for the caller pinned from its own
-// preview read — can never match a row that has started sending: the WHERE
-// misses (0 rows) and this returns null instead of cancelling a live send.
-// A row rescheduled to a different time in between (a held review-ask
-// retry, a quiet-hours requeue) also misses and must be re-previewed.
-// `conn` defaults to the module connection but accepts a transaction so a
-// caller can hold the row lock across its own fresh preview + this write.
-async function cancelScheduledSms(id, pin = {}, conn = db) {
-  const query = conn('sms_log').where({ id, status: 'scheduled' });
-  if (pin.scheduledFor == null) query.whereNull('scheduled_for');
-  else query.where({ scheduled_for: pin.scheduledFor });
-  const [cancelled] = await query.update({ status: 'cancelled', updated_at: new Date() }).returning('*');
-  return cancelled || null;
-}
-
-module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, cancelScheduledSms };
+module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms };
