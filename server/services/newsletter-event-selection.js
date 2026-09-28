@@ -51,7 +51,7 @@ function parseLockedEventIds(value) {
 }
 
 function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
-  occurrenceCount = null, identityRecurring = false, firstOfYear = null,
+  occurrenceCount = null, identityRecurring = false, firstOfYear = null, provenFirstOfYear = null,
 } = {}) {
   return (Array.isArray(featuredHistory) ? featuredHistory : []).some((prior) => {
     if (String(prior.id) === String(event.id)) return false;
@@ -98,6 +98,14 @@ function isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
       // occurrence exists in the year pool (the featured prior row is the
       // earlier-year evidence itself).
       if (firstOfYear === false) return true;
+      // No earlier date this year is not yet proof this is the year's FIRST
+      // (Codex P2, round 22): the rule fails closed without continuity. The
+      // proof is the pool's own isFirstOccurrenceOfYear verdict, this
+      // featured row having shipped in the ET year just before, or an annual
+      // identity (one a year by nature). A row featured two years back says
+      // nothing about this year's earlier dates.
+      if (provenFirstOfYear !== true && !isAnnualEvent(event) && !isAnnualEvent(prior)
+        && !shippedInPriorEtYear(prior, etYearOf(event.start_at, reference), reference)) return true;
       return !isEditoriallyNewEvent({
         ...event,
         times_featured: Math.max(1, Number(prior.times_featured) || 0),
@@ -140,7 +148,10 @@ async function filterPreviouslyFeaturedIdentities(events, { knex = db, reference
     const identityRecurring = event.__identityRecurring === true
       || identityIsRecurring(event, calendarYearPool, occurrenceCount);
     const firstOfYear = !hasEarlierOccurrenceThisYear(event, calendarYearPool, reference);
-    return !isPreviouslyFeaturedIdentity(event, history, reference, { occurrenceCount, identityRecurring, firstOfYear });
+    const provenFirstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
+    return !isPreviouslyFeaturedIdentity(event, history, reference, {
+      occurrenceCount, identityRecurring, firstOfYear, provenFirstOfYear,
+    });
   });
 }
 
@@ -366,6 +377,14 @@ function hasLegacyContinuityEvidence(row, eventYear, reference = new Date()) {
     && etYearOf(lookaheadEnd, reference) === eventYear - 1;
 }
 
+/** A row's own feature history shows it shipped in the ET year just before
+ * `eventYear`: its stamped occurrence, or legacy send-time evidence. */
+function shippedInPriorEtYear(row, eventYear, reference = new Date()) {
+  const stamped = row?.last_featured_occurrence_at;
+  return (Boolean(stamped) && etYearOf(stamped, reference) === eventYear - 1)
+    || hasLegacyContinuityEvidence(row, eventYear, reference);
+}
+
 function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   if (!event?.start_at) return false;
   const start = new Date(event.start_at).getTime();
@@ -401,12 +420,9 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   // place into this year has no sibling and no occurrence stamp of its own —
   // hasLegacyContinuityEvidence recovers that evidence from last_featured_at
   // (fails closed on an ambiguous late-December send).
-  const inPriorYear = (value) => Boolean(value) && etYearOf(value, reference) === eventYear - 1;
-  const hasPriorYearOccurrence = inPriorYear(event.last_featured_occurrence_at)
-    || hasLegacyContinuityEvidence(event, eventYear, reference)
-    || evidenceSiblings.some((sibling) => inPriorYear(sibling.start_at)
-      || inPriorYear(sibling.last_featured_occurrence_at)
-      || hasLegacyContinuityEvidence(sibling, eventYear, reference));
+  const hasPriorYearOccurrence = shippedInPriorEtYear(event, eventYear, reference)
+    || evidenceSiblings.some((sibling) => (Boolean(sibling.start_at) && etYearOf(sibling.start_at, reference) === eventYear - 1)
+      || shippedInPriorEtYear(sibling, eventYear, reference));
   if (hasPriorYearOccurrence) return true; // (b) continuity
 
   if (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true; // (b) debut
@@ -646,6 +662,7 @@ function isLockedEventStillEligible(event, rec, ctx) {
     occurrenceCount: rec.occurrenceCount,
     identityRecurring: rec.isRecurringIdentity,
     firstOfYear: !hasEarlierOccurrenceThisYear(event, yearIdentityPool, reference),
+    provenFirstOfYear: isFirstOccurrenceOfYear(event, yearIdentityPool, reference),
   })) return false;
 
   return true;

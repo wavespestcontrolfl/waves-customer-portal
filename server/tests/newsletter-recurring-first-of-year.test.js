@@ -278,6 +278,39 @@ describe('an "unknown" event type with annual or seasonal recurrence is a once-a
   });
 });
 
+describe('recurrence known only from feature history still has to prove first-of-year', () => {
+  // A 2026 row relabeled one_time; the identity's only recurrence evidence is
+  // a weekly row featured in an earlier year, outside the 2025-2026 pool.
+  const current = weeklyEvent('this-2026', {
+    event_type: 'one_time', recurrence_type: 'none', freshness_status: 'fresh_one_time',
+    description: 'Fresh produce and local vendors.', start_at: '2026-09-12T14:00:00Z',
+  });
+  const featuredIn = (occurrence, overrides = {}) => ({
+    id: 'featured-prior', title: current.title, event_type: 'recurring_series', recurrence_type: 'weekly',
+    times_featured: 1, last_featured_at: occurrence, last_featured_occurrence_at: occurrence, ...overrides,
+  });
+  const verdict = (prior, pool = [current]) => isPreviouslyFeaturedIdentity(current, [prior], REFERENCE, {
+    firstOfYear: true, provenFirstOfYear: isFirstOccurrenceOfYear(current, pool, REFERENCE),
+  });
+
+  test('a gap year (featured 2024, nothing in 2025) is blocked: no earlier 2026 date is not proof', () => {
+    expect(verdict(featuredIn('2024-09-14T14:00:00Z'))).toBe(true);
+  });
+
+  test('the featured row itself shipping last ET year is the continuity proof', () => {
+    expect(verdict(featuredIn('2025-09-13T14:00:00Z'))).toBe(false);
+  });
+
+  test('a 2025 occurrence in the year pool proves continuity even when the feature was older', () => {
+    const lastYear = weeklyEvent('seen-2025', { start_at: '2025-09-13T14:00:00Z' });
+    expect(verdict(featuredIn('2024-09-14T14:00:00Z'), [current, lastYear])).toBe(false);
+  });
+
+  test('an annual identity may skip a year', () => {
+    expect(verdict(featuredIn('2024-09-14T14:00:00Z', { event_type: 'annual', recurrence_type: 'annual' }))).toBe(false);
+  });
+});
+
 describe('operator star override still bypasses the calendar-year rule', () => {
   const SEPTEMBER_REFERENCE = new Date('2026-09-08T12:00:00Z'); // Tuesday — issue window 09-08..09-14
 
