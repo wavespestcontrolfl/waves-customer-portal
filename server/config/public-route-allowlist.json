@@ -18,7 +18,7 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing.",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing. The visitPrepPreParserGuard entry is the visit-prep photos sub-gate + token-shape check (GATE_VISIT_PREP_PHOTOS) mounted ahead of the shared body parsers so a dark or malformed photos request 404s before any parse (always next() or 404).",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
@@ -26,6 +26,7 @@
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/appointment (inline function#e6220f30)",
+        "USE /api/public/appointment (visitPrepPreParserGuard#0755b055)",
         "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/inspection (inline function#ae857f75)",
@@ -127,6 +128,17 @@
       "routes": [
         "GET /l/:code",
         "USE /l (express-rate-limit({ handler#945948f2 }))"
+      ]
+    },
+    {
+      "router": "server/routes/og-preview.js",
+      "mount": "/og",
+      "reason": "Link-preview images for iMessage/SMS/email crawlers (no login possible; owner sign-off 2026-09-28). Only /og/report/:token.jpg reads its token: 32-hex gate, typedReportDelivery suppression, no-store/noindex/no-referrer, per-IP limiter; unknown links get the byte-identical default card. /og/<kind>.jpg are fixed brand images with no token and no lookup.",
+      "routes": [
+        "GET /og<re:^\\/([a-z-]+)\\.jpg$>",
+        "GET /og<re:^\\/report\\/([a-f0-9]{32})\\.jpg$/i>",
+        "GET /og<re:.*>",
+        "USE /og (inline function#844ec3c3)"
       ]
     },
     {
@@ -422,12 +434,13 @@
     {
       "router": "server/routes/appointment-public.js",
       "mount": "/api/public/appointment",
-      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404)",
+      "reason": "Tokenized appointment confirm / calendar links from SMS/email; the USE entry is the router's 404-when-dark gate (always next() or 404) POST /:token/photos (GATE_VISIT_PREP_PHOTOS, dark): customer attaches up to 3 photos + a note to that visit; token-format gate, sub-gate 404 before its limiter, /64-keyed 6-per-min limiter, eligibility 404, multer only after all of that, stop-locked write; sends nothing.",
       "routes": [
         "USE /api/public/appointment (inline function#43251846)",
         "GET /api/public/appointment/:token",
         "GET /api/public/appointment/:token/calendar.ics",
-        "POST /api/public/appointment/:token/confirm"
+        "POST /api/public/appointment/:token/confirm",
+        "POST /api/public/appointment/:token/photos"
       ]
     },
     {

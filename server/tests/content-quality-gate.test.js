@@ -61,6 +61,20 @@ describe('hard checks: schema/canonical/indexable', () => {
   test('schema_valid fails without schema', () => {
     expect(checkSchemaValid({}).ok).toBe(false);
   });
+  test('schema_valid passes a refresh: its schema is frozen to the live page, the draft\'s never publishes', () => {
+    // prod run b48a687d: a refresh hard-failed no_schema_block over a field
+    // publishRefresh never reads.
+    expect(checkSchemaValid({ frontmatter: { schema_types: ['Article'] } }, { action_type: 'refresh_existing_page' }))
+      .toEqual({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(checkSchemaValid({}, { action_type: 'new_supporting_blog' }).ok).toBe(false);
+    // Wired through evaluate(): every check receives the brief.
+    const gate = require('../services/content/content-quality-gate');
+    const draft = { url: '/pest-control/signs-of-termites/', body: 'Refreshed guidance about termite signs.', frontmatter: {} };
+    expect(gate.evaluate(draft, { action_type: 'refresh_existing_page', page_type: 'refresh' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: true, reason: 'refresh_schema_frozen_to_live_page' });
+    expect(gate.evaluate(draft, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' }, {}).checks.schema_valid)
+      .toMatchObject({ ok: false, reason: 'no_schema_block' });
+  });
   test('title_meta_spam_free hard-fails stuffed title patterns', () => {
     const result = checkTitleMetaSpamFree({
       title: 'Pest Control Near Me in Anna Maria, FL | THE BEST Pest Control Anna Maria, FL | Top-Rated Exterminator Near Me',
@@ -88,6 +102,15 @@ describe('hard checks: schema/canonical/indexable', () => {
     expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'competitor_gap', competitor_position: 5, search_volume: 12000 } }).ok).toBe(false);
     // the exemption is keyed on the bucket — other buckets can't ride competitor fields past the check
     expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'striking_distance', competitor_position: 5, search_volume: 100, competitor_domain: 'x.com' } }).ok).toBe(false);
+  });
+  test('gsc_signal_attached accepts answer-engine evidence only for aeo_question_gap', () => {
+    const evidence = { bucket: 'aeo_question_gap', impressions: null, aeo_benchmark_id: 'Q6', aeo_engines_missing: ['chatgpt', 'claude', 'gemini'] };
+    expect(checkGscSignalAttached({}, { gsc_signal: evidence })).toEqual({ ok: true, reason: 'aeo_question_gap_evidence' });
+    // provenance lost → still fails closed
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, aeo_engines_missing: [] } }).ok).toBe(false);
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, aeo_benchmark_id: null } }).ok).toBe(false);
+    // keyed on the bucket — another bucket can't ride the AEO fields past the check
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, bucket: 'aeo_gap' } }).ok).toBe(false);
   });
   test('no_duplicate_intent fails on cannibalization human_review reason', () => {
     expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'cannibalization bucket' }).ok).toBe(false);

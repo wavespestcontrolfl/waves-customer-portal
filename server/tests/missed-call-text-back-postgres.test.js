@@ -287,18 +287,16 @@ jest.setTimeout(30000);
     expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
   });
 
-  test('outside 8am-8pm ET the call is deferred, not sent, and the durable sweep sends it once the window reopens', async () => {
+  test('outside 8am-8pm ET the call is texted right away, not deferred to the morning (owner ruling 2026-09-28)', async () => {
     // 2026-09-09T02:00Z = 22:00 ET the prior evening.
     const outOfWindow = Date.parse('2026-09-09T02:00:00Z');
     nowSpy.mockReturnValue(outOfWindow);
-    const row = call(0, { created_at: new Date(outOfWindow), updated_at: new Date(outOfWindow) });
+    // READY_MINUTES_AGO before "now" — past the voicemail grace, still well
+    // inside its own 30-minute send slot.
+    const readyAt = new Date(outOfWindow - READY_MINUTES_AGO * 60 * 1000);
+    const row = call(0, { created_at: readyAt, updated_at: readyAt });
     await database('call_log').insert(row);
-    expect((await textBackIfMissed(row.twilio_call_sid)).outcome).toBe('deferred');
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
-
-    nowSpy.mockReturnValue(Date.parse('2026-09-09T12:05:00Z')); // ~8:05am ET
-    expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect((await stored(row)).metadata.missed_call_text_outcome).toBe('sent');
   });
@@ -565,22 +563,16 @@ jest.setTimeout(30000);
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:already_contacted');
     });
 
-    test('the window closing mid-send holds it (no claim, lease released) and the 8 AM sweep sends it', async () => {
-      const endedAt = new Date(Date.parse('2026-09-08T23:50:00Z')); // 19:50 ET — slot runs past 20:00, so it may move to 8 AM
+    test('the 8 PM cutoff passing mid-send no longer holds anything — the send goes through (owner ruling 2026-09-28)', async () => {
+      const endedAt = new Date(Date.parse('2026-09-08T23:50:00Z')); // 19:50 ET
       const row = call(0, { created_at: endedAt, updated_at: endedAt });
       await database('call_log').insert(row);
       nowSpy.mockReturnValue(Date.parse('2026-09-08T23:56:00Z')); // 19:56 ET
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
-        before: () => { nowSpy.mockReturnValue(Date.parse('2026-09-09T00:00:30Z')); }, // 20:00:30 ET at the handoff
+        before: () => { nowSpy.mockReturnValue(Date.parse('2026-09-09T00:00:30Z')); }, // 20:00:30 ET at the handoff — past 8 PM
       }));
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_WINDOW_CLOSED' });
-      expect(await claimRow()).toBeUndefined();
-      const held = await stored(row);
-      expect(held.metadata.missed_call_text_settled_at).toBeUndefined();
-      expect(held.metadata.missed_call_text_leased_at).toBeUndefined();
-
-      nowSpy.mockReturnValue(Date.parse('2026-09-09T12:04:00Z')); // 08:04 ET
-      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
     test('the send slot closing mid-send settles too_old without a claim', async () => {
@@ -967,29 +959,30 @@ jest.setTimeout(30000);
     expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:too_old');
   });
 
-  test('a call that clears its voicemail grace after 8 PM ET is deferred and goes out at 8 AM', async () => {
+  test('a call that clears its voicemail grace after 8 PM ET is texted right then, not deferred to 8 AM', async () => {
     const endedAt = new Date(Date.parse('2026-09-08T23:57:00Z')); // 19:57 ET
     const row = call(0, { created_at: endedAt, updated_at: endedAt });
     await database('call_log').insert(row);
-    nowSpy.mockReturnValue(Date.parse('2026-09-09T00:02:30Z')); // 20:02:30 ET — the post-call hook
-    expect((await textBackIfMissed(row.twilio_call_sid)).outcome).toBe('deferred');
-    nowSpy.mockReturnValue(Date.parse('2026-09-09T12:04:00Z')); // 08:04 ET
-    expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+    nowSpy.mockReturnValue(Date.parse('2026-09-09T00:02:30Z')); // 20:02:30 ET — just past the 5-minute grace
+    expect((await textBackIfMissed(row.twilio_call_sid)).outcome).toBe('sent');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('the sweep judges each row by a fresh clock — a pass that runs past 8 PM ET holds the later rows', async () => {
-    const endedAt = new Date(Date.parse('2026-09-08T23:40:00Z')); // 19:40 ET
-    const first = call(0, { created_at: endedAt, updated_at: endedAt });
-    const second = call(0, { created_at: new Date(endedAt.getTime() + 1000), updated_at: endedAt, from_phone: '+19415550102' });
+  test('the sweep judges each row by a fresh clock — a pass that runs long holds a later row whose own slot has since closed', async () => {
+    // first's slot closes at NOW+3s; second's (created 1s later) at NOW+4s.
+    // Both are comfortably past their voicemail grace at NOW.
+    const firstEndedAt = new Date(NOW - (34 * 60 + 57) * 1000);
+    const secondEndedAt = new Date(firstEndedAt.getTime() + 1000);
+    const first = call(0, { created_at: firstEndedAt, updated_at: firstEndedAt });
+    const second = call(0, { created_at: secondEndedAt, updated_at: secondEndedAt, from_phone: '+19415550102' });
     await database('call_log').insert([first, second]);
-    nowSpy.mockReturnValue(Date.parse('2026-09-08T23:59:30Z')); // 19:59:30 ET
     sendCustomerMessage.mockImplementationOnce(pipeline(() => {
-      nowSpy.mockReturnValue(Date.parse('2026-09-09T00:00:10Z')); // the first send finishes at 20:00:10 ET
+      nowSpy.mockReturnValue(NOW + 40 * 1000); // the first send takes 40s — long enough to close the second row's own slot
       return REAL_SEND;
     }));
     expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 2 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect((await stored(second)).metadata.missed_call_text_settled_at).toBeUndefined();
+    expect((await stored(second)).metadata.missed_call_text_outcome).toBe('skipped:too_old');
     expect(await claimRow('+19415550102')).toBeUndefined();
   });
 

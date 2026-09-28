@@ -1111,10 +1111,15 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
         if (result) {
           patch.link_tasks_queued = result.queued || 0;
           logger.info(`[autonomous-pr-poller] internal-link planning for ${result.url}: queued=${result.queued} candidates=${result.candidates}`);
+        } else {
+          // Planning could not run (no corpus): retry marker for the daily
+          // sweep (InternalLinkPrExecutor._replanUnplannedPublishes).
+          patch.link_planning_failed_at = new Date();
         }
       }
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] internal-link planning failed for ${target.url}: ${err.message}`);
+      patch.link_planning_failed_at = new Date();
     }
   }
 
@@ -1447,6 +1452,7 @@ async function maybeAutoMerge(run, pr) {
     let pinnedShaOk = false;
     let approvedAt = null;
     let briefId = null;
+    let comparisonVerdict = null;
     try {
       const stableContextValue = (value) => {
         if (Array.isArray(value)) return value.map(stableContextValue);
@@ -1463,13 +1469,31 @@ async function maybeAutoMerge(run, pr) {
         if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
         // A stored NULL verdict is a valid competitor-free read; missing
         // row/unparseable stays flagged (fail closed).
-        const flagged = ctr === undefined ? true : Boolean(ctr && ctr.requiresHumanReview === true);
+        // A stored whole-draft company extraction that found any company
+        // (or did not succeed) governs the run too. The merge gate never
+        // re-calls the extractor: it judges the extraction the runner /
+        // remediation persisted with this exact verdict (pinned head = the
+        // text it judged).
+        // Both auto-merged lanes (new_supporting_blog, refresh_existing_page)
+        // commit only through the publisher's owner-list chokepoint, which
+        // stores its extraction on the verdict. Anything but a successful
+        // extraction that found NO company — including a stored NULL or a
+        // PR opened before this check shipped — governs the run, so the
+        // owner-list verdict decides and a missing one waits for a human
+        // (pre-push r8/r9, Codex r5).
+        const extraction = ctr && ctr.companyExtraction;
+        const extractionGoverns = !(extraction && extraction.ok === true
+          && Array.isArray(extraction.companies) && extraction.companies.length === 0);
+        // Any recorded competitor name (the final committed text's included)
+        // governs the run too (pre-push r11).
+        const namesRecorded = Boolean(ctr && Array.isArray(ctr.namedCompetitors) && ctr.namedCompetitors.length > 0);
+        const flagged = ctr === undefined ? true : Boolean((ctr && ctr.requiresHumanReview === true) || extractionGoverns || namesRecorded);
         let dp = fresh.draft_payload;
         if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
         const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
         const approved = fresh.trust_build_approved_at || null;
         const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-        return { flagged, pinned, approvedAt: approved,
+        return { flagged, comparison: ctr, pinned, approvedAt: approved,
           approvedAtKey: approved instanceof Date ? approved.toISOString() : String(approved || ''),
           approvedSha, briefId: fresh.brief_id || null,
           comparisonKey: JSON.stringify(stableContextValue(ctr)),
@@ -1489,6 +1513,7 @@ async function maybeAutoMerge(run, pr) {
         approvedAt = context.approvedAt;
         approvedShaOk = Boolean(approvedAt && context.approvedSha && headSha && context.approvedSha === headSha);
         briefId = context.briefId;
+        comparisonVerdict = context.comparison;
 
         // The trusted editorial signer may add only authenticated evidence
         // sidecars after either trusted content anchor. Prefer a live human
@@ -1562,8 +1587,12 @@ async function maybeAutoMerge(run, pr) {
               rawBrief = { action_type: row.action_type, gsc_signal: gs };
             }
           }
-          const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
-          eligible = namedCompetitorAutopublishEligible(rawBrief) === true;
+          // Lane (kill switch + action) AND the owner list on the persisted
+          // verdict — the same two checks the runner applied, so a name
+          // off the owner list never merges unattended.
+          const { namedCompetitorAutopublishEligible, namedCompetitorListVerdict } = require('./comparison-table-gate');
+          eligible = namedCompetitorAutopublishEligible(rawBrief) === true
+            && namedCompetitorListVerdict(comparisonVerdict).ok === true;
         } catch (_) { eligible = false; }
         if (!eligible) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);

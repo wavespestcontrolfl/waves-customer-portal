@@ -9,7 +9,7 @@ const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-
  */
 
 const db = require('../../models/db');
-const { lockCustomerComms } = require('../../utils/customer-comms-lock');
+const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
@@ -1225,6 +1225,13 @@ async function createCustomer(input) {
   }
 
   const created = await db.transaction(async (trx) => {
+    // codex #5196 P1-A: fence this admin-UI mint against
+    // call-booking-link-text.js's phone-locked handoff (same lockSmsPhone
+    // key/namespace) — the FIRST statement of this transaction, nothing
+    // else held before it, so no lock-order inversion risk (see
+    // routes/admin-customers.js ensureCustomerAccount's lockPhone comment
+    // for the full contract this mirrors).
+    await lockSmsPhone(trx, phone);
     const [account] = await trx('customer_accounts').insert({
       first_name: firstName,
       last_name: lastName,
@@ -3639,6 +3646,23 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+
+// The follow-through's per-target pin for a cancel confirmed against a frozen
+// impact (see cancelAppointment); null when nothing was pinned.
+function pinnedCancelEffects(appointmentId, frozen) {
+  if (!frozen) return null;
+  return {
+    [appointmentId]: {
+      invoices: frozen.invoices || [],
+      fee: frozen.fee || null,
+      creditReversalOfferIds: (frozen.inspection_credit_reversal || [])
+        .filter((credit) => credit.would_reverse === true)
+        .map((credit) => credit.id),
+    },
+  };
+}
+
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
@@ -3695,21 +3719,28 @@ async function cancelAppointment(input, actionContext = {}) {
       // judged by the REAL clock) must never charge weeks later — waive.
       const staleReplay = cancelledAtReplay
         && (Date.now() - new Date(cancelledAtReplay).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
+      // A replay of a pinned confirm keeps its pin: the retry must settle
+      // exactly what the card showed, like the first attempt.
+      const pinnedEffects = pinnedCancelEffects(appointment_id, input._frozen_cancellation_impact);
       if (cancelledAtReplay && !staleReplay) {
-        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtReplay) });
+        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtReplay), pinnedEffects });
       } else {
         logger.warn(`[intelligence-bar] cancel replay for ${appointment_id} is ${staleReplay ? 'stale' : 'missing an audited transition time'} — fee legs waived (fail free)`);
-        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
+        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true, pinnedEffects });
       }
     } catch (e) {
       logger.error(`[intelligence-bar] cancel replay follow-through failed for ${appointment_id}: ${e.message}`);
     }
     // Counted-plan reseed on the replay too (Codex #4814 r7 P1): a first
     // reseed that failed without its stamp gets its retry here, like the
-    // other post-commit obligations this branch replays. Idempotent.
-    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-      db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
-    });
+    // other post-commit obligations this branch replays. Idempotent. A
+    // card-confirmed cancel never reseeds: the card only confirms visits
+    // that cannot add a make-up visit (cancelMayReseedPlan).
+    if (!input._frozen_cancellation_impact) {
+      await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
+      });
+    }
     return {
       success: true,
       appointment_id,
@@ -3721,6 +3752,39 @@ async function cancelAppointment(input, actionContext = {}) {
   if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
     return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
   }
+
+  // Exact-effect confirm (W0B / PR A of the cancel-pinned-effects lane): a
+  // pending action proposed against a frozen impact snapshot (fee, invoices,
+  // inspection-credit reversal — see appointment-cancel-impact.js) pins it
+  // on `_frozen_cancellation_impact`. Recompute the SAME snapshot fresh,
+  // right before committing anything, and refuse if state moved since the
+  // operator approved the card — never settle a different fee/void/reversal
+  // than what was shown. No frozen pin (every caller today — the route
+  // refuses cancel_appointment before any pending action can carry one; see
+  // CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE in admin-intelligence-bar.js) means
+  // this check is a no-op, so this is inert until a later PR wires the
+  // proposal side and lifts that refusal. The same pin then rides into the
+  // follow-through (pinnedCancelEffects), which voids only the pinned
+  // invoices and re-checks the fee verdict at the cancellation instant, so
+  // state that moves AFTER this check still cannot settle differently.
+  if (input._frozen_cancellation_impact) {
+    const { computeCancelAppointmentImpact, cancelImpactsMatch } = require('../appointment-cancel-impact');
+    let freshImpact;
+    try {
+      freshImpact = await computeCancelAppointmentImpact(appointment_id);
+    } catch (err) {
+      logger.warn(`[intelligence-bar] cancel impact unavailable for ${appointment_id}: ${err.message}`);
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) could not be verified right now — nothing was changed. Try again in a moment.' };
+    }
+    if (!cancelImpactsMatch(freshImpact, input._frozen_cancellation_impact)) {
+      return { error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) changed since this was proposed — nothing was changed. Ask again for a fresh preview.' };
+    }
+    // Owner ruling 2026-09-28: the bar cancels simple visits only.
+    if ((freshImpact?.card_cancel_refusals || []).length) {
+      return { error: CARD_CANCEL_REFUSED_MESSAGE };
+    }
+  }
+  const pinnedEffects = pinnedCancelEffects(appointment_id, input._frozen_cancellation_impact);
 
   // Route through the SHARED status writer, not a direct status update
   // (Codex r3 on PR #3091): transitionJobStatus is where the cross-cutting
@@ -3792,10 +3856,10 @@ async function cancelAppointment(input, actionContext = {}) {
     const staleCommit = cancelledAtCommit
       && (Date.now() - new Date(cancelledAtCommit).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
     if (cancelledAtCommit && !staleCommit) {
-      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtCommit) });
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtCommit), pinnedEffects });
     } else {
       logger.warn(`[intelligence-bar] cancellation instant for ${appointment_id} is ${staleCommit ? 'stale' : 'missing'} — fee legs waived (fail free)`);
-      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true, pinnedEffects });
     }
   } catch (e) {
     logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);
@@ -3803,9 +3867,12 @@ async function cancelAppointment(input, actionContext = {}) {
   // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
   // inside a 9-application plan adds one back at the end of the series.
   // Gated, failure-isolated, post-commit.
-  await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-    db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
-  });
+  // A card-confirmed cancel never reseeds (see the replay branch above).
+  if (!pinnedEffects) {
+    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+      db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
+    });
+  }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 

@@ -3222,9 +3222,11 @@ describe('runNext post-publish bookkeeping', () => {
 // publish path (astro PR → Codex-gated auto-merge) instead. Comparison-gate
 // FAILURES are unaffected either way.
 describe('named-competitor autopublish gate', () => {
-  const SLUG = '/pest-control/taexx-system-comparison/';
+  // A neutral slug: the publisher's final-text comparison gate scans the
+  // slug too, and "taexx" in it would name HomeTeam.
+  const SLUG = '/pest-control/in-wall-system-comparison/';
 
-  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null }) {
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true, contentGuardrails = null, body = null, operatorBrief = null, slug = SLUG, signalMetadata = undefined, frontmatterExtra = {} }) {
     const claimedAt = new Date('2026-08-26T05:30:00Z');
     const queue = {
       claimNext: jest.fn().mockResolvedValue({
@@ -3232,11 +3234,13 @@ describe('named-competitor autopublish gate', () => {
         action_type: 'new_supporting_blog',
         bucket: 'operator_intercept',
         claimed_at: claimedAt,
+        ...(signalMetadata ? { signal_metadata: signalMetadata } : {}),
       }),
       complete: jest.fn().mockResolvedValue(true),
       pendingReview: jest.fn().mockResolvedValue(true),
       release: jest.fn().mockResolvedValue(true),
       skip: jest.fn().mockResolvedValue(true),
+      defer: jest.fn().mockResolvedValue(true),
     };
     const briefBuilder = {
       compose: jest.fn().mockResolvedValue({
@@ -3250,7 +3254,7 @@ describe('named-competitor autopublish gate', () => {
         // the pin path has its own coverage above.
         gsc_signal: { bucket: 'operator_intercept', intercept },
         voice_constraints: {
-          operator_brief: {
+          operator_brief: operatorBrief || {
             working_title: 'In-Wall Systems Compared for SWFL Homes',
             primary_kw: 'taexx system review',
             thesis: 'Compare in-wall systems for SWFL homes.',
@@ -3263,12 +3267,13 @@ describe('named-competitor autopublish gate', () => {
         ok: true,
         draft: {
           type: 'draft',
-          url: SLUG,
+          url: slug,
           title: 'In-Wall Systems Compared for SWFL Homes',
           frontmatter: {
-            slug: SLUG,
-            canonical: `https://www.wavespestcontrol.com${SLUG}`,
+            slug,
+            canonical: `https://www.wavespestcontrol.com${slug}`,
             title: 'In-Wall Systems Compared for SWFL Homes',
+            ...frontmatterExtra,
           },
           body: body || 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
         },
@@ -3295,8 +3300,9 @@ describe('named-competitor autopublish gate', () => {
       // same module (comparison-table-gate owns it).
       comparisonTableGate: {
         namedCompetitorAutopublishEligible: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorAutopublishEligible,
+        namedCompetitorListVerdict: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorListVerdict,
         ...(comparisonGate
-          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) }),
+          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true, namedCompetitors: ['Orkin'] }) }),
       },
     });
     return { runner, queue, claimedAt };
@@ -3331,6 +3337,215 @@ describe('named-competitor autopublish gate', () => {
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     expect(queue.pendingReview).not.toHaveBeenCalled();
     expect(queue.skip).toHaveBeenCalled();
+  });
+
+  // Owner rulings 2026-09-27 (D2) + 2026-09-28: unattended only when every
+  // named competitor is on the owner list. These
+  // run the REAL comparison gate over synthetic drafts, with the names
+  // authorized by the (synthetic) operator brief.
+  describe('owner-approved competitor list (real comparison gate)', () => {
+    const realGate = jest.requireActual('../services/content/comparison-table-gate');
+    const prPublisher = (n) => ({ publishOrUpdatePage: jest.fn().mockResolvedValue({
+      url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false,
+      pr_url: `https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/${n}`,
+    }) });
+    // The publisher's commit chokepoint, run for REAL
+    // (business-name-confirmer assertOwnerListForCommit) with only the
+    // model call stubbed: `companiesFor(draft)` is what the model lists.
+    const chokepointPublisher = (n, companiesFor = () => []) => ({ publishOrUpdatePage: jest.fn(async (draft, briefArg, opts) => {
+      const confirmer = jest.requireActual('../services/content/business-name-confirmer');
+      const facts = jest.requireActual('../services/content/competitor-facts');
+      const spy = jest.spyOn(confirmer, 'extractCompanyNames').mockImplementation(async (finalDraft) => ({
+        ok: true, key: 'k', companies: companiesFor(finalDraft).map((c) => facts.findCompetitor(c)?.name || c),
+      }));
+      try {
+        await confirmer.assertOwnerListForCommit({ draft, brief: briefArg, frontmatter: draft.frontmatter, body: draft.body, humanApproved: opts?.humanApproved });
+      } finally { spy.mockRestore(); }
+      return { url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false, pr_url: `https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/${n}` };
+    }) });
+    const refusingPublisher = (err) => ({ publishOrUpdatePage: jest.fn().mockRejectedValue(Object.assign(new Error(err.message || 'refused'), err)) });
+    const brief = (names) => ({
+      working_title: `${names} alternatives in Sarasota`,
+      primary_kw: 'in-wall termite system review',
+      thesis: `Compare ${names} with a local SWFL provider.`,
+    });
+
+    test('approved names only (incl. the TAEXX and bare HomeTeam spellings) publish and record the names the list cleared', async () => {
+      delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+      const publisher = chokepointPublisher(911, () => ['HomeTeam', 'Orkin']);
+      const { runner, queue } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and HomeTeam'),
+        body: 'HomeTeam installs TAEXX tubes in new walls. Orkin offers recurring residential plans.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual(['HomeTeam Pest Defense', 'Orkin']);
+      // The chokepoint's result on the committed text is what the poller judges.
+      expect(result.comparison_table_result.companyExtraction).toMatchObject({ ok: true, companies: ['HomeTeam Pest Defense', 'Orkin'] });
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['HomeTeam Pest Defense', 'Orkin']);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['Aptive', 'Aptive offers recurring residential plans across its markets.', 'Aptive Environmental'],
+      ['Truly Nolen', 'Truly Nolen offers recurring residential plans.', 'Truly Nolen'],
+    ])('%s alone clears the owner list (owner added it 2026-09-28) and publishes', async (who, body, canonical) => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(921, () => [who]);
+      const { runner, queue } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief(who), body });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.competitors_approved_by_list).toEqual([canonical]);
+      expect(queue.skip).not.toHaveBeenCalled();
+    });
+
+    test('one name off the owner list skips as named_competitor_off_list — never published, never queued for approval', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = prPublisher(912);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin and Hughes Exterminators'),
+        body: 'Orkin offers recurring residential plans. Hughes Exterminators offers recurring residential plans too.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_off_list' });
+      expect(result.reviewer_notes).toMatch(/Hughes Exterminators/);
+      expect(result.comparison_table_result.competitors_approved_by_list).toBeUndefined();
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_off_list', { claimToken: claimedAt });
+    });
+
+    // Companies the deterministic detection cannot see (Codex r3 on #5146):
+    // the chokepoint's extraction adds them, and any name off the six skips.
+    test.each([
+      ['a suffix-less brand ("Bug Out")', { body: 'Bug Out competes with local providers in Sarasota.' }, ['Bug Out'], 'named_competitor_off_list'],
+      // A detection-only brand in the slug is now also caught deterministically
+      // by the final-text comparison gate, which scans the slug (Codex r8).
+      ['a name only in the slug', { body: 'How to compare local termite providers before you switch.', slug: '/pest-control/hulett-alternatives/' }, ['Hulett'], 'comparison_table_failed'],
+      ['a name used both generically and as a company', { body: 'Lawn Doctor can be an informal term for a turf specialist. Lawn Doctor competes with local providers for recurring plans.' }, ['Lawn Doctor'], 'named_competitor_off_list'],
+      ['a name only in secondary_keywords', { body: 'How to compare local pest providers.', frontmatterExtra: { secondary_keywords: ['bug out alternatives sarasota'] } }, ['Bug Out'], 'named_competitor_off_list'],
+    ])('%s the model lists is refused at the commit and the run skips', async (_label, draftOpts, companies, reason) => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(915, () => companies);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, intercept: false, ...draftOpts });
+
+      const result = await runner.runNext();
+
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: reason });
+      if (reason === 'named_competitor_off_list') {
+        expect(result.reviewer_notes).toContain(companies[0]);
+        expect(result.comparison_table_result.companyExtraction).toMatchObject({ companies });
+      }
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', reason, { claimToken: claimedAt });
+    });
+
+    test('deterministic names found only in the FINAL text (publisher-added) are persisted on the verdict (pre-push r11)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(920);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        // The publisher adds a reused image alt naming Orkin.
+        draft.body = `${draft.body}\n\n![Orkin truck outside a Venice home](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      // Orkin is operator-authorized, so the publisher's final-text
+      // comparison gate passes it and only the name inventory changes.
+      const { runner } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.namedCompetitors).toEqual(['Orkin']);
+    });
+
+    test('publisher-added text that fails the comparison gate refuses the commit (Codex r7)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const publisher = chokepointPublisher(922, () => ['Orkin']);
+      const inner = publisher.publishOrUpdatePage.getMockImplementation();
+      publisher.publishOrUpdatePage.mockImplementation(async (draft, briefArg, opts) => {
+        draft.body = `${draft.body}\n\n![Orkin scams customers with hidden fees](/images/blog/x/body-1.webp)`;
+        return inner(draft, briefArg, opts);
+      });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, comparisonGate: realGate, operatorBrief: brief('Orkin'), body: 'How to compare local pest providers.' });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'comparison_table_failed' });
+      expect(result.reviewer_notes).toMatch(/COMPARISON_DISPARAGEMENT/);
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'comparison_table_failed', { claimToken: claimedAt });
+    });
+
+    test('the model listing no company publishes an ordinary post, even with the kill switch off', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = chokepointPublisher(916);
+      const { runner } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate, intercept: false,
+        body: 'Biological Pest Control offers a way to reduce chemical use around Sarasota homes.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(result.comparison_table_result.companyExtraction).toMatchObject({ ok: true, companies: [] });
+    });
+
+    test('a company-check outage at the chokepoint defers the draft an hour — at most 3 times — and an over-long draft is skipped', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+      const outage = () => refusingPublisher({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: true, message: 'company-name check unavailable for the final text (no_key)', extraction: { ok: false, reason: 'no_key' } });
+      const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher: outage(), comparisonGate: realGate });
+      const recordRetry = jest.spyOn(runner, '_recordCompanyCheckRetry').mockResolvedValue(true);
+      const before = Date.now();
+
+      const result = await runner.runNext();
+
+      expect(recordRetry).toHaveBeenCalledWith(expect.objectContaining({ id: 'opp_named_1' }), 1, claimedAt);
+      expect(result).toMatchObject({ outcome: 'deferred_company_check', skip_reason: 'named_competitor_unverified_names' });
+      expect(result.reviewer_notes).toMatch(/no_key/);
+      expect(queue.skip).not.toHaveBeenCalled();
+      const [id, availableAt, payload] = queue.defer.mock.calls[0];
+      expect([id, payload]).toEqual(['opp_named_1', { claimToken: claimedAt }]);
+      expect(availableAt.getTime() - before).toBeGreaterThanOrEqual(59 * 60 * 1000);
+
+      // queue.defer refunds the claim attempt, so the retry count on the
+      // opportunity is what bounds an outage (pre-push r7).
+      const exhausted = namedCompetitorScenario({ publisher: outage(), comparisonGate: realGate, signalMetadata: { company_check_retries: 3 } });
+      expect(await exhausted.runner.runNext()).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(exhausted.queue.defer).not.toHaveBeenCalled();
+      expect(exhausted.queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: exhausted.claimedAt });
+
+      const tooLong = namedCompetitorScenario({
+        publisher: refusingPublisher({ code: 'BLOG_OWNER_LIST_UNVERIFIED', retryable: false, message: 'company-name check unavailable for the final text (draft_too_long_for_extraction)' }),
+        comparisonGate: realGate,
+      });
+      expect(await tooLong.runner.runNext()).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_unverified_names' });
+      expect(tooLong.queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_unverified_names', { claimToken: tooLong.claimedAt });
+    });
+
+    test('kill switch off: an approved-names-only draft is skipped exactly as before (named_competitor_disabled)', async () => {
+      process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
+      const publisher = prPublisher(914);
+      const { runner, queue, claimedAt } = namedCompetitorScenario({
+        publisher, comparisonGate: realGate,
+        operatorBrief: brief('Orkin'),
+        body: 'Orkin offers recurring residential plans.',
+      });
+
+      const result = await runner.runNext();
+
+      expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_disabled' });
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_disabled', { claimToken: claimedAt });
+    });
   });
 
   test('clean affiliate blogs publish with no trust credit, approval, or intercept marker', async () => {
@@ -3792,6 +4007,81 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     expect(briefMap).toBeTruthy();
     for (const [service, slug] of Object.entries(briefMap)) {
       expect([service, servicePathSlug(service)]).toEqual([service, slug]);
+    }
+  });
+});
+
+// Refreshes had no in-loop self-lint (their guard options need the live
+// page), so every mechanical miss parked the run at gate 3c. The runner now
+// hydrates gate 3c's own options before the session.
+describe('W1 in-loop self-lint arms for refreshes with gate 3c options', () => {
+  const setup = (publisher) => {
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_ref', action_type: 'refresh_existing_page', page_url: '/pest-control/signs-of-termites/', claimed_at: new Date('2026-09-28T10:00:00Z') }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const brief = {
+      id: 'brief_ref', opportunity_id: 'opp_ref', action_type: 'refresh_existing_page', page_type: 'refresh',
+      target_url: '/pest-control/signs-of-termites/', target_keyword: 'signs of termites', city: 'Sarasota', service: 'termite',
+      human_review_required: false,
+    };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, reason: 'test_stop_after_dispatch' }) };
+    const factsSufficiency = { check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true, city_id: 'sarasota', service_id: 'termite', county: 'sarasota' }) };
+    const runner = loadRunnerWith({ queue, briefBuilder: { compose: jest.fn().mockResolvedValue(brief) }, dispatcher, publisher, factsSufficiency });
+    return { runner, dispatcher };
+  };
+
+  test('a refresh session gets the hydrated options: live domains, protected metaTitle, live meta, prior body', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({
+        _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md',
+        domains: ['sarasotaflpestcontrol.com'],
+        metaTitle: 'Pest Control Near Me | Sarasota',
+        metaDescription: 'Live Sarasota meta.',
+      }),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toMatchObject({
+      isRefresh: true,
+      domains: ['sarasotaflpestcontrol.com'],
+      liveMetaTitle: 'Pest Control Near Me | Sarasota',
+      liveMetaDescription: 'Live Sarasota meta.',
+      priorBody: 'Live prior body.',
+      targetIsBlog: false,
+    });
+  });
+
+  test('a hydration failure disarms only the lint: the session still runs and gate 3c stays authoritative', async () => {
+    const publisher = {
+      getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+      loadExistingPageBody: jest.fn().mockRejectedValue(new Error('github unavailable')),
+    };
+    const { runner, dispatcher } = setup(publisher);
+    await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+  });
+
+  test('the kill switch disarms the lint for refreshes too', async () => {
+    const prev = process.env.AUTONOMOUS_WRITER_SELF_LINT;
+    process.env.AUTONOMOUS_WRITER_SELF_LINT = 'false';
+    try {
+      const publisher = {
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+        loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live prior body.', word_count: 3, frontmatter: {} }),
+      };
+      const { runner, dispatcher } = setup(publisher);
+      await runner.runNext();
+      expect(dispatcher.runWithBrief.mock.calls[0][1].selfLintOptions).toBeNull();
+      expect(publisher.loadExistingPageBody).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.AUTONOMOUS_WRITER_SELF_LINT;
+      else process.env.AUTONOMOUS_WRITER_SELF_LINT = prev;
     }
   });
 });

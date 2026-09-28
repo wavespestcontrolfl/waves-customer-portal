@@ -310,15 +310,55 @@ function candidateLiveKeys(candidate) {
   return sites.map((site) => `${site}|${path}`);
 }
 
+// A completed run proves that publication once succeeded; current registry
+// truth decides whether the URL is still live and indexable. The wrapper
+// below intersects this richer run metadata with a verified Astro-only row.
+// `row` carries pre-projected frontmatter_* / payload_title columns (Codex
+// #4984 r6+ P2) rather than the raw `draft_payload` JSONB blob — the query
+// projects only these fields in SQL so a brief compose never transfers the
+// full historical article body + gate metadata of every completed run.
+function candidateFromAutonomousRun(row) {
+  const rawUrl = row?.published_url;
+  const publishedSites = normalizeSpokeSites([rawUrl]);
+  if (!rawUrl || (/^https?:\/\//i.test(rawUrl) && publishedSites.length === 0)) return null;
+  return {
+    id: row.id,
+    title: row.frontmatter_title || row.payload_title || null,
+    path: normalizePathForCompare(rawUrl),
+    keyword: row.frontmatter_primary_keyword || row.brief_keyword || null,
+    city: row.frontmatter_first_area || row.brief_city || null,
+    service: row.brief_service || row.frontmatter_service || null,
+    category: row.frontmatter_category || null,
+    targetSites: publishedSites.length ? publishedSites : [...HUB_SITE_KEYS],
+    workflowStatus: 'published',
+    astroStatus: 'live',
+    pathVerified: true,
+  };
+}
+
+// Reconciliation statuses that still mean "this IS the Astro-only row for
+// this post" — astro_only is the steady state. astro_changed_since_sync is
+// assigned to BOTH DB-matched and unmatched rows whose Astro hash drifted
+// (content-registry.js changeStatus), so it counts as Astro-only lineage
+// only when the row has no db_blog_id; a DB-matched row is covered by the
+// blog_posts query instead. Never db_changed_since_sync, conflict, etc.
+const REGISTRY_ASTRO_OWNED_STATUSES = new Set(['astro_only', 'astro_changed_since_sync']);
+
 // The registry is the only durable inventory for Astro-authored posts that
 // have neither a blog_posts row nor an autonomous run. Accept only its
 // strongest state: an Astro source is present, the workflow is published,
-// and the live-status sweep verified the canonical route.
+// and the live-status sweep verified the canonical route. A transient
+// changed-since-sync flag does not itself mean unverified — the live-status
+// fields (workflow/astro/live/noindex, checked below via registryRowLivePath)
+// are preserved across a resync (Codex #4984 r7 P2: excluding this status
+// dropped a republished post from related-post candidates until the NEXT
+// unchanged daily sync happened to restore astro_only).
 function candidateFromRegistryRow(row) {
   const safeRow = row || {};
   const frontmatter = registryFrontmatter(safeRow);
   const path = registryRowLivePath(safeRow);
-  if (!path || safeRow.reconciliation_status !== 'astro_only') return null;
+  if (!path || !REGISTRY_ASTRO_OWNED_STATUSES.has(safeRow.reconciliation_status)) return null;
+  if (safeRow.reconciliation_status === 'astro_changed_since_sync' && safeRow.db_blog_id != null) return null;
   const verifiedSites = registryRowVerifiedSites(safeRow);
   if (!verifiedSites.length) return null;
   return {
@@ -343,9 +383,37 @@ function candidateFromRegistryRow(row) {
  * rankRelatedPosts' first argument. `opts.database` overrides the knex
  * connection (tests inject a mock); `opts.limit` overrides the cap.
  */
-async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+// Every related-post candidate that is verified live right now (blog_posts,
+// autonomous runs and the content registry, cross-checked). Shared by brief
+// composition (ranked) and the publish-time recheck (paths only).
+async function loadVerifiedCandidates(database) {
   const rows = await database('blog_posts')
     .select('id', 'title', 'keyword', 'tag', 'category', 'slug', 'city', 'target_sites', 'status', 'astro_status', 'astro_live_url');
+  // The audit table is append-only and draft_payload carries the full
+  // article body plus gate metadata; a brief compose only ever needs a
+  // handful of frontmatter fields (Codex #4984 r6+ P2), so project those
+  // in SQL rather than transferring every historical run's complete payload.
+  const autonomousRows = await database('autonomous_runs')
+    .leftJoin('content_briefs as cb', 'cb.id', 'autonomous_runs.brief_id')
+    .where({
+      'autonomous_runs.outcome': 'completed_published',
+      'autonomous_runs.action_type': 'new_supporting_blog',
+    })
+    .whereNotNull('autonomous_runs.published_url')
+    .select(
+      'autonomous_runs.id',
+      'autonomous_runs.published_url',
+      'autonomous_runs.completed_at',
+      database.raw("autonomous_runs.draft_payload->'frontmatter'->>'title' as frontmatter_title"),
+      database.raw("autonomous_runs.draft_payload->>'title' as payload_title"),
+      database.raw("autonomous_runs.draft_payload->'frontmatter'->>'primary_keyword' as frontmatter_primary_keyword"),
+      database.raw("autonomous_runs.draft_payload->'frontmatter'->'service_areas_tag'->>0 as frontmatter_first_area"),
+      database.raw("autonomous_runs.draft_payload->'frontmatter'->>'service' as frontmatter_service"),
+      database.raw("autonomous_runs.draft_payload->'frontmatter'->>'category' as frontmatter_category"),
+      'cb.target_keyword as brief_keyword',
+      'cb.city as brief_city',
+      'cb.service as brief_service'
+    );
   const registryRows = await database('content_registry')
     .select(
       'id',
@@ -357,6 +425,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'astro_status',
       'live_status',
       'reconciliation_status',
+      'db_blog_id',
       'noindex_detected',
       'title',
       'target_keyword',
@@ -376,13 +445,89 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     // never offer a build_failed or still-pending target to a hard link gate.
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
       && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
+  // Keyed by the row's own domain+path keys, not pathname alone: two live
+  // rows can share a pathname on different fleet hosts, and each must stay
+  // a candidate for briefs targeting its host.
+  const registryCandidatesByKey = new Map();
+  const registryCandidateList = [];
+  // Every qualifying registry row's domain+path keys, BEFORE rows that share
+  // a pathname on different fleet hosts collapse into one candidate by path
+  // (the publish-time recheck must see each host).
+  const qualifyingRegistryKeys = [];
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
-      if (candidate) candidates.push(candidate);
+      if (candidate) {
+        registryCandidateList.push(candidate);
+        for (const key of candidateLiveKeys(candidate)) {
+          if (!registryCandidatesByKey.has(key)) registryCandidatesByKey.set(key, candidate);
+          qualifyingRegistryKeys.push(key);
+        }
+      }
     } catch { /* malformed registry row: exclude it */ }
   }
+  // A slug can be reused across fleet domains over time, so two different
+  // completed runs — or a stale run and an unrelated current registry row —
+  // can share a bare pathname while belonging to different sites (Codex
+  // #4984 r6+ P2). Group by the run's OWN domain-plus-path live key (not
+  // path alone) and keep only the newest `completed_at` per key: a
+  // `new_supporting_blog` update on an existing slug can leave multiple
+  // completed_published rows for the same URL, and rankRelatedPosts sorts
+  // by topical score before deduping paths, so an older run could otherwise
+  // donate metadata over the most recently published version.
+  const newestAutonomousByKey = new Map();
+  for (const row of autonomousRows || []) {
+    let candidate;
+    try { candidate = candidateFromAutonomousRun(row); }
+    catch { continue; }
+    if (!candidate) continue;
+    const key = candidateLiveKeys(candidate).sort().join(',');
+    const completedAt = row.completed_at ? new Date(row.completed_at).getTime() : 0;
+    const existing = newestAutonomousByKey.get(key);
+    if (!existing || completedAt > existing.completedAt) {
+      newestAutonomousByKey.set(key, { candidate, completedAt });
+    }
+  }
+  const consumedRegistry = new Set();
+  for (const { candidate } of newestAutonomousByKey.values()) {
+    // A path match alone is not enough — the run and the current registry
+    // row must share a live domain+path key, or an old hub run can donate
+    // its metadata to an unrelated spoke page whose pathname was reused.
+    const verified = candidateLiveKeys(candidate)
+      .map((key) => registryCandidatesByKey.get(key))
+      .find(Boolean) || null;
+    if (!verified) continue;
+    consumedRegistry.add(verified);
+    // Current registry truth controls both rendering and topical identity.
+    // Historical run metadata fills only fields the live registry lacks.
+    for (const field of ['title', 'keyword', 'city', 'service', 'category']) {
+      if (verified[field]) candidate[field] = verified[field];
+    }
+    candidate.targetSites = verified.targetSites;
+    candidates.push(candidate);
+  }
+  for (const candidate of registryCandidateList) {
+    if (!consumedRegistry.has(candidate)) candidates.push(candidate);
+  }
+  const liveKeys = new Set([...candidates.flatMap(candidateLiveKeys), ...qualifyingRegistryKeys]);
+  return { candidates, liveKeys };
+}
+
+async function getRelatedPostsForBrief(target = {}, { database = db, limit = RELATED_POSTS_DEFAULT_LIMIT } = {}) {
+  const { candidates } = await loadVerifiedCandidates(database);
   return rankRelatedPosts(target, candidates, { limit });
+}
+
+// Publish-time recheck: of the frozen related paths, the ones still verified
+// live NOW on every frozen publish host (a post can be unpublished,
+// noindexed or moved to another fleet domain while a draft that links it
+// waits for review). Hosts default to the hub, like candidate targetSites.
+async function getLiveRelatedPaths(paths = [], { database = db, hosts = [] } = {}) {
+  const wanted = new Set((Array.isArray(paths) ? paths : []).map(normalizePathForCompare).filter(Boolean));
+  if (!wanted.size) return new Set();
+  const sites = Array.isArray(hosts) && hosts.length ? hosts : HUB_SITE_KEYS;
+  const { liveKeys } = await loadVerifiedCandidates(database);
+  return new Set([...wanted].filter((p) => sites.every((site) => liveKeys.has(`${site}|${p}`))));
 }
 
 module.exports = {
@@ -390,9 +535,11 @@ module.exports = {
   RELATED_POSTS_TARGET_MIN,
   rankRelatedPosts,
   candidateFromRow,
+  candidateFromAutonomousRun,
   candidateFromRegistryRow,
   registryRowLivePath,
   registryRowLiveKeys,
   getRelatedPostsForBrief,
+  getLiveRelatedPaths,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

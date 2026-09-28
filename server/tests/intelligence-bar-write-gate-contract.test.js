@@ -82,7 +82,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -143,6 +143,7 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'repair_closeout',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -153,6 +154,7 @@ const CONFIRMED_ENDPOINT_WRITES = [
   'approve_seo_action',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
 ];
 
 // ── FROZEN ── by-name snapshot taken 2026-06-11 (issue #1568). Writes whose
@@ -252,7 +254,7 @@ const READ_ONLY = [
   'get_inbox_summary', 'search_emails', 'get_email_thread', 'draft_email_reply',
   'get_vendor_invoices', 'get_email_stats', 'get_blocked_senders',
   'get_stripe_balance', 'get_payout_history', 'get_payout_details', 'get_cash_flow',
-  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
+  'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts', 'list_pending_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'get_estimate_detail', 'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_neighborhood_grass_profile',
@@ -570,6 +572,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         autopay_enabled: true, next_charge_date: null, termite_stations_rented: false,
       }],
     }],
+    // repair_closeout plans from getCloseoutStatus (spied below — its ~20
+    // probes are covered by closeout-status.test.js); the seeded record has
+    // no report link, so the plan has a publish step and reaches the gate.
+    ['closeout-repair-tools', 'executeCloseoutRepairTool', 'repair_closeout', { service_id: '00000000-0000-0000-0000-00000000d001' }, {
+      service_records: [{ id: 'rec-closeout', status: 'completed', report_template_version: 'service_report_v1', report_view_token: null, structured_notes: {} }],
+    }],
   ];
 
   test('harness sanity: the recording db actually records mutations', async () => {
@@ -603,9 +611,22 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // controlled prerequisite here; the real-DB estimate suite tests outages.
     const pricingSync = toolName === 'save_customer_estimate'
       ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
+    const closeoutStatus = toolName === 'repair_closeout'
+      ? jest.spyOn(require('../services/closeout-status'), 'getCloseoutStatus').mockResolvedValue({
+        found: true, packet: null, visit: { customerId: 'cust-1', technicianId: 'tech-1' },
+        record: { id: 'rec-closeout' },
+        reportRecordId: 'rec-closeout',
+        summary: { closedOut: false },
+        facts: {
+          completion: { state: 'done', reason: 'record_completed' },
+          report: { state: 'pending', reason: 'no_report_artifact', posture: 'internal_only' },
+          reportDelivery: { state: 'not_required', reason: 'frozen_posture_internal_only' },
+        },
+      }) : null;
     let result;
     try { result = await executor(toolName, input); } finally {
       pricingSync?.mockRestore();
+      closeoutStatus?.mockRestore();
       if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
     }
 
@@ -664,6 +685,7 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
   const ENDPOINT_CALLS = [
     ['banking-tools', 'executeBankingTool', 'request_instant_payout', { amount: 50 }, { isAdmin: true }],
     ['banking-tools', 'executeBankingTool', 'request_standard_payout', { amount: 50 }, { isAdmin: true }],
+    ['banking-tools', 'executeBankingTool', 'cancel_pending_payout', { payout_id: 'po_test_synthetic' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'approve_seo_action', { action_id: '00000000-0000-0000-0000-000000000001' }, { isAdmin: true }],
     ['seo-tools', 'executeSeoTool', 'run_seo_pipeline', {}, { isAdmin: true }],
   ];

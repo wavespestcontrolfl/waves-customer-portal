@@ -3011,8 +3011,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
     ? Number(referralStats?.rewardPerReferral) || 0
     : 0;
   const quickActions = [
-    { icon: 'wrench', label: 'Request', sub: 'New service', accent: true, action: () => onSwitchTab?.('request') },
-    { icon: 'chat', label: 'Message', sub: 'Text the team', accent: true, action: () => { window.location.href = 'sms:+19412975749'; } },
+    { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
+    { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: referralReward > 0 ? `$${referralReward} credit` : 'View details', action: () => onSwitchTab?.('refer') },
   ];
@@ -3091,7 +3091,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             320-390px viewports. */}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: compact ? 8 : 10, marginTop: 22 }}>
           {quickActions.map((item) => (
-            <button key={item.label} type="button" onClick={item.action} {...(item.accent ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} style={dashboardActionCard}>
+            <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
               <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
               {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
@@ -4182,6 +4182,30 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
   );
 }
 
+function NotificationLabelDisclosure({ label, description }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)} style={{ minWidth: 0 }}>
+      <summary
+        className="waves-focus-ring"
+        style={{
+          minHeight: 44, display: 'flex', alignItems: 'center', gap: 6,
+          cursor: 'pointer', listStyle: 'none', color: B.glassNavy,
+          fontSize: 16, fontWeight: 700, lineHeight: 1.25,
+        }}
+      >
+        <span style={{ minWidth: 0 }}>{label}</span>
+        <span aria-hidden="true" style={{ display: 'inline-flex', color: B.grayMid, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }}>
+          <Icon name="chevronDown" size={16} strokeWidth={2} />
+        </span>
+      </summary>
+      <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.5, paddingBottom: 4 }}>
+        {description}
+      </div>
+    </details>
+  );
+}
+
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
   const [expanded, setExpanded] = useState(false);
   const settingsId = useId();
@@ -4589,24 +4613,31 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     }
   };
 
-  // Change the delivery channel (text / email / both) for one notification.
-  const handleChannelChange = async (channelKey, value) => {
-    if (prefsLocked[channelKey]) return;
-    const prevVal = prefs[channelKey] || 'sms';
-    if (prevVal === value) return;
-    setPrefsLocked(prev => ({ ...prev, [channelKey]: true }));
-    setPrefs(prev => ({ ...prev, [channelKey]: value }));
+  // Optional account alerts combine delivery and Off in one control. Off
+  // changes only the enable flag, retaining the saved delivery channel.
+  const handleChannelChange = async (channelKey, value, enabledKey) => {
+    const lockKeys = [channelKey, enabledKey].filter(Boolean);
+    if (lockKeys.some(key => prefsLocked[key])) return;
+    const changes = {
+      ...(channelKey && value !== 'off' ? { [channelKey]: value } : {}),
+      ...(enabledKey ? { [enabledKey]: value !== 'off' } : {}),
+    };
+    const keys = Object.keys(changes);
+    if (keys.every(key => prefs[key] === changes[key])) return;
+    const previous = Object.fromEntries(keys.map(key => [key, prefs[key]]));
+    setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, true])) }));
+    setPrefs(prev => ({ ...prev, ...changes }));
     try {
-      const result = await api.updateNotificationPrefs({ [channelKey]: value });
-      if (channelKey === 'requestChannel' && result.preferences?.requestChannel !== value) {
-        throw new Error('Refresh the app to manage request notifications.');
+      const result = await api.updateNotificationPrefs(changes);
+      if ((enabledKey || channelKey === 'requestChannel') && keys.some(key => result.preferences?.[key] !== changes[key])) {
+        throw new Error('Refresh the app to manage notification preferences.');
       }
     } catch (err) {
-      setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
+      setPrefs(prev => ({ ...prev, ...previous }));
       showCustomerAlert('Could not update delivery preference. Please try again.');
       console.error(err);
     } finally {
-      setPrefsLocked(prev => ({ ...prev, [channelKey]: false }));
+      setPrefsLocked(prev => ({ ...prev, ...Object.fromEntries(lockKeys.map(key => [key, false])) }));
     }
   };
 
@@ -5352,15 +5383,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             {(() => {
               const items = [
                 { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'Appointment updates', desc: 'Bookings, changes and cancellations', icon: 'calendar', locked: false, defaultOn: true },
-                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', icon: 'clock', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', icon: 'bell', locked: false, defaultOn: true },
+                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '3-day reminder', desc: 'A reminder three days before your visit', icon: 'clock', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: 'Day-before reminder', desc: 'A reminder the day before your visit', icon: 'bell', locked: false, defaultOn: true },
                 { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'On the way', desc: 'Live technician tracking', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
                 // Text / Email / Both: the arrival email twin (retired
                 // 2026-08-06) is back on the owner's 2026-09-06 go.
-                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Technician arrival', icon: 'door', locked: false, defaultOn: true },
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Technician arrival', desc: 'An alert when your technician reaches the property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
@@ -5368,8 +5399,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 // extension of the 2026-07-09 "stops at appointment alerts"
                 // ruling, which predates this lane. No channelKey: these are
                 // app/bell advisories only — never SMS or email.
-                ...(prefs.appPreferencesAvailable ? [{ key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service reports', icon: 'document', locked: false, defaultOn: true }] : []),
-                { key: 'weatherAlerts', label: 'Weather & property alerts', desc: 'Rain and lawn advisories in the app', icon: 'cloudRain', locked: false, defaultOn: true },
+                ...(prefs.appPreferencesAvailable ? [{ key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service reports', desc: 'Choose text or app alerts; app may fall back to text. Off stops all report notifications, including emails. Reports remain in Documents.', icon: 'document', locked: false, defaultOn: true }] : []),
+                { key: 'weatherAlerts', label: 'Weather & property alerts', desc: 'Rain and lawn advisories in the app. Choose Off to stop these alerts.', icon: 'cloudRain', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
@@ -5386,6 +5417,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
               const propertyOwned = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key);
+              const optionalDelivery = p.key === 'serviceCompleted' || p.key === 'weatherAlerts';
               return (
                 <div key={p.key} data-reminder-row="" style={{
                   // Let each label and its controls share a row while they
@@ -5401,15 +5433,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{p.label}</div>
-                      {p.desc && <div style={{ fontSize: 16, color: muted, lineHeight: 1.5, whiteSpace: 'normal', marginTop: 2 }}>{p.desc}</div>}
+                      <NotificationLabelDisclosure label={p.label} description={p.desc} />
                       {p.locked && (
                         <div style={{ fontSize: 14, color: B.orange, marginTop: 2, fontWeight: 700 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
-                  {/* Select + switch travel together so a wrap never splits
-                      the controls across lines. */}
+                  {/* Legacy appointment switches stay beside their delivery
+                      choice. Optional account alerts use a single select. */}
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
                     marginLeft: 'auto',
@@ -5437,21 +5468,33 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     const alertOn = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key)
                       ? shownTextsEntry?.preferences?.[p.key] !== false
                       : isOn;
-                    const selectable = alertOn && opts.length > 1;
+                    const selectable = optionalDelivery || (alertOn && opts.length > 1);
                     return (
                       <CustomerSelect
                         data-testid={propertyOwned ? `per-property-${p.key}` : undefined}
-                        value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
-                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
-                        disabled={!selectable || !!prefsLocked[p.channelKey]}
+                        value={optionalDelivery && !isOn ? 'off' : prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
+                        onChange={(e) => handleChannelChange(p.channelKey, e.target.value, optionalDelivery ? p.key : undefined)}
+                        disabled={!selectable || !!prefsLocked[p.channelKey] || (optionalDelivery && !!prefsLocked[p.key])}
                         aria-label={`Delivery method for ${p.label}`}
                         aria-describedby={propertyOwned ? 'appointment-delivery-note' : undefined}
                       >
                         {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !app.ready}>{o.label}</option>)}
+                        {optionalDelivery && <option value="off">Off</option>}
                       </CustomerSelect>
                     );
                   })()}
-                  {!propertyOwned && (
+                  {p.key === 'weatherAlerts' && (
+                    <CustomerSelect
+                      value={isOn ? 'push' : 'off'}
+                      onChange={(e) => handleChannelChange(null, e.target.value, p.key)}
+                      disabled={!!prefsLocked[p.key]}
+                      aria-label={`Delivery method for ${p.label}`}
+                    >
+                      <option value="push">App</option>
+                      <option value="off">Off</option>
+                    </CustomerSelect>
+                  )}
+                  {!propertyOwned && !optionalDelivery && (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                       <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
                       {p.locked && (
@@ -5468,7 +5511,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
                   <GlassTile name="mail" size={34} />
-                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
+                  <NotificationLabelDisclosure label="Request updates" description="Updates when your service request is received or changes" />
                 </div>
                 <CustomerSelect aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
                   disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}>
@@ -5566,7 +5609,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
                 { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
                 { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
-                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s notifications to you as well as the on-location contacts', icon: 'smartphone' },
+                { key: 'appointmentNotifyPrimary', label: 'Send me appointment alerts', desc: 'Receive this property\'s appointment and technician alerts in addition to any on-location contacts.', icon: 'smartphone' },
               ];
               const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
               const alertCount = options.length - 1;
@@ -5599,10 +5642,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         return (
                           <div key={option.key} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
                             <GlassTile name={option.icon} />
-                            <span style={{ flex: 1, minWidth: 0 }}>
-                              <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{option.label}</span>
-                              <span style={{ display: 'block', fontSize: 14, color: muted, marginTop: 1 }}>{option.desc}</span>
-                            </span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <NotificationLabelDisclosure label={option.label} description={option.desc} />
+                            </div>
                             <GoldSwitch
                               on={on}
                               disabled={!!prefsLocked[lockKey]}
@@ -5730,7 +5772,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Me too” to send those texts to you as well.' : 'You’ll keep getting them too.'}
+                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"

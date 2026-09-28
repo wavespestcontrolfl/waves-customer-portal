@@ -19,7 +19,7 @@ jest.mock('../models/db', () => {
     const val = typeof spec === 'function' ? spec(mockCounters[table]) : spec;
     const chain = {};
     const self = () => chain;
-    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
+    ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orWhereIn', 'orderBy', 'forUpdate', 'leftJoin', 'andWhere', 'orWhereNotNull', 'whereNotIn'].forEach((m) => {
       chain[m] = jest.fn((...args) => {
         if (table === 'invoices' && m === 'where' && args[0] === 'notes') mockInvoiceNotePredicates.push(args);
         if (typeof args[0] === 'function') args[0].call(chain, chain);

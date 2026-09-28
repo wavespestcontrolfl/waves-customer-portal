@@ -11820,6 +11820,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
+            const noticeLegs = (failResult.channelResults || failResult.deduped === true)
+              && require('./messaging/billing-prior-delivery').settledLegTimes(failResult);
+            const noticeSentAt = failResult.deduped ? noticeLegs?.eventAt : new Date();
             // Send-window hold: the decline is deliberately independent of
             // completion messaging — when the operator skipped the separate
             // completion SMS, this notice is the ONLY carrier of the failure
@@ -11868,7 +11871,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
             }
             recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
-            if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+            if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt =
+              noticeSentAt?.toISOString() || recordStructuredNotes.paymentFailedNoticeSentAt;
             else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
             await mergeRecordNotesKeys(record.id, {
               paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
@@ -11900,10 +11904,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // for a concurrent sender to claim and re-send.
               try {
                 invoice = await DeclineNoticeInvoiceService.markDeliverySent(invoice.id, {
-                  sms: true,
+                  sms: noticeLegs ? noticeLegs.smsAccepted : true,
+                  email: noticeLegs?.emailAccepted || false,
                   source: 'payment_failed_notice',
                   payUrl,
                   claimToken: declineSendClaim.invoice.send_claim_token,
+                  deduped: failResult.deduped === true,
+                  eventVisibleAt: noticeSentAt,
+                  smsEventVisibleAt: noticeLegs?.smsAccepted && !noticeLegs.freshSms ? noticeLegs.smsAt : undefined,
+                  emailEventVisibleAt: noticeLegs?.emailAccepted && !noticeLegs.freshEmail ? noticeLegs.emailAt : undefined,
                 });
               } catch (statusErr) {
                 logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);

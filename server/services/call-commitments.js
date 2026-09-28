@@ -310,8 +310,31 @@ function evidenceFor(v2, paths) {
 // Every timestamp that reaches a commitment — a V2 scheduling field or a
 // model-written due_at — goes through the Eastern parser: a naive
 // "2026-09-02T09:00:00" is an ET wall clock, never Railway's UTC.
+//
+// An AI-written time with an Eastern offset of EITHER season is the wall
+// clock it spells: the model is told to write the ET offset, and when it
+// slips the season ("15:00-05:00" in July) the spoken number is still right
+// — the booking path's rule (v2IsoToEtWallClock, confirmedWallClockET).
+// Read as an instant it would land an hour off: a 3 PM callback due at
+// 4 PM, a "3 PM" appointment promise never matching the 3 PM booking
+// (#5081 follow-up). Any other offset is a real instant. Office-typed
+// times go through parseDueAt directly and are not affected.
+// Fractional seconds are dropped: the ET parser reads only naive
+// 'YYYY-MM-DDTHH:MM[:SS]' (anything else would fall through to UTC).
+const ET_OFFSET_TIME_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(?:-04:?00|-05:?00)$/;
+// The written instant stands whenever its offset is valid for that ET wall
+// clock — it reads back as the same clock, e.g. either occurrence of 1:30
+// on the fall-back night — and the wall clock is used only when the offset
+// is from the wrong season (codex #5139 r2 P1).
 function isoOrNull(value) {
-  const d = parseDueAt(value);
+  const et = ET_OFFSET_TIME_RE.exec(String(value ?? '').trim());
+  if (et) {
+    const written = new Date(String(value).trim());
+    const p = !Number.isNaN(written.getTime()) ? etParts(written) : null;
+    const pad = (n) => String(n).padStart(2, '0');
+    if (p && `${p.year}-${pad(p.month)}-${pad(p.day)}T${pad(p.hour)}:${pad(p.minute)}` === et[1].slice(0, 16)) return written.toISOString();
+  }
+  const d = parseDueAt(et ? et[1] : value);
   return d instanceof Date ? d.toISOString() : null;
 }
 
@@ -2056,13 +2079,15 @@ async function rejudgeSlotKept(conn, kept, row, callLogId) {
 // naive confirmed_start_at compared as written — the booking path's rule;
 // any other encoding is simply re-judged).
 async function listSlotKeptCallIds(conn) {
+  // The basis is inlined (a constant) so the planner can match the partial
+  // index call_commitments_slot_kept_idx.
   const rows = await conn.raw(
     `SELECT DISTINCT cc.call_log_id
        FROM call_commitments cc
        JOIN call_log cl ON cl.id = cc.call_log_id
        LEFT JOIN scheduled_services ss ON ss.id::text = cc.fulfillment ->> 'record_id'
       WHERE cc.status = 'fulfilled' AND cc.human_state IS NULL
-        AND cc.fulfillment ->> 'basis' = ?
+        AND (cc.fulfillment ->> 'basis') = '${SLOT_BOOKING_BASIS}'
         AND (ss.id IS NULL
           OR ss.status = ANY(?)
           OR ss.customer_id IS DISTINCT FROM cl.customer_id
@@ -2085,7 +2110,7 @@ async function listSlotKeptCallIds(conn) {
             cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' ~ '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+){0,1}){0,1}(-0[45]:{0,1}00){0,1}$'
             AND left(cl.ai_extraction_enriched #>> '{scheduling,confirmed_start_at}', 16)
               = to_char(cc.due_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD"T"HH24:MI'), false))`,
-    [SLOT_BOOKING_BASIS, SLOT_OFF_BOOKS_STATUSES],
+    [SLOT_OFF_BOOKS_STATUSES],
   );
   return (rows?.rows || []).map((r) => r.call_log_id);
 }
