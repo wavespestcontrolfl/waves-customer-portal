@@ -194,6 +194,18 @@ async function claimToday(technicianId, etDate, message, payload) {
   return inserted.length > 0;
 }
 
+// Undo a claim whose send was definitely refused. Best-effort: a failed
+// delete only means no retry today, never a duplicate text.
+async function releaseClaim(technicianId, etDate) {
+  try {
+    await db('tech_notifications')
+      .where({ dedupe_key: dedupeKeyFor(technicianId, etDate), type: NOTIFICATION_TYPE })
+      .del();
+  } catch (err) {
+    logger.warn(`[tech-open-visit-nudge] claim release failed for ${technicianId}: ${err.message}`);
+  }
+}
+
 /**
  * Runs the whole sweep once: gate check, today's open visits grouped by
  * technician, eligibility + phone filtering, per-technician dedupe claim,
@@ -257,7 +269,11 @@ async function runTechOpenVisitNudge({ now = new Date() } = {}) {
         allowOwnerSms: true,
       });
       if (result && result.success === false) {
+        // A definite refusal sent nothing — give the day's slot back so a
+        // re-run can retry. A throw (below) keeps it: the text may already
+        // be out, and a second copy is worse than a missed one.
         logger.warn(`[tech-open-visit-nudge] send failed for ${tech.id}: ${result.error || result.code || 'unknown'}`);
+        await releaseClaim(tech.id, etDate);
         skipped += 1;
       } else {
         sent += 1;
@@ -284,5 +300,6 @@ module.exports = {
     buildMessage,
     dedupeKeyFor,
     claimToday,
+    releaseClaim,
   },
 };

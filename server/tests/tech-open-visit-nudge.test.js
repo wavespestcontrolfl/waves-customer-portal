@@ -206,15 +206,35 @@ describe('runTechOpenVisitNudge — grouping, eligibility, sends', () => {
     expect(body).not.toContain('Winterbottom');
   });
 
-  test('a Twilio send failure is logged and counted as skipped, not thrown', async () => {
+  test('a definite Twilio refusal is counted as skipped and gives the day\'s slot back', async () => {
     TwilioService.sendSMS.mockResolvedValue({ success: false, error: 'blocked' });
     const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    const notifChains = [];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
       return chain();
     });
     const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
     expect(r).toEqual({ status: 'ok', techs: 1, sent: 0, skipped: 1, visits: 1 });
+    // Nothing went out, so the claim is released and a re-run can retry.
+    const release = notifChains.find((c) => c.del.mock.calls.length);
+    expect(release).toBeDefined();
+    expect(release.where).toHaveBeenCalledWith({ dedupe_key: 'tech_open_visit_nudge:tech-a:2026-09-28', type: 'tech_open_visit_nudge' });
+  });
+
+  test('a thrown send keeps the claim — the text may be out, so no second copy', async () => {
+    TwilioService.sendSMS.mockRejectedValue(new Error('socket hang up'));
+    const rows = [visitRow({ id: 'v1', techId: 'tech-a' })];
+    const notifChains = [];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services as s') return chain({ select: jest.fn().mockResolvedValue(rows) });
+      if (table === 'tech_notifications') { const c = chain({ del: jest.fn().mockResolvedValue(1) }); notifChains.push(c); return c; }
+      return chain();
+    });
+    const r = await runTechOpenVisitNudge({ now: new Date('2026-09-28T23:00:00Z') });
+    expect(r).toEqual({ status: 'ok', techs: 1, sent: 0, skipped: 1, visits: 1 });
+    expect(notifChains.every((c) => c.del.mock.calls.length === 0)).toBe(true);
   });
 });
 
