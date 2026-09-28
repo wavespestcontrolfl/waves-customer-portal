@@ -1877,12 +1877,13 @@ class RelayConversation {
    */
   /**
    * End a streamed round early — a barge-in (`interrupted`) or a failed send
-   * (`failed`) — keeping history to what was actually SENT: the sent prefix
-   * plus the round's tool_use blocks, each paired with a "not run" result so
-   * the next model call sees a valid, honest transcript. No tool runs, no
-   * further frame is sent, and an entry interrupt() already cut is left as
-   * interrupt() recorded it. THE ONE CHOKEPOINT for every early exit of a
-   * streamed round — finalize-time abort, finalize-time failed send,
+   * (`failed`) — keeping unsigned history to what was actually sent, while a
+   * completed thinking response stays intact for signed replay and carries
+   * delivery truth in a later user-side note. Tool-use blocks are paired with
+   * a "not run" result so the next model call sees a valid transcript. No tool
+   * runs, no further frame is sent, and an entry interrupt() already cut is
+   * left as interrupt() recorded it. THE ONE CHOKEPOINT for every early exit
+   * of a streamed round — finalize-time abort, finalize-time failed send,
    * mid-stream barge-in, mid-stream model failure/timeout, pre-tool abort —
    * so history/transcript are built one way regardless of where the round
    * stopped. `msg` may be `null` (the model call itself never resolved, e.g.
@@ -1891,7 +1892,21 @@ class RelayConversation {
    * case, only whatever prefix was already sent.
    */
   _closeStreamedRoundEarly(streamState, msg, reason) {
-    if (reason === 'failed') {
+    const outcome = {
+      failed: {
+        closeStream: true,
+        result: { failed: true },
+        toolResult: 'speech to the caller failed',
+        deliveryKnown: false,
+      },
+      interrupted: {
+        closeStream: false,
+        result: { aborted: true },
+        toolResult: 'the current turn was interrupted',
+        deliveryKnown: Boolean(this._pendingInterruptNote),
+      },
+    }[reason];
+    if (outcome.closeStream) {
       // Best effort: end the token group Twilio has open (it has only seen
       // last:false frames) so the next turn's speech can't attach to it. The
       // socket may be the thing that failed, so a throw here is expected.
@@ -1905,25 +1920,18 @@ class RelayConversation {
     streamState.closed = true;
     const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
     const toolUseBlocks = msg ? msg.content.filter((b) => b.type === 'tool_use') : [];
-    // A thinking block rides along ONLY when there are tool_use blocks to
-    // pair it with (the "must survive to the next request" case for a tool
-    // loop) — an abandoned round with nothing said and no tool call keeps
-    // its prior (empty, not pushed) shape exactly as before this model
-    // existed.
-    const thinkingBlocks = toolUseBlocks.length && msg
-      ? msg.content.filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking')
-      : [];
     // A completed thinking response is a signed replay prefix: preserve every
     // block byte-for-byte and in provider order, even when only part of its
     // text reached the caller. With no `msg` (abort before finalMessage), no
     // signed response exists and the synthesized sent prefix remains valid.
-    const assistantMessage = this._thinkingAlwaysOn && msg
+    const preservesProviderResponse = Boolean(this._thinkingAlwaysOn && msg);
+    const assistantMessage = preservesProviderResponse
       ? { role: 'assistant', content: msg.content }
       : {
           role: 'assistant',
           content: sentText
-            ? [...thinkingBlocks, { type: 'text', text: sentText }, ...toolUseBlocks]
-            : [...thinkingBlocks, ...toolUseBlocks],
+            ? [{ type: 'text', text: sentText }, ...toolUseBlocks]
+            : toolUseBlocks,
         };
     if (assistantMessage.content.length) {
       // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
@@ -1939,21 +1947,19 @@ class RelayConversation {
         const kept = assistantMessage.content.filter((b) => b.type !== 'text');
         assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
       }
-      if (this._thinkingAlwaysOn && msg
-        && (reason === 'failed' || (reason === 'interrupted' && !this._pendingInterruptNote))) {
+      if (preservesProviderResponse && !outcome.deliveryKnown) {
         this._queueDeliveryNote(sentText);
       }
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
     }
     if (toolUseBlocks.length) {
-      const why = reason === 'failed' ? 'speech to the caller failed' : 'the current turn was interrupted';
       this.messages.push({
         role: 'user',
-        content: this._appendDeliveryNote(toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${why}.` }))),
+        content: this._appendDeliveryNote(toolUseBlocks.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: `Not run — ${outcome.toolResult}.` }))),
       });
     }
-    return reason === 'failed' ? { failed: true } : { aborted: true };
+    return outcome.result;
   }
 
   /**
