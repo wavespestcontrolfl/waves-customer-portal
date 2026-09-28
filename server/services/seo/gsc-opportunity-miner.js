@@ -1217,47 +1217,41 @@ function urlHost(url) {
 // Third-party domains and competitor names are EVIDENCE for reviewers only.
 function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEngines = 3 } = {}) {
   const byQuery = new Map(questions.map((q) => [q.query, q]));
-  const perQuestion = new Map();
-  for (const r of rows) {
+  // One evidence record per question × engine.
+  const engines = new Map();
+  for (const r of rows.filter((x) => byQuery.has(x.query) && x.llm_platform && isMeasuredAnswer(x))) {
     const q = byQuery.get(r.query);
-    if (!q || !r.llm_platform || !isMeasuredAnswer(r)) continue;
-    if (!perQuestion.has(q.id)) perQuestion.set(q.id, new Map());
-    const engines = perQuestion.get(q.id);
-    let e = engines.get(r.llm_platform);
-    if (!e) {
-      e = { platform: r.llm_platform, models: new Set(), days: new Set(), targetCited: false, otherOwned: 0, domains: new Map(), competitors: new Set() };
-      engines.set(r.llm_platform, e);
-    }
-    e.days.add(observationDate(r.check_date));
-    if (r.model_version) e.models.add(r.model_version);
+    const key = `${q.id}\u0000${r.llm_platform}`;
+    const e = engines.get(key) || {
+      questionId: q.id, platform: r.llm_platform, models: new Set(), days: new Set(),
+      targetCited: false, otherOwned: 0, hosts: [], competitors: new Set(),
+    };
+    engines.set(key, e);
     const owned = ownedCitations(r);
-    if (owned.some((u) => citationMatchesPage(u, q.target_path))) e.targetCited = true;
-    else if (owned.length) e.otherOwned += 1;
-    for (const u of cleanUrls(r.cited_urls)) {
-      if (isOwnedUrl(u)) continue;
-      const host = urlHost(u);
-      if (host) e.domains.set(host, (e.domains.get(host) || 0) + 1);
-    }
-    for (const c of asJsonArray(r.competitors_mentioned)) if (c?.name) e.competitors.add(c.name);
+    const cited = owned.some((u) => citationMatchesPage(u, q.target_path));
+    e.days.add(observationDate(r.check_date));
+    e.models.add(r.model_version);
+    e.targetCited = e.targetCited || cited;
+    e.otherOwned += Number(!cited && owned.length > 0);
+    e.hosts.push(...cleanUrls(r.cited_urls).filter((u) => !isOwnedUrl(u)).map(urlHost));
+    asJsonArray(r.competitors_mentioned).forEach((c) => e.competitors.add(c?.name));
+  }
+  const observedByQuestion = new Map(questions.map((q) => [q.id, []]));
+  for (const e of engines.values()) {
+    if (e.days.size >= minDays) observedByQuestion.get(e.questionId).push(e);
   }
 
   const gaps = [];
   for (const q of questions) {
-    const engines = perQuestion.get(q.id);
-    if (!engines) continue;
-    const observed = [...engines.values()].filter((e) => e.days.size >= minDays);
+    const observed = observedByQuestion.get(q.id);
     const missing = observed.filter((e) => !e.targetCited);
     if (missing.length < minEngines) continue;
     const domains = new Map();
-    const competitors = new Set();
-    for (const e of missing) {
-      for (const [d, n] of e.domains) domains.set(d, (domains.get(d) || 0) + n);
-      for (const c of e.competitors) competitors.add(c);
-    }
+    missing.flatMap((e) => e.hosts).filter(Boolean).forEach((d) => domains.set(d, (domains.get(d) || 0) + 1));
     gaps.push({
       question: q,
       engines_missing: missing
-        .map((e) => ({ platform: e.platform, models: [...e.models].sort(), observation_days: e.days.size, other_owned_pages_cited: e.otherOwned }))
+        .map((e) => ({ platform: e.platform, models: [...e.models].filter(Boolean).sort(), observation_days: e.days.size, other_owned_pages_cited: e.otherOwned }))
         .sort((a, b) => a.platform.localeCompare(b.platform)),
       engines_citing_target: observed.filter((e) => e.targetCited).map((e) => e.platform).sort(),
       engines_observed: observed.length,
@@ -1266,7 +1260,7 @@ function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEn
         .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
         .slice(0, 5)
         .map(([domain, citations]) => ({ domain, citations })),
-      competitors_mentioned: [...competitors].sort(),
+      competitors_mentioned: [...new Set(missing.flatMap((e) => [...e.competitors]))].filter(Boolean).sort(),
     });
   }
   return gaps;
@@ -1299,6 +1293,10 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
     third_party_domains: gap.third_party_domains,
     competitors_mentioned: gap.competitors_mentioned,
     demand_basis: impressionsBoost(impressions) > 0 ? 'gsc' : 'ai_evidence_only',
+    // The FAQ-blocked topic behind the broad service (a German-cockroach
+    // question canonicalizes to 'pest') — same derivation and key the other
+    // buckets use, so the brief's FAQ policy and the publish guard agree.
+    specialty_topic: extractSpecialtyTopic([q.query, q.target_path]),
   };
   // Live target → the refresh agent's ANSWER-GAP MODE (same key and entry
   // shape answer_gap uses; the question is the one query to answer).
@@ -1328,6 +1326,11 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
   opp.dedupe_key = aeoQuestionGapDedupeKey(q);
   return opp;
 }
+
+// SQL: the slug a queued article row is bound to publish at, for every
+// pinned-article producer (operator intercept + category seeds, and this
+// bucket's missing-target articles).
+const PINNED_ARTICLE_PATH_SQL = "COALESCE(signal_metadata->'intercept_brief'->>'slug', signal_metadata->'category_brief'->>'slug', signal_metadata->>'target_path')";
 
 // The route a row writes: the live page it refreshes, or the target path a
 // new article is pinned to.
@@ -1876,6 +1879,11 @@ class GscOpportunityMiner {
     // expiring them would let a sync outage drain the lane one domain at
     // a time. Same shape and purpose as familyExemptions above.
     const sweepExemptQueries = { ctr_rewrite: new Set(), no_content_yet: new Set() };
+    // Every qualifying aeo_question_gap candidate this run, BEFORE the cap
+    // and the routing filters — the recovered-signal sweep's live set.
+    // opps stays null when the bucket did not evaluate (gate off, cap 0,
+    // observations or sitemap unreadable), which suppresses its sweep.
+    const aeoQuestionQualifying = { opps: null };
     // Pages the older seo_actions queue owns for internal-link work.
     // Captured here so the persist transaction can retire companions that
     // were queued BEFORE that queue claimed the page.
@@ -1916,7 +1924,7 @@ class GscOpportunityMiner {
       ['answer_gap', () => this.mineAnswerGap(since)],
       // Same-batch page conflicts are arbitrated in persistAll
       // (aeoQuestionOppYields), after the facts boost and frozen-aware.
-      ['aeo_question_gap', () => this.mineAeoQuestionGaps(since)],
+      ['aeo_question_gap', () => this.mineAeoQuestionGaps(since, { qualifying: aeoQuestionQualifying })],
       // Runs AFTER answer_gap by list order: its persistable refresh pages
       // fence the family refreshes — two buckets must not queue
       // independently claimable edits of one page (their dedupe keys
@@ -2209,6 +2217,17 @@ class GscOpportunityMiner {
               revalidated,
               sweepExemptQueries[bucket],
               since
+            );
+          }
+          // aeo_question_gap: a question whose target engines now cite, that
+          // an admin deactivated, or that fell under the observation floor
+          // stops qualifying — retire its pending row. The live set is every
+          // qualifying candidate (pre-cap; each sits at or above its floor),
+          // and the sweep's hub-coverage guard applies unchanged (a stale
+          // GSC sync only suppresses retirement, never widens it).
+          if (!errors.aeo_question_gap && aeoQuestionQualifying.opps) {
+            await this._sweepRecoveredQueries(
+              AEO_QUESTION_GAP_BUCKET, aeoQuestionQualifying.opps, trx, revalidated, new Set(), since
             );
           }
           // local_gap shares the disappearing-signal lifecycle but not the
@@ -3393,7 +3412,7 @@ class GscOpportunityMiner {
    * disables), AEO_QUESTION_GAP_COOLDOWN_DAYS (28: a page edited that
    * recently is not refreshed again for another question).
    */
-  async mineAeoQuestionGaps(since) {
+  async mineAeoQuestionGaps(since, { qualifying = { opps: null } } = {}) {
     if (!isEnabled('aeoQuestionGapMining')) return [];
     const minDays = envIntAtLeast('AEO_GAP_MIN_DAYS', 3, 1);
     const minEngines = envIntAtLeast('AEO_QUESTION_GAP_MIN_ENGINES', 3, 1);
@@ -3410,7 +3429,10 @@ class GscOpportunityMiner {
       return [];
     }
     const gaps = evaluateAeoQuestionGaps(rows, questions, { minDays, minEngines });
-    if (!gaps.length) return [];
+    if (!gaps.length) {
+      qualifying.opps = [];
+      return [];
+    }
 
     let live;
     try {
@@ -3439,6 +3461,7 @@ class GscOpportunityMiner {
       const id = routeIdentity(hubTargetUrl(gap.question.target_path));
       return buildAeoQuestionGapOpp(gap, { liveUrl: live.get(id) || null, impressions: impressions.get(id) || 0 });
     });
+    qualifying.opps = opps;
     // Rank + fence without the cap, then fill the cap. A live target the
     // refresh lane cannot edit (a tool page rather than an Astro content
     // file) would park its run for review, so each refresh pick is probed
@@ -3524,8 +3547,10 @@ class GscOpportunityMiner {
 
   // Routes under an in-flight write (pending / claimed / pending_review) or
   // written inside the cooldown (done), by route identity → holder keys:
-  // page edits from every bucket, plus this bucket's pinned articles (no
-  // page_url yet — their route is the target_path they publish at).
+  // page edits from every bucket, plus every PINNED article (no page_url
+  // yet — its route is the slug it is bound to publish at): operator
+  // intercept and category seeds carry theirs in intercept_brief /
+  // category_brief.slug, this bucket in target_path.
   async _aeoQuestionPageFence(cooldownDays, runner = db) {
     const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
     const recent = (b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
@@ -3536,11 +3561,12 @@ class GscOpportunityMiner {
       .where(recent)
       .select('page_url', 'dedupe_key');
     const articles = await runner('opportunity_queue')
-      .where({ bucket: AEO_QUESTION_GAP_BUCKET, action_type: 'new_supporting_blog' })
+      .whereNull('page_url')
+      .whereRaw(`${PINNED_ARTICLE_PATH_SQL} IS NOT NULL`)
       .where(recent)
-      .select('dedupe_key', db.raw("signal_metadata->>'target_path' as target_path"));
+      .select('dedupe_key', db.raw(`${PINNED_ARTICLE_PATH_SQL} as pinned_path`));
     const map = new Map();
-    for (const r of [...edits, ...articles.map((a) => ({ ...a, page_url: hubTargetUrl(a.target_path) }))]) {
+    for (const r of [...edits, ...articles.map((a) => ({ ...a, page_url: hubTargetUrl(a.pinned_path) }))]) {
       const id = routeIdentity(r.page_url);
       if (!id) continue;
       if (!map.has(id)) map.set(id, new Set());

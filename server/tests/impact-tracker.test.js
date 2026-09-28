@@ -101,6 +101,39 @@ describe('aeoVerdict — answer-engine visibility feedback', () => {
   });
 });
 
+describe('AEO feedback loop covers aeo_question_gap', () => {
+  const { aeoQueryIdsForRun } = tracker._internals;
+  function fakeDb(rowsByTable) {
+    const calls = [];
+    const database = (table) => {
+      const q = { table, filters: [] };
+      q.where = (...a) => { q.filters.push(['where', ...a]); return q; };
+      q.whereIn = (...a) => { q.filters.push(['whereIn', ...a]); return q; };
+      q.whereRaw = (...a) => { q.filters.push(['whereRaw', ...a]); return q; };
+      q.select = async () => { calls.push(q); return rowsByTable[table] || []; };
+      q.update = async () => 1;
+      return q;
+    };
+    return { database, calls };
+  }
+
+  test('a question row watches exactly its own active managed query; aeo_gap keeps city×service', async () => {
+    const { database, calls } = fakeDb({ seo_llm_mention_queries: [{ id: 42 }] });
+    const question = 'How do I get rid of German cockroaches in my Florida home — should I hire a professional?';
+    expect(await aeoQueryIdsForRun(database, { bucket: 'aeo_question_gap', query: question })).toEqual([42]);
+    expect(calls[0].filters).toEqual([['where', { active: true, query: question }]]);
+    expect(await aeoQueryIdsForRun(database, { bucket: 'aeo_question_gap', query: null })).toEqual([]);
+    await aeoQueryIdsForRun(database, { bucket: 'aeo_gap', city: 'Sarasota', service: 'pest' });
+    expect(calls[1].filters.map((f) => f[0])).toEqual(['where', 'whereRaw', 'whereRaw']);
+  });
+
+  test('citation rechecks select both AEO buckets', async () => {
+    const { database, calls } = fakeDb({ content_optimization_impact: [] });
+    await tracker.checkAeoVisibility({ db: database });
+    expect(calls[0].filters[0]).toEqual(['whereIn', 'bucket', ['aeo_gap', 'aeo_question_gap']]);
+  });
+});
+
 describe('impact-tracker pure helpers', () => {
   test('median handles odd/even/empty', () => {
     expect(median([3, 1, 2])).toBe(2);

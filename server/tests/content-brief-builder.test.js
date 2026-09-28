@@ -920,12 +920,18 @@ describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => 
     const brief = compose(
       { page_url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-german-cockroaches/', query: question,
         signal_metadata: { impressions: 0, benchmark_id: 'Q6', engines_missing, unanswered_queries: unanswered,
-          competitors_mentioned: ['Example Pest Co'] } },
+          competitors_mentioned: ['Example Pest Co'], specialty_topic: 'cockroach' } },
       { page_type: 'refresh', action_type: 'refresh_existing_page' }
     );
     expect(brief.gsc_signal.unanswered_queries).toEqual(unanswered);
     expect(brief.required_sections.some((sec) => /direct-answer/i.test(sec))).toBe(true);
-    expect(brief.schema_types).toContain('FAQPage');
+    // Refresh publishing freezes the live page's schema, so FAQPage is not
+    // claimed as a requirement here.
+    expect(brief.schema_types).not.toContain('FAQPage');
+    // A German-cockroach question is FAQ-blocked: the miner's specialty
+    // topic reaches the brief's FAQ policy, so no FAQ section is required.
+    expect(brief.required_sections.some((sec) => /\bFAQ\b/i.test(sec))).toBe(false);
+    expect(brief.gsc_signal.specialty_topic).toBe('cockroach');
     expect(brief.gsc_signal.aeo_benchmark_id).toBe('Q6');
     expect(brief.gsc_signal.aeo_engines_missing).toEqual(['chatgpt', 'claude', 'gemini']);
     // Competitor names are queue evidence only — they never reach the brief.
@@ -938,8 +944,21 @@ describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => 
         signal_metadata: { impressions: 0, benchmark_id: 'Q26', engines_missing, target_path: '/termite/termite-bond/' } },
       { page_type: 'supporting-blog', action_type: 'new_supporting_blog' }
     );
-    expect(brief.voice_constraints.operator_brief).toEqual({ slug: '/termite/termite-bond/' });
+    expect(brief.voice_constraints.slug_pin).toBe('/termite/termite-bond/');
+    // Never operator_brief: the dispatcher treats any value there as a full
+    // operator-authored intercept.
+    expect(brief.voice_constraints.operator_brief).toBeUndefined();
     expect(brief.gsc_signal.unanswered_queries).toBeNull();
+  });
+
+  test('a non-blocked question refresh keeps the visible FAQ section but claims no FAQPage schema', () => {
+    const brief = compose(
+      { page_url: 'https://www.wavespestcontrol.com/pest-control/one-time-pest-control-vs-ongoing-plan/', query: 'Do I need one-time or recurring pest control in Bradenton?',
+        signal_metadata: { impressions: 0, benchmark_id: 'Q21', engines_missing, specialty_topic: null } },
+      { page_type: 'refresh', action_type: 'refresh_existing_page' }
+    );
+    expect(brief.required_sections.some((sec) => /\bFAQ\b/i.test(sec))).toBe(true);
+    expect(brief.schema_types).not.toContain('FAQPage');
   });
 
   test('other buckets carry no AEO evidence fields', () => {

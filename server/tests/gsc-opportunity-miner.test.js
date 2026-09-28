@@ -3309,6 +3309,83 @@ describe('aeo_question_gap bucket', () => {
     }
   });
 
+  test('a German-cockroach question carries its FAQ-blocked specialty topic (brief + publish guard agree)', () => {
+    for (const id of ['Q6', 'Q14']) {
+      expect(buildAeoQuestionGapOpp(gapFor(id), { liveUrl: null }).signal_metadata.specialty_topic).toBe('cockroach');
+    }
+    expect(buildAeoQuestionGapOpp(gapFor('Q21'), { liveUrl: null }).signal_metadata.specialty_topic).toBeNull();
+  });
+
+  test('the route fence covers every pinned-article producer — a category seed holding Q19\'s target blocks the question', async () => {
+    const categoryManifest = require('../data/category-seed-topics-v1.json');
+    const seed = categoryManifest.briefs.find((b) => b.slug === q('Q19').target_path);
+    expect(seed).toBeDefined(); // the manifest and Q19 really share this route
+    const queries = [];
+    const runner = () => {
+      const qb = { raws: [] };
+      qb.whereIn = () => qb; qb.whereNotNull = () => qb; qb.whereNull = () => { qb.nullPage = true; return qb; };
+      qb.whereRaw = (sql) => { qb.raws.push(sql); return qb; };
+      qb.where = () => qb;
+      qb.select = async () => {
+        queries.push(qb);
+        return qb.nullPage ? [{ dedupe_key: `catseed:v1:${seed.id}`, pinned_path: seed.slug }] : [];
+      };
+      return qb;
+    };
+    const db = require('../models/db');
+    const prevRaw = db.raw;
+    db.raw = jest.fn((sql) => sql);
+    const miner = new GscOpportunityMiner();
+    const fence = await miner._aeoQuestionPageFence(28, runner);
+    db.raw = prevRaw;
+    // One predicate reads every producer's binding slug.
+    expect(queries[1].raws[0]).toMatch(/intercept_brief'->>'slug'.*category_brief'->>'slug'.*target_path/);
+    const article = buildAeoQuestionGapOpp(gapFor('Q19'), { liveUrl: null });
+    const refresh = buildAeoQuestionGapOpp(gapFor('Q19'), { liveUrl: `${HUB}${q('Q19').target_path}` });
+    expect(selectAeoQuestionGaps([article], { cap: 2, fencedPages: fence })).toEqual([]);
+    expect(selectAeoQuestionGaps([refresh], { cap: 2, fencedPages: fence })).toEqual([]);
+  });
+
+  test('the recovered-signal sweep retires pending question rows outside the pre-cap qualifying set', async () => {
+    const db = require('../models/db');
+    const selects = [];
+    const updates = [];
+    const pending = [{ dedupe_key: 'aeo_question_gap::Q6::x', page_url: null, service: 'pest', city: null }];
+    db.mockImplementation(() => {
+      const qb = { f: {} };
+      qb.where = (o) => { Object.assign(qb.f, o); return qb; };
+      qb.whereNotIn = (c, v) => { qb.f.notIn = v; return qb; };
+      qb.whereIn = (c, v) => { qb.f.in = v; return qb; };
+      qb.whereNot = () => qb; qb.whereNotNull = () => qb; qb.whereRaw = () => qb;
+      qb.select = () => qb;
+      qb.forUpdate = async () => (qb.f.in || []).map((k) => ({ dedupe_key: k }));
+      qb.update = async (u) => { updates.push({ keys: qb.f.in, u }); return 1; };
+      qb.then = (res, rej) => { selects.push(qb.f); return Promise.resolve(qb.f.bucket === 'aeo_question_gap' ? pending : []).then(res, rej); };
+      return qb;
+    });
+    const prevRaw = db.raw;
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ domain: 'wavespestcontrol.com' }] }); // hub GSC coverage fresh
+    try {
+      const miner = new GscOpportunityMiner();
+      // A qualifying question the cap or a fence held back this run still
+      // defends its pending row (floor-pinned, so persistable).
+      const stillQualifying = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+      await miner._sweepRecoveredQueries('aeo_question_gap', [stillQualifying], null, [], new Set(), '2026-08-30');
+      expect(selects[0].notIn).toEqual([stillQualifying.dedupe_key]);
+      const expired = updates.find((x) => x.u.skip_reason === 'aeo_question_gap_signal_recovered');
+      expect(expired.keys).toContain('aeo_question_gap::Q6::x');
+    } finally {
+      db.mockReset();
+      db.raw = prevRaw;
+    }
+    // mineAll wiring: runs only when the bucket evaluated without error, over
+    // the PRE-cap qualifying candidates.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(src).toMatch(/if \(!errors\.aeo_question_gap && aeoQuestionQualifying\.opps\)/);
+    expect(src).toMatch(/qualifying\.opps = opps;\n[\s\S]*selectAeoQuestionGaps\(opps, \{ cap: Infinity/);
+  });
+
   test('a batch carrying only pinned question articles still takes the page-edit advisory lock', async () => {
     const miner = new GscOpportunityMiner();
     const raws = [];

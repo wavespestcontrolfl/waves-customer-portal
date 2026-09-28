@@ -3833,7 +3833,9 @@ function applyOperatorSlugRepair(brief, draft) {
   // straight through to publish (Codex r1+r3).
   // A shape error in the pin is an operator input error: park via the old
   // remedy, never guess.
-  const rawPin = brief?.voice_constraints?.operator_brief?.slug;
+  // slug_pin: the non-operator pin (aeo_question_gap missing-target
+  // articles) — same enforcement, without operator-intercept semantics.
+  const rawPin = brief?.voice_constraints?.operator_brief?.slug ?? brief?.voice_constraints?.slug_pin;
   const pinned = rawPin == null ? null : String(rawPin).trim();
   if (pinned != null && !PINNED_SLUG_PATTERN.test(pinned)) {
     return {

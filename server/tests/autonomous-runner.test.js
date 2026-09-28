@@ -936,6 +936,13 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
   });
 
+  test('a non-operator slug_pin (aeo_question_gap article) is enforced the same way', () => {
+    const draft = driftedDraft({ frontmatter: { category: 'lawn-care' } });
+    const result = applyOperatorSlugRepair({ voice_constraints: { slug_pin: PINNED } }, draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+  });
+
   test('an on-fleet BACKSLASH network-path canonical naming the drifted route is repaired — correspondence reads the parsed pathname (Codex r13)', () => {
     const draft = driftedDraft({
       frontmatter: { canonical: '\\\\www.wavespestcontrol.com\\fall-lawn-mistakes-southwest-florida\\' },

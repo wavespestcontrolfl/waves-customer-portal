@@ -183,7 +183,11 @@ const AEO_TREATED_PAGE_TYPES = new Set([
   'city-service', 'supporting-blog', 'refresh',
 ]);
 
-function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints }) {
+// schemaFrozen: refresh publishing keeps the live page's structured data
+// (astro-publisher copies only title/meta onto the frozen frontmatter), so a
+// refresh brief must not claim FAQPage as a binding requirement it cannot
+// deliver. The visible FAQ section still applies.
+function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, voiceConstraints, schemaFrozen = false }) {
   if (!isAeoGap || !AEO_TREATED_PAGE_TYPES.has(pageType)) {
     return { requiredSections, schemaTypes, voiceConstraints };
   }
@@ -196,7 +200,7 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
   if (!sections.some((s) => /\bFAQ\b/i.test(s))) {
     sections.push('FAQ section (3–5 Q/A pairs phrased exactly how a SWFL homeowner would ask an AI assistant)');
   }
-  const schema = Array.from(new Set([...schemaTypes, 'FAQPage']));
+  const schema = schemaFrozen ? schemaTypes : Array.from(new Set([...schemaTypes, 'FAQPage']));
   const voice = {
     ...voiceConstraints,
     aeo_notes: [
@@ -647,6 +651,7 @@ class ContentBriefBuilder {
     // Overlay answer-engine extractability requirements for AEO-gap briefs.
     const aeo = applyAeoTreatment({
       isAeoGap: AEO_GAP_BUCKETS.has(opportunity.bucket),
+      schemaFrozen: opportunity.bucket === 'aeo_question_gap' && decision.action_type === 'refresh_existing_page',
       pageType,
       requiredSections: REQUIRED_SECTIONS[pageType] || [],
       schemaTypes: SCHEMA_TYPES[pageType] || [],
@@ -915,18 +920,19 @@ class ContentBriefBuilder {
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
       voice_constraints: (() => {
         // aeo_question_gap new articles publish AT the benchmark target
-        // path: the runner's operator slug pin (applyOperatorSlugRepair)
-        // enforces operator_brief.slug, so the question is measured against
-        // the page this lane actually created.
-        const aeoSlugPin = opportunity.bucket === 'aeo_question_gap'
+        // path: the runner's slug repair (applyOperatorSlugRepair) enforces
+        // slug_pin, so the question is measured against the page this lane
+        // actually created. A dedicated field, never operator_brief — the
+        // dispatcher reads ANY operator_brief as a full operator-authored
+        // intercept.
+        const slugPin = opportunity.bucket === 'aeo_question_gap'
           && decision.action_type === 'new_supporting_blog'
           && opportunity.signal_metadata?.target_path
-          ? { slug: opportunity.signal_metadata.target_path }
-          : null;
-        const pinnedBrief = operatorOverlay ? operatorOverlay.operator_brief : aeoSlugPin;
-        const base = pinnedBrief
-          ? { ...layered.voiceConstraints, operator_brief: pinnedBrief }
-          : layered.voiceConstraints;
+          ? { slug_pin: opportunity.signal_metadata.target_path }
+          : {};
+        const base = operatorOverlay
+          ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief, ...slugPin }
+          : { ...layered.voiceConstraints, ...slugPin };
         const gateRetry = opportunity.signal_metadata?.gate_retry;
         return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
       })(),
