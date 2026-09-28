@@ -3214,15 +3214,17 @@ class RelayConversation {
    * A reconnected leg of a call an earlier leg already switched: the switch
    * is once per CALL, so this leg runs on the same shared-chain Claude model
    * for the rest of the call instead of returning to the provider that
-   * failed, and carries the earlier record forward in its own stamps (this
-   * leg's own record wins if it somehow switched first). It keeps the model
+   * failed, and carries the earlier record forward in its own stamps. A leg
+   * that already switched on its own (a delayed resume reload — codex r5)
+   * keeps its own pin and record untouched. It keeps the model
    * the call already switched to when that is still an allowed Claude id,
    * so a reconnect on a process with newer settings never changes models
    * again mid-call (codex r4).
    */
   _adoptEarlierSwitch(earlier) {
+    if (this._modelSwitch) return;
     this._pinClaudeFallback(earlier.to);
-    this._modelSwitch ||= earlier;
+    this._modelSwitch = earlier;
     if (this._currentTurn) this._currentTurn.effort = this._stampedEffort;
   }
 

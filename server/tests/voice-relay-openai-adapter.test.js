@@ -1061,6 +1061,19 @@ describe('OpenAI provider-failure fallback (mid-call switch to Claude)', () => {
     expect(convo2.model).toBe(MODELS.DEFAULTS.VOICE);
   });
 
+  test('a leg that already switched on its own keeps its pin and record when a delayed resume reload lands', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    const other = [...ALLOWED_OVERRIDE_MODEL_IDS].find((id) => id !== MODELS.DEFAULTS.VOICE);
+    const convo = new RelayConversation({ callSid: 'CA-fallback-resume-late', from: '+19415551234', send: () => {} });
+    convo._switchToClaudeFallback('provider_error', { turn: 2 });
+    const own = convo._modelSwitch;
+    await convo._applyResumeState({ callerTurns: [], lookupRefs: [], slotRefs: [], promises: [], modelSwitch: { from: LUNA, to: other, reason: 'stream_timeout', turn: 1 } });
+    expect(convo.model).toBe(MODELS.DEFAULTS.VOICE); // not repinned to the predecessor's model
+    expect(convo._modelSwitch).toBe(own);
+  });
+
   test('a mid-stream OpenAI error on the block renderer retries on Claude, and the turn stats describe the Claude reply', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI_INBOUND = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = LUNA;
