@@ -641,6 +641,20 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
     })).resolves.toEqual({ ok: true, anchor: 90.55 });
   });
+  // Owner ruling 2026-09-28 ("$0 means charge nothing"): a stamped $0 anchors
+  // no extended charge — an extras-only invoice on it (e.g. a legacy-null
+  // non-member who keeps a monthly_rate) is never auto-charged up to that
+  // unrelated rate.
+  test('a stamped $0 visit refuses the extended charge — never anchored to the monthly rate', async () => {
+    const legacyNonMember = { id: 'c1', billing_mode: null, monthly_rate: 74.7, waveguard_tier: null };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: legacyNonMember, lockedSvc: { ...visit, estimated_price: 0 }, lockedInvoice: invoiceAt(40),
+    })).resolves.toEqual({ ok: false, reason: 'stamped_zero_price' });
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, estimated_price: '0.00' }, lockedInvoice: invoiceAt(40),
+    })).resolves.toEqual({ ok: false, reason: 'stamped_zero_price' });
+  });
+
   test('an invoice above the anchor refuses (anchor_exceeded)', async () => {
     await expect(verifyExtendedCompletionAnchor({
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(120),
@@ -860,5 +874,41 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({
       ...base, billingMode: 'per_application', estimatedPrice: null, perApplicationFee: null,
     })).toBe(false);
+  });
+});
+
+describe('stamped $0 never predicts or anchors an extended auto-charge (owner ruling 2026-09-28)', () => {
+  const { attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+  const extrasOnly = { id: 'inv-x', subtotal: 40, total: 40, discount_amount: 0, line_items: [] };
+
+  test('the sheet does not promise an auto-charge for an extras-only invoice on a stamped $0 visit', () => {
+    expect(attachedInvoiceAutoChargeLikely({
+      invoice: extrasOnly, autopayActive: true, estimatedPrice: 0, isRecurring: false, isCallback: false,
+      serviceType: 'Termite Inspection Service', waveguardTier: null, monthlyRate: 74.7, billingMode: null,
+    })).toBe(false);
+  });
+
+  test('the completion verdict gives a stamped $0 visit no extended anchor (over cap → pay link)', async () => {
+    const gates = require('../config/feature-gates').gates;
+    const prev = gates.completionAutopayCharge;
+    gates.completionAutopayCharge = true;
+    try {
+      const { resolveExtendedLane } = require('../services/completion-charge-verdict');
+      const conn = () => {
+        const chain = { where() { return chain; }, whereNotIn() { return chain; }, first: async () => null };
+        return chain;
+      };
+      const verdict = await resolveExtendedLane({
+        svc: { id: 's1', estimated_price: 0, is_callback: false, service_type: 'Termite Inspection Service', cust_monthly_rate: 74.7, cust_billing_mode: null },
+        invoice: { id: 'inv-x', subtotal: 40, total: 40, discount_amount: 0 },
+        alreadyPaid: false, visitPerformed: true, perApplicationBilling: false,
+        apptCardOneTimeCharge: false, apptCardLaneUnresolved: false, customerAutopayActive: true, conn,
+      });
+      expect(verdict.extendedChargeCandidate).toBe(true);
+      expect(verdict.extendedLaneAnchor).toBeNull();
+      expect(verdict.extendedLaneOverCap).toBe(true);
+    } finally {
+      gates.completionAutopayCharge = prev;
+    }
   });
 });

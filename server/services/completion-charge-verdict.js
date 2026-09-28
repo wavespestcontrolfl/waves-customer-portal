@@ -153,9 +153,12 @@ async function resolveExtendedLane({
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
+    // A stamped $0 anchors nothing (owner 2026-09-28, "$0 means charge
+    // nothing") — never the dues/fee fallback — so the charge is over cap
+    // and the invoice goes out as a pay link.
     const anchor = svc.estimated_price != null && Number(svc.estimated_price) > 0
       ? Number(svc.estimated_price)
-      : (Number(duesAnchor) > 0 ? Number(duesAnchor) : null);
+      : (isStampedZeroEstimate(svc.estimated_price) ? null : (Number(duesAnchor) > 0 ? Number(duesAnchor) : null));
     extendedLaneAnchor = anchor;
     const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
     const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;

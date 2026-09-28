@@ -700,6 +700,13 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   } catch {
     return { ok: false, reason: 'estimate_card_hold_unverifiable' };
   }
+  // A stamped $0 (non-callback) is the visit's own price (owner 2026-09-28,
+  // "$0 means charge nothing"): nothing anchors an extended charge on it, so
+  // an extras-only invoice goes out as a pay link — never auto-charged up to
+  // an unrelated monthly_rate or fee.
+  if (!lockedSvc.is_callback && isStampedZeroEstimate(lockedSvc.estimated_price)) {
+    return { ok: false, reason: 'stamped_zero_price' };
+  }
   const hasVisitPrice = lockedSvc.estimated_price != null && Number(lockedSvc.estimated_price) > 0;
   let duesCollected = true;
   try { duesCollected = await monthlyDuesCollected(dbConn, lockedSvc.customer_id); } catch { duesCollected = true; }
@@ -761,6 +768,9 @@ function attachedInvoiceAutoChargeLikely({
   perApplicationFee = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
+  // Mirrors verifyExtendedCompletionAnchor: a stamped $0 anchors no extended
+  // charge, so its attached invoice goes out as a pay link (owner 2026-09-28).
+  if (billingMode !== 'per_application' && isStampedZeroEstimate(estimatedPrice)) return false;
   // An UNAPPLIED out-of-band (cash/Zelle) prepayment demotes (GitHub r3
   // P2) — completion nets it first; once the netting marker exists
   // (prepaidApplied, the same scheduled_service_prepaid detection the
