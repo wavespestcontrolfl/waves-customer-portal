@@ -38,7 +38,7 @@ const {
 } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
-const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
+const { createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS } = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
   filterPreviouslyFeaturedIdentities,
@@ -1273,6 +1273,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // instead of the autopilot's 'max' so a draft can't hang the UI
         // (owner ruling 2026-09-27; see createNewsletterDraft's JSDoc).
         effort: 'high',
+        timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       });
       // Return the locked event ids so the Compose flow can carry them into
       // the /sends save (the saved row needs them for times_featured tracking).
@@ -1294,6 +1295,7 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         persist: false,
         // Interactive admin composer — see the flagship branch above.
         effort: 'high',
+        timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       });
       return res.json({ success: true, draft });
     }
@@ -1391,7 +1393,7 @@ ${tone ? `Tone: ${tone}` : ''}`;
       laneId: 'newsletter',
       // Opus 5.5 thinks from max_tokens; leave room for the HTML/text JSON.
       maxTokens: 24000,
-      timeoutMs: 5 * 60 * 1000,
+      timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       jsonMode: true,
       system: systemPrompt,
       text: userPrompt,
@@ -2528,6 +2530,7 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       // Interactive admin composer (calendar "Draft" button, synchronous
       // HTTP request) — see createNewsletterDraft's JSDoc.
       effort: 'high',
+      timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
     });
 
     const result = await db.transaction(async (trx) => {

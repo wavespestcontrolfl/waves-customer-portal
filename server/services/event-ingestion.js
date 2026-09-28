@@ -76,17 +76,19 @@ const { mergeEvents, pickSurvivor } = require('./event-dedup');
 // EXCLUDED.* is the proposed insert; events_raw.* is the existing row.
 const REVIVAL_COND = 'COALESCE(events_raw.end_at, events_raw.start_at) < :etMidnight AND COALESCE(EXCLUDED.end_at, EXCLUDED.start_at) >= :etMidnight';
 // A still-pending row whose feed moved it to a different ET day is a new
-// occurrence editorially too: re-open curation so an earlier policy drop
-// (e.g. "already featured this year") doesn't stick to next year's date. Rows
-// with approved_via set (an operator reset one) stay with the operator.
+// occurrence editorially too: re-queue it for the normalizer (freshness is
+// date-dependent, e.g. a limited run's opening week) and re-open curation, so
+// an earlier policy drop (e.g. "already featured this year") doesn't stick to
+// next year's date. Rows with approved_via set (an operator reset one) stay
+// with the operator.
 const REOPEN_CURATION_COND = `(${REVIVAL_COND}) OR (events_raw.admin_status = 'pending' AND events_raw.approved_via IS NULL AND (events_raw.start_at AT TIME ZONE 'America/New_York')::date IS DISTINCT FROM (EXCLUDED.start_at AT TIME ZONE 'America/New_York')::date)`;
 function revivalResetFields() {
   // ET-midnight-today as a bound timestamptz — identical to the sweep's
   // parseETDateTime(`${etDateString()}T00:00:00`) (avoids the naive-ISO leak).
   const etMidnight = parseETDateTime(`${etDateString()}T00:00:00`);
   return {
-    normalized_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
-    freshness_revival_pending: db.raw(`CASE WHEN ${REVIVAL_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
+    normalized_at: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN NULL ELSE events_raw.normalized_at END`, { etMidnight }),
+    freshness_revival_pending: db.raw(`CASE WHEN ${REOPEN_CURATION_COND} THEN true ELSE events_raw.freshness_revival_pending END`, { etMidnight }),
     // A revival is a NEW occurrence editorially — re-open auto-curation
     // (event-curation.js excludes rows with curated_at, so a previously
     // examined-but-not-approved event would otherwise never be looked at

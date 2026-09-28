@@ -1661,6 +1661,10 @@ const NEWSLETTER_WRITE_MAX_TOKENS = 32000;
 // splits this across legs instead of handing a stalled Opus leg the whole
 // budget, so the OpenAI fallback still gets real time.
 const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
+// Interactive admin-composer calls run inside a browser request, so they get
+// the dispatcher's standard 4-minute chain budget (what the composer had
+// before the Opus switch) instead of the autopilot's 10 minutes.
+const INTERACTIVE_DRAFT_TIMEOUT_MS = 4 * 60 * 1000;
 
 /**
  * Create a newsletter draft via Claude and persist it.
@@ -1702,6 +1706,7 @@ async function createNewsletterDraft({
   // multi-minute max-effort call without risking the admin UI (and any
   // upstream proxy) timing out on the operator.
   effort,
+  timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
 }) {
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
@@ -1815,7 +1820,7 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   const response = await dispatchWithFallback(draftPolicy, {
     laneId: 'newsletter',
     maxTokens: NEWSLETTER_WRITE_MAX_TOKENS,
-    timeoutMs: NEWSLETTER_WRITE_TIMEOUT_MS,
+    timeoutMs,
     jsonMode: true,
     system: systemPrompt,
     text: userPrompt,
@@ -2020,6 +2025,7 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
 }
 
 module.exports = {
+  INTERACTIVE_DRAFT_TIMEOUT_MS,
   resolveIssueReference,
   createNewsletterDraft,
   persistNewsletterDraft,
