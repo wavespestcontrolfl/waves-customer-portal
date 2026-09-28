@@ -467,7 +467,10 @@ class InternalLinkPrExecutor {
         title: internalLinkPrTitle(selected),
         body: buildInternalLinkPrBody({ branch, selected }),
       });
-      headSha = pr?.head?.sha || commits.map((commit) => commit?.commit?.sha).filter(Boolean).at(-1) || null;
+      // Provenance is the commit THIS executor created, never the PR head
+      // read afterwards: a push landing between commitFiles and createPr must
+      // not be recorded as ours (provenanceGate then holds the PR).
+      headSha = commits.map((commit) => commit?.commit?.sha).filter(Boolean).at(-1) || null;
       await requestCodexReview(pr, headSha, selected);
 
       await this._markTasksPrOpen(selected, {
@@ -1042,20 +1045,25 @@ class InternalLinkPrExecutor {
   }
 
   async _markTasksPrOpen(selected, { pr, branch, commitSha, reviewerNotes = null }) {
-    const ids = selected.map((item) => item.task.id).filter(Boolean);
-    if (!ids.length) return;
-    await db(TABLE)
-      .whereIn('id', ids)
-      .where('status', 'pr_reserved')
-      .update({
-        status: 'pr_open',
-        astro_pr_url: pr?.html_url || null,
-        pr_branch: branch,
-        pr_commit_sha: commitSha || null,
-        executor_version: PR_EXECUTOR_VERSION,
-        reviewer_notes: reviewerNotes || `Astro internal-link PR opened: ${pr?.html_url || 'unknown'}. Merge only after Codex and editorial review.`,
-        updated_at: new Date(),
-      });
+    // Per task: persist the source URL as revalidated for THIS PR, so the
+    // merge-time protection gate checks the page actually edited, not a
+    // URL from an earlier dry-run (the slug may have changed since).
+    for (const item of selected) {
+      if (!item.task.id) continue;
+      await db(TABLE)
+        .where({ id: item.task.id, status: 'pr_reserved' })
+        .update({
+          status: 'pr_open',
+          astro_pr_url: pr?.html_url || null,
+          pr_branch: branch,
+          pr_commit_sha: commitSha || null,
+          executor_version: PR_EXECUTOR_VERSION,
+          source_url: item.validation?.source_url || item.task.source_url || null,
+          source_canonical_url: item.validation?.source_canonical_url || item.task.source_canonical_url || null,
+          reviewer_notes: reviewerNotes || `Astro internal-link PR opened: ${pr?.html_url || 'unknown'}. Auto-merges only after its link-only, preview, Codex, target and protection gates pass.`,
+          updated_at: new Date(),
+        });
+    }
   }
 
   async _markReservedTasksFailed(selected, err) {

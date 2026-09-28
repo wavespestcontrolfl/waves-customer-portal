@@ -561,7 +561,7 @@ describe('internal-link dry-run executor helpers', () => {
     expect(GitHubClient.createIssueComment).toHaveBeenCalledWith(77, expect.stringContaining('@codex review'));
     expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
       branch: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
-      commitSha: 'link-head-sha',
+      commitSha: 'link-commit-sha',
     }));
   });
 
@@ -665,7 +665,7 @@ describe('internal-link dry-run executor helpers', () => {
 
   test('records opened PRs even when Codex review comment fails', async () => {
     GitHubClient.createBranch.mockResolvedValue({});
-    GitHubClient.putFile.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
+    GitHubClient.commitFiles.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
     GitHubClient.createPr.mockResolvedValue({
       number: 78,
       html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/78',
@@ -696,7 +696,7 @@ describe('internal-link dry-run executor helpers', () => {
     expect(instance._markTasksPrOpen).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({
       pr: expect.objectContaining({ number: 78 }),
       branch: expect.stringMatching(/^content\/internal-link-termite-inspection-/),
-      commitSha: 'link-head-sha',
+      commitSha: 'link-commit-sha',
     }));
   });
 
