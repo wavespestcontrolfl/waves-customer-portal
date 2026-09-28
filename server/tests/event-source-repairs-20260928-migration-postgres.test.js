@@ -42,7 +42,9 @@ const migration = require('../models/migrations/20260928230000_event_source_repa
     ]);
   });
 
-  const enabledNames = async () => (await db('event_sources').where({ enabled: true }).orderBy('name')).map((r) => r.name);
+  // Sorted in JS: CI's database collation orders "St. Petersburg" vs
+  // "Stpete" differently from a C-collation local database.
+  const enabledNames = async () => (await db('event_sources').where({ enabled: true })).map((r) => r.name).sort();
 
   test('disables exactly the three listed feeds', async () => {
     await migration.up(db);
