@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
 const UrlIntelligence = require('../services/seo/url-intelligence');
 const { dispatchSeoPipeline } = require('../services/seo/seo-pipeline-dispatcher');
 const logger = require('../services/logger');
@@ -218,7 +219,7 @@ router.get('/orphan-pages', async (req, res) => {
 
 // POST /run-pipeline — dispatch the full SEO pipeline (admin only).
 // With SEO_PIPELINE_QUEUE_ONLY enabled, a dedicated worker claims queued rows.
-router.post('/run-pipeline', requireAdmin, async (req, res) => {
+router.post('/run-pipeline', requireAdmin, requireFullAccess, async (req, res) => {
   const domain = req.body.domain || 'wavespestcontrol.com';
   const requestedDaysBack = parseInt(req.body.daysBack || 7, 10);
   const daysBack = Number.isFinite(requestedDaysBack) && requestedDaysBack > 0 ? requestedDaysBack : 7;

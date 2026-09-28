@@ -450,198 +450,113 @@ function validateReserviceOffer({ reply, factsBlock }) {
   return { ok: true, violations: [] };
 }
 
-// Pricing-family key → the catalog service_keys that family books as, in
-// preference order (Codex #5194 r1): the pricing resolver's families are not
-// catalog keys, and a partial match on "termite" lands on the lowest-sorted
-// termite row, not the bait system. Keys come from the service-library and
-// inspection-catalog migrations; the first that resolves to a real row wins,
-// so a catalog that predates a later key still resolves.
-// Active keys first (Codex #5194 r3): the service-library cleanup migration
-// archived lawn_fertilization, mosquito_event and the palm rows in favor of
-// lawn_care_one_time / mosquito_one_time; an archived row never wins
-// (requestedServiceType skips is_archived / is_active=false rows).
-const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
-  pest_control: ['pest_general_quarterly', 'pest_control'],
-  lawn_care: ['lawn_care_monthly', 'lawn_care_quarterly', 'lawn_care', 'lawn_care_recurring', 'lawn_fertilization'],
-  one_time_lawn: ['lawn_care_one_time', 'lawn_fertilization'],
-  mosquito: ['mosquito_monthly', 'mosquito_seasonal', 'mosquito'],
-  one_time_mosquito: ['mosquito_one_time', 'mosquito_event'],
-  tree_shrub: ['tree_shrub_program', 'tree_shrub'],
-  palm: ['palm_injection', 'palm_treatment'],
-  termite: ['termite_bait'],
-  rodent_bait: ['rodent_monitoring', 'rodent_bait'],
-});
-// Specific work the pricing resolver folds into a family, checked in order
-// before it (Codex #5194 r5: one table instead of a decision tree per
-// service): the first entry whose patterns ALL match names the catalog keys
-// to try, in preference order, and makes the request `explicit`.
-//   - inspections (pre-push audit P1): the pricing resolver folds "WDO
-//     inspection" into the termite family, which would price a bait-system
-//     treatment for an inspection request;
-//   - one-time / initial pest (Codex #5194 r2): the pricing resolver's
-//     special-intent branch returns null for pest, which would fall through
-//     to the 45-minute General Pest default although a cleanout runs 90;
-//   - named termite treatments (Codex #5194 r6): liquid, pretreatment, slab
-//     pre-treat, trenching and spot treatment are catalog services of their
-//     own, never the bait-system family default;
-//   - rodent trapping / exclusion (Codex #5194 r4): distinct catalog
-//     services with different durations (audit P1) — trapping alone → the
-//     trapping row, exclusion alone → exclusion-only, both → the combined row.
-const PEST_WORDS_RE = /\b(?:pest|bugs?|roach(?:es)?|ants?|spiders?|general)\b/i;
-const RODENT_WORDS_RE = /\b(?:rodents?|rats?|mice|mouse)\b/i;
-const TERMITE_WORDS_RE = /\btermites?\b/i;
-const INSPECTION_RE = /\binspection\b/i;
-const PRETREAT_RE = /\bpre[-\s]?treat/i;
-const TRAPPING_RE = /\b(?:trapping|traps?)\b/i;
-const EXCLUSION_RE = /\bexclusion\b/i;
-const EXPLICIT_SERVICE_INTENTS = Object.freeze([
-  { patterns: [/\bwdo\b/i], keys: ['wdo_inspection'] },
-  { patterns: [INSPECTION_RE, TERMITE_WORDS_RE], keys: ['termite_inspection'] },
-  { patterns: [INSPECTION_RE, RODENT_WORDS_RE], keys: ['rodent_inspection'] },
-  { patterns: [INSPECTION_RE, PEST_WORDS_RE], keys: ['pest_inspection'] },
-  { patterns: [/\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i, PEST_WORDS_RE], keys: ['pest_initial_cleanout'] },
-  { patterns: [/\bslab\b/i, PRETREAT_RE], keys: ['termite_slab_pretreat'] },
-  { patterns: [TERMITE_WORDS_RE, PRETREAT_RE], keys: ['termite_pretreatment'] },
-  { patterns: [TERMITE_WORDS_RE, /\bliquid\b/i], keys: ['termite_liquid'] },
-  { patterns: [TERMITE_WORDS_RE, /\btrench/i], keys: ['termite_trenching'] },
-  { patterns: [TERMITE_WORDS_RE, /\bspot[-\s]?treat/i], keys: ['termite_spot_treatment'] },
-  { patterns: [RODENT_WORDS_RE, TRAPPING_RE, EXCLUSION_RE], keys: ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping'] },
-  { patterns: [RODENT_WORDS_RE, TRAPPING_RE], keys: ['rodent_trapping', 'rodent_exclusion'] },
-  { patterns: [RODENT_WORDS_RE, EXCLUSION_RE], keys: ['rodent_exclusion_only', 'rodent_exclusion'] },
-]);
-// A one-time pricing family is explicit work only when the message says so
-// (pre-push audit P1: "a one-time mosquito treatment for a party" beside a
-// scheduled monthly visit is a NEW booking). The pricing resolver also
-// files routine lawn words ("weed treatment", "fertilization", "brown
-// patch") under one_time_lawn, and those stay about the lawn program.
-const ONE_TIME_PRICING_WORDS = Object.freeze({
-  one_time_lawn: /\bone[-\s]?time\b/i,
-  one_time_mosquito: /\b(?:one[-\s]?time|event|party)\b/i,
-});
+// Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
+// the structural fix for PR #5194): which job a reply's open times must be
+// sized for. Six Codex rounds on keyword tables kept finding new phrasings —
+// the bookable catalog has 16 termite, 7 rodent and 7 pest variants plus
+// the specialty services — so the model reads the text and picks one of the
+// customer's own visits, their open estimate, or one bookable catalog
+// service (the call pipeline's loadBookableCallServices list), and code
+// accepts only an answer that names an option it offered. An unclear text,
+// an invented option or a provider failure is uncertain, which withholds
+// OPEN TIMES: availability sized for the wrong job is worse than none
+// (Codex #5194 r4). Runs only for a live, gate-on draft about to fetch OPEN
+// TIMES (generateGroundedDraft).
+const SERVICE_IDENTITY_TIMEOUT_MS = 20000;
 
-async function requestedServiceType(inboundMessage) {
-  return (await resolveRequestedService(inboundMessage))?.name || null;
-}
-// The service a customer is asking FOR in an inbound message: the first
-// bookable catalog row among its candidate keys, as { name, explicit } —
-// `explicit` for specific work (EXPLICIT_SERVICE_INTENTS, or a one-time
-// pricing family the message calls one-time) as opposed to a family-level
-// request ("pest control", "lawn service") resolved through the pricing
-// resolver (customer-pricing-ai serviceKeyFromText). Null when the message
-// names no service, no candidate is bookable, or on any resolver error
-// (fail-safe: the caller falls back to the customer's own visit).
-async function resolveRequestedService(inboundMessage) {
-  const text = String(inboundMessage || '').trim();
-  if (!text) return null;
-  try {
-    const intent = EXPLICIT_SERVICE_INTENTS.find(({ patterns }) => patterns.every((re) => re.test(text)));
-    const pricingKey = intent ? null : require('./customer-pricing-ai').serviceKeyFromText(text);
-    const candidates = intent ? intent.keys : PRICING_KEY_TO_CATALOG_KEYS[pricingKey];
-    const explicit = Boolean(intent) || Boolean(ONE_TIME_PRICING_WORDS[pricingKey]?.test(text));
-    const { resolveServiceType } = require('./service-library');
-    for (const catalogKey of candidates || []) {
-      const row = await resolveServiceType(catalogKey);
-      // Retired rows never price a booking, nor rows offered no longer
-      // (booking_enabled=false, e.g. bi-monthly lawn); a historical visit
-      // keeps its own identity through the scheduled-visit match.
-      if (row?.name && row.is_archived !== true && row.is_active !== false && row.booking_enabled !== false) {
-        return { name: String(row.name), explicit };
-      }
-    }
-    return null;
-  } catch (err) {
-    logger.warn(`[sms-shadow] requested-service resolution failed (${err.message}); using the customer's own visit`);
-    return null;
-  }
+// The visits a text can be about: every upcoming one (V1…) and the most
+// recent completed one (C1 — a callback on it).
+function serviceIdentityVisits(context) {
+  const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type)
+    .map((s, i) => ({ id: `V${i + 1}`, type: String(s.type), date: s.date, upcoming: true }));
+  const last = (context?.serviceHistory || []).find((s) => s && s.type);
+  return last ? [...upcoming, { id: 'C1', type: String(last.type), date: last.date, upcoming: false }] : upcoming;
 }
 
-// The requested service counts only for a NEW booking (pre-push audit P1):
-// a reschedule, cancellation or skip is about an existing visit, and so is
-// any message naming a service the customer already has on the calendar —
-// "move my lawn and shrub visit" must keep the visit's own combined
-// service, not collapse to standalone lawn care.
-const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
-// Identity terms per service family, singular or plural: they read catalog
-// and visit labels AND the customer's own text (serviceIdentityFor).
-const SERVICE_FAMILY_ALIASES = Object.freeze({
-  pest: /\b(?:pests?|bugs?|general pest|cleanouts?|(?:cock)?roach(?:es)?|ants?|spiders?)\b/i, // identity terms only — never a cadence word (Codex #5194 r3)
-  lawn: /\b(?:lawns?|turf|grass|fert\w*|weeds?)\b/i,
-  mosquito: /\bmosquito(?:e?s)?\b/i,
-  tree_shrub: /\b(?:trees?|shrubs?|ornamentals?)\b/i,
-  palm: /\bpalms?\b/i, // never "Palmetto", a city in the service area
-  termite: /\b(?:termites?|wdo)\b/i,
-  rodent: RODENT_WORDS_RE,
-});
-function serviceFamilyOf(serviceName) {
-  const name = String(serviceName || '');
-  // most specific first: a combined label like "Lawn + Tree & Shrub" is
-  // asked about by either family, and each alias answers for its own
-  for (const family of ['termite', 'rodent', 'mosquito', 'palm', 'tree_shrub', 'lawn', 'pest']) {
-    if (SERVICE_FAMILY_ALIASES[family].test(name)) return family;
-  }
-  return null;
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
+  const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${formatEtDate(v.date)})` : ''}`);
+  return [
+    'A customer of Waves Pest Control texted:',
+    JSON.stringify(String(inboundMessage || '')),
+    '',
+    'Their visits:',
+    ...(visitLines.length ? visitLines : ['none on file']),
+    ...(openEstimate ? ['', `Their open estimate: ${openEstimate.service || 'service not stated'}`] : []),
+    '',
+    'Services Waves books (key: name):',
+    ...services.map((s) => `${s.service_key}: ${s.name}`),
+    '',
+    'A reply may offer open appointment times, sized for one job. Which job is this text about?',
+    ...(visits.length ? ['- "visit": one of their visits above (moving, cancelling or confirming it, asking when it is, a problem since it). Put its id in "visit".'] : []),
+    ...(openEstimate ? ['- "estimate": scheduling the work in their open estimate.'] : []),
+    ...(services.length ? ['- "new_service": work none of their visits covers. Put the matching service key in "service".'] : []),
+    '- "none": the text names no service and points at no particular visit.',
+    '- "unclear": it could be more than one visit or service, or it asks about several at once.',
+    'Choose only from the lists above. When unsure, answer "unclear".',
+  ].join('\n');
 }
 
-// The service identity an OPEN TIMES lookup should price, with a certainty
-// flag (Codex #5194 r4, structural): availability with the WRONG duration
-// is worse than no availability, so an uncertain identity withholds OPEN
-// TIMES and the draft defers ("we'll confirm a time"). When the message
-// names a service (resolveRequestedService), the identity is:
-//   - the one visit type it refers to (visitTypesFor): upcoming, or — for
-//     existing-visit wording with no upcoming match — the last completed
-//     visit (a callback, Codex #5194 r1: "the mosquitoes came back" is about
-//     the completed combined visit, never a new standalone booking);
-//   - else, with no existing-visit wording and one service family named,
-//     the requested catalog service as a NEW booking;
-//   - else uncertain (Codex #5194 r6): several visit types match; several
-//     families are named and no one visit covers them all; or existing-visit
-//     wording goes with a service that has no visit on file — "The
-//     mosquitoes came back, but can you add lawn service Tuesday?" is
-//     neither the mosquito visit nor a plain lawn booking.
-// With no service named: the one upcoming visit (a reschedule or "when can
-// you come" is about it), uncertain for several, else the last completed
-// visit, else the engine's own default.
-async function serviceIdentityFor(inboundMessage, context) {
-  const text = String(inboundMessage || '');
-  const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type);
-  const resolved = await resolveRequestedService(text);
-  if (resolved) {
-    const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
-    const families = new Set([serviceFamilyOf(resolved.name), ...Object.keys(SERVICE_FAMILY_ALIASES).filter((f) => SERVICE_FAMILY_ALIASES[f].test(text))].filter(Boolean));
-    const scheduled = visitTypesFor(resolved, families, upcoming, aboutExisting);
-    const lastCompleted = (context?.serviceHistory || []).filter((s) => s && s.type).slice(0, 1);
-    const matched = scheduled.length || !aboutExisting ? scheduled : visitTypesFor(resolved, families, lastCompleted, true);
-    if (matched.length === 1) return { serviceType: matched[0], certain: true, reason: scheduled.length ? 'named_scheduled_visit' : 'named_completed_visit' };
-    if (!matched.length && !aboutExisting && families.size === 1) return { serviceType: resolved.name, certain: true, reason: 'new_booking' };
-    return { serviceType: null, certain: false, reason: matched.length ? 'ambiguous_named_visit' : 'unmatched_named_service' };
-  }
-  if (upcoming.length === 1) return { serviceType: String(upcoming[0].type), certain: true, reason: 'single_upcoming' };
+// The provider can answer only with an offered option. A kind with nothing
+// to offer (a brand-new customer has no visit; a catalog load that failed
+// open has no service) is left out of the answer entirely rather than sent
+// as a bare null-typed property.
+function serviceIdentitySchema(visits, openEstimate, services) {
+  const nullableEnum = (ids) => ({ type: ['string', 'null'], enum: [...ids, null] });
+  const properties = {
+    about: { type: 'string', enum: [...(visits.length ? ['visit'] : []), ...(openEstimate ? ['estimate'] : []), ...(services.length ? ['new_service'] : []), 'none', 'unclear'] },
+    ...(visits.length ? { visit: nullableEnum(visits.map((v) => v.id)) } : {}),
+    ...(services.length ? { service: nullableEnum(services.map((s) => s.service_key)) } : {}),
+  };
+  return { type: 'object', additionalProperties: false, required: Object.keys(properties), properties };
+}
+
+// The text names no job: the one upcoming visit (a reschedule or "when can
+// you come" is about it), uncertain for several; with none upcoming, the
+// open estimate ("Sounds good, can we do Tuesday?", Codex #5194 r3), else
+// the last completed visit, else the engine's own default service for a
+// brand-new customer.
+function unnamedServiceIdentity(visits, openEstimate) {
+  const upcoming = visits.filter((v) => v.upcoming);
+  if (upcoming.length === 1) return { serviceType: upcoming[0].type, certain: true, reason: 'single_upcoming' };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
-  const last = liveServiceType(context);
-  if (last) return { serviceType: last, certain: true, reason: 'last_completed' };
-  // Nothing on file at all (a brand-new customer): the engine's own default
-  // service is the right answer, as it was before this lane.
+  if (openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  const completed = visits.find((v) => !v.upcoming);
+  if (completed) return { serviceType: completed.type, certain: true, reason: 'last_completed' };
   return { serviceType: null, certain: true, reason: 'engine_default' };
 }
 
-// The distinct visit types among `visits` a requested service refers to,
-// counting only types that cover EVERY service family the message names
-// (a combined "Lawn + Tree & Shrub" answers for "my lawn and shrub visit").
-// A visit booked as exactly that catalog service wins (Codex #5194 r5):
-// "reschedule my rodent trapping" must not land on a Rodent Monitoring
-// visit listed before it. Otherwise every covering type (Codex #5194 r2:
-// "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
-// Termite Bait Station" share the pest family though no first word
-// matches) — which explicitly distinct work joins only when the message is
-// about an existing visit (audit P1): trapping beside scheduled
-// monitoring, or a WDO inspection beside treatment, is a NEW booking.
-function visitTypesFor(resolved, families, visits, aboutExisting) {
-  const types = [...new Set(visits.map((s) => String(s.type)))];
-  const covers = (t) => [...families].every((f) => SERVICE_FAMILY_ALIASES[f].test(t));
-  const name = resolved.name.trim().toLowerCase();
-  const exact = types.filter((t) => t.trim().toLowerCase() === name && covers(t));
-  if (exact.length || (resolved.explicit && !aboutExisting) || !families.size) return exact;
-  return types.filter(covers);
+// Code accepts only an option it offered (the schema already constrains the
+// provider; this re-checks) — anything else is uncertain.
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
+  const visit = visits.find((v) => v.id === answer?.visit);
+  const service = services.find((s) => s.service_key === answer?.service);
+  if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit' };
+  if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
+  return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
+}
+
+// { serviceType, certain, reason, estimateId? } — estimateId when the open
+// estimate is the job.
+async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
+  const visits = serviceIdentityVisits(context);
+  try {
+    const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
+    const { dispatchWithFallback } = require('./llm/call');
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+      laneId: 'sms_service_identity',
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
+      jsonMode: true,
+      jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
+      maxTokens: 100,
+      timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
+    }, { reserveFallbackBudget: true });
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
+  } catch (err) {
+    logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
+    return { serviceType: null, certain: false, reason: 'no_valid_answer' };
+  }
 }
 
 // The service a live (non-estimate) scheduling reply is about: the next
@@ -1421,7 +1336,10 @@ function buildFactsBlock(context, extras = {}) {
   // an ordinary per-draft FACT the model quotes verbatim, same as OPEN
   // TIMES. Gate-on unconditional (not scheduling-intent-gated): ANY category
   // — a hand-off, a cancellation, a held complaint — may need to state it.
-  // `extras.now` is test-only.
+  // `extras.now` was test-only through PR #5194; generateGroundedDraft now
+  // passes its own captured factsAt here for every live draft too (Codex
+  // #5194 P2 — see its comment), so the phrase rendered here and the
+  // instant returned as factsGeneratedAt are always the same moment.
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
@@ -1887,15 +1805,21 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * adversarial verifier; if the draft asserts facts the context doesn't
  * support, feeds the violations back for a rewrite toward deferral, up to
  * MAX_REVISIONS times. Returns the final draft + loop telemetry
- * { parsed, passes, converged, model, servedModel, verifierModels }. converged=true means the verifier
+ * { parsed, passes, converged, model, servedModel, verifierModels, factsBlock,
+ * factsGeneratedAt }. converged=true means the verifier
  * signed off (or the reply was empty — nothing to assert). model identifies
  * the winning requested route; servedModel identifies the provider-reported
- * model that produced the FINAL draft. Verify failures
+ * model that produced the FINAL draft. factsGeneratedAt is the instant
+ * factsBlock was rendered (Codex #5194 P2) — null on a frozen replay
+ * (presetFactsBlock), which has no such instant of its own; a live caller
+ * persists it so the SLA phrase it carries can be re-anchored at send time
+ * instead of to the row's later created_at (see sms-followup-sla.js's
+ * slaDraftedAt). Verify failures
  * degrade gracefully: keep the current draft, stop, converged=false — a
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -1940,29 +1864,29 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // file's own save-the-sale routing already applies to intent + raw text
   // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
   // drift apart.
-  // Codex r3: the live inbound path has no estimate, so the engine fell
-  // back to General Pest Control minutes for every customer. The customer's
-  // own next visit (else last visit) names the service a reschedule/
-  // cancellation/complaint reply is about; an estimate's service_interest
-  // still wins inside the engine when estimateId is set. Carried on the
+  // Which job the OPEN TIMES are sized for (Codex r3, follow-up #5, owner
+  // 2026-09-28): serviceIdentityFor has the model pick the visit, open
+  // estimate or catalog service the text is about. An estimate the message
+  // is linked to (estimateId) pins the service itself — its service_interest
+  // wins inside the engine — so no classification then. Carried on the
   // snapshot so the send-time recheck asks the same question.
-  // Follow-up #5 (Codex r8): a NEW booking is about the service the customer
-  // is asking for, not their next scheduled visit — "can you add lawn?"
-  // must be priced with lawn minutes. The requested service is resolved
-  // from the inbound text through the existing catalog resolvers; when the
-  // message names none, the customer's own next (else last) visit stands.
   const needsOpenTimes = Boolean(schedulingIntent)
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
-  // The catalog lookup runs only when a live, gate-on OPEN TIMES fetch is
-  // about to use it (Codex #5194 r1): with the gate off, or on a frozen
-  // replay, gate-off drafting stays free of catalog queries.
-  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const identity = willFetchOpenTimes ? await serviceIdentityFor(inboundMessage, context) : { serviceType: liveServiceType(context), certain: true };
+  // The identity step runs only when a live, gate-on OPEN TIMES fetch is
+  // about to use it (Codex #5194 r1): with the gate off, on a frozen replay,
+  // or with no city to look up (fetchOpenTimesData returns nothing then —
+  // the backfill lane never passes one), drafting makes no catalog query and
+  // no extra model call.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && Boolean(city) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const identity = willFetchOpenTimes && !estimateId
+    ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
+    : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
+  const pricingEstimateId = estimateId || identity.estimateId || null;
   // An estimate pins the service itself; otherwise an uncertain identity
   // withholds OPEN TIMES rather than pricing the wrong job.
-  const identityCertain = Boolean(estimateId) || identity.certain;
+  const identityCertain = Boolean(pricingEstimateId) || identity.certain;
   if (willFetchOpenTimes && !identityCertain) {
     logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
   }
@@ -1972,12 +1896,24 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId, serviceType,
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId: pricingEstimateId, serviceType,
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes });
+  // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
+  // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
+  // not off created_at — the row's created_at lands only after this whole
+  // draft→verify→revise loop finishes below, which can cross the 8am/8pm ET
+  // phrase boundary the send-time checks (sms-followup-sla.js) re-derive the
+  // deadline from. factsAt IS that instant; it rides straight into
+  // buildFactsBlock's `now` (so the rendered phrase and the timestamp this
+  // function returns are always the same moment) and out again as
+  // factsGeneratedAt on every return below, for the caller to persist. A
+  // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
+  // "generated now" instant of its own — it returns null.
+  const factsAt = presetFactsBlock ? null : new Date();
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2010,7 +1946,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no LLM verification claim, behave as
@@ -2032,7 +1968,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: null,
     };
   }
@@ -2054,14 +1990,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
         openTimesSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: computeOpenTimesSnapshot({
-        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
       }),
     };
   }
@@ -2146,12 +2082,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId, serviceType,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType,
     }),
   };
 }
@@ -2258,7 +2194,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot,
+      openTimesSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
@@ -2431,6 +2367,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          // Codex #5194 P2: the instant the drafter rendered the SLA phrase
+          // into factsBlock — claimAutoSend persists it on the decision's
+          // input_snapshot so slaDraftedAt can anchor the deadline to it
+          // instead of the row's own (later) created_at.
+          factsGeneratedAt,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
@@ -2467,6 +2408,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               lintFailures: lint.failures,
               openTimesSnapshot,
               intendedActions: parsed.intended_actions,
+              // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+              factsGeneratedAt,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
           }
@@ -2516,6 +2459,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             lintFailures: lint.failures,
             openTimesSnapshot,
             intendedActions: parsed.intended_actions,
+            // Codex #5194 P2 — see the maybeAutoSend call's comment above.
+            factsGeneratedAt,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
         }
@@ -2596,7 +2541,6 @@ module.exports = {
   PAYMENT_ACK_RE,
   replyBindsDeclaredDays,
   liveServiceType,
-  requestedServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
   reserviceFactLine,

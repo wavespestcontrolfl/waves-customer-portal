@@ -448,7 +448,22 @@ function composeParkedRunDigest({ active = [], stale = [], newCount = 0 } = {}) 
       : '',
     `<p style="color:#666;font-size:13px;margin-top:20px;">This digest is visibility only — decisions happen in the portal. It sends when new runs park (plus a Sunday summary while the backlog is non-empty).</p>`,
   ].filter(Boolean).join('\n');
-  return { subject, bodyHtml, total, activeCount: active.length, staleCount: stale.length, newCount };
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy;
+  // the full digest still lands in `detail`. `total > 0` is guaranteed
+  // above, but `active.length` alone can be 0 while only stale rows exist —
+  // lead the headline with whichever bucket is actually nonzero so it never
+  // reads "Content — 0 drafts awaiting review".
+  const headline = active.length > 0
+    ? `Content — ${active.length} draft${active.length === 1 ? '' : 's'} awaiting review`
+    : `Content — ${stale.length} stale draft${stale.length === 1 ? '' : 's'} to dismiss`;
+  const summary = active.length > 0
+    ? `${newCount} new since last check; ${stale.length} probably dismissible.`
+    : `${newCount} new since last check.`;
+  // Item identity (admin-alerts-ring-v2 follow-up): the parked opportunity
+  // ids already in scope — a count-only digest can't otherwise tell "same
+  // backlog" from "a different set of parked runs" at a flat total.
+  const itemKeys = [...active, ...stale].map((item) => item.opportunity_id).filter(Boolean).map(String);
+  return { subject, bodyHtml, total, activeCount: active.length, staleCount: stale.length, newCount, headline, summary, itemKeys };
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +540,11 @@ async function runParkedRunDigest(opts = {}) {
       key: 'parked-run-digest',
       subject: composed.subject,
       html: composed.bodyHtml,
+      headline: composed.headline,
+      summary: composed.summary,
+      count: composed.total,
+      newCount: composed.newCount,
+      itemKeys: composed.itemKeys,
       link: '/admin/blog?tab=autopilot',
       sendEmail: () => mailer.send({
         to,

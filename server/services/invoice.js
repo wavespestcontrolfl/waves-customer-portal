@@ -5248,6 +5248,11 @@ const InvoiceService = {
       // caller's transaction, and the invoice commits atomically with the
       // caller's own writes.
       database = null,
+      // The caller's check under the visit row lock, run on every linked
+      // mint (see buildParams): same contract as
+      // mintScheduledServiceInvoiceWithDeposit's recheckInTrx. Completion
+      // passes refuseCoveredMemberMintInTrx (Codex r4 P1 on #5237).
+      recheckInTrx = null,
     },
   ) {
     const sr = await db("service_records")
@@ -5304,6 +5309,22 @@ const InvoiceService = {
             throw scheduledPriceMovedError(lockedRow);
           }
         }
+      }
+      // The caller's in-lock check runs on EVERY linked mint, not only the
+      // replay lane (pre-push P1 on 645ccccaee — completion's backfill mint
+      // is explicit-amount). The non-replay lanes hold only the advisory mint
+      // lock here, so they take the same shared chain first (the advisory
+      // re-acquire is a same-transaction no-op): the check then reads under
+      // the visit row lock, the one the stamp writer also takes.
+      if (recheckInTrx && conn && sr.scheduled_service_id) {
+        if (!replayFromScheduled) {
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(conn, {
+            scheduledServiceId: sr.scheduled_service_id,
+            customerId: sr.customer_id,
+          });
+        }
+        await recheckInTrx(conn);
       }
       const scheduledInvoice = replayFromScheduled
         ? await buildScheduledServiceInvoiceLines(sr.scheduled_service_id, {
@@ -11356,37 +11377,41 @@ const InvoiceService = {
    * reverseInspectionCreditForBooking defer (office alerted). The real gate
    * runs AFTER the void, so the invoices the void preview says it would void
    * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
-   * gates in their card-confirmed (pinned) scope,
-   * unresolvedInvoicesForCancelledService with serviceRecordLinks. Returns
-   * true when an invoice would still be unresolved. Throws when the read
+   * gates, unresolvedInvoicesForCancelledService. Returns true when an
+   * invoice would still be unresolved. Throws when the read
    * fails: the caller treats the effect set as undeterminable rather than
    * guessing.
    */
   async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
     if (!scheduledServiceId) return false;
-    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId, { serviceRecordLinks: true });
+    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId);
     if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
     return Boolean(await query.first("id"));
   },
 
+  // Query-builder clause: an invoice tied to a visit — directly
+  // (scheduled_service_id) or through its service record (service_record_id,
+  // how most post-completion invoices link). For customer-wide visit-money
+  // checks (the signup-cancel eligibility and pre-refund scans in
+  // customer-offboarding.js); per-visit gates use
+  // unresolvedInvoicesForCancelledService below.
+  whereVisitLinked(qb) {
+    qb.whereNotNull("scheduled_service_id").orWhereNotNull("service_record_id");
+  },
+
   /**
    * The invoices of a cancelled scheduled service that still hold money
-   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES) — the ONE query for every
-   * post-void gate: the follow-through's fee gate, the inspection-credit
-   * reversal's invoice guard, and the Intelligence Bar preview. By default
-   * it matches the direct scheduled_service_id link only, as those gates
-   * always have. `serviceRecordLinks` also matches invoices linked only
-   * through a service record (the second link the void sweep scans); a
-   * card-confirmed cancel uses it, so its card and its commit both see an
-   * invoice the direct link misses. Widening the default for every cancel
-   * surface is a separate change. Returns a query builder.
+   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES), linked directly OR through
+   * a service record — the same two links the void sweep scans, since most
+   * post-completion invoices carry only service_record_id. The ONE query for
+   * every post-void gate: the follow-through's fee gate, the inspection-credit
+   * reversal's invoice guard, the plan-cancel processor's manual-review list,
+   * offboarding's per-visit check, and the Intelligence Bar preview. The
+   * direct link alone let an invoice still holding money go unseen, so a
+   * late-cancel fee could be charged and a credit reversed beside it.
+   * Returns a query builder.
    */
-  unresolvedInvoicesForCancelledService(conn, scheduledServiceId, { serviceRecordLinks = false } = {}) {
-    if (!serviceRecordLinks) {
-      return conn("invoices")
-        .where({ scheduled_service_id: scheduledServiceId })
-        .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-    }
+  unresolvedInvoicesForCancelledService(conn, scheduledServiceId) {
     return conn("invoices")
       .where((q) => {
         q.where({ scheduled_service_id: scheduledServiceId })

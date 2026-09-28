@@ -226,32 +226,13 @@ async function runAutoApplySweep({ dbi = db } = {}) {
     }
   }
 
-  if (results.applied > 0) {
-    try {
-      const remaining = await dbi('data_hygiene_proposals')
-        .where({ status: 'pending' })
-        .count({ n: '*' })
-        .first();
-      const ruleSummary = Object.entries(results.byRule)
-        .map(([rule, n]) => `${rule} ×${n}`)
-        .join(', ');
-      await require('../notification-service').notifyAdmin(
-        'system',
-        `Data hygiene: ${results.applied} fix${results.applied === 1 ? '' : 'es'} auto-applied`,
-        `${ruleSummary}. All audited and reversible from the Data Hygiene page. ${Number(remaining?.n) || 0} lower-confidence proposals still pending review.`,
-        {
-          // The hygiene page lives as a tab of the Agents hub; a bare
-          // /admin/data-hygiene redirect DROPS query params (verified in
-          // dev) — deep-link the tab route directly.
-          link: '/admin/agents?tab=hygiene&status=auto_applied',
-          metadata: { ...results },
-        },
-      );
-    } catch (notifyErr) {
-      logger.warn(`[data-hygiene] auto-apply digest notify failed (non-blocking): ${notifyErr.message}`);
-    }
-  }
-
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28, decisions 2 + 5):
+  // this only ever reports good news (fixes already applied) plus a
+  // standing pending count — neither belongs in the bell. A standing
+  // backlog is a count on the Data Hygiene page itself, not a daily alert,
+  // and a good-news/FYI report never rings. No notification of any kind
+  // fires here any more; the summary below is the whole audit trail — the
+  // per-proposal apply is already durably logged via auditHygieneProposalApply.
   logger.info(`[data-hygiene] auto-apply sweep: applied=${results.applied} stale=${results.stale} skipped=${results.skipped} errors=${results.errors}`);
   return results;
 }

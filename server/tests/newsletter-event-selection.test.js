@@ -122,7 +122,7 @@ describe('flagship final event-selection gate', () => {
     const rows = await filterPreviouslyFeaturedIdentities([
       event(ID_1, { title: 'Sunset Yoga' }),
       event(ID_2, { title: 'Harbor Art Walk' }),
-    ], { knex, reference: REFERENCE });
+    ], { knex, reference: REFERENCE, yearPool: [] });
     expect(rows.map((row) => row.title)).toEqual(['Harbor Art Walk']);
   });
 
