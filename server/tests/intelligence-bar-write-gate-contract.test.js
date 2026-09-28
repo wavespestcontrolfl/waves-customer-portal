@@ -591,6 +591,8 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       sms_log: [{
         id: '00000000-0000-0000-0000-00000000e001', customer_id: '00000000-0000-0000-0000-00000000e002',
         direction: 'outbound', to_phone: '9415550100', message_type: 'manual', status: 'scheduled',
+        // Staff-scheduled from the inbox — the only kind the bar may cancel.
+        admin_user_id: '44444444-4444-4444-8444-444444444444',
         scheduled_for: new Date('2099-01-01T12:00:00Z'),
       }],
       customers: [{ id: '00000000-0000-0000-0000-00000000e002', first_name: 'Contract', last_name: 'Fixture' }],

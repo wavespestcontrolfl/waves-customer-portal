@@ -267,25 +267,32 @@ const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.nam
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
+// Name → handler. A lookup table instead of a switch keeps the dispatcher's
+// own complexity flat as tools are added (Codex round 10 on #5224).
+const COMMS_TOOL_HANDLERS = {
+  get_unanswered_threads: (input) => getUnansweredThreads(input),
+  get_conversation_thread: (input) => getConversationThread(input),
+  search_messages: (input) => searchMessages(input),
+  get_sms_stats: (input) => getSmsStats(input.days || 30),
+  get_call_log: (input) => getCallLog(input),
+  list_call_partners: (input) => listCallPartners(input),
+  get_open_commitments: (input) => getOpenCommitments(input),
+  get_partner_call_history: (input) => getPartnerCallHistory(input),
+  send_sms: (input) => sendSms(input),
+  draft_sms_reply: (input) => draftSmsReply(input),
+  get_csr_overview: (input) => getCsrOverview(input.days || 30),
+  get_todays_activity: () => getTodaysActivity(),
+  list_queued_messages: (input) => listQueuedMessages(input),
+  cancel_queued_message: (input, actionContext) => cancelQueuedMessage(input, actionContext),
+};
+
 async function executeCommsTool(toolName, input, actionContext = {}) {
+  const handler = Object.prototype.hasOwnProperty.call(COMMS_TOOL_HANDLERS, toolName)
+    ? COMMS_TOOL_HANDLERS[toolName]
+    : null;
+  if (!handler) return { error: `Unknown comms tool: ${toolName}` };
   try {
-    switch (toolName) {
-      case 'get_unanswered_threads': return await getUnansweredThreads(input);
-      case 'get_conversation_thread': return await getConversationThread(input);
-      case 'search_messages': return await searchMessages(input);
-      case 'get_sms_stats': return await getSmsStats(input.days || 30);
-      case 'get_call_log': return await getCallLog(input);
-      case 'list_call_partners': return await listCallPartners(input);
-      case 'get_open_commitments': return await getOpenCommitments(input);
-      case 'get_partner_call_history': return await getPartnerCallHistory(input);
-      case 'send_sms': return await sendSms(input);
-      case 'draft_sms_reply': return await draftSmsReply(input);
-      case 'get_csr_overview': return await getCsrOverview(input.days || 30);
-      case 'get_todays_activity': return await getTodaysActivity();
-      case 'list_queued_messages': return await listQueuedMessages(input);
-      case 'cancel_queued_message': return await cancelQueuedMessage(input, actionContext);
-      default: return { error: `Unknown comms tool: ${toolName}` };
-    }
+    return await handler(input, actionContext);
   } catch (err) {
     if (isUncertainManualSmsOutcome(err)) {
       return uncertainManualSmsResponse(err);
