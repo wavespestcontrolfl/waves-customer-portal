@@ -43,6 +43,7 @@ function status({ facts = {}, packet = null } = {}) {
     packet,
     visit: { customerId: 'cust-1', technicianId: 'tech-1' },
     record: { id: 'rec-1' },
+    reportRecordId: 'rec-1',
     summary: { closedOut: false },
     facts: { ...base, ...facts },
   };
@@ -249,4 +250,25 @@ test('confirmed: never runs without the verified plan, and never adds a step the
   expect(drifted.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
   expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
+});
+
+test('report steps bind to the record owning the report artifact, not the primary record', async () => {
+  const sibling = { ...RECORD, id: 'rec-sibling', report_view_token: 'c'.repeat(32) };
+  getCloseoutStatus.mockResolvedValue({
+    ...status({ facts: { reportDelivery: { state: 'pending', reason: 'not_enqueued', posture: 'auto_send' } } }),
+    record: { id: 'rec-primary' },
+    reportRecordId: 'rec-sibling',
+  });
+  const seen = [];
+  db.mockImplementation(jest.fn((table) => {
+    const chain = {
+      where: (w) => { if (table === 'service_records') seen.push(w.id); return chain; },
+      first: async () => (table === 'service_records' ? sibling : undefined),
+    };
+    return chain;
+  }));
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.steps).toEqual([expect.objectContaining({ step: 'queue_report_email', service_record_id: 'rec-sibling' })]);
+  expect(preview.service_record_id).toBe('rec-sibling');
+  expect(seen).not.toContain('rec-primary');
 });

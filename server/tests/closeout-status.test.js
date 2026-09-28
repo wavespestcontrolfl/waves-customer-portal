@@ -570,8 +570,11 @@ describe('closeout-status: comms + follow-up', () => {
   test('evidence on a sibling service_records row counts: token on the older record (codex r17)', () => {
     const rec1 = { ...closedOutInputs().record, id: 'rec-new', report_view_token: null, report_generated_at: null };
     const rec2 = { ...closedOutInputs().record, id: 'rec-old', report_view_token: 't'.repeat(32), report_generated_at: '2026-08-30T18:05:00Z' };
-    const { facts } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
+    const { facts, reportRecordId } = deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1, rec2] }));
     expect(facts.report).toMatchObject({ state: 'done', reason: 'report_published', hasToken: true });
+    // A repair of the report facts must act on the record they were read from.
+    expect(reportRecordId).toBe('rec-old');
+    expect(deriveCloseoutFacts(closedOutInputs({ record: rec1, records: [rec1] })).reportRecordId).toBe('rec-new');
   });
 
   test('GH r4: sibling invoice + billing outage → unknown; sibling posture never relabels the token record; non-performed invoice → contradiction; inactive visit beats failed attempt', () => {

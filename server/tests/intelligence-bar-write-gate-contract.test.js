@@ -614,6 +614,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
       ? jest.spyOn(require('../services/closeout-status'), 'getCloseoutStatus').mockResolvedValue({
         found: true, packet: null, visit: { customerId: 'cust-1', technicianId: 'tech-1' },
         record: { id: 'rec-closeout' },
+        reportRecordId: 'rec-closeout',
         summary: { closedOut: false },
         facts: {
           completion: { state: 'done', reason: 'record_completed' },

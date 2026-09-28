@@ -146,7 +146,10 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     return { steps, manual, skipped };
   }
 
-  const recordId = status.record?.id || null;
+  // The report facts were derived from the record owning the report artifact
+  // (closeout-status reportRecordId), which can be a sibling of status.record
+  // — eligibility, dedupe and execution all bind to that same record.
+  const recordId = status.reportRecordId || null;
   const recordRow = recordId
     ? await knex('service_records').where({ id: recordId })
       .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id')
@@ -265,7 +268,7 @@ function previewFromPlan(serviceId, status, plan) {
   return {
     preview: true,
     service_id: serviceId,
-    service_record_id: status.record?.id || null,
+    service_record_id: status.reportRecordId || null,
     customer_id: status.visit?.customerId || null,
     steps: plan.steps.map((s) => ({ ...s, effect: STEP_EFFECTS[s.step].label })),
     manual: plan.manual,
