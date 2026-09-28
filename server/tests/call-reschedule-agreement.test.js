@@ -96,7 +96,8 @@ describe('groundRescheduleAgreement', () => {
       .toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
     // Codex #5092 r8: a question is not a commitment or an acceptance.
     expect(said('Will we see you Thursday at two in the afternoon?', OK_CALLER)).toMatchObject({ ok: false, reason: 'agent_commitment_ungrounded' });
-    expect(said('We will see you Thursday at two in the afternoon.', 'Thursday at two works for me?')).toMatchObject({ ok: false, reason: 'caller_acceptance_ungrounded' });
+    // A caller may ask for exactly the slot the agent then commits to.
+    expect(said('We will see you Thursday at two in the afternoon.', 'Can you do Thursday at two?', { accept: 'Can you do Thursday at two' }).ok).toBe(true);
     // Codex #5092 r12: "p.m." ending a sentence keeps the boundary.
     const PM_LINE = 'We will see you Thursday at two p.m. Do not forget to unlock the gate.';
     expect(ground(v2({

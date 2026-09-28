@@ -15,10 +15,11 @@
  *   - the agent's commitment (/scheduling/agent_committed_booking, speaker
  *     "agent") and the caller's acceptance (/scheduling/caller_accepted_slot,
  *     speaker "caller") each appear word for word in one turn of that
- *     speaker, in sentences that are not questions and are free of
- *     negation, hedges and open conditions (the booking check's own
- *     screens, call-triage-flags.js — a quote cut from "We will not see you
- *     Thursday" or "Will we see you Thursday at two?" does not ground);
+ *     speaker, in sentences free of negation, hedges and open conditions
+ *     (the booking check's own screens, call-triage-flags.js — a quote cut
+ *     from "We will not see you Thursday" does not ground); the agent's
+ *     sentence is not a question ("Will we see you Thursday at two?"), while
+ *     the caller may ask for the exact slot ("Can you do Thursday at two?");
  *   - an agreed-slot quote (/scheduling/confirmed_start_at) appears word for
  *     word in one turn and contains every recorded slot word; the hour word
  *     is one hour ("two", "2", "noon") and is the slot's; the period words
@@ -137,8 +138,8 @@ function sentencesAround(turn, quote) {
 // around it? The sentences it sits in must carry no negation, hedge or open
 // condition — the booking check's own screens (call-triage-flags.js), applied
 // to the quote's sentences rather than its whole turn so an unrelated "No
-// worries." earlier in the turn does not void a real commitment — and, for a
-// commitment, acceptance or slot, must not be a question.
+// worries." earlier in the turn does not void a real commitment — and, for
+// the agent's commitment and the slot, must not be a question.
 function plainlySaid(turn, quote, askingFails) {
   const around = sentencesAround(turn, quote);
   const text = around.map((x) => x.ns).join(' ');
@@ -259,12 +260,12 @@ function movedAppointmentGrounded(scheduling, quotes, started) {
     && quotes.some((q) => holds(q, words));
 }
 
-// Every quote the grounding uses is screened; a question fails a statement
-// of agreement, but a caller naming the visit to move usually asks ("Can you
-// move my September 24th visit?").
-const ASKING_FAILS = new Set([
-  '/scheduling/agent_committed_booking', '/scheduling/caller_accepted_slot', '/scheduling/confirmed_start_at',
-]);
+// Every quote the grounding uses is screened; a question fails the agent's
+// commitment and the slot it states. A caller may ask: a request for exactly
+// the slot the agent then commits to is acceptance under the extraction
+// contract ("Can you do Thursday at two?"), and a caller naming the visit to
+// move usually asks ("Can you move my September 24th visit?").
+const ASKING_FAILS = new Set(['/scheduling/agent_committed_booking', '/scheduling/confirmed_start_at']);
 function isPlain(holding, quote, fieldPath) {
   return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
 }
