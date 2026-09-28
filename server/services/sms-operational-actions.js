@@ -494,7 +494,16 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           // payment-method change never is, however worded). Payment
           // admissibility and the event page read it, since an ask's words
           // never change after intake (Codex #4996 r6).
-          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}) },
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
+          // Whether a plain human staff reply can answer this ask at all
+          // (owner ruling 2026-09-28, partly reversing R3 2026-09-24): the
+          // extraction's own judgement (answered_by_reply), stamped once
+          // here exactly like money_answerable (Codex #5088 precedent) — an
+          // unstamped row (extracted before this lane, or any kind other
+          // than 'other') is never reply-answerable, so it keeps R3: only a
+          // visit event or a payment landing closes it (sms-commitment-
+          // fulfillment.js witnessTypes).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { reply_answerable: item.answered_by_reply === true } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back

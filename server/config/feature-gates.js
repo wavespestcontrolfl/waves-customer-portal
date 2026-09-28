@@ -81,6 +81,7 @@
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
+ *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_BOOKING_LUNCH_BLOCK=true (restores the 12:00-13:00 lunch block on every customer-facing offer + commit surface (/book, public reschedule, public re-service, the legacy zone availability engine); read at call time via scheduling/customer-windows.js lunchBlockEnabled(); unset = noon is a normal offerable/reservable hour, owner ruling 2026-09-23)
@@ -611,6 +612,13 @@ const gates = {
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
+  // Tech-reviewed completion-photo captions/summary grounding the AI report
+  // writer (owner spec 2026-09-27). This map entry is for logGateStatus
+  // only (pre-push P3, Codex #5145 r2) — the canonical CALL-TIME reader is
+  // reportPhotoContentLive() below (strict 'true'), which admin-schedule.js's
+  // POST /generate-report actually uses, so a flip needs no redeploy.
+  reportPhotoContent: process.env.GATE_REPORT_PHOTO_CONTENT === 'true',
+
   // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
   // entry is for logGateStatus only; the canonical CALL-TIME reader is
   // voiceRelayOpenaiLive() below (strict 'true', same convention as
@@ -899,6 +907,28 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
+
+  // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
+  // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
+  // rescheduling, exact amounts + send_payment_link, portal/estimate links)
+  // instead of defaulting to "we'll confirm and follow up", and answers
+  // CANCELLATIONS (skip/reschedule from OPEN TIMES only, never an invented
+  // discount/credit/refund) instead of escalating them. Dark in every
+  // environment: gate off keeps the drafter's prompts, facts block and
+  // behavior byte-identical (draft rows keep stamping prompt_version
+  // house_voice_v11). The one canonical reader is server/services/
+  // sms-shadow-drafter.js, which re-reads gateEnvValue('GATE_SMS_REAL_ANSWERS')
+  // at draft time — this entry is for logGateStatus only.
+  smsRealAnswers: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+  // Per-category hand-off gates (owner ruling 2026-09-27): each one, ON,
+  // removes exactly that category from the HELD-FOR-A-PERSON list in the
+  // real-answers prompt (smsRealAnswers must ALSO be on, or there is no
+  // real-answers prompt to remove it from). All default off, dark in every
+  // environment, read at call time by the same drafter module.
+  smsAgentComplaints: gateEnvValue('GATE_SMS_AGENT_COMPLAINTS'),
+  smsAgentBillingDisputes: gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'),
+  smsAgentChemicalMedical: gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL'),
+  smsAgentLegal: gateEnvValue('GATE_SMS_AGENT_LEGAL'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -3193,6 +3223,17 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_REPORT_PHOTO_CONTENT read at CALL time — off unless exactly 'true'
+// (repo gate convention, matching discountStackingLive above). On, the AI
+// report writer's grounding (POST /generate-report, admin-schedule.js) may
+// include the technician's own tech-reviewed photo captions / photo summary,
+// labeled as a TECHNICIAN PHOTO OBSERVATIONS block. Off, byte-identical to
+// before this lane: no captions or summary reach the model. The
+// `reportPhotoContent` gates-map entry above is for logGateStatus only.
+function reportPhotoContentLive() {
+  return process.env.GATE_REPORT_PHOTO_CONTENT === 'true';
+}
+
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
 // point into a non-Anthropic voice-relay session model must use: the session
 // allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
@@ -3383,5 +3424,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, reportPhotoContentLive };
 // gates 1775330914
