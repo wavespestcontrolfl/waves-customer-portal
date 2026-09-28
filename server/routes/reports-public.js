@@ -1817,26 +1817,17 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const asset = await db('service_report_notification_assets')
-      .where({
-        service_record_id: service.id,
-        asset_type: 'sms_preview_image',
-      })
-      .orderBy('created_at', 'desc')
-      .first()
-      .catch(() => null);
-    if (!asset) return res.status(404).json({ error: 'preview_not_found' });
-
-    // Stored-identity check (owner pre-push P1, 2026-09-28): a preview built
-    // under a different GATE_REPORT_PHOTO_CONTENT state or an older render
-    // version — or whose photo set has since changed — must never keep
-    // serving as current. Cheap when the gate is off (a plain string
-    // compare on data already loaded above; no extra query — the photo-set
-    // signature is only read when the gate is on). A legacy row from
-    // before photo_content_signature existed reads that column as null,
-    // which only matches today's signature when the gate is ALSO off today
-    // (the safe direction: never wrongly served, worst case an extra
-    // rebuild). Any mismatch falls through to the SAME preview_not_found
+    // Stored-identity match (owner pre-push P1s, 2026-09-28): several preview
+    // rows can exist for one record (rebuilds over time — a gate flip, a
+    // photo change, a render-version bump). Select the NEWEST row whose
+    // identity matches the CURRENT state in one query, rather than always
+    // taking the newest row and refusing it on any mismatch — an older row
+    // built under the SAME current state (e.g. the gate flipped on, then
+    // back off) is a perfectly valid image to serve, not a reason to 404
+    // while a newer, now-irrelevant row sits on top of it. Cheap when the
+    // gate is off: still one query, no extra query for the photo-set
+    // signature (only read when the gate is currently on). No row matching
+    // the current identity falls through to the SAME preview_not_found
     // response the route already gives for no asset at all — this route has
     // no rebuild path of its own, so it does not invent one here; the next
     // completion/dispatch event rebuilds it.
@@ -1846,9 +1837,21 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
       ? `-pgon${await require('../services/service-report/photo-set-signature')
         .reportPhotoSetPdfSignature(service.id, db).catch(() => '-phu')}`
       : '';
-    const staleAsset = asset.render_version !== currentPreviewRenderVersion
-      || (asset.photo_content_signature || '') !== currentPhotoContentSignature;
-    if (staleAsset) return res.status(404).json({ error: 'preview_not_found' });
+    const asset = await db('service_report_notification_assets')
+      .where({
+        service_record_id: service.id,
+        asset_type: 'sms_preview_image',
+        render_version: currentPreviewRenderVersion,
+      })
+      // A legacy row from before photo_content_signature existed reads NULL;
+      // COALESCE only matches it to today's identity when the gate is ALSO
+      // off today (the safe direction this column's migration docstring
+      // describes — never wrongly served, worst case an extra rebuild).
+      .andWhere(db.raw('COALESCE(photo_content_signature, ?) = ?', ['', currentPhotoContentSignature]))
+      .orderBy('created_at', 'desc')
+      .first()
+      .catch(() => null);
+    if (!asset) return res.status(404).json({ error: 'preview_not_found' });
 
     const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
     const config = require('../config');
