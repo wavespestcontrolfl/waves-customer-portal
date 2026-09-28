@@ -1604,6 +1604,14 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // the shadow->live promotion path may advance origin_mode to 'live'.
     // Absent a stamp (rows predating this fix) falls through to today's
     // current-gate read.
+    // Rollback semantics (documented per pre-push audit): the current-gate
+    // read also means a LIVE-origin run that comes due after the gate is
+    // rolled back true -> shadow finalizes 'shadow', unsent. Deliberate:
+    // shadow is the stop-sending lever, and a rollback that let already
+    // queued live sends keep going would not stop anything. That run's send
+    // is dropped, not deferred — its trigger's intent marker was settled
+    // 'processed' when the run was created, so nothing replays it; a later
+    // re-flip to live sends only events from then on.
     const originMode = asObject(claimedRun.context).origin_mode;
     const dispatchMode = emailTemplateAutomationsMode();
     if (originMode === 'shadow' || dispatchMode === 'shadow') {

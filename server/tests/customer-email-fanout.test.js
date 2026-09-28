@@ -189,6 +189,8 @@ describe('propagateCustomerEmailChange', () => {
       email_template_automation_runs: {
         rows: [{ id: 'run-1', payload: { customer_email: 'chris.w.sample@example.com', first_name: 'Chris' } }],
       },
+      // No pending automation intent marker for this customer (covered by its own test below).
+      email_template_automation_intents: { updateCount: 0 },
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -239,26 +241,21 @@ describe('propagateCustomerEmailChange', () => {
   });
 
   test('retargets a still-pending automation intent marker (estimate.expired replay) to the corrected address (#5154 codex P1 r5)', async () => {
-    const conn = makeConn({
-      email_template_automation_intents: {
-        rows: [{ id: 'intent-1', payload: { id: 'est-9', customer_id: 'cust-1', customer_email: 'chris.w.sample@example.com', category: 'pest' } }],
-      },
-    });
+    const conn = makeConn({ email_template_automation_intents: { updateCount: 1 } });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(counts.templateRuns).toBe(1);
-    // Customer-linked, pending, still-old-address markers only.
-    const filters = conn.__calls.filter((c) => c.table === 'email_template_automation_intents');
-    expect(filters.find((c) => c.op === 'where').arg).toEqual({ status: 'pending' });
-    expect(filters.filter((c) => c.op === 'whereRaw').map((c) => c.arg.bindings)).toEqual(
-      expect.arrayContaining([['cust-1'], ['chris.w.sample@example.com']]),
-    );
+    const calls = conn.__calls.filter((c) => c.table === 'email_template_automation_intents');
+    // Customer-linked, still-pending, still-old-address markers only…
+    expect(calls.find((c) => c.op === 'where').arg).toEqual({ status: 'pending' });
+    expect(calls.filter((c) => c.op === 'whereRaw').map((c) => c.arg.bindings)).toEqual([
+      ['cust-1'], ['chris.w.sample@example.com'],
+    ]);
+    // …patched set-based in SQL (jsonb_set), never a per-row JS parse that a
+    // malformed payload could throw out of (pre-push audit P1). The real
+    // jsonb semantics are proven in the emitters -postgres suite.
     const [intentSync] = conn.__updates('email_template_automation_intents');
-    expect(JSON.parse(intentSync.arg.payload)).toEqual({
-      id: 'est-9', customer_id: 'cust-1', customer_email: 'chriswsample@example.com', category: 'pest',
-    });
-    // The settle CAS re-asserts 'pending' so a replay that already settled the marker wins.
-    expect(conn.__calls.some((c) => c.table === 'email_template_automation_intents' && c.op === 'where'
-      && c.arg && c.arg.id === 'intent-1' && c.arg.status === 'pending')).toBe(true);
+    expect(intentSync.arg.payload.__raw).toContain("jsonb_set(payload, '{customer_email}'");
+    expect(intentSync.arg.payload.__bindings).toEqual(['chriswsample@example.com']);
   });
 
   test('matches copies by the OLD email only', async () => {
