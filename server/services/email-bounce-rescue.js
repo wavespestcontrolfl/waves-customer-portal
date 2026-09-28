@@ -594,8 +594,12 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
     summary,
     // One row per address; a repeat bounce of the SAME address is already
     // deduped upstream (email-rescue:${bouncedEmail} on the auto-corrected
-    // bell above) before this path ever runs for it.
+    // bell above) before this path ever runs for it. Every call here is
+    // therefore a DIFFERENT customer's bounce needing a human — count alone
+    // (1, always equal to the prior row's count) would go quiet after the
+    // first; newCount:1 says every one of them is new news, so it rings.
     count: 1,
+    newCount: 1,
     link: '/admin/customers',
     sendEmail: () => email.send({
       to: suggestionRecipient(),
@@ -899,4 +903,5 @@ module.exports = {
   consensusCandidates,
   validateCandidate,
   bounceSuggestionHeadlineAndSummary,
+  sendSuggestionEmail,
 };

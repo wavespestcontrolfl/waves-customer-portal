@@ -146,6 +146,68 @@ describe('deliverOpsDigest', () => {
   });
 });
 
+// admin-alerts-ring scope (2026-09-28, spec item 3): the ring-only-on-change
+// gates (ringGate / ringOnRefresh) are OWNER-AUDIENCE ONLY. An engineering
+// or fyi sender never gets either — notifyAdmin's own default (any content
+// change re-bells) applies to its refresh, and no lookback/lock runs for a
+// fresh insert — byte-identical to before this scope.
+describe('deliverOpsDigest — ring gates are owner-audience only', () => {
+  it('a FIX (engineering) dedupeKey+refreshOnDedupe sender gets NO ringOnRefresh — notifyAdmin\'s default (always re-bell on change) applies', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-fix', deduped: false });
+    await deliverOpsDigest({
+      key: 'llm-dispatch-exceptions', subject: 'FIX: LLM dispatch exceptions', html: '<p>x</p>',
+      dedupeKey: 'ops-digest:llm-dispatch-exceptions', refreshOnDedupe: true, sendEmail: jest.fn(),
+    });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.refreshOnDedupe).toBe(true);
+    expect(opts).not.toHaveProperty('ringOnRefresh');
+  });
+
+  it('a FYI sender with no dedupeKey gets no ringGate at all', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-fyi', deduped: false });
+    await deliverOpsDigest({ key: 'k', subject: 'FYI: routine report', text: 't', count: 3, sendEmail: jest.fn() });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts).not.toHaveProperty('ringGate');
+  });
+
+  it('an ACT (owner) dedupeKey+refreshOnDedupe sender DOES get ringOnRefresh', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-act', deduped: false });
+    await deliverOpsDigest({
+      key: 'promised-estimate', subject: 'ACT: 3 promised quotes never went out', text: 't',
+      dedupeKey: 'ops-digest:promised-estimate', refreshOnDedupe: true, count: 3, sendEmail: jest.fn(),
+    });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(typeof opts.ringOnRefresh).toBe('function');
+  });
+
+  it('an ACT (owner) sender with no dedupeKey DOES get a ringGate', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-act2', deduped: false });
+    await deliverOpsDigest({ key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 3, sendEmail: jest.fn() });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(typeof opts.ringGate).toBe('function');
+  });
+
+  it('audience flips per emission, not a cached value — the SAME dedupeKey gets ringOnRefresh only when THIS call is owner-audience', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-flip', deduped: false });
+    await deliverOpsDigest({
+      key: 'gbp-sync-health', subject: 'FIX: Google review sync — 1 location degraded', text: 't',
+      dedupeKey: 'ops-digest:gbp-sync-health', refreshOnDedupe: true, sendEmail: jest.fn(),
+    });
+    expect(mockNotifyAdmin.mock.calls[0][3]).not.toHaveProperty('ringOnRefresh');
+    mockNotifyAdmin.mockClear();
+    await deliverOpsDigest({
+      key: 'gbp-sync-health', subject: 'ACT: Google review sync — 1 location degraded', text: 't',
+      dedupeKey: 'ops-digest:gbp-sync-health', refreshOnDedupe: true, sendEmail: jest.fn(),
+    });
+    expect(typeof mockNotifyAdmin.mock.calls[0][3].ringOnRefresh).toBe('function');
+  });
+});
+
 describe('deliverOpsDigest — kind/audience/feed derivation', () => {
   async function metadataFor(subject, extra = {}) {
     withGate(true);
