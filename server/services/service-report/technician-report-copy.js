@@ -254,7 +254,10 @@ function containsExplicitNumericCredential(text) {
       // Preserve a unit-backed quantity governed by that work unless a code
       // noun or access action explicitly reconnects the number to the device.
       if (isExplicitDeviceWorkMeasurement(value, match)) continue;
-      if (digitCount >= 2 && digitCount <= 8) return true;
+      // An explicit credential noun still governs a long token or several
+      // numeric groups. A total above eight digits must not let unit-shaped
+      // groups disappear during the later measurement masking.
+      if (digitCount >= 2) return true;
     }
   }
   return false;

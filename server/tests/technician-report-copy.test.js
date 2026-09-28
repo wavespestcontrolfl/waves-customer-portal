@@ -106,6 +106,12 @@ const CREDENTIAL_CASES = {
     'Broadcast granular before unlocking rear gate with 24-0-11',
   ],
   shared: [
+    'Gate code 1234ft 5678ft 9012ft',
+    'Gate code 1234ft 5678ft 9ft',
+    'Gate PIN AB1234ml 5678ml 9012ml',
+    'Gate passcode is 123456789ft',
+    '1234ft 5678ft 9012ft is the gate code',
+    '1234ml 5678ml 9012ml remains the keypad',
     'Use 2468 AT THE SIDE GATE',
     'USE 24-68 AT THE GATE',
     'USE 2468 TO OPEN THE GATE',
@@ -327,6 +333,8 @@ const LEGITIMATE_CASES = {
     'Mixed24-0-11 then used it to treat soil near the gate',
   ],
   sharedWork: [
+    'Inspected the keypad and treated 1234ft 5678ft 9012ft of the surrounding fence',
+    'Serviced the lockbox and applied 123456789 ml around the mounting plate',
     'Using 100 ml at the rear gate, we treated the hinge area',
     'Using 100ml at the rear gate, we treated the hinge area',
     'Opened rear gate on 9/27/2026',
