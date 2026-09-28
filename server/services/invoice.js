@@ -1868,8 +1868,12 @@ async function buildScheduledServiceInvoiceLines(
   // Delegate to the shared predicate so this can never drift from
   // completionInvoiceAmount / predictCompletionBilling's own reading of
   // the same provenance signal.
-  const authoritativeZero = primaryBaseKnown
-    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // primaryBaseKnown is implied with the gate off (the predicate needs a
+  // positive primary_line_price there); under GATE_STAMPED_ZERO_FREE a bare
+  // stamped $0 with no primary is authoritative too, so stored add-ons
+  // reconcile down to it (Codex r1 P1 on #5256). Checkout extras are
+  // appended after this reconciliation, untouched.
+  const authoritativeZero = hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
   // Whether storedNetAmount below actually came from a stamped price on this
   // row (a real positive estimated_price, or the provenance-backed genuine
   // $0) versus the fee/rate fallback another caller resolved because this

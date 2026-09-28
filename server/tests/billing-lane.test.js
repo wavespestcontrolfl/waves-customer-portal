@@ -912,3 +912,62 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     })).toBe(false);
   });
 });
+
+// Parallel review P2s on #5256: the gate reaches the in-lock extended
+// anchor, the sheet's membership/self-pay auto-charge promise, and the
+// annual-prepay label. Off stays exactly as before.
+describe('GATE_STAMPED_ZERO_FREE — in-lock anchor, sheet promise, annual-prepay label', () => {
+  const {
+    verifyExtendedCompletionAnchor, attachedInvoiceAutoChargeLikely, predictCompletionBilling,
+  } = require('../services/billing-lane');
+  afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+  const noDuesConn = () => {
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'orWhere', 'andWhereRaw', 'andWhere']) chain[m] = () => chain;
+    chain.first = async () => null;
+    return () => chain;
+  };
+  const legacyLane = { id: 'c1', billing_mode: null, monthly_rate: 33.33, waveguard_tier: null };
+  const zeroVisit = { id: 's1', customer_id: 'c1', status: 'completed', is_recurring: false, estimated_price: 0, is_callback: false, prepaid_method: null };
+  const invoice30 = { subtotal: 30, total: 30, discount_amount: 0, scheduled_service_id: 's1' };
+
+  test('in-lock extended anchor: a stamped $0 refuses with the gate on', async () => {
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: noDuesConn(), lockedCustomer: legacyLane, lockedSvc: zeroVisit, lockedInvoice: invoice30,
+    })).resolves.toEqual({ ok: false, reason: 'anchor_exceeded' });
+  });
+
+  test('sheet promise: a stamped $0 on a legacy lane with a monthly rate never promises auto-charge with the gate on', () => {
+    const args = {
+      invoice: { subtotal: 30, total: 30, discount_amount: 0 },
+      autopayActive: true,
+      estimatedPrice: 0,
+      primaryLinePrice: null,
+      isRecurring: false,
+      isCallback: false,
+      serviceType: 'Pest Control',
+      billingMode: null,
+      monthlyRate: 33.33,
+      waveguardTier: null,
+      duesCollectedThisMonth: false,
+    };
+    const off = attachedInvoiceAutoChargeLikely(args);
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(attachedInvoiceAutoChargeLikely(args)).toBe(false);
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    expect(attachedInvoiceAutoChargeLikely(args)).toBe(off);
+  });
+
+  test('annual-prepay lane: an uncovered stamped $0 reads as free, not "prepaid", with the gate on', () => {
+    const args = {
+      lane: 'annual_prepay', billingMode: 'annual_prepay', autopayActive: true,
+      estimatedPrice: 0, primaryLinePrice: null, monthlyRate: 33.33, perApplicationFee: null,
+      isRecurring: false, isCallback: false, prepaidMethod: null, prepaidAmount: 0,
+    };
+    process.env.GATE_STAMPED_ZERO_FREE = 'true';
+    expect(predictCompletionBilling(args)).toMatchObject({ kind: 'no_charge', amount: 0, reason: 'fully_discounted' });
+    delete process.env.GATE_STAMPED_ZERO_FREE;
+    expect(predictCompletionBilling(args).kind).not.toBe('prepaid');
+  });
+});

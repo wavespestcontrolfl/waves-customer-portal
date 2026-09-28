@@ -17,15 +17,10 @@ const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 // unlike the CANCELLED_SERVICE_RESOLVED_STATUSES / estimate-first-application-invoice
 // requires below, which stay lazy/in-function on purpose.
 const { invoiceAmountDue, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus } = require('./invoice-helpers');
-// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) — read at call time so a
-// flip needs no redeploy. Widens hasAuthoritativeZeroPrice below; see its
-// own header for what changes. Fallback to a direct env read when a test's
-// partial `jest.mock('../config/feature-gates', ...)` predates this export
-// (this module is required by hundreds of test files) — same strict
-// `=== 'true'` semantics either way; production always has the real export.
-const featureGatesForStampedZero = require('../config/feature-gates');
-const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
-  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) — the canonical call-time
+// reader, so a flip needs no redeploy. Widens hasAuthoritativeZeroPrice
+// below; the other readers in this change call it through this module.
+const stampedZeroFreeLive = () => require('../config/feature-gates').stampedZeroFreeLive();
 
 // Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
 // as a literal so this module stays db-free for pure unit tests; the
@@ -416,6 +411,11 @@ function predictCompletionBillingAnnualPrepay({
   // Owned by the renewal flow, not a data gap — bills nothing BY DESIGN.
   if (!hasVisitPrice) return noCharge('annual_renewal_owned');
   const amount = Number(estimatedPrice);
+  // GATE_STAMPED_ZERO_FREE: a stamped $0 is a free visit, not "prepaid" —
+  // same label every other lane gives it (parallel review P2 on #5256).
+  if (!(amount > 0) && stampedZeroFreeLive()) {
+    return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
+  }
   // grossAmount (codex round-9 P2): this lane can reach hasVisitPrice via
   // hasAuthoritativeZeroPrice too (a stamped $0 with a positive
   // primaryLinePrice), which the CLIENT reads as UNPRICED — the same gap
@@ -747,6 +747,12 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   })) {
     return { ok: false, reason: 'dues_covered' };
   }
+  // GATE_STAMPED_ZERO_FREE: a stamped $0 anchors at nothing, exactly like
+  // resolveExtendedLane — so a charge admitted before a $0 stamp landed
+  // refuses here, under the lock (parallel review P2 on #5256).
+  if (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(lockedSvc.estimated_price, lockedSvc.primary_line_price)) {
+    return { ok: false, reason: 'anchor_exceeded' };
+  }
   const anchor = hasVisitPrice
     ? Number(lockedSvc.estimated_price)
     : Number(completionInvoiceAmount({
@@ -855,6 +861,9 @@ function attachedInvoiceAutoChargeLikely({
     monthlyRate,
     billingMode,
   })) return false;
+  // GATE_STAMPED_ZERO_FREE: a stamped $0 anchors at nothing (completion's
+  // resolveExtendedLane refuses it), so never promise the auto-charge.
+  if (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) return false;
   const anchor = hasVisitPrice
     ? Number(estimatedPrice)
     : Number(completionInvoiceAmount({
