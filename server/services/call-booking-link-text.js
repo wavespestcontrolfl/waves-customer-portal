@@ -940,9 +940,15 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
 // with 21+ minted codes in the window could then hide an older code that WAS
 // actually texted behind 20 newer opens that never sent, and we'd text the
 // same person twice inside the 14-day window. Do it as one correlated EXISTS
-// instead: every short_codes row in the window is a candidate, with no count
-// limit, and the same sms_log filters (excludeUnresolvedSendReservations,
-// direction, since, status) still apply.
+// instead: every short_codes row for this lead is a candidate, with no count
+// limit and no age bound of its own — the 14-day exclusion this function
+// answers for is about when the SMS carrying the link went out, not when
+// the code was minted (codex #5018 pre-push P1, round 4: a code minted 15
+// days ago but manually texted 3 days ago, still a valid link, was
+// invisible here when short_codes carried its own `since` filter, wrongly
+// allowing an automated text inside the promised 14-day exclusion). Only
+// sms_log's own filters (excludeUnresolvedSendReservations, direction,
+// since, status) bound the window.
 async function linkSentRecently(conn, leadId, now) {
   const since = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
   // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
@@ -958,7 +964,6 @@ async function linkSentRecently(conn, leadId, now) {
         .where('short_codes.kind', 'consultation')
         .where('short_codes.entity_type', 'leads')
         .where('short_codes.entity_id', leadId)
-        .where('short_codes.created_at', '>=', since)
         .whereRaw("sms_log.message_body LIKE '%/l/' || short_codes.code || '%'"),
     )
     .first('sms_log.id');

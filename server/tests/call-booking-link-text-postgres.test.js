@@ -997,6 +997,32 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(result).toBe(true);
   });
 
+  // codex #5018 pre-push P1 (round 4): the 14-day exclusion this function
+  // answers for is about when the SMS carrying the link went out, not when
+  // the underlying short_code was minted. A code minted well outside the
+  // window (15 days ago here) but manually texted just 3 days ago — still
+  // a valid, delivered link — used to be invisible: short_codes carried its
+  // own `since` filter, so this candidate never reached the EXISTS join at
+  // all, and an automated text could go out a second time inside the
+  // promised 14-day exclusion.
+  test('linkSentRecently finds a real send on a code minted OUTSIDE the 14-day window but sent WITHIN it', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550778' });
+    const mintedAt = new Date(NOW.getTime() - 15 * 24 * 60 * 60 * 1000); // minted 15 days ago — outside the window
+    const sentAt = new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000); // sent only 3 days ago — inside it
+    await mockPg('short_codes').insert({
+      id: randomUUID(), code: 'oo001', target_url: 'https://portal.example.com/inspection/tok-old2',
+      kind: 'consultation', entity_type: 'leads', entity_id: leadId,
+      created_at: mintedAt, updated_at: mintedAt,
+    });
+    await mockPg('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550778', status: 'accepted',
+      message_body: 'Pick a time: https://portal.example.com/l/oo001', created_at: sentAt,
+    });
+
+    const result = await callBookingLinkText._private.linkSentRecently(mockPg, leadId, NOW);
+    expect(result).toBe(true);
+  });
+
   // codex r3 P2 (this round) — new raw SQL added alongside the earlier
   // jsonb_build_object fix: recoverStaleClaims'/recoverAbandonedClaim's own
   // named-binding comparisons. The same class of bug (a mocked knex cannot
