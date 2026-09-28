@@ -19,6 +19,7 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
       <button onClick={() => setTab('overview')}>Profile overview</button>
       <button onClick={() => onCustomerMutation?.({ customerId, action: 'update' })}>Save profile address</button>
       <button onClick={() => { setDraftOpen(true); onDraftActiveChange?.(true); }}>Open address draft</button>
+      <button onClick={() => { setDraftOpen(false); onDraftActiveChange?.(false); }}>Close address draft</button>
     </div>;
   },
 }));
@@ -672,5 +673,27 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
     expect(confirmSpy).toHaveBeenCalledTimes(2);
     expect(linkClicks).toHaveBeenCalledOnce();
+  });
+
+  // Overlay mode mounts the directory queue and a profile together; closing
+  // the profile's draft must not drop the guard for the queue's open draft.
+  it('keeps guarding an open queue draft after an overlay profile draft closes', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const linkClicks = vi.fn();
+
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=overlay']}>
+      <a href="/admin/dashboard" onClick={(e) => { e.preventDefault(); linkClicks(); }}>Leave to Dashboard</a>
+      <CustomersPageV2 />
+    </MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open queue draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open address draft' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close address draft' }));
+    expect(screen.getByTestId('queue-draft-open')).toHaveTextContent('true');
+
+    fireEvent.click(screen.getByRole('link', { name: 'Leave to Dashboard' }));
+    expect(confirmSpy).toHaveBeenCalledOnce();
+    expect(linkClicks).not.toHaveBeenCalled();
   });
 });

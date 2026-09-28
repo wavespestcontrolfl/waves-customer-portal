@@ -1901,8 +1901,12 @@ export default function CustomersPageV2() {
   // sidebar/tab bar in AdminLayoutV2, or any other <a href> — also never
   // fires beforeunload) goes through that hook's own tab/close/switch
   // guards, so this page needs its own.
-  const draftActiveRef = useRef(false);
-  const handleDraftActiveChange = (active) => { draftActiveRef.current = active; };
+  // Tracked per panel: in overlay mode both can hold a draft at once, and
+  // closing one must not clear the other's warning.
+  const draftActiveRef = useRef({ profile: false, queue: false });
+  const hasOpenDraft = () => draftActiveRef.current.profile || draftActiveRef.current.queue;
+  const handleProfileDraftActiveChange = (active) => { draftActiveRef.current.profile = active; };
+  const handleQueueDraftActiveChange = (active) => { draftActiveRef.current.queue = active; };
   // Kept in sync on every settled render so a later popstate can restore
   // exactly the URL the draft was open on.
   const currentUrlRef = useRef(`${location.pathname}${location.search}`);
@@ -1911,7 +1915,7 @@ export default function CustomersPageV2() {
   }, [location.pathname, location.search]);
   useEffect(() => {
     const guardHistory = () => {
-      if (!draftActiveRef.current || confirmDiscardDraft()) return;
+      if (!hasOpenDraft() || confirmDiscardDraft()) return;
       // Declined: the browser already popped to the new entry before this
       // event fired — put the draft's own URL back on top rather than a new
       // history-manipulation mechanism (minimal, scoped to a live draft).
@@ -1923,7 +1927,7 @@ export default function CustomersPageV2() {
     // capture-phase anchor-click pattern as EstimateToolViewV2's own
     // unsaved-draft guard (guardLink).
     const guardLink = (event) => {
-      if (!draftActiveRef.current) return;
+      if (!hasOpenDraft()) return;
       const link = event.target.closest?.("a[href]");
       if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
       if (!confirmDiscardDraft()) {
@@ -2137,7 +2141,7 @@ export default function CustomersPageV2() {
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
       onCustomerMutation={refreshCustomersAndGeocodeReview}
-      onDraftActiveChange={handleDraftActiveChange}
+      onDraftActiveChange={handleProfileDraftActiveChange}
       initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
       tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={
@@ -2287,7 +2291,7 @@ export default function CustomersPageV2() {
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
         geocodeReviewRefreshToken={geocodeReviewRefreshToken}
-        onDraftActiveChange={handleDraftActiveChange}
+        onDraftActiveChange={handleQueueDraftActiveChange}
         isAdmin={isAdmin}
         editingId={editingId}
         customerEditor={customerEditor}
