@@ -760,17 +760,21 @@ async function runScoreRescore({ limit = RESCORE_RUN_LIMIT } = {}) {
   let approved = 0;
   let revalidated = 0;
   for (const row of rows) {
-    if (hasContentChangedSinceCuration(row)) {
+    // An operator who put the row back to pending (manual_hold) decides it.
+    // A held row is never sent back to fresh curation (that would clear the
+    // hold and let the model re-approve it); its score may still refresh,
+    // but only while its content is unchanged, and it is never approved.
+    const held = Boolean(storedBreakdown(row)?.manual_hold);
+    const contentChanged = hasContentChangedSinceCuration(row);
+    if (held && contentChanged) continue;
+    if (contentChanged) {
       await revalidateStaleRescoreCandidate(row, 'Returned to fresh curation: row content changed since it was last assessed');
       revalidated += 1;
       continue;
     }
     const decision = rescoreCuratedEvent(row);
     if (!decision) continue;
-    // An operator who put the row back to pending (manual_hold) decides it;
-    // the rescore still refreshes the score but never re-approves it.
-    const canApprove = decision.approve && eligibleIds.has(String(row.id))
-      && !storedBreakdown(row)?.manual_hold;
+    const canApprove = decision.approve && eligibleIds.has(String(row.id)) && !held;
     const outcome = await applyRescore(row, decision, { canApprove });
     if (outcome === 'approved' || outcome === 'rescored' || outcome === 'raced') rescored += 1;
     if (outcome === 'approved') approved += 1;

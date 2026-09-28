@@ -256,14 +256,22 @@ describeOrSkip('buildCurationCandidateQuery admits a genuine first-of-year stale
     };
     const heldId = await insertScored('TEST Held Gala Night', { manual_hold: true });
     const freeId = await insertScored('TEST Free Gala Night', {});
+    const heldChangedId = await insertScored('TEST Held Changed Gala Night', { manual_hold: true });
+    // The feed rewrote the held row's listing after the operator's reset.
+    await db('events_raw').where({ id: heldChangedId }).update({ description: 'Rewritten listing text.' });
 
     await runScoreRescore();
 
     const held = await db('events_raw').where({ id: heldId }).first();
     const free = await db('events_raw').where({ id: freeId }).first();
+    const heldChanged = await db('events_raw').where({ id: heldChangedId }).first();
     expect(held.admin_status).toBe('pending');
     expect(held.score_breakdown.manual_hold).toBe(true);
     expect(free.admin_status).toBe('approved');
+    // Never returned to fresh curation: hold and curated_at both survive.
+    expect(heldChanged.admin_status).toBe('pending');
+    expect(heldChanged.curated_at).not.toBeNull();
+    expect(heldChanged.score_breakdown.manual_hold).toBe(true);
   });
 
   test('expired and needs_review rows remain excluded unconditionally, even with no earlier sibling at all', async () => {
