@@ -41,6 +41,20 @@ The link is one level deep. Sync refuses a series that rides itself
 (`self_link`) and a host that itself rides another series
 (`host_is_rider`), so links never chain or cycle.
 
+Sync also refuses a rider that is not a genuine, currently-ongoing series
+root at its own address: a non-root row (`not_series_root`), a non-recurring
+row (`not_recurring`), a `recurring_ongoing`-false series (`not_ongoing`),
+one whose latest resolved `recurring_plan_alerts` decision is `cancel_series`
+or `let_lapse` (`plan_stopped` — a defense-in-depth check independent of the
+flag, since it and `not_ongoing` normally agree), and a rider whose host sits
+at a different, both-known `property_id` (`different_property` — a host at
+another address must never lend its tech/window to a visit at the rider's
+own address). These exist because the host-extend hook and the nightly
+reconcile reach a rider with no other per-action gate: a customer who
+cancels just the pest series (which clears `recurring_ongoing` and records
+`cancel_series`) but keeps lawn would otherwise get fresh, billable pest
+rows re-inserted the next time lawn extends.
+
 ## The date rule
 
 `server/services/rider-series.js#planRiderDates` — pure, no DB:
@@ -59,6 +73,12 @@ The link is one level deep. Sync refuses a series that rides itself
   rider is overdue: it takes the first host date within
   `OVERDUE_WAIT_DAYS` (28) of the floor, else a standalone date on the
   floor, and the walk continues normally from there.
+- A standalone fallback date also clears owner blackout days (the shared
+  `scheduling/blackout-dates.getBlackoutLayers` lookup, forward-only —
+  `planRiderDates`'s optional `blackoutDates` parameter), the same nudge
+  the seeder's own generator applies to every date it walks. A host date is
+  already the host series' own, already-cleared, date and is never
+  re-nudged.
 
 With lawn at a steady 42-day cadence, this lands the rider on every 2nd
 lawn date (84-day gaps). A skipped, paused or ended host falls back to its
@@ -78,11 +98,14 @@ own 84-day cadence rather than lapsing.
    `tryLockCustomerComms`; a miss on any of them skips with `host_locked` /
    `rider_locked` / `customer_locked`, writing nothing) — see "Locking"
    below.
-   After the comms lock it reads the customer `FOR SHARE NOWAIT` and
-   applies the same eligibility table as the visit-count top-up
-   (`services/series-customer-eligibility.js`): a deleted, genuinely
-   held, inactive or churned customer skips with that reason, and a
-   locked customer row skips with `customer_row_locked`.
+   Before the comms lock, the locked read also runs the rider-liveness and
+   different-property gates from "The link" above (`not_series_root` /
+   `not_recurring` / `not_ongoing` / `plan_stopped` / `different_property`)
+   — see `riderLivenessSkipReason`. After the comms lock it reads the
+   customer `FOR SHARE NOWAIT` and applies the same eligibility table as
+   the visit-count top-up (`services/series-customer-eligibility.js`): a
+   deleted, genuinely held, inactive or churned customer skips with that
+   reason, and a locked customer row skips with `customer_row_locked`.
    It then takes the annual-prepay namespace as a try-lock and applies the
    top-up's series rules to the rider (`prepayLockedSeriesSkipReason`,
    `routes/admin-schedule.js`): an annual-prepay series, a family on plan
@@ -100,12 +123,26 @@ own 84-day cadence rather than lapsing.
    `field_confirmed_at` set, a **non-null `visit_id`** (a grouped row's
    date is kept in sync with its `service_visits` stop only through
    visit-groups.js's own move paths — a plain UPDATE here would desync
-   it), a **reminder or confirmation already sent** (the authoritative
-   `appointment_reminders` ledger's `confirmation_sent` /
-   `reminder_72h_sent` / `reminder_24h_sent`, or this row's own
-   `confirmation_sms_sent_at` / `reminder_24h_sent` / `arrival_sms_sent_at`
-   / `prep_sent_at` stamps — owner ruling: existing customers' pest dates
-   move with NO texts, so a row the customer has already been told about
+   it), a **real, delivered customer-facing send about THIS row** (the
+   `messaging_audit_log` ledger — `appointment_id` = this row's id,
+   `purpose` in `appointment_confirmation` / `appointment_reminder_72h` /
+   `appointment_reminder_24h`, `sent_at IS NOT NULL` — the one durable
+   record of an actual send tied to a row, per
+   `appointment-reminders.js#safeSend`'s own comment; never the
+   `appointment_reminders` ledger's `confirmation_sent` / `reminder_72h_sent`
+   / `reminder_24h_sent` flags, which are bookkeeping and get set true with
+   NO send at all on a `sendConfirmation:false` registration, the cron's
+   self-heal insert, or — critically — a sibling-suppressed registration,
+   the exact shape a rider row takes the moment it joins its host's
+   date/window; pinning on those flags made every synced rider row
+   immovable within ~15 minutes and would have aligned nothing for PR 3's
+   backfill), or this row's own `arrival_sms_sent_at` / `prep_sent_at`
+   stamps (each genuinely claimed/confirmed around a real send —
+   `track-transitions.js` / `prep-guide-sender.js`; `confirmation_sms_sent_at`
+   and this row's own `scheduled_services.reminder_24h_sent` column are
+   never checked — neither has a writer anywhere in server code, so both
+   always read false/null — owner ruling: existing customers' pest dates
+   move with NO texts, so a row the customer has actually been told about
    is fixed), or **scheduled within the next `NEAR_TERM_DAYS` (7) days**
    of today. Conservative by design — never move or cancel a row the
    business or the customer is already committed to, and the immovable
@@ -118,32 +155,76 @@ own 84-day cadence rather than lapsing.
    even when it is near-term or still carries a leftover `visit_id`,
    invoice or sent-reminder stamp: only a completed row or a LIVE
    immovable row counts.
-5. Horizon = the host's last live future date, or (host has none) the
-   anchor plus `plannedVisitCountForPattern(pattern) * TARGET_GAP_DAYS`
-   days — the same visit count the seeder would plan for that pattern in a
-   year, spaced at the rider's own fallback interval.
+5. Horizon = the LATER of the host's last live future date and the
+   rider's own standalone horizon (the anchor, or the plan floor if later,
+   plus `plannedVisitCountForPattern(pattern) * TARGET_GAP_DAYS` days — the
+   same visit count the seeder would plan for that pattern in a year,
+   spaced at the rider's own fallback interval), computed by
+   `computeRiderHorizon` (exposed via `_internals` so tests can derive the
+   same horizon a real sync would). Clamping to just the host's last date
+   whenever it has any future row at all — the pre-fix rule — lapsed a
+   rider the instant its host was ending, however soon: the plan came back
+   empty and every movable rider row got cancelled as surplus. A host with
+   a single remaining row now still leaves the rider its own fallback
+   cadence for everything past that row. Since the anchor can itself
+   advance between sync passes (a row landing on a host date can become
+   immovable — completed, or grouped via `visit_id` — which makes IT the
+   new anchor), the horizon can grow between passes too; convergence to a
+   stable plan can take more than one sync, same as any other maintenance
+   sweep that re-derives its state from scratch each time.
 6. `planRiderDates` computes the plan; it's diffed against the rider's
    current **movable** future rows (live, non-immovable, and dated
    strictly after the anchor — the anchor row itself is never a diff
    candidate, see "Why the anchor is excluded" below):
-   - A row already on a planned date: kept, untouched.
+   - A row already on a planned date: **kept**. When that date is a host
+     date whose `window_start` / `window_end` / `technician_id` has since
+     drifted from the kept row's own (the host was re-windowed or
+     reassigned with no date change, and grouping was off or ineligible so
+     the row never picked it up another way), the row is additionally
+     **refreshed** onto the host's current fields — reported as its own
+     `refresh` list, separate from `move` (a kept row's date never
+     changes). A second sync after a refresh is a no-op: the fields now
+     match.
    - An unmatched movable row and an unmatched planned date are paired in
-     date order (move the row; when the target date is a host date, its
-     `window_start` / `window_end` / `technician_id` come along so the
-     rider actually joins that stop).
-   - A planned date with no row left to pair: a new row is inserted, built
-     off the rider's own most recently dated row (a field allowlist —
-     price, discount, service identity, property — the same fields
-     `buildRecurringFollowUpRows` and `extendSeriesOnceLocked` stamp on a
-     normal seeded/extended child; never re-derived), through the
-     `createScheduledService` booking contract.
+     date order (**move** the row; when the target date is a host date,
+     its `window_start` / `window_end` / `technician_id` come along so the
+     rider actually joins that stop). When the target is NOT a host date
+     (a standalone fallback), the destination is treated like any other
+     series writer's own insert target: the row's technician is re-resolved
+     for assignability/absence on that date (`assignableRecurringTemplateTechnicianId`
+     — nulled, never left on someone ineligible or marked out), and the
+     shared occupancy clash probe (`seriesCandidateDateClashes`) runs; a
+     clash skips this ONE pairing for this sync (logged, row left where it
+     is) rather than double-booking — a later sync re-diffs and retries.
+     Host-date targets are exempt from both checks: they intentionally
+     join the host's own already-placed, already-conflict-cleared stop.
+   - A planned date with no row left to pair: a new row is **inserted**,
+     built off the series PARENT with `recurring_template_overrides`
+     applied (`overlayRecurringTemplateOverrides` — the same canonical
+     template `extendSeriesOnceLocked` /
+     `runRecurringSeriesMaintenanceLocked` derive before copying anything
+     from `parent`), never the rider's own latest occurrence — an
+     occurrence-only ("this only") edit on the latest row must never
+     become the future template; only an "apply to following" edit
+     (which writes `recurring_template_overrides`) does. The insert copies
+     a field allowlist (price, discount, service identity, property — the
+     same fields `buildRecurringFollowUpRows` and `extendSeriesOnceLocked`
+     stamp on a normal seeded/extended child; never re-derived) through
+     the `createScheduledService` booking contract, then mirrors the
+     PARENT's own add-on lines run through `filterAddonLinesForDate` for
+     THIS insert's date (`insertRecurringChildAddons` — the same due-date
+     filter every other recurring writer applies; never a verbatim clone
+     of one occurrence's add-ons, which would ignore each add-on's own
+     recurrence envelope, e.g. a one-time fee). A standalone (non-host)
+     insert date gets the same tech-absence resolution and occupancy clash
+     probe a standalone move does, described above.
    - A movable row with no planned date left to pair: cancelled through
      `transitionJobStatus` (`notifyCustomer: 'caller_suppress'`, reason
      `rider_resync`) — never hard-deleted.
-   - Every insert/move calls `visit-groups.maybeGroupRow` so a rider lands
-     in the same visit as its host stop.
-7. `dryRun: true` returns the same `{ keep, move, insert, cancel }` shape
-   and writes nothing.
+   - Every insert/move/refresh calls `visit-groups.maybeGroupRow` so a
+     rider lands in the same visit as its host stop.
+7. `dryRun: true` returns the same `{ keep, move, refresh, insert, cancel }`
+   shape and writes nothing.
 
 **No customer communication.** Inserted/moved rows get their reminder rows
 from the existing self-heal sweep (`selfHealMissingReminderRows`, no
@@ -188,7 +269,17 @@ is skipped for that pass (`skipped: 'host_locked'` / `'rider_locked'` /
 **Hooked (sync fires in-band):**
 - A rider's own visit completing (`runRecurringSeriesMaintenanceLocked`).
 - A rider's own horizon top-up (`topUpRecurringSeriesLocked`).
-- A rider's plan-ending alert action (`runRecurringAlertAction`).
+- A rider's plan-ending alert action, but only for `extend` /
+  `convert_ongoing` (`runRecurringAlertAction`) — `let_lapse` deliberately
+  does NOT take the rider-sync detour: it falls through to the SAME
+  series-wide `recurring_ongoing = false` clear + alert-resolution logic
+  every other series gets. The rider branch used to run for every action
+  and return before that clear ever executed, so "let this rider lapse"
+  resynced (extended) it instead of stopping it. `convert_ongoing` on a
+  rider flips `recurring_ongoing = true` series-wide BEFORE syncing (the
+  same series-wide flip the non-rider `convert_ongoing` branch does) —
+  syncRiderSeries refuses a not-yet-ongoing rider (see "The link" above),
+  and reviving a lapsed plan needs the flag set first.
 - A host gaining rows via the seeder (`seedFollowUpsForParent`), auto-
   extend, or top-up (`extendSeriesOnceLocked`, shared by both) — every
   rider whose `rides_parent_id` points at that host is synced in the same
@@ -212,4 +303,19 @@ drift from an un-hooked path is caught within 24 hours.
 - `server/tests/rider-series-sync-postgres.test.js` — the reconciler
   against real migrated PostgreSQL: a lawn every_6_weeks + quarterly pest
   pair seeded through the real seeder, an immovable (invoiced) anchor, dry
-  run, idempotence, and the real completion auto-extend path.
+  run, idempotence, and the real completion auto-extend path. Also covers:
+  the parent+overrides insert template (never the latest occurrence), the
+  due-date-filtered add-on copy, `let_lapse` clearing `recurring_ongoing`
+  instead of resyncing, `convert_ongoing` flipping the flag before syncing,
+  `not_ongoing`, the standalone-date occupancy clash and tech-absence
+  checks, the kept-row window/tech refresh, the `messaging_audit_log`-based
+  immovability (including the sibling-suppressed-registration
+  fail-without-fix case), and the `not_series_root` / `plan_stopped` /
+  `different_property` liveness gates.
+- `server/tests/rider-series-lock-parity.test.js` — the shared advisory
+  lock's key derivation stays byte-identical to
+  `acquireRecurringSeriesMaintenanceLock`.
+- `server/tests/rider-series-reconcile.test.js` — the nightly sweep's job-
+  health summary: a per-rider `skipped: 'error'` counts toward
+  `summary.errors`, never `summary.skipped`, so a run where every rider
+  genuinely failed cannot read as a quietly healthy `skipped: N`.

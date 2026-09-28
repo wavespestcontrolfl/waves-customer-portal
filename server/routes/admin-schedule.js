@@ -24733,7 +24733,27 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // up, so this alert should not normally exist for one) resyncs from the
     // host instead of spawning independent dates. Dark until rides_parent_id
     // is set on real data (PR 2/3).
-    if (cols.rides_parent_id && parent.rides_parent_id) {
+    //
+    // action !== 'let_lapse' (Codex round-1 P1): this branch used to run for
+    // EVERY action and return before the let_lapse logic further below ever
+    // executed, so "let this rider lapse" resynced it (extending it) and
+    // never cleared recurring_ongoing — the exact opposite of what the
+    // office asked for. Only extend/convert_ongoing take the rider-sync
+    // detour; let_lapse falls through to the SAME series-wide
+    // recurring_ongoing=false clear every other series gets.
+    if (cols.rides_parent_id && parent.rides_parent_id && action !== 'let_lapse') {
+      // convert_ongoing on a rider must flip recurring_ongoing=true BEFORE
+      // syncing — syncRiderSeries now refuses (skipped: 'not_ongoing') a
+      // parent whose flag reads false, the same not-ongoing rule the top-up
+      // and the nightly reconcile honor, so an ended plan the office is
+      // deliberately reviving needs the flag set first, mirroring the
+      // non-rider convert_ongoing branch below (series-wide, base rows only).
+      if (action === 'convert_ongoing' && cols.recurring_ongoing && !parent.recurring_ongoing) {
+        await trx('scheduled_services')
+          .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+          .where('is_recurring', true)
+          .update({ recurring_ongoing: true });
+      }
       const riderSync = await require('../services/rider-series').syncRiderSeries(trx, parentId, { source: 'alert_action' });
       if (riderSync.skipped) {
         // A skip (lock contention, the host link changing under us, a
@@ -25685,3 +25705,12 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
+// Rider series (pest-rides-the-lawn-rhythm PR 1) — consumed lazily by
+// services/rider-series.js so its own inserted rows carry the SAME due
+// add-on set, insert helper, occupancy clash probe and tech-absence
+// resolution every other series writer uses, never a second copy of any of
+// them (same avoid-a-route-load-cycle reason as the exports above).
+module.exports.filterAddonLinesForDate = filterAddonLinesForDate;
+module.exports.insertRecurringChildAddons = insertRecurringChildAddons;
+module.exports.seriesCandidateDateClashes = seriesCandidateDateClashes;
+module.exports.assignableRecurringTemplateTechnicianId = assignableRecurringTemplateTechnicianId;

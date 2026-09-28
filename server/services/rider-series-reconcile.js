@@ -34,7 +34,16 @@ async function runRiderSeriesReconcileSweep({ parentIds = null } = {}) {
   for (const parentId of ids) {
     try {
       const result = await syncRiderSeries(db, parentId, { source: 'nightly_reconcile' });
-      if (result.skipped) {
+      if (result.skipped === 'error') {
+        // syncRiderSeries itself already caught and logged the real error
+        // (it never lets one rider's exception escape the sweep) — that
+        // per-rider failure must count toward job health (P2 fix #8), not
+        // vanish into summary.skipped alongside benign, expected skips
+        // (lock contention, an ineligible customer, ...). A run where
+        // every rider errored otherwise reads as a healthy "skipped: N",
+        // never surfacing to whatever watches this summary.
+        summary.errors.push({ parentId, error: 'sync failed (see server logs for the underlying error)' });
+      } else if (result.skipped) {
         summary.skipped[result.skipped] = (summary.skipped[result.skipped] || 0) + 1;
       } else {
         summary.synced += 1;
