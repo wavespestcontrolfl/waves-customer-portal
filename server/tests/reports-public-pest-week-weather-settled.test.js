@@ -77,6 +77,65 @@ describe('settledWeekWeatherForRender', () => {
   test('the v1 response builder routes the fetched week through the settle check before buildPestReportV2', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
     expect(source).toMatch(/const \[fetchedWeekWeather, forecastHeavyRain\] = expectationsGateOn/);
-    expect(source).toMatch(/const weekWeather = settledWeekWeatherForRender\(fetchedWeekWeather, mode\);[\s\S]{0,400}buildPestReportV2\(\{/);
+    expect(source).toMatch(/const weekWeather = settledWeekWeatherForRender\(fetchedWeekWeather, mode\);[\s\S]{0,1600}buildPestReportV2\(\{/);
+  });
+});
+
+// Codex P0 2026-09-28: a PDF/static render whose week never SETTLED (still
+// an open window) dropped its rain fact via settledWeekWeatherForRender
+// above, but nothing marked the document uncacheable — so it was stored
+// under the stable pest-line PDF key with no rain block, and later
+// downloads kept serving that "no rain block" copy forever even once the
+// window closed. Mirrors the lawn week-weather freeze's own
+// weekWeatherUncacheable contract (lawn-week-weather-freeze.test.js).
+describe('pestWeekWeatherUncacheable — PDF/static renders never bake an unsettled window into the cache', () => {
+  test('reports-public.js computes it from the SAME fetched week/mode the rain block used, and sets it on `data` regardless of pestReportV2 composing', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    expect(source).toMatch(
+      /const pestWeekWeatherUncacheable = expectationsGateOn[\s\S]{0,200}mode !== 'live'[\s\S]{0,200}fetchedWeekWeather\.windowClosed !== true;/,
+    );
+    expect(source).toMatch(/data\.pestWeekWeatherUncacheable = pestWeekWeatherUncacheable;/);
+  });
+
+  test('BOTH PDF cache-decision sites consult it — the direct route (reports-public.js) and the queued renderer (pdf-queue.js)', () => {
+    const reportsPublic = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'pdf-queue.js'), 'utf8');
+    for (const src of [reportsPublic, pdfQueue]) {
+      expect(src).toMatch(/renderedData\?\.pestWeekWeatherUncacheable/);
+    }
+    // reports-public.js branches AROUND the putReportPdf call, same as the
+    // lawn guard immediately above it.
+    expect(reportsPublic).toMatch(/renderedData\?\.pestWeekWeatherUncacheable\)[\s\S]{0,600}\} else if/);
+    // pdf-queue.js returns the bytes with no key rather than storing.
+    expect(pdfQueue).toMatch(/renderedData\?\.pestWeekWeatherUncacheable\)[\s\S]{0,300}uncached: true/);
+  });
+
+  test('pdf-queue.js never composes pestReportV2 itself — it learns the fact through pestWeekWeatherUncacheableForPdf, mode: "static"', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'pdf-queue.js'), 'utf8');
+    expect(pdfQueue).not.toMatch(/buildPestReportV2/);
+    expect(pdfQueue).toMatch(/pestWeekWeatherUncacheableForPdf\(service, \{ mode: 'static' \}\)/);
+  });
+
+  test('the shared pestWeekWeatherUncacheableForPdf is fail-open (false) and never live', () => {
+    const { pestWeekWeatherUncacheableForPdf } = require('../services/service-report/pest-report-v2');
+    const ORIGINAL_GATE = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    process.env.PEST_REPORT_V2 = 'true';
+    return Promise.resolve()
+      .then(async () => {
+        // LIVE is never uncacheable this way, even with a broken service row.
+        await expect(pestWeekWeatherUncacheableForPdf({}, { mode: 'live' })).resolves.toBe(false);
+        // No coordinates at all => the fetch resolves null => not uncacheable
+        // (nothing rain-derived is at risk of being cached stale).
+        await expect(pestWeekWeatherUncacheableForPdf({ service_line: 'pest' }, { mode: 'static' })).resolves.toBe(false);
+        // Gate off => always false regardless of mode.
+        process.env.GATE_PEST_REPORT_EXPECTATIONS = 'false';
+        await expect(pestWeekWeatherUncacheableForPdf({ service_line: 'pest' }, { mode: 'static' })).resolves.toBe(false);
+      })
+      .finally(() => {
+        process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL_GATE;
+        process.env.PEST_REPORT_V2 = ORIGINAL_V2;
+      });
   });
 });

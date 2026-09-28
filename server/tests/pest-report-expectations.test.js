@@ -174,7 +174,10 @@ describe('classifyProductExpectation — explicit product-name map (no heuristic
     [{ name: 'Atticus Talak 7.9 F' }, 'pyrethroid'],
     [{ name: 'Demand CS' }, 'pyrethroid'],
     [{ name: 'Onslaught Fastcap' }, 'pyrethroid'],
-    [{ name: 'Delta Dust' }, 'pyrethroid'],
+    // Delta Dust is its OWN class ('dust'), not 'pyrethroid' (owner ruling
+    // 2026-09-28, P1 audit round 2): a dust formulation is never a surface
+    // barrier — see the 'dust' class copy in buildWhatToExpect below.
+    [{ name: 'Delta Dust' }, 'dust'],
     [{ name: 'Advion Evolution Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Cockroach Gel Bait' }, 'roach_gel_bait'],
     [{ name: 'Advion Ant Bait Gel' }, 'ant_bait'],
@@ -280,6 +283,73 @@ describe('buildWhatToExpect', () => {
     expect(buildWhatToExpect({ products: [{ name: 'LESCO 90/10 Nonionic Surfactant' }] })).toBeNull();
   });
 
+  // P1-D fix (owner ruling 2026-09-28, P1 audit round 2): Delta Dust is a
+  // DUST formulation (cracks/voids), never a surface barrier — it must
+  // never share the pyrethroid barrier copy or mention doors/windows.
+  describe('Delta Dust — dedicated dust class, never a barrier claim', () => {
+    it('gets its own dust-class line, not the pyrethroid barrier line', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Delta Dust' }] });
+      expect(out.lines).toHaveLength(1);
+      expect(out.lines[0]).toMatch(/cracks, voids/);
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+
+    it('still gets the dust line even applied via an exterior/perimeter method (the class, not the method, decides)', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Delta Dust', method: 'perimeter_spray', methodInferred: false }],
+      });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+  });
+
+  // P1-D fix, second half: even an actual pyrethroid SPRAY product (Demand
+  // CS / Onslaught Fastcap / Atticus Talak 7.9 F) only earns the barrier
+  // claim with CONFIRMED exterior/perimeter application evidence — method
+  // and area were previously discarded before classification.
+  describe('pyrethroid barrier claim requires confirmed exterior/perimeter application evidence', () => {
+    it('EXPLICIT exterior method (methodInferred: false) earns the barrier line', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Demand CS', method: 'perimeter_spray', methodInferred: false }],
+      });
+      expect(out.lines[0]).toMatch(/barrier treatment/);
+      expect(out.lines[0]).toMatch(/near doors and windows/);
+    });
+
+    it('an applicationArea naming an exterior/perimeter chip earns the barrier line even with no explicit method', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter' }],
+      });
+      expect(out.lines[0]).toMatch(/barrier treatment/);
+    });
+
+    it('UNKNOWN method/area (nothing recorded) falls back to non-barrier wording for the SAME product class', () => {
+      const out = buildWhatToExpect({ products: [{ name: 'Demand CS' }] });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+      expect(out.lines[0]).toMatch(/keeps working after it's applied/);
+    });
+
+    it('an INFERRED method (methodInferred: true) is treated as UNKNOWN, never assumed exterior — even though the pest-line default guess IS perimeter_spray', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Onslaught Fastcap', method: 'perimeter_spray', methodInferred: true }],
+      });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+
+    it('an EXPLICIT interior/non-perimeter method never earns the barrier line', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Atticus Talak 7.9 F', method: 'spot_treatment', methodInferred: false, applicationArea: 'Kitchen' }],
+      });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+
+    it('never guarantees/eliminates in either pyrethroid wording', () => {
+      const confirmed = buildWhatToExpect({ products: [{ name: 'Demand CS', method: 'perimeter_spray', methodInferred: false }] });
+      const unconfirmed = buildWhatToExpect({ products: [{ name: 'Demand CS' }] });
+      expect(confirmed.lines[0]).not.toMatch(/guarantee|eliminat/i);
+      expect(unconfirmed.lines[0]).not.toMatch(/guarantee|eliminat/i);
+    });
+  });
+
   it('one line per class, de-duplicated across products of the same class (two roach-gel product names)', () => {
     const out = buildWhatToExpect({
       products: [
@@ -368,10 +438,26 @@ describe('buildSpiderExpectation', () => {
     expect(out.whatWeDid).not.toMatch(/SKU-4471/);
   });
 
-  it('action recorded AND a spider-labeled pyrethroid residual (from the explicit map) applied: combined wording', () => {
+  // P1-C fix (owner ruling 2026-09-28, P1 audit round 2): a spider-targeted
+  // pyrethroid applied ANYWHERE is not evidence the EAVES were treated —
+  // the sweep-only eave action alone (treatmentApplied: false) must not be
+  // combined with an unrelated product's spider tag to claim a residual is
+  // present. This is the exact false-positive the fix closes: NO area
+  // evidence tying the product to the eaves, and NO separately-recorded
+  // eave TREATMENT (only the sweep) => de-web wording, never combined.
+  it('spider-targeted pyrethroid applied with NO location evidence tying it to the eaves: de-web wording only (no false residual credit)', () => {
     const out = buildSpiderExpectation({
       actionLabels: EAVE_ACTION,
       applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+    expect(out.expectation).not.toMatch(/residual we applied/i);
+  });
+
+  it('action recorded AND a spider-labeled pyrethroid residual applied WITH its own application area naming eaves/soffit: combined wording', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }],
     });
     expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
     expect(out.expectation).toMatch(/residual we applied/i);
@@ -379,10 +465,29 @@ describe('buildSpiderExpectation', () => {
     expect(out.nextStep).toMatch(/come take another look/);
   });
 
+  it('action recorded AND a spider-labeled pyrethroid residual applied, AND the visit separately recorded a genuine (treatmentApplied: true) eave action: combined wording', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      actionEntries: [{ label: 'Treated eaves and soffit with residual', treatmentApplied: true }],
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }], // no area of its own
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+    expect(out.expectation).toMatch(/residual we applied/i);
+  });
+
+  it('a SWEEP-only actionEntries (treatmentApplied: false) does NOT count as eave-treatment evidence', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      actionEntries: [{ label: EAVE_ACTION[0], treatmentApplied: false }],
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+  });
+
   it('action recorded, a spider-targeted product applied but it is NOT pyrethroid-classified: still de-web only (no false residual credit)', () => {
     const out = buildSpiderExpectation({
       actionLabels: EAVE_ACTION,
-      applications: [{ product: { name: 'Taurus SC' }, targets: ['spiders'] }], // non_repellent, not pyrethroid
+      applications: [{ product: { name: 'Taurus SC' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }], // non_repellent, not pyrethroid
     });
     expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
   });
@@ -390,7 +495,7 @@ describe('buildSpiderExpectation', () => {
   it('action recorded, a pyrethroid product applied but NOT targeted for spiders: still de-web only', () => {
     const out = buildSpiderExpectation({
       actionLabels: EAVE_ACTION,
-      applications: [{ product: { name: 'Demand CS' }, targets: ['ants'] }],
+      applications: [{ product: { name: 'Demand CS' }, targets: ['ants'], applicationArea: 'Eaves / soffit' }],
     });
     expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
   });
@@ -398,7 +503,10 @@ describe('buildSpiderExpectation', () => {
   it('never guarantees a result, in either combo', () => {
     const combos = [
       buildSpiderExpectation({ actionLabels: EAVE_ACTION, applications: [] }),
-      buildSpiderExpectation({ actionLabels: EAVE_ACTION, applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'] }] }),
+      buildSpiderExpectation({
+        actionLabels: EAVE_ACTION,
+        applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffit' }],
+      }),
     ];
     for (const out of combos) {
       expect(out.expectation + out.nextStep).not.toMatch(/guarantee/i);

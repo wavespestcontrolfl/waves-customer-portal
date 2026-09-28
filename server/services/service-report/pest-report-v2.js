@@ -220,19 +220,29 @@ function buildPestReportV2({
   customerConcern = null,
   suppressDefense = false,
   // "Expectations" blocks (owner-approved 2026-09-27, dark behind
-  // GATE_PEST_REPORT_EXPECTATIONS): applications carries the same shape
-  // report-data.js's `data.applications` already builds
-  // ({ product: { active_ingredient, category, moa_group, rainfast_minutes },
-  // targets: [...] }); actionLabels is report-data.js's
-  // completedProtocolActionLabels(service) — SERVER-INTERNAL ONLY (raw
-  // protocol-action labels never reach the public report payload; the
-  // caller computes this directly from `service`, never from returned
-  // report data); weekWeather is application-conditions.js's fetchServiceWeekWeather
+  // GATE_PEST_REPORT_EXPECTATIONS): applications MIXES a public shape
+  // (report-data.js's `data.applications` — name/targets/applicationArea/
+  // method/methodInferred, all already public) with the moa_group /
+  // rainfast_minutes facts ONLY report-data.js's expectationFactsOut
+  // out-param carries (codex P0 2026-09-28: those two facts must never
+  // reach the public payload), shaped { id, product: { name, moa_group,
+  // rainfast_minutes }, targets: [...], applicationArea, method,
+  // methodInferred }; actionLabels is report-data.js's
+  // completedProtocolActionLabels(service) — SERVER-INTERNAL ONLY the same
+  // way (raw protocol-action labels never reach the public report payload;
+  // the caller computes this directly from `service`, never from returned
+  // report data) — used only for the spider section's gate; actionEntries
+  // is report-data.js's completedProtocolActionEntries(service),
+  // { label, treatmentApplied }[], SERVER-INTERNAL ONLY the same way — used
+  // for the spider section's residual-evidence check (codex P1 2026-09-28:
+  // a sweep, treatmentApplied: false, must not count as a treatment);
+  // weekWeather is application-conditions.js's fetchServiceWeekWeather
   // result ({ rainInches, rainConfidence }); forecastHeavyRain is LIVE VIEW
   // ONLY (see pest-report-expectations.js) and must be false/omitted for
   // any PDF/static render; serviceMonth is 1–12.
   applications = [],
   actionLabels = [],
+  actionEntries = [],
   weekWeather = null,
   forecastHeavyRain = false,
   serviceMonth = null,
@@ -305,7 +315,7 @@ function buildPestReportV2({
   // convention as `defense` / `aiSummary` / `forecast` below.
   const expectations = pestReportExpectationsGateOn()
     ? buildPestExpectations({
-      weekWeather, applications, actionLabels, serviceMonth, forecastHeavyRain,
+      weekWeather, applications, actionLabels, actionEntries, serviceMonth, forecastHeavyRain,
     })
     : null;
 
@@ -395,12 +405,70 @@ function pestReportV2PdfSignature(service = {}) {
   return `-pestv2c${tonSuffix}${pexSuffix}`;
 }
 
+// Best-effort, fail-open (null) week-weather fetch — mirrors
+// reports-public.js's own fetchPestWeekWeatherSafe. Kept here too (rather
+// than re-implemented ad hoc) so pdf-queue.js's queued renderer — which
+// never composes pestReportV2 itself; the actual PDF bytes come from a real
+// HTTP round-trip to the report page fetching its own /data — can still
+// learn the SAME settledness fact the served render will use.
+async function fetchPestWeekWeatherForCache(service) {
+  try {
+    const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+    const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
+    const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
+    if (lat == null || lng == null) return null;
+    return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
+  } catch {
+    return null;
+  }
+}
+
+// Whether a PDF/static render of this pest-line record must be treated as
+// UNCACHEABLE because the rain block's trailing 7-day window is still open
+// (codex P0 2026-09-28 — same rule as the lawn week-weather freeze in
+// report-data.js: a render whose week is not yet SETTLED is not
+// reproducible, so a durably cached copy would keep serving the "no rain
+// block" bytes forever even after the window closes and a later render
+// would include it). LIVE view is never uncacheable this way — mode ===
+// 'live' always returns false, since only a durably cached PDF/static
+// render is the risk this guards.
+//
+// Callable directly by BOTH PDF cache-decision sites: reports-public.js's
+// direct PDF route (through buildServiceReportV1ResponseData, which
+// composes pestReportV2 itself and already has a fetched week to check —
+// see reports-public.js's own pestWeekWeatherUncacheable) and
+// pdf-queue.js's queued renderer, which calls buildReportV1Data directly
+// and never composes pestReportV2 at all — this function is the ONLY
+// channel that render has to the same fact. Best-effort / fail-open
+// (false): a weather hiccup must never block a PDF render, only widen its
+// cache eligibility back to the pre-fix behavior — no worse than before
+// this close.
+async function pestWeekWeatherUncacheableForPdf(service = {}, { mode } = {}) {
+  if (mode === 'live' || process.env.PEST_REPORT_V2 !== 'true' || !pestReportExpectationsGateOn()) {
+    return false;
+  }
+  const serviceLine = service.service_line || detectServiceLine(service.service_type);
+  if (serviceLine !== 'pest') return false;
+  // Same cockroach-family exclusion pestReportV2PdfSignature uses above —
+  // those typed reports never compose the V2 dashboard/expectations at all,
+  // so their rain window is never at risk of being baked into a cache key.
+  try {
+    const parsed = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    if (isCockroachTypedReportType(parsed?.typedReportSnapshot?.type)) return false;
+  } catch { /* fall through — an unparsable snapshot is not a cockroach report */ }
+  const weekWeather = await fetchPestWeekWeatherForCache(service);
+  return !!weekWeather && weekWeather.windowClosed !== true;
+}
+
 module.exports = {
   buildPestReportV2,
   buildCustomerConcernCard,
   pestReportV2PdfSignature,
   pestTraceOrNothingGateOn,
   pestReportExpectationsGateOn,
+  pestWeekWeatherUncacheableForPdf,
   isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,

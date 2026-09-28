@@ -743,6 +743,31 @@ function completedProtocolActionLabels(service = {}) {
   )];
 }
 
+// Same two sources as completedProtocolActionLabels, but keeping
+// treatmentApplied per entry — completedProtocolActionLabels's plain label
+// strings drop it. Needed by the Pest Report V2 spider "residual/treated"
+// wording (codex P1 2026-09-28): a sweep-only eave action (treatmentApplied:
+// false) must not be combined with an unrelated product's spider tag to
+// claim the eaves were actually treated — see pest-report-expectations.js's
+// buildSpiderExpectation. SERVER-INTERNAL ONLY, same contract as
+// completedProtocolActionLabels: never attached to `data`/the object
+// buildReportV1Data returns.
+function completedProtocolActionEntries(service = {}) {
+  const structured = parseJsonObject(service.structured_notes);
+  const entries = []
+    .concat(Array.isArray(service.protocolActionScopesCompleted) ? service.protocolActionScopesCompleted : [])
+    .concat(Array.isArray(structured.protocolActionScopesCompleted) ? structured.protocolActionScopesCompleted : []);
+  const seen = new Set();
+  const result = [];
+  for (const entry of entries) {
+    const label = String(entry?.label || '').trim();
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    result.push({ label, treatmentApplied: entry?.treatmentApplied === true });
+  }
+  return result;
+}
+
 // Controlled treatment-area labels carry an explicit scope
 // (shared/treatment-area-scopes.json — every chip vocabulary the completion
 // panel offers is classified there, and a test enumerates them). The regex
@@ -3794,10 +3819,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         label_verified_at: product.approved_report_product_facts?.labelVerifiedAt || null,
         label_version: product.approved_report_product_facts?.labelVersion || null,
         facts_approved: !!product.approved_report_product_facts,
-        // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
-        // see attachApprovedReportProductFacts / approvedReportProductFacts.
-        moa_group: product.approved_report_product_facts?.moaGroup || null,
-        rainfast_minutes: product.approved_report_product_facts?.rainfastMinutes ?? null,
+        // moa_group / rainfast_minutes are DELIBERATELY NOT here (codex P0
+        // 2026-09-28): they classify the Pest Report V2 "expectations" copy
+        // (pest-report-expectations.js) but are server-internal facts, never
+        // part of the public /api/reports/:token/data payload (gate on or
+        // off, every service line). See expectationFactsOut below — the
+        // ONLY channel that carries them to the render path.
       },
       method,
       // Explicit vs inferred decides whether pesticide identity may override
@@ -3817,6 +3844,25 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       appliedAt: product.applied_at || product.created_at,
     };
   });
+  // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS) —
+  // moa_group / rainfast_minutes classify the what-to-expect / rain-fast
+  // copy (pest-report-expectations.js) but must NEVER reach the public
+  // payload (codex P0 2026-09-28). Handed to the caller ONLY through this
+  // opt-in out-param — never attached to `applications`/the object this
+  // function returns — same "server-internal, never on `data`" contract
+  // completedProtocolActionLabels uses for raw protocol-action labels.
+  // Aligned to `applications` by index (both map 1:1 over `products`).
+  if (opts.expectationFactsOut && typeof opts.expectationFactsOut === 'object') {
+    opts.expectationFactsOut.applications = applications.map((app, index) => ({
+      id: app.id,
+      product: {
+        name: app.product.name,
+        moa_group: products[index]?.approved_report_product_facts?.moaGroup || null,
+        rainfast_minutes: products[index]?.approved_report_product_facts?.rainfastMinutes ?? null,
+      },
+      targets: app.targets,
+    }));
+  }
   const evidenceLevel = serviceData.evidenceLevel
     || serviceData.evidence_level
     || structured.evidenceLevel
@@ -5807,6 +5853,7 @@ module.exports = {
   approvedReportProductFacts,
   attachApprovedReportProductFacts,
   completedProtocolActionLabels,
+  completedProtocolActionEntries,
   loadLawnProgramOverviewContext,
   normalizeAdvisoryForTreatmentScope,
   buildCompletionAdvisory,

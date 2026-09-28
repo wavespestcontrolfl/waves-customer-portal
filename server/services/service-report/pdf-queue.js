@@ -20,7 +20,7 @@ const {
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
-const { pestReportV2PdfSignature } = require('./pest-report-v2');
+const { pestReportV2PdfSignature, pestWeekWeatherUncacheableForPdf } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('./reservice-report');
@@ -258,6 +258,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (codex P1 #3600 r11).
     attachTermiteReportV2(data, service);
     attachCockroachReportV2(data, service);
+    // This path never composes pestReportV2 itself (the actual bytes come
+    // from the browser's own /data fetch below), so it has no other way to
+    // learn whether the pest rain block's 7-day window is still open — see
+    // pestWeekWeatherUncacheableForPdf's own comment (codex P0 2026-09-28).
+    data.pestWeekWeatherUncacheable = await pestWeekWeatherUncacheableForPdf(service, { mode: 'static' });
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -350,6 +355,19 @@ async function renderAndStoreServiceReportPdf(recordId, {
       return {
         key: null, pdf, rendered: true, token: reportToken, uncached: true,
         uncachedReason: reason,
+      };
+    }
+    // Mirrors the lawn guard above for the pest-line rain block (codex P0
+    // 2026-09-28): a still-OPEN 7-day window is not yet reproducible, so
+    // storing it under the stable '-pex1' key would serve the "no rain
+    // block" bytes forever even after the window settles and a later render
+    // would include it. Wait for the window to close; no amount of retrying
+    // resolves it any sooner.
+    if (renderedData?.pestWeekWeatherUncacheable) {
+      logger.warn(`[service-report-pdf] pest week weather unsettled for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'pest_week_weather_unsettled',
       };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });

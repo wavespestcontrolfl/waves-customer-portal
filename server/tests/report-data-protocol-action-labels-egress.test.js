@@ -99,3 +99,95 @@ describe('protocolActionLabels never reaches the public v1 payload', () => {
     expect(JSON.stringify(data)).not.toContain('Swept eaves');
   });
 });
+
+// moa_group / rainfast_minutes (codex P0 2026-09-28): these classify the
+// Pest V2 "what to expect" / rain-fast copy (pest-report-expectations.js)
+// but are server-internal facts, never part of the public
+// /api/reports/:token/data payload — report-data.js hands them to the
+// caller ONLY through the expectationFactsOut out-param, the same
+// "server-internal, never on `data`" contract completedProtocolActionLabels
+// uses above.
+function deepHasKey(value, key, seen = new Set()) {
+  if (!value || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((v) => deepHasKey(v, key, seen));
+  if (Object.prototype.hasOwnProperty.call(value, key)) return true;
+  return Object.values(value).some((v) => deepHasKey(v, key, seen));
+}
+
+const MOA_MARKER = 'INTERNAL-MOA-MARKER-7f3a9c';
+const RAINFAST_MINUTES = 474747;
+
+const PRODUCT_FIXTURES = {
+  ...FIXTURES,
+  service_products: [
+    {
+      id: 'sp-actionlabels-1',
+      service_record_id: SERVICE.id,
+      product_id: 'cat-actionlabels-1',
+      product_name: 'Distinctive Egress Test Product',
+      product_category: 'insecticide',
+      active_ingredient: 'Test Active',
+      application_rate: '1',
+      rate_unit: 'oz',
+      total_amount: 1,
+      amount_unit: 'oz',
+      application_area: 'Perimeter',
+      targets: JSON.stringify(['ants']),
+      created_at: '2026-07-16T00:00:00Z',
+    },
+  ],
+  products_catalog: [
+    {
+      id: 'cat-actionlabels-1',
+      name: 'Distinctive Egress Test Product',
+      category: 'insecticide',
+      product_type: 'pesticide',
+      epa_reg_number: 'EPA-99999-1',
+      approved_for_service_report: true,
+      moa_group: MOA_MARKER,
+      rainfast_minutes: RAINFAST_MINUTES,
+      active_ingredient: 'Test Active',
+    },
+  ],
+};
+
+describe('moa_group / rainfast_minutes never reach the public v1 payload (codex P0 2026-09-28)', () => {
+  const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
+  afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
+
+  test('gate OFF: applications[].product carries no moa_group/rainfast_minutes key anywhere', async () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const data = await buildReportV1Data(SERVICE, 'token-moa-off', makeKnex(PRODUCT_FIXTURES));
+    expect(data.applications).toHaveLength(1);
+    expect(data.applications[0].product.name).toBe('Distinctive Egress Test Product');
+    expect(deepHasKey(data, 'moa_group')).toBe(false);
+    expect(deepHasKey(data, 'rainfast_minutes')).toBe(false);
+    expect(deepHasKey(data, 'moaGroup')).toBe(false);
+    expect(deepHasKey(data, 'rainfastMinutes')).toBe(false);
+    expect(JSON.stringify(data)).not.toContain(MOA_MARKER);
+  });
+
+  test('gate ON: STILL no moa_group/rainfast_minutes key anywhere (buildReportV1Data never reads this gate)', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const data = await buildReportV1Data(SERVICE, 'token-moa-on', makeKnex(PRODUCT_FIXTURES));
+    expect(deepHasKey(data, 'moa_group')).toBe(false);
+    expect(deepHasKey(data, 'rainfast_minutes')).toBe(false);
+    expect(deepHasKey(data, 'moaGroup')).toBe(false);
+    expect(deepHasKey(data, 'rainfastMinutes')).toBe(false);
+    expect(JSON.stringify(data)).not.toContain(MOA_MARKER);
+  });
+
+  test('expectationFactsOut out-param carries the facts the public payload withholds', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const expectationFactsOut = {};
+    const data = await buildReportV1Data(SERVICE, 'token-moa-outparam', makeKnex(PRODUCT_FIXTURES), { expectationFactsOut });
+    expect(expectationFactsOut.applications).toHaveLength(1);
+    expect(expectationFactsOut.applications[0].product.moa_group).toBe(MOA_MARKER);
+    expect(expectationFactsOut.applications[0].product.rainfast_minutes).toBe(RAINFAST_MINUTES);
+    // The out-param is never attached to the returned object itself.
+    expect(deepHasKey(data, 'moa_group')).toBe(false);
+    expect(deepHasKey(data, 'rainfast_minutes')).toBe(false);
+  });
+});

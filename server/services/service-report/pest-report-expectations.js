@@ -168,10 +168,23 @@ function buildRainExpectation({
 // no spider section, full stop — never inferred from a product target
 // alone. actionLabels: raw completed-action label strings for the visit
 // (server-internal only — see report-data.js's completedProtocolActionLabels;
-// never rendered verbatim, only matched). applications: the same array
-// pest-report-v2 builds ({ product: {...}, targets: [...] }).
+// never rendered verbatim, only matched) — used ONLY for the section gate
+// above. actionEntries: the same completed actions WITH treatmentApplied
+// preserved (report-data.js's completedProtocolActionEntries,
+// { label, treatmentApplied }[], server-internal only) — used for the
+// residual-evidence check below, where a sweep (treatmentApplied: false)
+// must not count as a treatment. applications: the same array pest-report-v2
+// builds ({ product: {...}, targets: [...], applicationArea, ... }).
 const SPIDER_ACTION_RE = /\b(eave|eaves|web|webs|webbing|soffit|cobweb)\b/i;
 const SPIDER_TARGET_RE = /spider/i;
+// Structured application-area evidence that the eaves/soffit specifically
+// were worked (owner ruling 2026-09-28, P1 audit round 2: a spider-targeted
+// pyrethroid applied ANYWHERE previously earned the residual/treated
+// wording even when the tech only SWEPT the eaves — treatmentApplied:
+// false — while separately spraying somewhere unrelated). Matches the
+// controlled application-area chip vocabulary (shared/treatment-area-scopes.json
+// — "Eaves / soffit(s)"), never free text like technician notes.
+const EAVE_AREA_RE = /\b(eaves?|soffits?|overhang)\b/i;
 
 // Fixed customer wording only — a raw completed protocol-action label is
 // NEVER rendered here; it is used only to decide the action gate above.
@@ -197,7 +210,7 @@ const RESIDUAL_EXPECTATION = 'New webs can appear within days as new spiders arr
   + 'noticeably thin out over about two weeks.';
 const RESIDUAL_NEXT_STEP = 'If it hasn\'t thinned out by then, text us and we\'ll come take another look.';
 
-function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
+function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applications = [] } = {}) {
   const actionHit = (actionLabels || []).some(
     (label) => SPIDER_ACTION_RE.test(cleanText(label)),
   );
@@ -205,12 +218,27 @@ function buildSpiderExpectation({ actionLabels = [], applications = [] } = {}) {
   // spider-targeted product (see module note above).
   if (!actionHit) return null;
 
-  // A spider-labeled residual actually applied: tech-tagged for spiders
-  // AND classified pyrethroid by the explicit product-name map — never a
-  // target tag alone (that was the P1 this replaces).
+  // A genuine eave TREATMENT recorded for the visit — not just a sweep
+  // (protocol marks a sweep treatmentApplied: false, and that alone is not
+  // application evidence the eaves were treated; see the module note above
+  // and the P1-C fix this closes). Visit-wide, not tied to one product.
+  const eaveActionTreated = (actionEntries || []).some(
+    (entry) => entry?.treatmentApplied === true && SPIDER_ACTION_RE.test(cleanText(entry?.label)),
+  );
+
+  // A spider-labeled residual actually applied: tech-tagged for spiders,
+  // classified pyrethroid by the explicit product-name map (never a target
+  // tag alone — that was the FIRST P1 this replaced), AND now also tied to
+  // the eaves/soffit area (owner ruling 2026-09-28, P1 audit round 2): the
+  // application's OWN recorded area names eaves/soffit/overhang, OR the
+  // visit separately recorded a genuine (treatmentApplied: true) eave
+  // action above. A product applied somewhere else entirely — the eaves
+  // only ever SWEPT — no longer earns the residual/treated wording.
   const residualApplied = (applications || []).some((app) => {
     const targeted = Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t)));
-    return targeted && classifyProductExpectation(toExpectationProduct(app)) === 'pyrethroid';
+    if (!targeted || classifyProductExpectation(toExpectationProduct(app)) !== 'pyrethroid') return false;
+    const areaEvidence = EAVE_AREA_RE.test(cleanText(app?.applicationArea));
+    return areaEvidence || eaveActionTreated;
   });
 
   const whatWeDid = residualApplied ? WEB_AND_RESIDUAL_TEXT : WEB_ONLY_TEXT;
@@ -245,7 +273,12 @@ const PRODUCT_EXPECTATION_CLASS = new Map([
   ['atticus talak 7.9 f', 'pyrethroid'],
   ['demand cs', 'pyrethroid'],
   ['onslaught fastcap', 'pyrethroid'],
-  ['delta dust', 'pyrethroid'],
+  // Delta Dust is its own class, NOT 'pyrethroid' (owner ruling 2026-09-28,
+  // P1 audit round 2): it is a DUST formulation applied into cracks/voids,
+  // never a surface barrier — the old shared mapping told a customer whose
+  // dust went into an interior void that "the barrier treatment... near
+  // doors and windows" was working. See the 'dust' class copy below.
+  ['delta dust', 'dust'],
   ['advion evolution cockroach gel bait', 'roach_gel_bait'],
   ['advion cockroach gel bait', 'roach_gel_bait'],
   ['advion ant bait gel', 'ant_bait'],
@@ -270,26 +303,72 @@ const EXPECTATION_TEXT = {
     + 'placements for a few days before they drop off.',
   roach_gel_bait: 'With gel bait, dead roaches may show up out in the open for a week or two as the colony '
     + 'feeds and dies off — that\'s the bait working, not a sign it isn\'t.',
+  // Barrier wording — ONLY when the application evidence confirms an
+  // exterior/perimeter method or area (see hasExteriorApplicationEvidence).
   pyrethroid: 'The barrier treatment keeps working after it\'s applied, but a few insects can still wander in '
     + 'and die near doors and windows for about 10–14 days.',
+  // Same product class, but the application's method/area is unknown or not
+  // confirmed exterior (owner ruling 2026-09-28, P1 audit round 2): never
+  // claim a barrier is protecting doors/windows without evidence it was
+  // applied there. Still honest about how the product itself works.
+  pyrethroid_unconfirmed: 'This treatment keeps working after it\'s applied, so you may still see a few insects '
+    + 'die off over the next 10–14 days as they come into contact with it.',
+  // Dust formulations (Delta Dust and any other dust in the product map,
+  // owner ruling 2026-09-28, P1 audit round 2) go into cracks, voids, and
+  // gaps — never a surface barrier, so this never uses "barrier" or
+  // "near doors and windows" language.
+  dust: 'Dust products work down inside cracks, voids, and gaps rather than as a visible surface treatment, so '
+    + 'it can take a little longer to notice fewer bugs — it\'s working out of sight.',
   igr: 'IGR products work on the next generation, so results build gradually over several weeks rather than '
     + 'overnight.',
 };
 
 // Fixed priority when more than 3 classes triggered — cap to ~3 lines.
-const EXPECTATION_PRIORITY = ['non_repellent', 'ant_bait', 'roach_gel_bait', 'pyrethroid', 'igr'];
+const EXPECTATION_PRIORITY = ['non_repellent', 'ant_bait', 'roach_gel_bait', 'pyrethroid', 'dust', 'igr'];
+
+// Application evidence that a product was applied via an EXTERIOR/PERIMETER
+// method or area — required before the "barrier" wording claims it is
+// protecting doors/windows (owner ruling 2026-09-28, P1 audit round 2: the
+// prior heuristic gave every pyrethroid-classed product the barrier
+// sentence regardless of method or area, which would have told a customer
+// an INTERIOR crack-and-crevice pyrethroid application was a barrier
+// working near their doors and windows). Structured fields only
+// (report-data.js's own method / methodInferred / applicationArea, never
+// free text). methodInferred === true means no EXPLICIT method was
+// recorded — methodFromProduct's pest-line fallback silently defaults an
+// unspecified method to 'perimeter_spray', which is a GUESS, not
+// application evidence, so an inferred method is treated the same as
+// unknown (fail closed, same "explicit map, never guessed" posture as
+// classifyProductExpectation itself).
+const EXTERIOR_METHODS = new Set(['perimeter_spray', 'broadcast_spray']);
+const EXTERIOR_AREA_RE = /\b(perimeter|exterior|foundation|eaves?|soffits?|overhang|lanai|patio|entry points?|fence line|trash area)\b/i;
+
+function hasExteriorApplicationEvidence(product = {}) {
+  if (product.methodInferred !== true && EXTERIOR_METHODS.has(String(product.method || ''))) return true;
+  return EXTERIOR_AREA_RE.test(cleanText(product.applicationArea));
+}
 
 function buildWhatToExpect({ products = [] } = {}) {
   const classes = new Set();
+  // Confirmed exterior evidence for ANY qualifying pyrethroid application —
+  // one confirmed application is enough to earn the barrier line even if
+  // another pyrethroid application this visit has unknown method/area.
+  let pyrethroidExteriorConfirmed = false;
   for (const product of products) {
     const cls = classifyProductExpectation(product);
-    if (cls) classes.add(cls);
+    if (!cls) continue;
+    classes.add(cls);
+    if (cls === 'pyrethroid' && hasExteriorApplicationEvidence(product)) {
+      pyrethroidExteriorConfirmed = true;
+    }
   }
   if (!classes.size) return null;
   const lines = EXPECTATION_PRIORITY
     .filter((cls) => classes.has(cls))
     .slice(0, 3)
-    .map((cls) => EXPECTATION_TEXT[cls])
+    .map((cls) => ((cls === 'pyrethroid' && !pyrethroidExteriorConfirmed)
+      ? EXPECTATION_TEXT.pyrethroid_unconfirmed
+      : EXPECTATION_TEXT[cls]))
     .filter((line) => validateCustomerCopy(line));
   return lines.length ? { lines } : null;
 }
@@ -325,6 +404,18 @@ function toExpectationProduct(raw = {}) {
     category: isPlainObject(product) ? (product.category ?? null) : null,
     moaGroup: pickEither(product, 'moaGroup', 'moa_group'),
     rainfastMinutes: pickEither(product, 'rainfastMinutes', 'rainfast_minutes'),
+    // APPLICATION-level (not product-level) structured fields — report-data.js
+    // carries these as siblings of `product` on each application, so they
+    // are read off `raw`, never `product`. Present only when `raw` IS an
+    // application (pest-report-v2.js's own caller); absent/null for
+    // report-copy-context.js's `productSafety` entries, which are deduped
+    // by CATALOG PRODUCT and carry no per-application method/area — that
+    // caller's barrier-vs-unconfirmed choice fails closed the same way an
+    // explicitly unknown value would (never assumes a barrier without
+    // evidence; see hasExteriorApplicationEvidence).
+    method: isPlainObject(raw) ? (raw.method ?? null) : null,
+    methodInferred: isPlainObject(raw) && typeof raw.methodInferred === 'boolean' ? raw.methodInferred : null,
+    applicationArea: pickEither(raw, 'applicationArea', 'application_area'),
   };
 }
 
@@ -333,6 +424,7 @@ function buildPestExpectations({
   weekWeather = null,
   applications = [],
   actionLabels = [],
+  actionEntries = [],
   serviceMonth = null,
   forecastHeavyRain = false,
 } = {}) {
@@ -340,7 +432,7 @@ function buildPestExpectations({
   const rain = buildRainExpectation({
     weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain,
   });
-  const spiders = buildSpiderExpectation({ actionLabels, applications });
+  const spiders = buildSpiderExpectation({ actionLabels, actionEntries, applications });
   const whatToExpect = buildWhatToExpect({ products: flatProducts });
   if (!rain && !spiders && !whatToExpect) return null;
   return { rain, spiders, whatToExpect };

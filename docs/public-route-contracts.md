@@ -109,7 +109,21 @@ while the live page may show the current reading); a second line may add an ants
 ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
 rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
-the calendar month alone, and never when there is no rain data at all.
+the calendar month alone, and never when there is no rain data at all. A
+PDF/static render whose trailing 7-day window is still open (fetched but
+`windowClosed !== true`) is additionally marked **uncacheable** (codex P0
+2026-09-28, same rule as the lawn week-weather freeze above):
+`reports-public.js` sets a top-level `data.pestWeekWeatherUncacheable`
+(sibling of `pestReportV2`, not nested inside it, so it survives even when
+`pestReportV2` itself composes to nothing) whenever the gate is on, the
+render is non-live, and a week was fetched with an open window; both PDF
+cache-decision sites (the direct `/:token` route and the queued renderer in
+`pdf-queue.js`, via the shared `pestWeekWeatherUncacheableForPdf` in
+`pest-report-v2.js`) skip storing under the stable `-pex1` key when it is
+set, so a later render — once the window closes — is what gets cached, not
+a permanent "no rain block" copy. This flag rides the JSON payload the same
+way `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
+cache-eligibility marker, not visit data.
 `spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
@@ -119,45 +133,73 @@ action; no such action recorded → no spider section at all, regardless of
 any spider-targeted product. `whatWeDid` / `expectation` / `nextStep` are
 ALWAYS one of two fixed combinations: (1) the action was recorded but no
 spider-labeled pyrethroid residual (from the explicit `whatToExpect`
-product-name map below) was also applied → de-web-only wording, no
-treatment claim ("We knocked down webs around the eaves and entry points.")
-and an expectation that never says "the residual we applied"; (2) the
-action was recorded AND a product tagged for spiders that also classifies
-`pyrethroid` in the explicit map was applied → combined wording ("We
+product-name map below) was also applied, OR was applied with no evidence
+tying it to the eaves — de-web-only wording, no treatment claim ("We
+knocked down webs around the eaves and entry points.") and an expectation
+that never says "the residual we applied"; (2) the action was recorded AND
+a product tagged for spiders that also classifies `pyrethroid` in the
+explicit map was applied WITH evidence it reached the eaves/soffit area
+(owner ruling 2026-09-28, P1 audit round 2: a spider-targeted pyrethroid
+applied anywhere is not enough — the application's own recorded area names
+eaves/soffit/overhang, or the visit separately recorded a genuine
+`treatmentApplied: true` eave action, never just the sweep-only action
+that gates the section in the first place) → combined wording ("We
 knocked down webs and treated the eaves and entry points where spiders
 build.") with a residual-backed expectation — even here, the eaves-treated
-claim rests on the recorded action, never on the product tag alone. Neither
-combination ever interpolates a raw completed protocol-action label. Raw
-protocol-action labels
+claim rests on recorded, structured evidence, never on the product tag
+alone and never on free text. Neither combination ever interpolates a raw
+completed protocol-action label. Raw protocol-action labels
 (`server/services/service-report/report-data.js`'s
-`completedProtocolActionLabels`) are internal tech/protocol vocabulary and
-are SERVER-INTERNAL ONLY: `reports-public.js` computes them directly from
-the DB-joined `service` row for this one gated builder call and they are
-never attached to `data`/the object `buildReportV1Data` returns, so no
-public report payload — `/data`, the PDF, `/map.svg`, or any other render —
-carries a `protocolActionLabels` field or any completed-action label text,
-regardless of the gate. `whatToExpect: { lines: [string] }` — up to 3
-de-duplicated, honest lines keyed to product class, resolved through an
-EXPLICIT, CLOSED map keyed by the exact catalog product name only (owner
-ruling 2026-09-28, revised: active_ingredient / moa_group / category
-inference was replaced after 2 rounds of misclassification — e.g. it would
-have called an Advion Ant Bait Gel a roach product via the shared "bait"
-category). Currently mapped: Taurus SC, Alpine WSG → non-repellent;
-Atticus Talak 7.9 F, Demand CS, Onslaught Fastcap, Delta Dust → pyrethroid
-barrier; Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel Bait →
-roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait; Gentrol
-IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is explicitly
-mapped to no class. A product NOT in this map gets no line — fail closed,
-never guessed; extending the map to a new product requires an
-owner-verified name, never reintroduced inference. Never a "guarantee" or
-"eliminate" claim (screened through the existing `validateCustomerCopy`
+`completedProtocolActionLabels` / `completedProtocolActionEntries` — the
+latter keeps each entry's `treatmentApplied` for the residual-evidence check
+above) are internal tech/protocol vocabulary and are SERVER-INTERNAL ONLY:
+`reports-public.js` computes them directly from the DB-joined `service` row
+for this one gated builder call and they are never attached to `data`/the
+object `buildReportV1Data` returns, so no public report payload — `/data`,
+the PDF, `/map.svg`, or any other render — carries a `protocolActionLabels`
+field or any completed-action label text, regardless of the gate.
+`whatToExpect: { lines: [string] }` — up to 3 de-duplicated, honest lines
+keyed to product class, resolved through an EXPLICIT, CLOSED map keyed by
+the exact catalog product name only (owner ruling 2026-09-28, revised:
+active_ingredient / moa_group / category inference was replaced after 2
+rounds of misclassification — e.g. it would have called an Advion Ant Bait
+Gel a roach product via the shared "bait" category). Currently mapped:
+Taurus SC, Alpine WSG → non-repellent; Atticus Talak 7.9 F, Demand CS,
+Onslaught Fastcap → pyrethroid barrier; Delta Dust → its OWN `dust` class
+(owner ruling 2026-09-28, P1 audit round 2: a dust formulation goes into
+cracks/voids, never a surface barrier, so it never shares the pyrethroid
+barrier copy); Advion Evolution Cockroach Gel Bait, Advion Cockroach Gel
+Bait → roach gel bait; Advion Ant Bait Gel, Advion WDG Granular → ant bait;
+Gentrol IGR, Tekko Pro IGR → IGR; LESCO 90/10 Nonionic Surfactant is
+explicitly mapped to no class. A product NOT in this map gets no line —
+fail closed, never guessed; extending the map to a new product requires an
+owner-verified name, never reintroduced inference. The pyrethroid barrier
+sentence additionally requires structured application evidence (an EXPLICIT
+`method` of `perimeter_spray` / `broadcast_spray`, or an `applicationArea`
+naming an exterior/perimeter chip) that the application was exterior — an
+inferred (not explicitly recorded) method is treated as unknown, never
+assumed exterior; when the method/area is unknown or indicates an interior
+application, the report uses different, non-barrier wording for the SAME
+product class rather than silently asserting the claim. Never a "guarantee"
+or "eliminate" claim (screened through the existing `validateCustomerCopy`
 banned-copy guard). The same rain + what-to-expect facts (never the spider
 block, never the live forecast clause) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
 so generated copy never contradicts the deterministic blocks — that
 grounding text is a prompt input, not part of any customer-fetchable
-payload.
+payload; that caller has no per-application method/area data (its product
+list is deduped by catalog product, not by application), so it always
+falls back to the non-barrier pyrethroid wording rather than assuming a
+barrier — the same fail-closed default, never a contradiction with the
+deterministic card. `moa_group` and `rainfast_minutes` (the catalog facts
+that drive this classification) are SERVER-INTERNAL ONLY (codex P0
+2026-09-28): they are never present on `data.applications[].product` in any
+render (gate on or off, every service line) — `report-data.js`'s
+`buildReportV1Data` hands them to the caller solely through an opt-in
+`expectationFactsOut` out-param that is never attached to the object the
+function returns, the same "server-internal, never on `data`" contract
+`completedProtocolActionLabels` uses.
 
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.

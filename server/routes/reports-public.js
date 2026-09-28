@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -444,9 +444,14 @@ async function buildServiceReportV1ResponseData(service, token, {
   // mode rides into the builder so mode-sensitive copy (the pest Visit
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
+  // expectationFactsOut is the ONE channel for moa_group/rainfast_minutes
+  // (codex P0 2026-09-28): report-data.js populates it as a side effect but
+  // never attaches those facts to `data` itself, so they can only reach the
+  // pest V2 expectations builder below, never the public JSON/PDF payload.
+  const expectationFactsOut = {};
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -568,6 +573,26 @@ async function buildServiceReportV1ResponseData(service, token, {
       // rain block — see settledWeekWeatherForRender. Live keeps whatever
       // fetchPestWeekWeatherSafe returned, settled or not.
       const weekWeather = settledWeekWeatherForRender(fetchedWeekWeather, mode);
+      // Same rule as the lawn week-weather freeze (report-data.js's
+      // weekWeatherUncacheable): a non-live render whose 7-day window is
+      // still OPEN dropped its rain fact above (settledWeekWeatherForRender),
+      // but that alone is not reproducible — the window closes on its own
+      // clock, so a later view would freeze a different (settled) answer
+      // while a durably cached PDF keeps serving the "no rain block" bytes
+      // forever. Mark it so the direct PDF route and the queued renderer
+      // (pdf-queue.js) both skip storing, exactly like the lawn precedent.
+      // Only meaningful when a week was actually fetched — a failed fetch or
+      // missing coordinates leaves no rain-derived bytes to protect.
+      const pestWeekWeatherUncacheable = expectationsGateOn
+        && mode !== 'live'
+        && !!fetchedWeekWeather
+        && fetchedWeekWeather.windowClosed !== true;
+      // Set unconditionally (even if buildPestReportV2 below returns null
+      // because nothing else is meaningful to show) so the cache-decision
+      // sites in reports-public.js and pdf-queue.js always see it — a
+      // pestReportV2-nested flag would silently disappear on exactly the
+      // early-return path that drops the rain block's own content.
+      data.pestWeekWeatherUncacheable = pestWeekWeatherUncacheable;
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -596,12 +621,36 @@ async function buildServiceReportV1ResponseData(service, token, {
         // isCallback rides the payload ungated (report-data), so the gate
         // term here is what makes the suppression killable.
         suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
-        applications: data.applications || [],
+        // Merges the ALREADY-PUBLIC per-application fields (name, targets,
+        // applicationArea, method, methodInferred — all already on
+        // data.applications) with the moa_group/rainfast_minutes facts ONLY
+        // expectationFactsOut carries (codex P0 2026-09-28: those two facts
+        // must never reach the public /api/reports/:token/data response,
+        // gate on or off, every service line — see expectationFactsOut
+        // above). Aligned by index: both arrays map 1:1 over the same
+        // `products` report-data.js fetched.
+        applications: (data.applications || []).map((app, index) => ({
+          id: app.id,
+          product: {
+            name: app.product?.name || null,
+            moa_group: expectationFactsOut.applications?.[index]?.product?.moa_group ?? null,
+            rainfast_minutes: expectationFactsOut.applications?.[index]?.product?.rainfast_minutes ?? null,
+          },
+          targets: app.targets,
+          applicationArea: app.applicationArea || null,
+          method: app.method || null,
+          methodInferred: app.methodInferred === true,
+        })),
         // Server-internal only (codex P0 2026-09-28) — computed directly
         // from `service`, never read off `data`/the returned report
         // payload: a raw completed-action label must never reach the
         // public /api/reports/:token/data response, gate on or off.
         actionLabels: completedProtocolActionLabels(service),
+        // Server-internal only, same contract (codex P1 2026-09-28) — the
+        // same completed actions WITH treatmentApplied preserved, so the
+        // spider section's residual-evidence check can tell a genuine eave
+        // TREATMENT from a sweep.
+        actionEntries: completedProtocolActionEntries(service),
         weekWeather,
         forecastHeavyRain,
         serviceMonth: monthFromDate(service.service_date),
@@ -2187,6 +2236,13 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
         } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (renderedData?.pestWeekWeatherUncacheable) {
+          // Same rule as the lawn branch above, mirrored for the pest-line
+          // rain block (codex P0 2026-09-28): a still-OPEN 7-day window
+          // must never be baked into the stable '-pex1' PDF key, or later
+          // downloads keep serving the "no rain block" bytes forever even
+          // after the window settles.
+          logger.warn(`[reports-public] pest week weather unsettled for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
