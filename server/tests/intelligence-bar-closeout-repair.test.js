@@ -184,10 +184,7 @@ test('confirmed: runs the steps in order and returns an itemized receipt', async
   ensureReportToken.mockImplementation(async () => { tokenMinted = true; return 'b'.repeat(32); });
   enqueueServiceReportV1EmailDelivery.mockResolvedValue({ ok: true, queued: true, delivery: { id: 'del-9', status: 'queued' } });
 
-  const approved = [
-    { step: 'publish_report', service_record_id: 'rec-1' },
-    { step: 'queue_report_email', service_record_id: 'rec-1', depends_on: 'publish_report' },
-  ];
+  const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
   const result = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
   expect(result.success).toBe(true);
   expect(executionOutcome(result)).toBe('completed');
@@ -203,10 +200,7 @@ test('confirmed: runs the steps in order and returns an itemized receipt', async
 test('confirmed: a failed prerequisite leaves its dependent not_attempted; a later failure makes the run partial', async () => {
   getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
   db.mockImplementation(fakeDb({ service_records: [RECORD] }));
-  const approved = [
-    { step: 'publish_report', service_record_id: 'rec-1' },
-    { step: 'queue_report_email', service_record_id: 'rec-1', depends_on: 'publish_report' },
-  ];
+  const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
   ensureReportToken.mockRejectedValue(new Error('db down'));
   const failed = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
   expect(executionOutcome(failed)).toBe('failed');
@@ -316,4 +310,21 @@ test('lawn reports never get a repair email — grounding is only verified by co
     expect(preview.steps.map((s) => s.step)).toEqual(['publish_report']);
     expect(preview.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'reportDelivery', fix: expect.stringMatching(/lawn report/) })]));
   }
+});
+
+test('a recipient swapped behind the same mask changes the plan: fingerprint and execution both refuse', async () => {
+  getCloseoutStatus.mockResolvedValue(status({ facts: MISSING_REPORT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], customers: [{ ...CUSTOMER, email: 'pat@example.com' }] }));
+  const before = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  db.mockImplementation(fakeDb({ service_records: [RECORD], customers: [{ ...CUSTOMER, email: 'paula@example.com' }] }));
+  const after = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  const mask = (p) => p.steps.find((st) => st.step === 'queue_report_email').recipients;
+  expect(mask(after)).toEqual(mask(before));
+  expect(previewFingerprint(after)).not.toBe(previewFingerprint(before));
+
+  const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+    confirmed: true, executionPins: { _verified_repair_steps: before.steps },
+  });
+  expect(run.preview_changed).toBe(true);
+  expect(ensureReportToken).not.toHaveBeenCalled();
 });

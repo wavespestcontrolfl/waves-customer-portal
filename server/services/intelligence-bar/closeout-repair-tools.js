@@ -30,6 +30,7 @@
  * Results carry ids, states and reasons — no customer names, phones or
  * addresses.
  */
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const CloseoutStatus = require('../closeout-status');
@@ -192,7 +193,9 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
     // Same resolver the delivery worker sends through — the card names who
     // gets the email, and a plan with nobody to email is not offered.
     const { customer, prefs } = blocker ? {} : await getContact();
-    const recipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs).map((r) => maskEmail(r.email)).filter(Boolean);
+    const fullRecipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs)
+      .map((r) => String(r.email || '').trim().toLowerCase()).filter(Boolean).sort();
+    const recipients = fullRecipients.map(maskEmail).filter(Boolean);
     if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
     if (blocker) skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
     else {
@@ -202,6 +205,9 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
         reason: deliveryFact.reason,
         service_record_id: recordRow.id,
         recipients,
+        // Binds the FULL addresses (masks can collide): the confirm-time
+        // fingerprint and the executor's plan match both cover this key.
+        recipients_key: crypto.createHash('sha256').update(JSON.stringify(fullRecipients)).digest('hex').slice(0, 16),
         ...(publishable ? { depends_on: 'publish_report' } : {}),
       });
     }
@@ -278,7 +284,7 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 }
 
 function stepsKey(steps) {
-  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.invoice_id || null, s.depends_on || null]));
+  return JSON.stringify((steps || []).map((s) => [s.step, s.service_record_id || null, s.depends_on || null, s.recipients_key || null]));
 }
 
 function previewFromPlan(serviceId, status, plan) {
