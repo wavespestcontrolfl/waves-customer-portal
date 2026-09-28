@@ -490,20 +490,38 @@ async function recordManualPayment(id, {
     queued = true;
   } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    const emailLeg = via === 'email' || via === 'both';
-    if (emailLeg) {
-      emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
-    }
-    if (via === 'sms' || via === 'both') {
+    const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
+    // The payment is already recorded: a claim failure only skips the
+    // receipt (reported back), never fails the payment.
+    const claim = await claimReceiptJobForOperatorSend(id)
+      .catch((err) => ({ error: err.message }));
+    if (claim.inFlight) {
+      // A queued job for this invoice is delivering the receipt right now.
+      queued = true;
+    } else if (claim.error) {
+      emailResult = { ok: false, error: `receipt claim failed: ${claim.error}` };
+    } else {
+      const emailLeg = via === 'email' || via === 'both';
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true });
-        smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
-      } catch (err) {
-        smsResult = { ok: false, error: err.message };
+        if (emailLeg) {
+          emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+        }
+        if (via === 'sms' || via === 'both') {
+          try {
+            const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: emailLeg, operatorInitiated: true });
+            smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
+          } catch (err) {
+            smsResult = { ok: false, error: err.message };
+          }
+        }
+        if (emailResult?.ok || smsResult?.ok) {
+          await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
+        }
+      } finally {
+        await releaseOperatorReceiptClaim(claim, { emailDelivered: emailResult?.ok === true, smsResult, emailResult });
       }
     }
     if (emailResult?.ok || smsResult?.ok) {
-      await db('invoices').where({ id }).update({ receipt_sent_at: db.fn.now() });
       await db('activity_log').insert({
         customer_id: updatedInvoice.customer_id,
         action: 'invoice_receipt_sent',

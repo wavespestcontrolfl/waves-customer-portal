@@ -1,4 +1,5 @@
 const os = require('os');
+const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -335,6 +336,99 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
   return { recovered, claimed: jobs.length, succeeded, failed };
 }
 
+// An operator's send-now of a paid invoice's receipt (the single resend, the
+// batch send, record-payment's inline receipt) runs outside this queue. A job
+// queued for the same invoice (the payment webhook's, the Intelligence Bar
+// closeout repair's) would deliver a second receipt around it. The invoice's
+// one job row (unique on invoice_id) is the shared claim: the operator send
+// takes it as `running` first — the drain never claims a running row and
+// every enqueue dedupes on it — and hands it back afterwards
+// (releaseOperatorReceiptClaim). A job the drain is delivering right now
+// refuses the operator send ({ inFlight: true }) rather than racing it.
+// A short transaction only: never held across the sends. A process that dies
+// holding the claim leaves a `running` row, which recoverStaleLocks hands to
+// the drain after STALE_LOCK_MINUTES — the receipt still goes out.
+async function claimReceiptJobForOperatorSend(invoiceId) {
+  const token = `operator:${workerId()}:${randomUUID()}`;
+  return db.transaction(async (trx) => {
+    const inserted = await trx('receipt_delivery_jobs')
+      .insert({
+        invoice_id: invoiceId,
+        source: 'operator_send',
+        status: 'running',
+        next_attempt_at: trx.fn.now(),
+        locked_at: trx.fn.now(),
+        locked_by: token,
+        attempts: 0,
+        max_attempts: DEFAULT_MAX_ATTEMPTS,
+        updated_at: trx.fn.now(),
+      })
+      .onConflict(['invoice_id'])
+      .ignore()
+      .returning(['id']);
+    if (inserted?.[0]) return { id: inserted[0].id, token, prior: null };
+
+    const job = await trx('receipt_delivery_jobs')
+      .where({ invoice_id: invoiceId })
+      .forUpdate()
+      .first('id', 'status', 'next_attempt_at', trx.raw(`(locked_at < now() - interval '${STALE_LOCK_MINUTES} minutes') AS lock_stale`));
+    if (!job) throw new Error(`receipt job for invoice ${invoiceId} vanished during the operator claim`);
+    const staleRunning = job.status === 'running' && job.lock_stale === true;
+    if (job.status === 'running' && !staleRunning) return { inFlight: true };
+    // A completed or failed job sends nothing more: no claim to hold.
+    if (!QUEUED_STATUSES.includes(job.status) && !staleRunning) return { id: null };
+
+    await trx('receipt_delivery_jobs')
+      .where({ id: job.id })
+      .update({ status: 'running', locked_at: trx.fn.now(), locked_by: token, updated_at: trx.fn.now() });
+    return {
+      id: job.id,
+      token,
+      // A stale running job goes back as due now, as recoverStaleLocks would.
+      prior: staleRunning
+        ? { status: 'retry_scheduled', next_attempt_at: new Date() }
+        : { status: job.status, next_attempt_at: job.next_attempt_at },
+    };
+  });
+}
+
+// After the operator send: a delivered receipt EMAIL completes the job (the
+// queued job would only repeat it; its text leg already skips once
+// receipt_sent_at is stamped). Otherwise the queued job goes back exactly as
+// it was — it still owes the email — and a row the claim itself created is
+// removed. Scoped to this claim's token; a failure logs and leaves the row
+// to recoverStaleLocks.
+async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsResult = null, emailResult = null } = {}) {
+  if (!claim?.id) return;
+  const mine = () => db('receipt_delivery_jobs').where({ id: claim.id, status: 'running', locked_by: claim.token });
+  try {
+    if (emailDelivered) {
+      await mine().update({
+        status: 'completed',
+        sms_result: smsResult,
+        email_result: emailResult,
+        completed_at: db.fn.now(),
+        locked_at: null,
+        locked_by: null,
+        last_error: null,
+        updated_at: db.fn.now(),
+      });
+    } else if (!claim.prior) {
+      await mine().del();
+    } else {
+      await mine().update({
+        status: claim.prior.status,
+        next_attempt_at: claim.prior.next_attempt_at,
+        locked_at: null,
+        locked_by: null,
+        updated_at: db.fn.now(),
+      });
+    }
+  } catch (err) {
+    logger.warn(`[receipt-delivery-queue] operator receipt claim release failed for job ${claim.id}: ${err.message}`);
+  }
+}
+
 function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
   const run = () => {
     processDueReceiptDeliveryJobs({ limit }).catch((err) => {
@@ -354,6 +448,8 @@ module.exports = {
   processDueReceiptDeliveryJobs,
   processReceiptDeliveryJob,
   scheduleReceiptDeliveryDrain,
+  claimReceiptJobForOperatorSend,
+  releaseOperatorReceiptClaim,
   _internals: {
     actionableSmsFailure,
     actionableEmailFailure,
