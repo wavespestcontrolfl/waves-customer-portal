@@ -117,6 +117,57 @@ function addETBusinessDays(from, businessDays) {
   return cursor;
 }
 
+const QUOTED_WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const QUOTED_MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+// The explicit day forms both quoted resolvers read: today / tomorrow, a
+// weekday (its next occurrence, today included), an ISO date, M/D(/YYYY)
+// and "Month D(, YYYY)". { year, month, day } (unvalidated) or null.
+function quotedDayParts(dayText, reference) {
+  const base = etParts(reference);
+  const formats = [
+    [/^(today|tomorrow)$/i, (m) => etParts(addETDays(reference, m[1].toLowerCase() === 'tomorrow' ? 1 : 0))],
+    [/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i,
+      (m) => etParts(addETDays(reference, (QUOTED_WEEKDAYS.indexOf(m[1].toLowerCase()) - base.dayOfWeek + 7) % 7))],
+    [/^(\d{4})-(\d{2})-(\d{2})$/, (m) => ({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) })],
+    [/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/,
+      (m) => ({ year: Number(m[3] || base.year), month: Number(m[1]), day: Number(m[2]) })],
+    [/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$/i,
+      (m) => ({ year: Number(m[3] || base.year), day: Number(m[2]),
+        month: QUOTED_MONTHS.findIndex((name) => [name, name.slice(0, 3)].includes(m[1].toLowerCase())) + 1 })],
+  ];
+  return formats.map(([pattern, resolve]) => {
+    const found = pattern.exec(dayText);
+    return found ? resolve(found) : null;
+  }).find(Boolean) || null;
+}
+
+// Resolve a quoted day with no clock to its ET calendar date 'YYYY-MM-DD':
+// the explicit forms above, same-day wording ("tonight", "this afternoon",
+// "end of day"), a weekday or "tomorrow" with a part of the day ("tomorrow
+// morning"), and the two spans the SMS staff-promise plan rules on (owner
+// ruling 2026-09-28): "this weekend" is its Sunday and "next week" is next
+// week's Friday. A leading "by / on / before / until / to / for" is read
+// through. Anything else ("next Wednesday", "in two weeks", a clock), a past
+// date or a date that does not exist is null.
+function parseQuotedETDay(text, reference) {
+  if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
+  const phrase = String(text).trim().toLowerCase().replace(/[.!]+$/, '')
+    .replace(/^(?:by|on|before|until|till|to|for)\s+/, '');
+  const offset = (days) => etDateString(addETDays(reference, days));
+  const dow = etParts(reference).dayOfWeek;
+  if (/^(?:tonight|this (?:morning|afternoon|evening)|later today|end of (?:the )?day|eod)$/.test(phrase)) return offset(0);
+  if (/^(?:this |the |over the )?weekend$/.test(phrase)) return offset((7 - dow) % 7);
+  if (phrase === 'next week') return offset(((8 - dow) % 7 || 7) + 4);
+  const core = phrase.replace(/^this\s+(?=(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b)/, '')
+    .replace(/^tmrw\b/, 'tomorrow')
+    .replace(/^((?:today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday))\s+(?:morning|afternoon|evening|night)$/, '$1');
+  const parts = quotedDayParts(core, reference);
+  if (!parts) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  const day = validCalendarDate(`${parts.year}-${pad(parts.month)}-${pad(parts.day)}`);
+  return day && day >= etDateString(reference) ? day : null;
+}
+
 // Resolve only explicit, unambiguous quoted day + clock expressions. This
 // does not assign business defaults to "tomorrow morning" or bare times.
 // Unknown wording, past yearless dates and DST gaps/folds require review.
@@ -131,24 +182,7 @@ function parseQuotedETDeadline(text, reference) {
   const minute = Number(minuteText || 0);
   if (minute > 59 || (meridiem ? rawHour < 1 || rawHour > 12 : rawHour > 23 || !minuteText || hourText.length !== 2)) return null;
   const hour = meridiem ? rawHour % 12 + (meridiem.toLowerCase().startsWith('p') ? 12 : 0) : rawHour;
-  const base = etParts(reference);
-  const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-  const formats = [
-    [/^(today|tomorrow)$/i, (m) => etParts(addETDays(reference, m[1].toLowerCase() === 'tomorrow' ? 1 : 0))],
-    [/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i,
-      (m) => etParts(addETDays(reference, (weekdays.indexOf(m[1].toLowerCase()) - base.dayOfWeek + 7) % 7))],
-    [/^(\d{4})-(\d{2})-(\d{2})$/, (m) => ({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) })],
-    [/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/,
-      (m) => ({ year: Number(m[3] || base.year), month: Number(m[1]), day: Number(m[2]) })],
-    [/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$/i,
-      (m) => ({ year: Number(m[3] || base.year), day: Number(m[2]),
-        month: months.findIndex((name) => [name, name.slice(0, 3)].includes(m[1].toLowerCase())) + 1 })],
-  ];
-  const date = formats.map(([pattern, resolve]) => {
-    const found = pattern.exec(dayText);
-    return found ? resolve(found) : null;
-  }).find(Boolean);
+  const date = quotedDayParts(dayText, reference);
   if (!date) return null;
   const pad = (n) => String(n).padStart(2, '0');
   const due = parseETDateTime(`${date.year}-${pad(date.month)}-${pad(date.day)}T${pad(hour)}:${pad(minute)}`);
@@ -396,7 +430,7 @@ function dateOnlyString(value) {
 module.exports = {
   dateOnlyString,
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, parseQuotedETDeadline, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, parseQuotedETDay, etWallClockOccurrences, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETBusinessDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

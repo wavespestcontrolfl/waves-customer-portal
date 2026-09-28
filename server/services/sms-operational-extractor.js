@@ -5,7 +5,7 @@ const Ajv = require('ajv/dist/2020');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
-const { parseQuotedETDeadline, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
+const { parseQuotedETDeadline, parseQuotedETDay, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
@@ -220,13 +220,15 @@ function statesClock(text) {
   return (value.match(CLOCK_TOKEN) || []).length > 0 || CLOCK_PREPOSITION.test(value);
 }
 
-// The calendar day a staff promise names (due_date): a real date on the
-// text's own ET day through 14 days later, else none.
-function promiseDueDate(value, sentAt) {
-  const day = validCalendarDate(value);
-  if (!day) return null;
+// The calendar day a staff promise names (due_date): the extraction's day
+// must be the one its quoted timing resolves to (parseQuotedETDay), as a
+// due_at must match parseQuotedETDeadline (Codex #5248 r1 P1), and fall on
+// the text's own ET day through 14 days later; anything else is none.
+function promiseDueDate(dueText, value, sentAt) {
   const sent = new Date(sentAt);
-  return day >= etDateString(sent) && day <= etDateString(addETDays(sent, 14)) ? day : null;
+  const day = validCalendarDate(value);
+  if (!day || day !== parseQuotedETDay(dueText, sent)) return null;
+  return day <= etDateString(addETDays(sent, 14)) ? day : null;
 }
 
 function groundExtraction(parsed, { message, properties = [], captureCommitments = true, captureAdditionalProperties = false }) {
@@ -285,7 +287,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
       due_at: due instanceof Date ? due.toISOString() : null,
       // The day a staff promise names without a clock: only with its timing
       // quoted and no clock anywhere in the text (that is due_at's job).
-      due_date: outbound && timingGrounded && !clockStated ? promiseDueDate(item.due_date, message.created_at) : null,
+      due_date: outbound && timingGrounded && !clockStated ? promiseDueDate(item.due_text, item.due_date, message.created_at) : null,
       timing_unverified: !!clockStated && !(due instanceof Date) };
   });
   // Sentence punctuation cannot establish semantic independence: "And only

@@ -1,4 +1,4 @@
-const { parseQuotedETDeadline } = require('../utils/datetime-et');
+const { parseQuotedETDeadline, parseQuotedETDay } = require('../utils/datetime-et');
 
 describe('quoted Eastern deadlines', () => {
   const reference = new Date('2026-09-06T02:00:00Z'); // September 5 in ET
@@ -41,4 +41,32 @@ describe('quoted Eastern deadlines', () => {
   ])('rejects a nonexistent or repeated ET clock: %s', (text, at) => {
     expect(parseQuotedETDeadline(text, new Date(at))).toBeNull();
   });
+});
+
+describe('quoted Eastern days with no clock (SMS staff-promise plan, owner ruling 2026-09-28)', () => {
+  const saturday = new Date('2040-03-10T15:00:00Z'); // Saturday 10 AM EST; DST starts Sunday 2040-03-11
+  const sunday = new Date('2040-03-11T15:00:00Z'); // Sunday 11 AM EDT
+
+  test.each([
+    ['today', '2040-03-10'], ['tonight', '2040-03-10'], ['this afternoon', '2040-03-10'], ['later today', '2040-03-10'],
+    ['end of day', '2040-03-10'], ['EOD', '2040-03-10'],
+    ['tomorrow', '2040-03-11'], ['tmrw', '2040-03-11'], ['tomorrow morning', '2040-03-11'], ['by tomorrow', '2040-03-11'],
+    ['Wednesday', '2040-03-14'], ['this Wednesday', '2040-03-14'], ['on Wednesday', '2040-03-14'], ['to Wednesday', '2040-03-14'],
+    ['Wednesday afternoon', '2040-03-14'], ['Saturday', '2040-03-10'],
+    ['this weekend', '2040-03-11'], ['the weekend', '2040-03-11'], ['over the weekend', '2040-03-11'],
+    ['next week', '2040-03-16'],
+    ['March 24', '2040-03-24'], ['3/24', '2040-03-24'], ['2040-03-24', '2040-03-24'], ['Mar 24th.', '2040-03-24'],
+  ])('%s resolves to %s', (text, expected) => {
+    expect(parseQuotedETDay(text, saturday)).toBe(expected);
+  });
+
+  test('on a Sunday the weekend is today and next week ends Friday five days out', () => {
+    expect(parseQuotedETDay('this weekend', sunday)).toBe('2040-03-11');
+    expect(parseQuotedETDay('next week', sunday)).toBe('2040-03-16');
+  });
+
+  test.each(['next Wednesday', 'in two weeks', 'tomorrow at 3pm', 'soon', 'this week', '3/9', 'February 30', 'Marchish 24', '', null])(
+    'cannot place %p on one day', (text) => {
+      expect(parseQuotedETDay(text, saturday)).toBeNull();
+    });
 });
