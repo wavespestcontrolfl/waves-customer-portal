@@ -2383,6 +2383,17 @@ describe('sourced competitor prices survive the SEO price check (r13)', () => {
     expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' })).toBe(false);
     expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.terminix.com/pricing' })).toBe(true);
   });
+
+  test('evaluate() hands the draft\'s evidence notes to the price check', () => {
+    const interceptBrief = { ...baseBrief(), ...brief };
+    const draft = (notes) => baseDraft({
+      body: `${baseDraft().body}\n\nOrkin charges a $199 cancellation fee.`,
+      notes_for_reviewer: notes,
+    });
+    const priceP0 = (r) => r.findings.some((f) => f.code === 'P0_HARDCODED_PRICE_NOT_APPROVED');
+    expect(priceP0(SeoCompletionGate.evaluate({ draft: draft(null), brief: interceptBrief, shadowMode: true }))).toBe(true);
+    expect(priceP0(SeoCompletionGate.evaluate({ draft: draft('Evidence sources: https://www.orkin.com/pricing'), brief: interceptBrief, shadowMode: true }))).toBe(false);
+  });
 });
 
 describe('a brief-level price ban reaches this gate too (r13)', () => {
