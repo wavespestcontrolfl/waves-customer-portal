@@ -429,6 +429,50 @@ describe('auto-growing composer', () => {
     expect(box.tagName).toBe('TEXTAREA');
   });
 
+  // jsdom has no layout: stub scrollHeight as 20px per line so the hook's
+  // measurement is observable through the style it writes.
+  const stubLineHeight = () => {
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() { return 20 * Math.max(1, String(this.value).split('\n').length); },
+    });
+    return () => {
+      if (desc) Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', desc);
+      else delete HTMLTextAreaElement.prototype.scrollHeight;
+    };
+  };
+
+  it('grows with its text, caps and scrolls past ~6 lines, and shrinks after clearing', async () => {
+    const restore = stubLineHeight();
+    try {
+      await mount();
+      const box = screen.getByPlaceholderText('Ask anything...');
+      fireEvent.change(box, { target: { value: 'a\nb\nc' } });
+      expect(box.style.height).toBe('60px');
+      expect(box.style.overflowY).toBe('hidden');
+      fireEvent.change(box, { target: { value: Array.from({ length: 12 }, (_, i) => `line ${i}`).join('\n') } });
+      expect(box.style.height).toBe('132px');
+      expect(box.style.overflowY).toBe('auto');
+      fireEvent.change(box, { target: { value: '' } });
+      expect(box.style.height).toBe('20px');
+    } finally { restore(); }
+  });
+
+  it('a draft kept across close and reopen is sized when the box mounts again', async () => {
+    const restore = stubLineHeight();
+    try {
+      const ref = await mount();
+      fireEvent.change(screen.getByPlaceholderText('Ask anything...'), { target: { value: 'one\ntwo\nthree\nfour' } });
+      act(() => ref.current.close?.());
+      fireEvent.keyDown(screen.queryByPlaceholderText('Ask anything...') || document.body, { key: 'Escape' });
+      act(() => ref.current.open());
+      const box = await screen.findByPlaceholderText('Ask anything...');
+      expect(box).toHaveValue('one\ntwo\nthree\nfour');
+      expect(box.style.height).toBe('80px');
+    } finally { restore(); }
+  });
+
   it('Enter (no Shift) submits the prompt', async () => {
     await mount();
     const box = screen.getByPlaceholderText('Ask anything...');

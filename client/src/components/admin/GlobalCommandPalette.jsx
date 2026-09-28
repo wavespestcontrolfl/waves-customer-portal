@@ -73,12 +73,20 @@ const D = {
 // `getMaxHeight` may be a number or a function (mobile factors in the live
 // viewport height); growth caps there and the box scrolls internally.
 function useAutoGrowTextarea(ref, value, getMaxHeight, enabled = true) {
+  // Runs after every render but measures only when the element, the value or
+  // the cap changed — so a textarea that MOUNTS already holding text (a draft
+  // kept across close/reopen, the follow-up box appearing) is sized too, not
+  // just one whose value changes while mounted.
+  const lastRef = useRef({ el: null, value: null, maxHeight: null });
   useLayoutEffect(() => {
     if (!enabled) return;
     const el = ref.current;
     if (!el) return;
     const maxHeight =
       typeof getMaxHeight === "function" ? getMaxHeight() : getMaxHeight;
+    const last = lastRef.current;
+    if (last.el === el && last.value === value && last.maxHeight === maxHeight) return;
+    lastRef.current = { el, value, maxHeight };
     el.style.height = "auto";
     // scrollHeight excludes the border; a border-box height must add it
     // back or the box ends up shorter than its content.
@@ -87,7 +95,7 @@ function useAutoGrowTextarea(ref, value, getMaxHeight, enabled = true) {
     const next = maxHeight ? Math.min(full, maxHeight) : full;
     el.style.height = `${next}px`;
     el.style.overflowY = maxHeight && full > maxHeight ? "auto" : "hidden";
-  }, [ref, value, getMaxHeight, enabled]);
+  });
 }
 
 // Roughly 6 lines before a composer stops growing and scrolls internally.
