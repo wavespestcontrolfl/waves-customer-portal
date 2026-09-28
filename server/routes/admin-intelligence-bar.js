@@ -3312,6 +3312,16 @@ router.post('/confirm-action', async (req, res, next) => {
           execParams._verified_inventory_version = livePreview?._version;
           if (action.tool_name !== 'update_restock_request' && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
         }
+        // cancel_queued_message: the fingerprint-verified preview's pinned
+        // claim state (send_attempt_token + provider_handoff_phase for an
+        // email_messages row, scheduled_for for a sms_log row) rides to the
+        // executor so it re-asserts the EXACT claim state under its own row
+        // lock — never a freshly sampled one. A message that started
+        // sending, was rescheduled, or was reclaimed by a retry in the
+        // meantime fails that recheck and is never touched.
+        if (action.tool_name === 'cancel_queued_message' && livePreview?._version) {
+          execParams._verified_message_version = livePreview._version;
+        }
       }
     }
 

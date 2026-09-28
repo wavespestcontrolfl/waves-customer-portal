@@ -1143,6 +1143,33 @@ function clearedProviderRetryState(message) {
   };
 }
 
+// Cancel a message an operator caught before it reached the provider — the
+// Intelligence Bar's cancel_queued_message tool (never called from inside a
+// send attempt itself). Eligible only while status is still 'queued' AND the
+// provider handoff has not started: the CAS below is scoped to the EXACT
+// send_attempt_token and provider_handoff_phase the caller pinned from its
+// own preview read (both null on a legacy pre-column row), so a message that
+// started sending (phase flips to PROVIDER_HANDOFF_STARTED the instant
+// dispatchToProvider marks it, before the provider call), or was reclaimed
+// by a retry (a fresh send_attempt_token — see retryClaimQuery above), never
+// matches this WHERE and is never touched. `conn` defaults to the module
+// connection but accepts a transaction so a caller can hold the row lock
+// across its own fresh preview + this write.
+async function cancelQueuedMessage(id, pin = {}, conn = db) {
+  const query = conn('email_messages').where({ id, status: 'queued' });
+  if (pin.sendAttemptToken == null) query.whereNull('send_attempt_token');
+  else query.where({ send_attempt_token: pin.sendAttemptToken });
+  if (pin.providerHandoffPhase == null) query.whereNull('provider_handoff_phase');
+  else query.where({ provider_handoff_phase: pin.providerHandoffPhase });
+  const [cancelled] = await query.update({
+    status: 'cancelled',
+    error_message: 'Cancelled by operator before it reached the provider',
+    provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+    updated_at: new Date(),
+  }).returning('*');
+  return cancelled || null;
+}
+
 function assertTemplateSendable(template, { test = false } = {}) {
   if (test) return;
   const status = String(template?.status || 'active').toLowerCase();
@@ -1896,6 +1923,7 @@ module.exports = {
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
   queuedRowInFlight,
+  cancelQueuedMessage,
   ABORTED_BEFORE_DISPATCH,
   QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
