@@ -3921,6 +3921,35 @@ async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
   await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
 }
 
+// The money a cancel's void moves for one invoice, as the confirmation card
+// shows and pins it: the invoice total, the account credit applied to it
+// (restoreAccountCreditForVoidedInvoice), and the estimate deposit credit
+// its deposit_credit lines carry (restoreDepositCreditForVoidedInvoice sums
+// the same lines the same way). Cents-rounded so a pg numeric string and a
+// pinned JSON number compare equal.
+function cancelVoidInvoiceAmounts(row) {
+  const cents = (v) => Math.round(Number(v || 0) * 100);
+  let items = [];
+  try {
+    const raw = row?.line_items;
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    items = Array.isArray(arr) ? arr : [];
+  } catch { items = []; }
+  const depositCents = items
+    .filter((item) => item?.category === "deposit_credit")
+    .reduce((sum, line) => sum + Math.abs(cents(line.amount ?? line.unit_price ?? 0)), 0);
+  return {
+    total: row?.total != null ? cents(row.total) / 100 : null,
+    credit_applied: cents(row?.credit_applied) / 100,
+    deposit_credit: depositCents / 100,
+  };
+}
+
+function cancelVoidAmountsMatch(a, b) {
+  if (!a || !b) return false;
+  return ["total", "credit_applied", "deposit_credit"].every((k) => (a[k] ?? null) === (b[k] ?? null));
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -5176,6 +5205,11 @@ const InvoiceService = {
       useScheduledReplay = false,
       dueDate,
       skipDepositCredit = false,
+      // refuseDepositCredit: the caller's approval did not cover consuming
+      // deposit money (the IB closeout repair). Checked on the LOCKED
+      // deposit read below — a 409 instead of any roll-forward, so no
+      // deposit that landed after the caller's own preview is consumed.
+      refuseDepositCredit = false,
       // Caller-supplied lines appended AFTER the service's own lines (secure
       // plan-choice setup fee): the caller owns the claim/idempotency for
       // these — this method just carries them into the same mint so the fee
@@ -5388,6 +5422,14 @@ const InvoiceService = {
         logger.warn(
           `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
         );
+        // A caller that must not consume deposit money cannot tell a
+        // deposit-bearing visit from a plain one without this read — fail
+        // closed instead of minting a full-balance draft.
+        if (refuseDepositCredit) {
+          const refusal = new Error("Deposit provenance could not be read — bill it from Billing Recovery.");
+          refusal.status = 409;
+          throw refusal;
+        }
       }
     }
     if (sourceEstimateId) {
@@ -5419,6 +5461,11 @@ const InvoiceService = {
             const createParams = await buildParams(trx);
             await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
             const depositCredit = await pendingDepositCredit(sourceEstimateId, trx);
+            if (refuseDepositCredit && depositCredit) {
+              const refusal = new Error("An estimate deposit credit would apply to this invoice — bill it from Billing Recovery.");
+              refusal.status = 409;
+              throw refusal;
+            }
             // Request the full unapplied balance; create() caps it against
             // its own post-discount, after-tax total (a pre-discount cap
             // here consumed ledger dollars the discounted invoice never
@@ -5451,6 +5498,15 @@ const InvoiceService = {
           // same stale params can't fix them (mirrors the shared mint
           // helper's contract).
           if (err.status) throw err;
+          // A refuseDepositCredit caller (the IB closeout repair, incl. its
+          // rolled-back preview) must not trigger the retry/alert path:
+          // an unreadable deposit ledger is a quiet refusal, never a real
+          // estimate_deposit_reconcile_needed alert from a planning call.
+          if (refuseDepositCredit) {
+            const refusal = new Error("Deposit balance could not be verified — bill it from Billing Recovery.");
+            refusal.status = 409;
+            throw refusal;
+          }
           logger.warn(
             `[invoice] deposit roll-forward failed for estimate ${sourceEstimateId} (attempt ${attempt + 1}): ${err.message}`,
           );
@@ -6370,6 +6426,14 @@ const InvoiceService = {
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
+      // IB closeout repair: its approval never covered consuming account
+      // credit, so this send behaves exactly as with the autoApplyAccountCredit
+      // gate off — no credit is applied (the balance stays on the account).
+      skipAccountCreditAutoApply = false,
+      // IB closeout repair: the total its approval showed. Checked on the
+      // CLAIMED row (a claimed invoice is no longer an editable draft); a
+      // mismatch restores the claim and sends nothing.
+      expectedTotal = null,
       // Internal-only: retries this same call once more after a
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
@@ -6381,7 +6445,7 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
@@ -6469,6 +6533,16 @@ const InvoiceService = {
     // without ever reaching a provider handoff's own assertion — so the
     // renewal gate is re-asserted here first. A lost gate restores the send
     // claim and throws; nothing was applied, nothing was sent.
+    if (expectedTotal !== null
+      && Math.round(Number(claim.invoice.total) * 100) !== Math.round(Number(expectedTotal) * 100)) {
+      await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+      return {
+        ok: false,
+        code: "total_changed",
+        error: `Invoice total is $${Number(claim.invoice.total).toFixed(2)}, not the approved $${Number(expectedTotal).toFixed(2)} — not sent`,
+        sms: { ok: false }, email: { ok: false },
+      };
+    }
     if (_underRenewalGate) {
       try {
         assertRenewalGateAlive();
@@ -6478,7 +6552,7 @@ const InvoiceService = {
       }
     }
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
-    const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
+    const sendCreditResult = skipAccountCreditAutoApply ? null : await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
       // Resolve the adopted rows while the token still owns the row — the
       // resolution is token-scoped and would be a silent no-op after the
@@ -10927,11 +11001,16 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null } = {},
+    { invoiceId = null, refusedClaimToken = null, pinnedInvoices = null, pinnedCreditReversalOfferIds = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
     const refusedSendCleanup = Boolean(invoiceId && refusedClaimToken);
+    const pinnedById = Array.isArray(pinnedInvoices)
+      ? new Map(pinnedInvoices.map((inv) => [String(inv.id), inv]))
+      : null;
+    const pinnedMismatch = (row) => pinnedById
+      && !cancelVoidAmountsMatch(cancelVoidInvoiceAmounts(row), pinnedById.get(String(row.id)));
     try {
       const candidateQuery = db("invoices");
       if (refusedSendCleanup) {
@@ -10952,13 +11031,31 @@ const InvoiceService = {
               );
           })
           .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+        // A cancel confirmed from a card that listed the invoices it voids
+        // (Intelligence Bar cancel_appointment, via the follow-through's
+        // pinned effects) voids ONLY those, and only at the amounts shown
+        // (checked below, before any Stripe call and again under the row
+        // lock); an invoice created or changed after the card is left
+        // open, and the follow-through's post-void gate then sends the fee
+        // to office review.
+        if (pinnedById) candidateQuery.whereIn("id", [...pinnedById.keys()]);
       }
       const candidates = await candidateQuery
-        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
+        .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id",
+          "total", "credit_applied", "line_items");
       if (candidates.length === 0) return voided;
       const StripeService = require("./stripe");
       for (const candidate of candidates) {
         try {
+          // A card-confirmed cancel never pins an invoice carrying a
+          // PaymentIntent (the card refuses that shape), so one attached
+          // since the card is left alone: no Stripe cancel, no void.
+          if (pinnedById && (pinnedMismatch(candidate) || candidate.stripe_payment_intent_id)) {
+            logger.warn(
+              `[invoice] NOT auto-voiding ${candidate.invoice_number} for cancelled service ${scheduledServiceId} — changed since the confirmed card; needs office review`,
+            );
+            continue;
+          }
           // ── Stripe PI triage (pre-lock) ────────────────────────────────
           const triagedPiId = candidate.stripe_payment_intent_id || null;
           // The refused-send cleanup runs after provider preparation. Never
@@ -11070,6 +11167,8 @@ const InvoiceService = {
               }
             } else if (!CANCELLED_SERVICE_VOIDABLE_STATUSES.includes(locked.status)) {
               return { skipped: `status moved to ${locked.status}`, invoice: locked };
+            } else if (pinnedMismatch(locked)) {
+              return { skipped: "amounts changed since the confirmed card; needs office review", invoice: locked };
             }
             // A different/new PI attached after triage means a customer is
             // actively starting a payment — skip.
@@ -11172,6 +11271,7 @@ const InvoiceService = {
           const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
             scheduledServiceId,
             createdBy: 'system:inspection_credit_cancellation_void_hook',
+            ...(pinnedCreditReversalOfferIds ? { pinnedReversalOfferIds: pinnedCreditReversalOfferIds } : {}),
           });
           // Surfaced for callers that COUNT reversals (the hourly sweep,
           // which now routes through this seam — Codex #3178 r33 P2): a
@@ -11187,6 +11287,115 @@ const InvoiceService = {
       }
     }
     return voided;
+  },
+
+  /**
+   * Read-only preview of voidOpenInvoicesForCancelledService — which
+   * invoices for this scheduled service WOULD be voided right now, with NO
+   * write and NO Stripe mutation (a live PaymentIntent is only RETRIEVED
+   * here, never cancelled). Mirrors that function's candidate/skip rules
+   * exactly (same status set, same applied-payment/finalized-statement/
+   * PaymentIntent-in-flight checks) so the Intelligence Bar cancel_appointment
+   * preview can freeze the exact invoice set the confirmation card shows,
+   * and the commit path can recompute this same preview immediately before
+   * voiding and refuse on drift instead of settling a different set.
+   * Throws when any read fails (the candidate scan, a statement or payment
+   * check, a PaymentIntent retrieve): a read that fails now may succeed at
+   * commit and void an invoice the card never showed, so the caller treats
+   * the whole effect set as undeterminable. A PaymentIntent that Stripe
+   * cannot verify without an error (`!pi`) is skipped, as the sweep does.
+   */
+  async previewInvoiceVoidForCancelledService(scheduledServiceId) {
+    const would = [];
+    if (!scheduledServiceId) return would;
+    const candidates = await db("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+      .orderBy("id")
+      .select("id", "invoice_number", "status", "total", "credit_applied", "line_items",
+        "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+    for (const candidate of candidates) {
+      if (candidate.payer_statement_id) {
+        const stmt = await db("payer_statements").where({ id: candidate.payer_statement_id }).first("status");
+        if (stmt && stmt.status !== "open") continue; // finalized statement — needs a credit on the next statement
+      }
+      const appliedPayment = await db("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [candidate.id])
+        .first("id");
+      if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
+      if (candidate.stripe_payment_intent_id) {
+        const pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
+        if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
+      }
+      would.push({
+        id: candidate.id,
+        invoice_number: candidate.invoice_number,
+        status: candidate.status,
+        // The void would CANCEL this PaymentIntent (and unbind it from
+        // combined siblings) — a card-confirmed cancel refuses that shape.
+        payment_intent: Boolean(candidate.stripe_payment_intent_id),
+        ...cancelVoidInvoiceAmounts(candidate),
+      });
+    }
+    return would;
+  },
+
+  /**
+   * Read-only preview of the post-void gate that BOTH cancellation money
+   * steps apply once voidOpenInvoicesForCancelledService has run: an
+   * invoice on this scheduled service still outside
+   * CANCELLED_SERVICE_RESOLVED_STATUSES makes runVisitCancellationFollowThrough
+   * skip the fee step (office alerted) and makes
+   * reverseInspectionCreditForBooking defer (office alerted). The real gate
+   * runs AFTER the void, so the invoices the void preview says it would void
+   * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
+   * gates in their card-confirmed (pinned) scope,
+   * unresolvedInvoicesForCancelledService with serviceRecordLinks. Returns
+   * true when an invoice would still be unresolved. Throws when the read
+   * fails: the caller treats the effect set as undeterminable rather than
+   * guessing.
+   */
+  async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
+    if (!scheduledServiceId) return false;
+    const query = InvoiceService.unresolvedInvoicesForCancelledService(db, scheduledServiceId, { serviceRecordLinks: true });
+    if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
+    return Boolean(await query.first("id"));
+  },
+
+  /**
+   * The invoices of a cancelled scheduled service that still hold money
+   * (outside CANCELLED_SERVICE_RESOLVED_STATUSES) — the ONE query for every
+   * post-void gate: the follow-through's fee gate, the inspection-credit
+   * reversal's invoice guard, and the Intelligence Bar preview. By default
+   * it matches the direct scheduled_service_id link only, as those gates
+   * always have. `serviceRecordLinks` also matches invoices linked only
+   * through a service record (the second link the void sweep scans); a
+   * card-confirmed cancel uses it, so its card and its commit both see an
+   * invoice the direct link misses. Widening the default for every cancel
+   * surface is a separate change. Returns a query builder.
+   */
+  unresolvedInvoicesForCancelledService(conn, scheduledServiceId, { serviceRecordLinks = false } = {}) {
+    if (!serviceRecordLinks) {
+      return conn("invoices")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    }
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
   },
 
   async getStats() {
@@ -11304,6 +11513,9 @@ module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 // repair card so it describes the same reach sendReceipt has.
 module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+module.exports._cancelVoidInvoiceAmounts = cancelVoidInvoiceAmounts;
+module.exports._cancelVoidAmountsMatch = cancelVoidAmountsMatch;
+
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
 // Test-only seam (#4131 slice 4): exercises the atomic attempt-increment
