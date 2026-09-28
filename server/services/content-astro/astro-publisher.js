@@ -3813,7 +3813,17 @@ function assertRefreshLaneEnabled(brief) {
 // can still appear, a PR create can still land), so the branch is removed as
 // best-effort cleanup and REFRESH_PUBLISH_UNRECONCILED tells the caller to
 // park the row for a person instead of retrying into a duplicate.
-async function reconcileTimedOutRefreshWrite(branch, { prCreateAttempted }, cause) {
+const REFRESH_RECONCILE_DEADLINE_MS = 60_000;
+
+// Reconciliation gets its own bounded GitHub deadline: a still-stalled GitHub
+// must not keep the row claimed (stale-claim recovery could re-pend it). An
+// expired lookup falls through to REFRESH_PUBLISH_UNRECONCILED.
+function reconcileTimedOutRefreshWrite(branch, opts, cause) {
+  return gh.runWithRequestDeadline(Date.now() + REFRESH_RECONCILE_DEADLINE_MS,
+    () => reconcileTimedOutRefreshWriteInner(branch, opts, cause));
+}
+
+async function reconcileTimedOutRefreshWriteInner(branch, { prCreateAttempted }, cause) {
   const unreconciled = (why) => {
     const err = new Error(`refresh write to ${branch} timed out and ${why}; check GitHub for this branch and any PR before retrying (${cause.message})`);
     err.code = 'REFRESH_PUBLISH_UNRECONCILED';

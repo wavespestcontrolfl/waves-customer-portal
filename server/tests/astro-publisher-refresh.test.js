@@ -16,6 +16,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   deleteRef: jest.fn(),
   findOpenPrByHead: jest.fn(),
   retireBranch: jest.fn(),
+  runWithRequestDeadline: jest.fn((_deadlineAt, fn) => fn()),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -214,6 +215,17 @@ describe('publishRefresh frontmatter freeze', () => {
       await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({
         code: 'REFRESH_PUBLISH_UNRECONCILED', branch: expect.stringMatching(/^content\/refresh-/),
       });
+    });
+
+    test('reconciliation runs under its own bounded GitHub deadline', async () => {
+      gh.createPr.mockRejectedValueOnce(deadline());
+      gh.findOpenPrByHead.mockRejectedValueOnce(deadline());
+      const before = Date.now();
+
+      await expect(pub.publishRefresh(refreshDraft(), BRIEF)).rejects.toMatchObject({ code: 'REFRESH_PUBLISH_UNRECONCILED' });
+      const [deadlineAt] = gh.runWithRequestDeadline.mock.calls.at(-1);
+      expect(deadlineAt).toBeGreaterThan(before);
+      expect(deadlineAt).toBeLessThanOrEqual(Date.now() + 60_000);
     });
 
     test('a non-deadline write failure is not reconciled', async () => {
