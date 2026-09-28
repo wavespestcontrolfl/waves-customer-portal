@@ -3354,11 +3354,15 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
-  // runs created by trigger-mapped email template automations.
+  // runs created by trigger-mapped email template automations. Runs in
+  // EVERY mode (codex P1 round 6 on #5154): with the gate off, executeRun
+  // settles each due run skipped (gate_off) without reading, previewing or
+  // sending anything, so a run due during an outage is dropped rather than
+  // sent stale when the gate returns. processTrigger creates no runs while
+  // off, so this only drains what was already queued.
   // =========================================================================
   cron.schedule('* * * * *', async () => {
     try {
-      if (!isEnabled('emailTemplateAutomations')) return;
       const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
       await EmailTemplateAutomationExecutor.processDueRuns();
     } catch (err) {

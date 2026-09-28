@@ -14,6 +14,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/estimate-conversion-guard', () => ({ excludePendingFirstBookings: jest.fn((q) => q) }));
 jest.mock('../services/estimate-deposits', () => ({ sweepTerminalEstimateDeposits: jest.fn(async () => undefined) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => undefined) }));
+jest.mock('../services/email-template-automation-emitters', () => ({
+  recordAutomationIntents: jest.fn(async (_trx, entries) => entries.map((e, i) => ({ id: `intent-${i}`, entity_id: String(e.entityId) }))),
+  emitEstimateExpired: jest.fn(async () => null),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -116,4 +120,34 @@ test('extending a never-sent expired draft is rejected', async () => {
     silent: true,
     entryPoint: 'test',
   })).rejects.toThrow(/never sent/);
+});
+
+
+// codex P1 round 6 on #5154: the estimate.expired automation obeys the ONE
+// shared follow-up rule (estimate-comms-eligibility.js) — a zero-comms lane
+// (estimate_data.noEngagementAutomation) or an archived row gets neither an
+// intent marker nor a direct emit, while the flip itself (status,
+// disposition, the staff bell) is unchanged for every row.
+test('zero-comms and archived rows expire normally but get no automation marker and no direct emit', async () => {
+  const emitters = require('../services/email-template-automation-emitters');
+  emitters.recordAutomationIntents.mockClear();
+  emitters.emitEstimateExpired.mockClear();
+  const rule1 = makeQuery([
+    { id: 'ok', customer_name: 'A', disposition: 'expired_viewed', archived_at: null, estimate_data: {} },
+    { id: 'optout', customer_name: 'B', disposition: 'expired_viewed', archived_at: null, estimate_data: JSON.stringify({ noEngagementAutomation: true }) },
+    { id: 'parked', customer_name: 'C', disposition: 'expired_viewed', archived_at: new Date(), estimate_data: {} },
+  ]);
+  const rule2 = makeQuery([]);
+  const queue = [rule1.q, rule2.q];
+  db.mockImplementation(() => queue.shift());
+
+  const result = await runEstimateExpiration();
+
+  expect(result).toEqual({ aged: 3, dateExpired: 0 });
+  // RETURNING carries what the shared rule reads.
+  expect(rule1.updates[0].returning).toEqual(expect.arrayContaining(['archived_at', 'estimate_data']));
+  const markerIds = emitters.recordAutomationIntents.mock.calls.flatMap(([, entries]) => entries.map((e) => e.entityId));
+  expect(markerIds).toEqual(['ok']);
+  expect(emitters.emitEstimateExpired.mock.calls.map(([row]) => row.id)).toEqual(['ok']);
+  expect(emitters.emitEstimateExpired).toHaveBeenCalledWith(expect.objectContaining({ id: 'ok' }), 'intent-0');
 });

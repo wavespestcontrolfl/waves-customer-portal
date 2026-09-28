@@ -1918,6 +1918,67 @@ describe('email template automation executor', () => {
     });
   });
 
+  // codex P1 round 6 on #5154: the scheduler now drains due runs in off
+  // mode too. With the gate off a due delayed/retry run is settled skipped
+  // (gate_off) straight after its claim — no entity read, no shadow
+  // preflight, no send — so it cannot go out stale when the gate returns.
+  describe('off mode drains due runs as skipped (drop-on-rollback)', () => {
+    afterEach(() => { delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS; });
+
+    test('processDueRuns with the gate off skips a due run without reading its estimate, previewing or sending; back live, the terminal run never sends', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      const dueRun = run({ status: 'retry_scheduled', attempts: 1 });
+      const skippedRow = { ...dueRun, status: 'skipped', exit_reason: 'email template automations gate is off' };
+      const skippedRunQuery = chain({ returning: [skippedRow] });
+      const skippedLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ result: [dueRun] }), // the due batch
+          chain({ returning: [{ ...dueRun, status: 'running', attempts: 2 }] }), // the claim
+          skippedRunQuery,
+        ],
+        'email_template_automations as a': [chain({ first: automation() })],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), skippedLogQuery],
+        // NO estimates / customers queue: an entity read would throw "Unexpected db table".
+      });
+
+      const result = await AutomationExecutor.processDueRuns();
+
+      expect(result.processed).toBe(1);
+      expect(result.results[0].status).toBe('skipped');
+      expect(skippedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'skipped', exit_reason: 'email template automations gate is off',
+      }));
+      expect(JSON.parse(skippedLogQuery.insert.mock.calls[0][0].metadata)).toEqual(expect.objectContaining({ guard: 'gate_off' }));
+      expect(EmailTemplates.preflightTemplateSend).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+
+      // The gate comes back live: the run is terminal, so nothing sends.
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const again = await AutomationExecutor.executeRun(skippedRow, { automation: automation() });
+      expect(again.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a shadow-origin run that comes due while off is skipped too — no shadow preflight', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'false';
+      const queuedRun = run({ context: JSON.stringify({ origin_mode: 'shadow' }) });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          chain({ returning: [{ ...queuedRun, status: 'skipped' }] }),
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), chain({ returning: [{ id: 'event-2' }] })],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.preflightTemplateSend).not.toHaveBeenCalled();
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('unknown trigger keys', () => {
     test('processTrigger is a harmless no-op: empty results, zero writes', async () => {
       db.mockClear();

@@ -16,6 +16,7 @@ const { scrubSentryText } = require('../utils/sentry-scrub');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
 const { EXPIRED_DISPOSITION_SQL } = require('./estimate-disposition');
+const { estimateFollowupBlockedReason } = require('./estimate-comms-eligibility');
 const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 // Every expiry flip also stamps WHY (estimator audit 2026-08-29 P0): the
@@ -50,14 +51,24 @@ function getThresholdDays() {
 // the sweep never has to infer anything from a timestamp again (see
 // email-template-automation-emitters.js's email_template_automation_intents
 // outbox and retryPendingIntents).
+//
+// Only an estimate that may receive automated follow-up at all earns a
+// marker (codex P1 round 6): estimate-comms-eligibility.js's shared rule —
+// not archived, and not stamped estimate_data.noEngagementAutomation (the
+// zero-comms promise of report cross-sell / plan-restart / website
+// self-service publications) — the same rule the engagement engine,
+// follow-up cron, auto-renew and extension flow read. The executor re-judges
+// it at execution (livePayloadForRun), so a later archive still stops a
+// pending or delayed run.
 async function flipExpiredBatch(buildQuery, columns, now) {
   return db.transaction(async (trx) => {
     const rows = await buildQuery(trx).update(expiredUpdate(now), columns);
     const flipped = Array.isArray(rows) ? rows : [];
     const intentIdByEstimateId = new Map();
-    if (flipped.length) {
+    const eligible = flipped.filter((row) => !estimateFollowupBlockedReason(row));
+    if (eligible.length) {
       const { recordAutomationIntents } = require('./email-template-automation-emitters');
-      const intents = await recordAutomationIntents(trx, flipped.map((row) => ({
+      const intents = await recordAutomationIntents(trx, eligible.map((row) => ({
         triggerEventKey: 'estimate.expired',
         entityType: 'estimate',
         entityId: row.id,
@@ -81,7 +92,9 @@ async function runEstimateExpiration() {
   const thresholdDays = getThresholdDays();
   const ageCutoff = new Date(Date.now() - thresholdDays * 24 * 60 * 60 * 1000);
   const now = new Date();
-  const flippedColumns = ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at'];
+  // archived_at + estimate_data feed the shared follow-up rule
+  // (estimateFollowupBlockedReason) for the estimate.expired automation.
+  const flippedColumns = ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition', 'customer_id', 'customer_email', 'category', 'service_interest', 'expires_at', 'archived_at', 'estimate_data'];
 
   // Rule 1: aged-out — sent/viewed with sent_at older than the cutoff and
   // no accept/decline yet. Only flips live rows. Archived rows are parked
@@ -190,11 +203,14 @@ async function runEstimateExpiration() {
   // pending-with-error / unrecoverable) rather than leaving the sweep to
   // guess. Never blocks the sweep — each is its own try/catch so one bad
   // row can't stop the rest, and the emitter itself is a no-op when the
-  // gate is off (its marker just stays pending for later replay).
-  if (expiredRows.length) {
+  // gate is off (its marker just stays pending for later replay). Same
+  // shared follow-up rule as the marker (flipExpiredBatch): an archived or
+  // zero-comms estimate is never emitted, marker or not.
+  const automationRows = expiredRows.filter((row) => !estimateFollowupBlockedReason(row));
+  if (automationRows.length) {
     const { emitEstimateExpired } = require('./email-template-automation-emitters');
     const intentIdByEstimateId = new Map([...agedIntents, ...dateIntents]);
-    for (const row of expiredRows) {
+    for (const row of automationRows) {
       try {
         await emitEstimateExpired(row, intentIdByEstimateId.get(String(row.id)) || null);
       } catch (e) {

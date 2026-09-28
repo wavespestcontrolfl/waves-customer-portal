@@ -2628,6 +2628,55 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     })).rejects.toMatchObject({ annualOfferGuardFailed: true });
   });
 
+  // codex P2 round 6 on #5154: preflight runs the SAME guard chain as
+  // sendTemplate (resolveTemplateForSend + prepareTemplateSend), so a
+  // marketing send with no unsubscribe URL and no ASM group is refused by
+  // both, with the same reason — never a parallel check that can drift.
+  test('a marketing template with no unsubscribe URL and no ASM group is refused by live sendTemplate AND blocked by preflight, identically', async () => {
+    const marketingVersion = () => version({
+      id: 'ver-marketing',
+      subject: 'Monthly update',
+      blocks: [{ type: 'paragraph', content: 'Hi {{first_name}}, here is the monthly update.' }],
+    });
+    sendgrid.newsletterGroupId.mockReturnValue(null);
+    try {
+      setDbQueues({
+        email_templates: [
+          chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) }),
+          chain({ first: marketingTemplate({ active_version_id: 'ver-marketing' }) }),
+        ],
+        email_template_versions: [chain({ first: marketingVersion() }), chain({ first: marketingVersion() })],
+      });
+
+      await expect(EmailTemplates.sendTemplate({
+        templateKey: 'newsletter.monthly', to: 'sam@example.com', payload: { first_name: 'Sam' },
+      })).rejects.toThrow('marketing template sends require an unsubscribe URL or SendGrid ASM group');
+
+      const result = await EmailTemplates.preflightTemplateSend({
+        templateKey: 'newsletter.monthly', to: 'sam@example.com', payload: { first_name: 'Sam' },
+      });
+      expect(result).toEqual({
+        ok: false,
+        reason: 'marketing template sends require an unsubscribe URL or SendGrid ASM group',
+        code: 'EMAIL_TEMPLATE_UNSUBSCRIBE_REQUIRED',
+      });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect(sendgrid.applyAnnualOfferGuard).not.toHaveBeenCalled();
+    } finally {
+      sendgrid.newsletterGroupId.mockReturnValue(101);
+    }
+  });
+
+  test('an infrastructure error in the shared chain (a template read failing) is rethrown, not read as a block', async () => {
+    const failing = chain();
+    failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+    setDbQueues({ email_templates: [failing] });
+
+    await expect(EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com', payload: {},
+    })).rejects.toThrow('connection terminated');
+  });
+
   test('blocks (ok:false) a missing template', async () => {
     setDbQueues({ email_templates: [chain({ first: null })] });
 

@@ -212,6 +212,39 @@ describe('livePayloadForRun — estimate revalidation (estimate.expired, codex P
     expect(live.__blocked).toBeUndefined();
     expect(live.status).toBe('sent');
   });
+
+  // codex P1 round 6 on #5154: the ONE shared follow-up rule
+  // (estimate-comms-eligibility.js), re-judged against the live row at
+  // execution so a pending/delayed/retried run obeys a later archive.
+  test('blocked: archived after the run was queued (status still expired)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', archived_at: new Date('2026-06-02T12:00:00Z'), estimate_data: {} },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('estimate is archived');
+  });
+
+  test('blocked: a zero-comms lane (estimate_data.noEngagementAutomation) never gets expiry copy', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', archived_at: null, estimate_data: JSON.stringify({ noEngagementAutomation: true }) },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toMatch(/noEngagementAutomation/);
+  });
+
+  test('the shared rule covers EVERY estimate-entity automation, not just estimate.expired', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', archived_at: null, estimate_data: { noEngagementAutomation: true } },
+    });
+
+    const live = await livePayloadForRun(run({ trigger_event_key: 'estimate.auto_renewed' }));
+
+    expect(live.__blocked).toMatch(/noEngagementAutomation/);
+  });
 });
 
 describe('exitReasonFor — send-time appointment guards', () => {

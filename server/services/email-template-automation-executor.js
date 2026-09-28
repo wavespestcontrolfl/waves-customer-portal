@@ -3,6 +3,7 @@ const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
+const { estimateFollowupBlockedReason } = require('./estimate-comms-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -1044,6 +1045,17 @@ async function livePayloadForRun(run, storedPayload = {}) {
       }
     }
     if (!row) return {};
+    // Every estimate-entity automation (estimate.sent / viewed /
+    // expiring_soon / auto_renewed / expired — all follow-up outreach) obeys
+    // the ONE shared follow-up rule the engagement engine, follow-up cron,
+    // auto-renew and extension flow read (codex P1 round 6 on #5154):
+    // estimate-comms-eligibility.js — never an archived estimate (staff
+    // parked it; archiving an expired estimate leaves status 'expired'),
+    // never one stamped estimate_data.noEngagementAutomation. Judged HERE,
+    // against the live row, so a pending, delayed or retried run re-judges
+    // it at execution, whatever was true when it was created.
+    const followupBlocked = estimateFollowupBlockedReason(row);
+    if (followupBlocked) return { __blocked: followupBlocked };
     const live = {};
     setLiveValue(live, 'estimate_id', row.id);
     if (hasOwn(row, 'status')) {
@@ -1532,6 +1544,8 @@ async function loadRunAndAutomation(runOrId, automation) {
   return { run, resolvedAutomation };
 }
 
+const GATE_OFF_REASON = 'email template automations gate is off';
+
 async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   const { run, resolvedAutomation } = await loadRunAndAutomation(runOrId, automation);
   if (FINAL_STATUSES.has(run.status)) return run;
@@ -1566,6 +1580,18 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     attempt: attemptNumber,
   });
   const claimedRun = { ...run, ...running };
+
+  // Gate OFF terminalizes, before anything else (codex P1 round 6 on
+  // #5154): the scheduler now runs processDueRuns in off mode too, ONLY so
+  // due delayed/retry runs are settled skipped (guard gate_off) instead of
+  // sitting runnable through the outage and then sending stale copy the
+  // moment the gate returns — the same drop-on-rollback posture as the
+  // live -> shadow rollback below. No entity reads, no shadow preflight, no
+  // provider call. A skipped run is terminal, so re-enabling the gate never
+  // sends it.
+  if (emailTemplateAutomationsMode() === 'off') {
+    return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
+  }
 
   try {
     const storedPayload = asObject(claimedRun.payload);
@@ -1624,7 +1650,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // (always true) and can be stale in prod too. Skipped, not silently
     // dropped: the row + event stay as an audit trail of what didn't send.
     if (dispatchMode === 'off') {
-      return markRunSkipped(claimedRun, 'email template automations gate is off', { guard: 'gate_off', attempt: attemptNumber });
+      return markRunSkipped(claimedRun, GATE_OFF_REASON, { guard: 'gate_off', attempt: attemptNumber });
     }
     const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
     if (outcome.skipReason) {

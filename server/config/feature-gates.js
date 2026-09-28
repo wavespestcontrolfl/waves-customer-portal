@@ -1865,14 +1865,16 @@ const gates = {
   //     email shadow mode won't actually send.
   // Every OTHER reader keeps reading this boolean (shadow counts as on,
   // same as live) because none of them sends anything outside the executor
-  // itself: the scheduler tick (scheduler.js ~line 3196, processDueRuns),
-  // the admin trigger/process-due test routes (admin-email-templates.js
+  // itself: the admin trigger/process-due test routes (admin-email-templates.js
   // ~lines 850, 873), and the new estimate.expired / review.linked_5star
   // emitters (email-template-automation-emitters.js) — all of them route
   // INTO the executor, which is where the shadow-vs-live decision actually
   // lives (executeRun's dispatch chokepoint). A producer must read this
   // boolean ONLY when every one of its own sends already goes exclusively
   // through the executor with no direct-send fallback of its own.
+  // The scheduler's due-run tick (scheduler.js, processDueRuns) reads no
+  // gate at all: it runs in every mode, and with the mode off executeRun
+  // settles each due run skipped (gate_off) instead of sending it.
   //
   // ONE SOURCE OF TRUTH (codex P1 round 4): this boolean is DERIVED from
   // emailTemplateAutomationsMode() at call time — on exactly when the mode
