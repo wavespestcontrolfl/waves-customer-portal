@@ -21,10 +21,10 @@ function routeIdentitySql(alias) {
 
 // The slug a queued ARTICLE row is bound to publish at, for every
 // pinned-article producer: operator intercept and category seeds
-// (intercept_brief / category_brief) and aeo_question_gap articles.
+// (intercept_brief / category_brief).
 function pinnedArticlePathSql(alias) {
   const m = col(alias, 'signal_metadata');
-  return `COALESCE(${m}->'intercept_brief'->>'slug', ${m}->'category_brief'->>'slug', ${m}->>'target_path')`;
+  return `COALESCE(${m}->'intercept_brief'->>'slug', ${m}->'category_brief'->>'slug')`;
 }
 
 // The route a row writes: its page (edits) or its pinned slug on the hub

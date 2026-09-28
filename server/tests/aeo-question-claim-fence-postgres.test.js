@@ -59,9 +59,10 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     await mockPg('opportunity_queue').del();
   });
 
-  const questionArticle = (patch = {}) => ({
-    id: randomUUID(), status: 'pending', action_type: 'new_supporting_blog', bucket: 'aeo_question_gap', score: 80,
-    dedupe_key: `aeo_question_gap::Q19::${randomUUID()}`,
+  // Question gaps only ever queue a refresh of the live target page.
+  const questionRefresh = (patch = {}) => ({
+    id: randomUUID(), status: 'pending', action_type: 'refresh_existing_page', bucket: 'aeo_question_gap', score: 80,
+    page_url: `${HUB}${SLUG}`, dedupe_key: `aeo_question_gap::Q19::${randomUUID()}`,
     signal_metadata: JSON.stringify({ benchmark_id: 'Q19', target_path: SLUG }), mined_at: new Date(), ...patch,
   });
   const categorySeed = (patch = {}) => ({
@@ -87,9 +88,9 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
   }
 
   test.each([
-    ['question first, category seed seeded after', () => [questionArticle(), categorySeed()]],
-    ['category seed first, question seeded after', () => [categorySeed(), questionArticle()]],
-    ['question first, intercept seed seeded after', () => [questionArticle(), interceptSeed()]],
+    ['question first, category seed seeded after', () => [questionRefresh(), categorySeed()]],
+    ['category seed first, question seeded after', () => [categorySeed(), questionRefresh()]],
+    ['question first, intercept seed seeded after', () => [questionRefresh(), interceptSeed()]],
   ])('%s: whichever is claimed first blocks the other', async (_label, rows) => {
     for (const r of rows()) await mockPg('opportunity_queue').insert(r);
     const claimed = await claimAll();
@@ -100,10 +101,10 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
 
   test('a claimed or in-review row of either kind blocks the other', async () => {
     for (const [holder, waiter] of [
-      [questionArticle({ status: 'claimed', claimed_at: new Date() }), categorySeed()],
-      [categorySeed({ status: 'claimed', claimed_at: new Date() }), questionArticle()],
-      [questionArticle({ status: 'pending_review' }), decayRefresh(`${HUB}${SLUG}`)],
-      [decayRefresh(`${HUB}${SLUG}`, { status: 'pending_review' }), questionArticle()],
+      [questionRefresh({ status: 'claimed', claimed_at: new Date() }), categorySeed()],
+      [categorySeed({ status: 'claimed', claimed_at: new Date() }), questionRefresh()],
+      [questionRefresh({ status: 'pending_review' }), decayRefresh(`${HUB}${SLUG}`)],
+      [decayRefresh(`${HUB}${SLUG}`, { status: 'pending_review' }), questionRefresh()],
     ]) {
       await mockPg('opportunity_queue').del();
       await mockPg('opportunity_queue').insert([holder, waiter]);
@@ -113,22 +114,22 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     }
   });
 
-  test('a question refresh keyed by page_url fences a pinned article for the same route (www / slash variants)', async () => {
+  test('a question refresh fences a pinned seed article for the same route (www / slash variants)', async () => {
     await mockPg('opportunity_queue').insert([
-      questionArticle({ status: 'claimed', claimed_at: new Date(), action_type: 'refresh_existing_page', page_url: `https://wavespestcontrol.com${SLUG.slice(0, -1)}` }),
+      questionRefresh({ status: 'claimed', claimed_at: new Date(), page_url: `https://wavespestcontrol.com${SLUG.slice(0, -1)}` }),
       categorySeed(),
     ]);
     expect(await queue.claimNext({ minScore: 0 })).toBeNull();
   });
 
   test('a question row waits out the cooldown after another row wrote its route; the reverse is not held', async () => {
-    await mockPg('opportunity_queue').insert([categorySeed({ status: 'done', updated_at: new Date() }), questionArticle()]);
+    await mockPg('opportunity_queue').insert([categorySeed({ status: 'done', updated_at: new Date() }), questionRefresh()]);
     expect(await queue.claimNext({ minScore: 0 })).toBeNull();
     await mockPg('opportunity_queue').where({ status: 'done' }).update({ updated_at: new Date(Date.now() - 40 * 86400_000) });
     expect(await queue.claimNext({ minScore: 0 })).not.toBeNull();
 
     await mockPg('opportunity_queue').del();
-    await mockPg('opportunity_queue').insert([questionArticle({ status: 'done', updated_at: new Date() }), categorySeed()]);
+    await mockPg('opportunity_queue').insert([questionRefresh({ status: 'done', updated_at: new Date() }), categorySeed()]);
     expect(await queue.claimNext({ minScore: 0 })).not.toBeNull();
   });
 
@@ -137,7 +138,7 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
       id: randomUUID(), opportunity_id: opportunityId, action_type: 'new_supporting_blog', claimed_at: new Date(),
       astro_pr_url: 'https://github.com/example/content/pull/9', ...patch,
     });
-    for (const [crashed, other] of [[questionArticle(), categorySeed()], [categorySeed(), questionArticle()]]) {
+    for (const [crashed, other] of [[questionRefresh(), categorySeed()], [categorySeed(), questionRefresh()]]) {
       await mockPg('autonomous_runs').del();
       await mockPg('opportunity_queue').del();
       // The worker opened the PR, then crashed; recovery set the row back to
@@ -155,14 +156,32 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
     await mockPg('autonomous_runs').del();
     await mockPg('opportunity_queue').del();
     const seed = categorySeed({ status: 'expired' });
-    const question = questionArticle();
+    const question = questionRefresh();
     await mockPg('opportunity_queue').insert([seed, question]);
     await mockPg('autonomous_runs').insert(run(seed.id, { published_url: `${HUB}${SLUG}` }));
     expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(question.id);
   });
 
+  test('a question refresh whose own worker crashed after opening its PR is not re-claimable until the PR is retired', async () => {
+    // Stale-claim recovery set the row back to pending; its run still owns
+    // an open, unmerged PR for the page.
+    const row = questionRefresh();
+    await mockPg('opportunity_queue').insert(row);
+    await mockPg('autonomous_runs').insert({ id: randomUUID(), opportunity_id: row.id, action_type: 'refresh_existing_page',
+      claimed_at: new Date(), astro_pr_url: 'https://github.com/example/content/pull/11' });
+    expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+    expect((await queue.peek({ limit: 10 })).map((r) => r.id)).not.toContain(row.id);
+    // Published: the refresh already landed — still not re-claimed (same
+    // own-run rule as blog rows; the row ages out via expireStale).
+    await mockPg('autonomous_runs').update({ published_url: `${HUB}${SLUG}` });
+    expect(await queue.claimNext({ minScore: 0 })).toBeNull();
+    // A retired PR (closed, branch removed) with no publish frees the row.
+    await mockPg('autonomous_runs').update({ published_url: null, astro_pr_retired_at: new Date() });
+    expect((await queue.claimNext({ minScore: 0 }))?.id).toBe(row.id);
+  });
+
   test('overlapping claims are serialized: two concurrent claimers take one same-route row, never both', async () => {
-    await mockPg('opportunity_queue').insert([questionArticle(), categorySeed()]);
+    await mockPg('opportunity_queue').insert([questionRefresh(), categorySeed()]);
     // Hold the claim lock from another session so both claimers start and
     // queue up at the same moment, then release it.
     const holder = await mockPg.client.acquireConnection();
@@ -185,7 +204,7 @@ postgres('aeo_question_gap claim fence on PostgreSQL', () => {
 
   test('unrelated routes and rows without a question are unaffected', async () => {
     await mockPg('opportunity_queue').insert([
-      questionArticle({ status: 'claimed', claimed_at: new Date() }),
+      questionRefresh({ status: 'claimed', claimed_at: new Date() }),
       decayRefresh(`${HUB}/termite/termite-bond/`),
       categorySeed({ signal_metadata: JSON.stringify({ category_brief: { slug: '/pest-control/other-post/' } }) }),
     ]);

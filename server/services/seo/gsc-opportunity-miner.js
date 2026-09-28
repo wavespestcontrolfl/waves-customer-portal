@@ -55,10 +55,11 @@
  *                       draft adds self-contained answer blocks (gated
  *                       behind GATE_ANSWER_GAP_MINING).
  *   aeo_question_gap    identify/decision/cost AEO benchmark question whose
- *                       TARGET page ≥N engines don't cite: refresh the live
- *                       target with the question as an answer block, else
- *                       one new article (gated behind
- *                       GATE_AEO_QUESTION_GAP_MINING, ≤2 per run).
+ *                       TARGET page ≥N engines don't cite: refresh the live,
+ *                       editable target with the question as an answer
+ *                       block; a missing target is logged, never queued
+ *                       (gated behind GATE_AEO_QUESTION_GAP_MINING, ≤2 per
+ *                       run).
  *   link_boost          derived (not mined): every ctr_rewrite/decay_refresh
  *                       page also gets an add_internal_links companion so
  *                       underperformers receive inbound links, not just a
@@ -80,7 +81,6 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const { observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
 const aeoBenchmark = require('../../data/aeo-benchmark-v1.json');
-const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
 const { routeIdentitySql, pinnedArticlePathSql } = require('../content/opportunity-route-sql');
 const { isEntityQuestion } = require('./aeo-entity-facts');
 const { geoBlockReason } = require('../content/topic-targeting-gate');
@@ -428,10 +428,9 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
     return 'new_supporting_blog';
   }
   // aeo_question_gap: a live benchmark target page gets the question as an
-  // answer block (ANSWER-GAP MODE); a missing target gets one article that
-  // answers the single question. Never a city-service page — the question
-  // is not the city page's intent.
-  if (bucket === 'aeo_question_gap') return page_url ? 'refresh_existing_page' : 'new_supporting_blog';
+  // answer block (ANSWER-GAP MODE). A missing target is an unmet gap this
+  // lane does not write (new articles come from the seed lanes).
+  if (bucket === 'aeo_question_gap') return page_url ? 'refresh_existing_page' : 'do_not_publish';
   // answer_gap is page-anchored by construction (mined from query→page rows);
   // without a target page there is nothing to add answer blocks to.
   if (bucket === 'answer_gap') {
@@ -1164,9 +1163,10 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
 // questions (provider questions stay aeo_gap's; entity questions are
 // identity gaps, not page gaps) whose TARGET page enough engines do not
 // cite. Owner-approved 2026-09-28 ("the auto-seeder"): the gap feeds the
-// existing autonomous pipeline — a live target is refreshed with the
-// question as an answer block (answer_gap's unanswered_queries contract),
-// a missing target gets one article.
+// existing autonomous pipeline — a live, editable target is refreshed with
+// the question as an answer block (answer_gap's unanswered_queries
+// contract). A missing target is an unmet gap, logged and never queued:
+// new articles come from the category and intercept seed lanes.
 
 const AEO_QUESTION_GAP_BUCKET = 'aeo_question_gap';
 const AEO_QUESTION_GAP_INTENTS = new Set(['identify', 'decision', 'cost']);
@@ -1198,17 +1198,6 @@ function hubTargetUrl(targetPath) {
 // claimed / pending_review — persistAll's upsert guard).
 function aeoQuestionGapDedupeKey(question) {
   return [AEO_QUESTION_GAP_BUCKET, question.id, routeIdentity(hubTargetUrl(question.target_path)) || '_'].join('::');
-}
-
-// A missing target can only become an article when the article can be
-// published AT that path — otherwise it lands at a writer-chosen URL, the
-// question's key freezes on completion, and the benchmark target stays
-// missing. The runner's existing slug pin (applyOperatorSlugRepair) can
-// honor exactly one shape: /<canonical blog category>/<leaf>/.
-function aeoPinnableBlogPath(targetPath) {
-  const p = String(targetPath || '');
-  if (!/^\/[a-z0-9-]+\/[a-z0-9-]+\/$/.test(p)) return false;
-  return BLOG_POST_CATEGORIES.has(p.split('/')[1]);
 }
 
 function urlHost(url) {
@@ -1278,14 +1267,16 @@ function evaluateAeoQuestionGaps(rows = [], questions = [], { minDays = 3, minEn
 // thin to clear its action's floor is pinned AT that floor (the lowest
 // admissible rank) — admitted, but never above a GSC opportunity that
 // earned its place. score_floor_pinned also keeps the facts boost off it.
+// A missing target (liveUrl null) routes to do_not_publish — an unmet gap,
+// never queued.
 function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
   const q = gap.question;
   const page_url = liveUrl || null;
-  // A refresh takes city/service from the TARGET URL (answer_gap's rule: a
+  // City/service come from the TARGET URL (answer_gap's rule: a
   // question-derived city on a non-city page would attach wrong-city facts
-  // to the edit); a new article takes the benchmark's labels.
+  // to the edit); the benchmark label only fills a missing service.
   const service = (page_url && inferServiceFromUrl(page_url)) || aeoServiceFor(q.service, q.query);
-  const city = page_url ? inferCityFromUrl(page_url) : (normalizeCity(q.city) || inferCityFromQuery(q.query));
+  const city = page_url ? inferCityFromUrl(page_url) : null;
   const signal = {
     impressions,
     benchmark_id: q.id,
@@ -1304,17 +1295,15 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
     // buckets use, so the brief's FAQ policy and the publish guard agree.
     specialty_topic: extractSpecialtyTopic([q.query, q.target_path]),
   };
-  // Live target → the refresh agent's ANSWER-GAP MODE (same key and entry
-  // shape answer_gap uses; the question is the one query to answer).
-  if (page_url) {
-    signal.unanswered_queries = [{
-      query: q.query,
-      impressions,
-      source: AEO_QUESTION_GAP_BUCKET,
-      benchmark_id: q.id,
-      engines_missing: gap.engines_missing.map((e) => e.platform),
-    }];
-  }
+  // The refresh agent's ANSWER-GAP MODE (same key and entry shape
+  // answer_gap uses; the question is the one query to answer).
+  signal.unanswered_queries = [{
+    query: q.query,
+    impressions,
+    source: AEO_QUESTION_GAP_BUCKET,
+    benchmark_id: q.id,
+    engines_missing: gap.engines_missing.map((e) => e.platform),
+  }];
   const opp = { bucket: AEO_QUESTION_GAP_BUCKET, query: q.query, page_url, service, city, signal_metadata: signal };
   const { total, breakdown } = scoreOpportunity(opp, { position: 20, impressions, gapStrength: gap.gap_strength });
   opp.action_type = actionForOpportunity(opp);
@@ -1337,28 +1326,20 @@ function buildAeoQuestionGapOpp(gap, { liveUrl = null, impressions = 0 } = {}) {
 // pinned-article producer (shared with the queue's claim fence).
 const PINNED_ARTICLE_PATH_SQL = pinnedArticlePathSql();
 
-// Can this lane ever act on the candidate as mined? Not when routing demoted
-// it (do_not_publish), nor for a MISSING target an article cannot be pinned
-// to (a tool, resource or city-service path) — nothing this lane publishes
-// would close it. A permanent rejection, unlike the cap or a fence.
+// Can this lane ever act on the candidate as mined? Only as a refresh of a
+// live target. A missing target is a permanent rejection for this lane
+// (unlike the cap or a fence): nothing it publishes would close the gap.
 function aeoQuestionGapRoutable(o) {
-  return o.action_type !== 'do_not_publish'
-    && (!!o.page_url || aeoPinnableBlogPath(o.signal_metadata?.target_path));
-}
-
-// The route a row writes: the live page it refreshes, or the target path a
-// new article is pinned to.
-function aeoQuestionGapRoute(o) {
-  return routeIdentity(o.page_url || hubTargetUrl(o.signal_metadata?.target_path));
+  return o.action_type === 'refresh_existing_page' && !!o.page_url;
 }
 
 // Highest score first, at most `cap`. Before the cap (so they never burn a
-// slot): frozen keys, do_not_publish demotions, missing targets an article
-// can't be pinned to, and any route another row is writing or recently
-// wrote (fencedPages: in-flight page edits or pinned articles under a
-// DIFFERENT key, or one done inside the cooldown; null = lookup failed →
-// nothing this run) or that an earlier pick this run targets — two
-// questions sharing a target never queue two writes to it.
+// slot): frozen keys, unroutable candidates (missing targets), and any page
+// another row is writing or recently wrote (fencedPages: in-flight page
+// edits or pinned seed articles under a DIFFERENT key, or one done inside
+// the cooldown; null = lookup failed → nothing this run) or that an earlier
+// pick this run targets — two questions sharing a target never queue two
+// refreshes of it.
 function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), fencedPages = new Map() } = {}) {
   const ordered = [...opps].sort((a, b) => b.score - a.score
     || b.signal_metadata.gap_strength - a.signal_metadata.gap_strength
@@ -1369,7 +1350,7 @@ function selectAeoQuestionGaps(opps = [], { cap = 2, occupiedKeys = new Set(), f
     if (out.length >= cap) break;
     if (!aeoQuestionGapRoutable(o) || occupiedKeys.has(o.dedupe_key)) continue;
     if (fencedPages === null) continue;
-    const id = aeoQuestionGapRoute(o);
+    const id = routeIdentity(o.page_url);
     const holders = fencedPages.get(id);
     if (holders && [...holders].some((k) => k !== o.dedupe_key)) continue;
     if (pages.has(id)) continue;
@@ -3461,8 +3442,8 @@ class GscOpportunityMiner {
       logger.warn(`[gsc-opp-miner] aeo_question_gap: occupied keys load failed: ${err.message}`);
       return new Set();
     });
-    // Fail-CLOSED for refreshes: without the fence a page could collect two
-    // concurrent edits. New-article questions are unaffected.
+    // Fail-CLOSED: without the fence a page could collect two concurrent
+    // edits.
     const fencedPages = await this._aeoQuestionPageFence(cooldownDays).catch((err) => {
       logger.warn(`[gsc-opp-miner] aeo_question_gap: page fence lookup failed (${err.message}) — refreshes suppressed this run`);
       return null;
@@ -3477,26 +3458,28 @@ class GscOpportunityMiner {
     // file) would park its run for review, so each refresh pick is probed
     // with the loader answer_gap uses — bounded, and confirmed non-editable
     // pages are remembered across runs in the listicle probe's cache. Such
-    // a question is skipped, not turned into a competing new article.
+    // a question is skipped.
     const ranked = selectAeoQuestionGaps(opps, { cap: Infinity, occupiedKeys: occupied, fencedPages });
     const out = [];
     const probe = { remaining: cap * 3 };
     for (const o of ranked) {
       if (out.length >= cap) break;
-      if (o.page_url && (await this._aeoRefreshTargetEditable(o.page_url, probe)) !== 'editable') continue;
+      if ((await this._aeoRefreshTargetEditable(o.page_url, probe)) !== 'editable') continue;
       out.push(o);
     }
     // The recovery sweep's live set: every qualifying candidate, including
     // ones held back only by the cap or a temporary fence — but NOT one this
-    // lane can never act on: unroutable as mined (a missing tool/resource
-    // target an article cannot be pinned to — its older pending REFRESH row,
-    // same key, would otherwise stay claimable for a page that is gone), or
-    // a live target confirmed non-editable (cached verdict, this run's
-    // probes included). Those rows retire.
+    // lane can never act on: a missing target (its older pending refresh
+    // row, same key, would otherwise stay claimable for a page that is
+    // gone) or a live target confirmed non-editable (cached verdict, this
+    // run's probes included). Those rows retire.
     const nonEditable = GscOpportunityMiner._nonEditablePages;
     qualifying.opps = opps.filter((o) => aeoQuestionGapRoutable(o)
-      && !(o.page_url && nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
-    logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'})`);
+      && !(nonEditable.get(routeIdentity(o.page_url)) > Date.now()));
+    // Missing targets are unmet gaps this lane does not write — reported so
+    // the seed lanes can pick them up.
+    const unmet = opps.filter((o) => !o.page_url).map((o) => o.signal_metadata.benchmark_id);
+    logger.info(`[gsc-opp-miner] aeo_question_gap: ${gaps.length} qualifying question(s), ${out.length} emitted (${out.map((o) => o.signal_metadata.benchmark_id).join(', ') || 'none'}); unmet gaps, target missing: ${unmet.join(', ') || 'none'}`);
     return out;
   }
 
@@ -3568,10 +3551,9 @@ class GscOpportunityMiner {
 
   // Routes under an in-flight write (pending / claimed / pending_review) or
   // written inside the cooldown (done), by route identity → holder keys:
-  // page edits from every bucket, plus every PINNED article (no page_url
-  // yet — its route is the slug it is bound to publish at): operator
-  // intercept and category seeds carry theirs in intercept_brief /
-  // category_brief.slug, this bucket in target_path.
+  // page edits from every bucket, plus every PINNED seed article (no
+  // page_url yet — its route is the slug it is bound to publish at, in
+  // intercept_brief / category_brief.slug).
   async _aeoQuestionPageFence(cooldownDays) {
     const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
     const recent = (b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
@@ -4266,7 +4248,7 @@ class GscOpportunityMiner {
   // article may point at a route another bucket is editing.
   static aeoQuestionOppYields(o, arbitrated) {
     return o.bucket === AEO_QUESTION_GAP_BUCKET
-      && !!arbitrated.nonAeoQuestionPages?.has(aeoQuestionGapRoute(o));
+      && !!arbitrated.nonAeoQuestionPages?.has(routeIdentity(o.page_url));
   }
 
   // Does this family opp lose page/query arbitration to another bucket?
@@ -4979,12 +4961,6 @@ class GscOpportunityMiner {
                query = EXCLUDED.query,
                service = EXCLUDED.service,
                city = EXCLUDED.city,
-               -- page_url too: an aeo_question_gap key is question + target,
-               -- so a pinned article whose target went live re-mines as a
-               -- refresh under the SAME key and must carry the page it
-               -- edits. A no-op elsewhere, since dedupeKey embeds page_url
-               -- whenever a row has one.
-               page_url = EXCLUDED.page_url,
                status = 'pending',
                -- A revived row is pending again — a lingering automatic
                -- retirement reason (family_signal_gone) would read as
@@ -5336,5 +5312,4 @@ module.exports._internals = {
   evaluateAeoQuestionGaps,
   buildAeoQuestionGapOpp,
   selectAeoQuestionGaps,
-  aeoPinnableBlogPath,
 };

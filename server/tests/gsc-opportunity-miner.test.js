@@ -3131,14 +3131,11 @@ describe('aeo_question_gap bucket', () => {
     expect(opp.dedupe_key).toBe('aeo_question_gap::Q6::wavespestcontrol.com::/pest-control/get-rid-of-german-cockroaches');
   });
 
-  test('a missing target → a single new article, no answer-block contract', () => {
+  test('a missing target is never queued work: do_not_publish, unroutable, never selected', () => {
     const opp = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null, impressions: 0 });
-    expect(opp.action_type).toBe('new_supporting_blog');
+    expect(opp.action_type).toBe('do_not_publish');
     expect(opp.page_url).toBeNull();
-    expect(opp.city).toBe('Sarasota');
-    expect(opp.service).toBe('termite');
-    expect(opp.signal_metadata.unanswered_queries).toBeUndefined();
-    expect(opp.score).toBe(minScoreToActFor('new_supporting_blog'));
+    expect(selectAeoQuestionGaps([opp], { cap: 5 })).toEqual([]);
   });
 
   test('GSC demand ranks: strong target impressions score above the floor without pinning', () => {
@@ -3156,7 +3153,7 @@ describe('aeo_question_gap bucket', () => {
     const a = live('Q26', '/termite/termite-bond/', 900);
     const b = live('Q37', '/termite/termite-bond/', 0); // same page as a, floor-pinned
     const c = live('Q36', '/termite/termite-treatment-cost/', 300);
-    const d = buildAeoQuestionGapOpp(gapFor('Q6'), { liveUrl: null });
+    const d = live('Q6', '/pest-control/get-rid-of-german-cockroaches/', 0);
     expect(selectAeoQuestionGaps([a, b, c, d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q26', 'Q36']);
     expect(selectAeoQuestionGaps([a, b, c, d], { cap: 5 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q26', 'Q36', 'Q6']);
     // A frozen key never burns a slot.
@@ -3166,17 +3163,8 @@ describe('aeo_question_gap bucket', () => {
     const bondPage = 'wavespestcontrol.com::/termite/termite-bond';
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set(['decay_refresh::x'])]]) }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q36']);
     expect(selectAeoQuestionGaps([a, c], { cap: 2, fencedPages: new Map([[bondPage, new Set([a.dedupe_key])]]) })).toHaveLength(2);
-    // A missing target that is not a /category/leaf/ blog route can't be
-    // published at its path → no article.
-    const calc = buildAeoQuestionGapOpp(gapFor('Q31'), { liveUrl: null });
-    expect(calc.action_type).toBe('new_supporting_blog');
-    expect(selectAeoQuestionGaps([calc, d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
-    // Two MISSING-target questions pinned to one path queue one article,
-    // and an in-flight article for that path fences the other question.
-    const bondArticle = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
-    const bondArticle2 = buildAeoQuestionGapOpp(gapFor('Q37'), { liveUrl: null });
-    expect(selectAeoQuestionGaps([bondArticle, bondArticle2], { cap: 2 })).toHaveLength(1);
-    expect(selectAeoQuestionGaps([bondArticle2], { cap: 2, fencedPages: new Map([[bondPage, new Set([bondArticle.dedupe_key])]]) })).toEqual([]);
+    // Missing targets never select.
+    expect(selectAeoQuestionGaps([buildAeoQuestionGapOpp(gapFor('Q31'), { liveUrl: null }), d], { cap: 2 }).map((o) => o.signal_metadata.benchmark_id)).toEqual(['Q6']);
     // Fence lookup failed → nothing this run.
     expect(selectAeoQuestionGaps([a, c, d], { cap: 2, fencedPages: null })).toEqual([]);
   });
@@ -3192,19 +3180,9 @@ describe('aeo_question_gap bucket', () => {
     expect(await yields([mine, decay])).toBe(true);
     expect(await yields([mine, weak])).toBe(false); // below its floor → lands nothing
     expect(await yields([mine])).toBe(false);
-    // Sitemap omission: the live sitemap missed the page, so the question
-    // became a pinned ARTICLE for the same route another bucket edits —
-    // it yields by route too.
-    const article = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
-    expect(article.page_url).toBeNull();
-    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article, decay]))).toBe(true);
-    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article]))).toBe(false);
-    // A surviving FAMILY refresh of the route wins over the pinned article
-    // too (family rows are outside the ordinary refresh candidates)...
+    // A family refresh that itself yields (to the question refresh of that
+    // page) never makes the question refresh yield back.
     const famRefresh = { bucket: 'listicle_family', action_type: 'refresh_existing_page', page_url: `${HUB}/termite/termite-bond/`, query: 'termite bond florida', service: 'termite', city: null, score: 60, signal_metadata: { family_queries: [] }, dedupe_key: 'listicle_family::page::bond' };
-    expect(GscOpportunityMiner.aeoQuestionOppYields(article, await miner._arbitratedRefreshPages([article, famRefresh]))).toBe(true);
-    // ...but a family refresh that itself yields (to the question REFRESH of
-    // that page) never makes the question refresh yield back.
     const famArb = await miner._arbitratedRefreshPages([mine, famRefresh]);
     expect(GscOpportunityMiner.familyOppYields(famRefresh, famArb)).toBe(true);
     expect(GscOpportunityMiner.aeoQuestionOppYields(mine, famArb)).toBe(false);
@@ -3215,29 +3193,6 @@ describe('aeo_question_gap bucket', () => {
     expect(aeoQuestionGapDedupeKey(q('Q26'))).not.toBe(aeoQuestionGapDedupeKey(q('Q27')));
     expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/termite-bond' })).toBe(aeoQuestionGapDedupeKey(q('Q26')));
     expect(aeoQuestionGapDedupeKey({ ...q('Q26'), target_path: '/termite/other/' })).not.toBe(aeoQuestionGapDedupeKey(q('Q26')));
-  });
-
-  test('an article row whose target went live re-mines as a refresh under the same key, carrying the page', async () => {
-    const article = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
-    const refresh = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: `${HUB}/termite/termite-bond/` });
-    expect(refresh.dedupe_key).toBe(article.dedupe_key);
-    const db = require('../models/db');
-    const calls = [];
-    db.mockImplementation(() => ({ whereIn() { return this; }, select: async () => [] }));
-    const trx = () => { const q = { where: () => q, whereIn: () => q, whereNotNull: () => q, forUpdate: () => q, select: async () => [] }; return q; };
-    trx.raw = async (sql, bindings) => { calls.push({ sql, bindings }); return { rowCount: 1 }; };
-    try {
-      const miner = new GscOpportunityMiner();
-      jest.spyOn(miner, '_aeoQuestionPageFence').mockResolvedValue(new Map());
-      expect(await miner.persistAll([refresh], trx)).toBe(1);
-      // The ON CONFLICT update of a mutable (pending / expired) row rewrites
-      // page_url with action_type — never a refresh row with no page.
-      expect(calls[0].sql).toMatch(/action_type = EXCLUDED\.action_type,[\s\S]*page_url = EXCLUDED\.page_url,/);
-      expect(calls[0].bindings[1]).toBe('refresh_existing_page');
-      expect(calls[0].bindings[3]).toBe(`${HUB}/termite/termite-bond/`);
-    } finally {
-      db.mockReset();
-    }
   });
 
   test('a German-cockroach question carries its FAQ-blocked specialty topic (brief + publish guard agree)', () => {
@@ -3268,7 +3223,7 @@ describe('aeo_question_gap bucket', () => {
     });
   });
 
-  test('the route fence covers every pinned-article producer — a category seed holding Q19\'s target blocks the question', async () => {
+  test('the route fence covers pinned seed articles — a category seed holding Q19\'s target blocks the question refresh', async () => {
     const categoryManifest = require('../data/category-seed-topics-v1.json');
     const seed = categoryManifest.briefs.find((b) => b.slug === q('Q19').target_path);
     expect(seed).toBeDefined(); // the manifest and Q19 really share this route
@@ -3293,10 +3248,8 @@ describe('aeo_question_gap bucket', () => {
     db.raw = prevRaw;
     db.mockReset();
     // One predicate reads every producer's binding slug.
-    expect(queries[1].raws[0]).toMatch(/intercept_brief'->>'slug'.*category_brief'->>'slug'.*target_path/);
-    const article = buildAeoQuestionGapOpp(gapFor('Q19'), { liveUrl: null });
+    expect(queries[1].raws[0]).toMatch(/intercept_brief'->>'slug'.*category_brief'->>'slug'/);
     const refresh = buildAeoQuestionGapOpp(gapFor('Q19'), { liveUrl: `${HUB}${q('Q19').target_path}` });
-    expect(selectAeoQuestionGaps([article], { cap: 2, fencedPages: fence })).toEqual([]);
     expect(selectAeoQuestionGaps([refresh], { cap: 2, fencedPages: fence })).toEqual([]);
   });
 
@@ -3323,7 +3276,7 @@ describe('aeo_question_gap bucket', () => {
       const miner = new GscOpportunityMiner();
       // A qualifying question the cap or a fence held back this run still
       // defends its pending row (floor-pinned, so persistable).
-      const stillQualifying = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+      const stillQualifying = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: `${HUB}/termite/termite-bond/` });
       await miner._sweepRecoveredQueries('aeo_question_gap', [stillQualifying], null, [], new Set(), '2026-08-30');
       expect(selects[0].notIn).toEqual([stillQualifying.dedupe_key]);
       const expired = updates.find((x) => x.u.skip_reason === 'aeo_question_gap_signal_recovered');
@@ -3415,18 +3368,23 @@ describe('aeo_question_gap bucket', () => {
       }
     });
 
-    test('recovery live set: a missing target an article cannot be pinned to drops out (Q11 /pest-identifier/ghost-ant/ gone from the sitemap)', async () => {
+    test('a missing target is skipped (no row, logged as an unmet gap) and drops out of the recovery live set', async () => {
       process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
       process.env.AEO_QUESTION_GAP_MAX_PER_RUN = '1';
-      const questions = [q('Q11'), q('Q26'), q('Q36')];
-      // Q11's tool page left the sitemap; the termite pages are live.
-      const miner = stubbed(synthetic(questions), [q('Q26'), q('Q36')].map((x) => `${HUB}${x.target_path}`));
+      // Q11's tool page and Q26's blog post are gone from the sitemap; the
+      // other two targets are live.
+      const questions = [q('Q11'), q('Q26'), q('Q36'), q('Q21')];
+      const miner = stubbed(synthetic(questions), [q('Q36'), q('Q21')].map((x) => `${HUB}${x.target_path}`));
+      const logger = require('../services/logger');
+      logger.info.mockClear();
       const qualifying = { opps: null };
       const out = await miner.mineAeoQuestionGaps('2026-08-30', { qualifying });
-      expect(out).toHaveLength(1); // cap defers one termite question
-      // Q11 would be a non-pinnable article → its old pending refresh retires;
-      // the cap-deferred termite question keeps its row.
-      expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q26', 'Q36']);
+      expect(out).toHaveLength(1); // cap defers one live question
+      expect(out.every((o) => o.action_type === 'refresh_existing_page' && o.page_url)).toBe(true);
+      // Missing targets retire their old pending rows; the cap-deferred live
+      // question keeps its row.
+      expect(qualifying.opps.map((o) => o.signal_metadata.benchmark_id).sort()).toEqual(['Q21', 'Q36']);
+      expect(logger.info.mock.calls.map((c) => c[0]).join('\n')).toMatch(/unmet gaps, target missing: Q11, Q26|unmet gaps, target missing: Q26, Q11/);
     });
 
     test('the editability probe is bounded and remembers confirmed non-editable pages', async () => {

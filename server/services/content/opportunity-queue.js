@@ -28,11 +28,14 @@ const effectiveActionSql = require('./opportunity-action-sql');
 // A failed status write may leave a published run's row pending. Fence every
 // blog claim, not just legacy approval holds. Only a verified closed PR with
 // its branch removed can cease blocking; published URLs never do.
+// aeo_question_gap refresh rows get the same own-run fence: a worker that
+// opened the refresh PR and crashed leaves the row pending after stale-claim
+// recovery, and re-claiming it would open a second PR for the same page.
 const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-         )) AND (${effectiveActionSql} <> 'new_supporting_blog' OR NOT EXISTS (
+         )) AND ((${effectiveActionSql} <> 'new_supporting_blog' AND opportunity_queue.bucket <> 'aeo_question_gap') OR NOT EXISTS (
            SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
              AND (r.published_url IS NOT NULL
                OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
@@ -51,12 +54,10 @@ const { writeRouteSql } = require('./opportunity-route-sql');
 //   - an unpublished, unretired Astro PR holds its route whatever the queue
 //     status says: a worker that recorded the PR and crashed leaves the row
 //     pending after stale-claim recovery, and the PR is still an open write;
-//   - a question row also waits while another row wrote its route within the
-//     cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh cooldown):
-//     a question ARTICLE left pending after a seed published the same slug
-//     would otherwise overwrite it. After the cooldown the next mine converts
-//     that row to a refresh of the now-live page (same key) or the recovery
-//     sweep retires it.
+//   - a question refresh also waits while another row wrote its page within
+//     the cooldown (AEO_QUESTION_GAP_COOLDOWN_DAYS, the miner's refresh
+//     cooldown), so a page a seed or another refresh just rewrote is not
+//     edited again straight away.
 // The day count is a parsed integer, never user text.
 function aeoRouteFenceSql() {
   const raw = Number.parseInt(process.env.AEO_QUESTION_GAP_COOLDOWN_DAYS, 10);

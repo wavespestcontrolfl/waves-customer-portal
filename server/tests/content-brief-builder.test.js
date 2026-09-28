@@ -938,19 +938,6 @@ describe('_composeBrief aeo_question_gap rows (AI-search question gaps)', () => 
     expect(JSON.stringify(brief)).not.toMatch(/Example Pest Co/);
   });
 
-  test('a missing-target article is pinned to the benchmark target path', () => {
-    const brief = compose(
-      { page_url: null, query: 'What is the difference between termite treatment and a termite bond in Sarasota?', city: 'Sarasota', service: 'termite',
-        signal_metadata: { impressions: 0, benchmark_id: 'Q26', engines_missing, target_path: '/termite/termite-bond/' } },
-      { page_type: 'supporting-blog', action_type: 'new_supporting_blog' }
-    );
-    expect(brief.voice_constraints.slug_pin).toBe('/termite/termite-bond/');
-    // Never operator_brief: the dispatcher treats any value there as a full
-    // operator-authored intercept.
-    expect(brief.voice_constraints.operator_brief).toBeUndefined();
-    expect(brief.gsc_signal.unanswered_queries).toBeNull();
-  });
-
   test('a non-blocked question refresh keeps the visible FAQ section but claims no FAQPage schema', () => {
     const brief = compose(
       { page_url: 'https://www.wavespestcontrol.com/pest-control/one-time-pest-control-vs-ongoing-plan/', query: 'Do I need one-time or recurring pest control in Bradenton?',

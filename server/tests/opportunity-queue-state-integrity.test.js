@@ -449,7 +449,7 @@ describe('aeo_question_gap lane fence (kill-switch contract)', () => {
     db.mockImplementation(() => chain());
     db.raw.mockResolvedValue({ rows: [] });
     await queue.claimNext({});
-    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).not.toContain(`bucket <> 'aeo_question_gap'`);
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).not.toContain(`AND bucket <> 'aeo_question_gap'`);
     const q = peekChain();
     db.mockImplementation(() => q);
     await queue.peek({});

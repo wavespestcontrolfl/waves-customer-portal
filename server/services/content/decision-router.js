@@ -84,9 +84,9 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // the key on completion without ever creating the page — and no later
 // mine could reopen it.
 // aeo_question_gap joined 2026-09-28 for the same reason: its key is the
-// benchmark question + target page, so a profiler reroute (refresh → new
-// blog, or blog → city-service page) would complete — and freeze — the key
-// without the target ever answering the question.
+// benchmark question + target page, so a profiler reroute of its refresh
+// (to a new blog or a city-service page) would complete — and freeze — the
+// key without the target ever answering the question.
 const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family', 'local_gap', 'aeo_question_gap']);
 
 function isOperatorPinned(opportunity = {}) {

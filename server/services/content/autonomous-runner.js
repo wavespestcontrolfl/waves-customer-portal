@@ -638,9 +638,7 @@ class AutonomousRunner {
     // remedy (single definition of slug drift — Codex r9); only a repair
     // that cannot be made safe (the pinned slug itself invalid) keeps the
     // old park remedy.
-    // aeo_question_gap articles carry the same pin (the benchmark target
-    // path) so the published URL is the page the question is measured on.
-    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET || opp.bucket === 'aeo_question_gap') {
+    if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
       const slugRepair = applyOperatorSlugRepair(brief, draft);
       if (slugRepair && !slugRepair.ok) {
         const finalized = await finalize(run, t0, {
@@ -3833,9 +3831,7 @@ function applyOperatorSlugRepair(brief, draft) {
   // straight through to publish (Codex r1+r3).
   // A shape error in the pin is an operator input error: park via the old
   // remedy, never guess.
-  // slug_pin: the non-operator pin (aeo_question_gap missing-target
-  // articles) — same enforcement, without operator-intercept semantics.
-  const rawPin = brief?.voice_constraints?.operator_brief?.slug ?? brief?.voice_constraints?.slug_pin;
+  const rawPin = brief?.voice_constraints?.operator_brief?.slug;
   const pinned = rawPin == null ? null : String(rawPin).trim();
   if (pinned != null && !PINNED_SLUG_PATTERN.test(pinned)) {
     return {

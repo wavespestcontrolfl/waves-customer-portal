@@ -919,20 +919,9 @@ class ContentBriefBuilder {
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
       voice_constraints: (() => {
-        // aeo_question_gap new articles publish AT the benchmark target
-        // path: the runner's slug repair (applyOperatorSlugRepair) enforces
-        // slug_pin, so the question is measured against the page this lane
-        // actually created. A dedicated field, never operator_brief — the
-        // dispatcher reads ANY operator_brief as a full operator-authored
-        // intercept.
-        const slugPin = opportunity.bucket === 'aeo_question_gap'
-          && decision.action_type === 'new_supporting_blog'
-          && opportunity.signal_metadata?.target_path
-          ? { slug_pin: opportunity.signal_metadata.target_path }
-          : {};
         const base = operatorOverlay
-          ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief, ...slugPin }
-          : { ...layered.voiceConstraints, ...slugPin };
+          ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
+          : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
         return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
       })(),

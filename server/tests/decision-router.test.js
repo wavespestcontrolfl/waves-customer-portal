@@ -295,7 +295,7 @@ describe('final_score equals sum of breakdown entries', () => {
 describe('page-anchored bucket pinning (aeo_question_gap)', () => {
   test.each([
     ['refresh_existing_page', '/pest-control/get-rid-of-german-cockroaches/', 'new_supporting_blog', 'refresh'],
-    ['new_supporting_blog', null, 'create_or_refresh_city_service_page', 'supporting-blog'],
+    ['refresh_existing_page', '/termite/termite-bond/', 'create_or_refresh_city_service_page', 'refresh'],
   ])('keeps %s when the profiler recommends another asset', (action, pageUrl, recommended, pageType) => {
     const r = route(
       opp({ bucket: 'aeo_question_gap', action_type: action, page_url: pageUrl, query: 'What affects termite treatment cost in Bradenton?' }),
