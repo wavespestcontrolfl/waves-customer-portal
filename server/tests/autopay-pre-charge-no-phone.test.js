@@ -135,8 +135,11 @@ test('a leg whose send throws does not skip its sibling and records no progress 
   expect(logAutopay.mock.calls.map(([, , opts]) => opts.details.channel)).toEqual(['email']);
 });
 
-test('a deduped Email leg logs the original acceptance without a new amount', async () => {
+test('a deduped Email leg preserves original time without inventing a changed current-rate amount', async () => {
   mockPrefs = { billing_channels: ['email'] };
+  // The original accepted Email was quoted before this customer moved to
+  // today's $149 rate. Its replay result has an acceptance time, no amount.
+  mockCustomers = [{ ...NO_PHONE, monthly_rate: '149.00' }];
   const sentAt = new Date('2026-05-20T14:00:00Z');
   sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt });
   expect(await sendPreChargeReminders()).toMatchObject({ sent: 0, skipped: 1 });

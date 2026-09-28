@@ -24,7 +24,7 @@ mockDb.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 mockDb.fn = { now: () => 'now()' };
 jest.mock('../models/db', () => mockDb);
 
-const { finalizeDeferredCompletionSend, stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
+const { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, stripPayLinkLineFromBody } = require('../services/dispatch-completion-deferred');
 
 describe('stripPayLinkLineFromBody (round 9 #4634 finding 1)', () => {
   const payUrl = 'https://pay.wavespestcontrol.com/i/abc123';
@@ -223,4 +223,42 @@ test('legacy mixed replay keeps old Email time but treats its new Text sibling a
     emailEventVisibleAt: '2026-09-08T14:00:00Z',
   }));
   expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('smsEventVisibleAt');
+});
+
+test('deferred decline finalize-only uses durable per-rail times and old notice time', async () => {
+  const Invoice = require('../services/invoice');
+  updates.length = 0;
+  Invoice.markDeliverySent.mockClear();
+  const meta = { invoice_id: 'inv-1', service_record_id: 'rec-1',
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+    invoice_prior_delivery_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_email: true, invoice_prior_email: true, invoice_prior_email_at: '2026-09-08T16:00:00Z',
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: '2026-09-08T14:00:00Z' };
+  expect(await finalizeDeferredDeclineNotice(meta)).toEqual({ ok: true });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, email: true, deduped: true,
+    eventVisibleAt: meta.invoice_prior_delivery_at,
+    smsEventVisibleAt: meta.invoice_prior_sms_at,
+    emailEventVisibleAt: meta.invoice_prior_email_at,
+  }));
+  const notes = updates.find((update) => update.structured_notes).structured_notes;
+  expect(JSON.parse(notes.bindings[0])).toEqual({ paymentFailedNoticeStatus: 'sent',
+    paymentFailedNoticeSentAt: new Date(meta.invoice_prior_delivery_at).toISOString() });
+});
+
+test('deferred decline keeps a fresh Email sibling fresh and does not invent a missing App timestamp', async () => {
+  const Invoice = require('../services/invoice');
+  updates.length = 0;
+  Invoice.markDeliverySent.mockClear();
+  await finalizeDeferredDeclineNotice({ invoice_id: 'inv-1', service_record_id: 'rec-1',
+    invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+    invoice_delivery_email: true, invoice_prior_email: false,
+    invoice_delivery_sms: true, invoice_prior_sms: true, invoice_prior_sms_at: null });
+  expect(Invoice.markDeliverySent).toHaveBeenCalledWith('inv-1', expect.objectContaining({
+    sms: true, email: true, deduped: false, smsEventVisibleAt: null,
+  }));
+  expect(Invoice.markDeliverySent.mock.calls[0][1]).not.toHaveProperty('emailEventVisibleAt');
+  const notes = JSON.parse(updates.find((update) => update.structured_notes).structured_notes.bindings[0]);
+  expect(notes.paymentFailedNoticeStatus).toBe('sent');
+  expect(Date.parse(notes.paymentFailedNoticeSentAt)).toBeGreaterThan(Date.parse('2026-09-08T16:00:00Z'));
 });

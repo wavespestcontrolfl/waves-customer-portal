@@ -3532,7 +3532,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
 
 const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
 
-async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
+async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
   try {
     const marked = await whereSendClaimOwned(
@@ -3541,7 +3541,7 @@ async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
         .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
       claimToken,
     ).update({
-      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
       scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
       updated_at: new Date(),
     });
@@ -5614,18 +5614,13 @@ const InvoiceService = {
     // existing stale-claim recovery to park for operator review — never a
     // half-committed "stamped but the retry vanished" state.
     const smsFinalizationStamp = (trx) => {
-      if (acceptedChannelResults?.sms?.deduped) {
-        const time = acceptedChannelResults.sms.sentAt || acceptedChannelResults.sms.eventVisibleAt;
-        return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
-          [time && !Number.isNaN(new Date(time).getTime()) ? new Date(time) : null]);
-      }
-      if (legAccepted(acceptedChannelResults?.sms)) return new Date();
-      const priorApp = acceptedChannelResults?.push;
-      if (billingLegDeliveryState("push", priorApp) === "deduped") {
-        const time = priorApp.eventVisibleAt;
-        return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)",
-          [time && !Number.isNaN(new Date(time).getTime()) ? new Date(time) : null]);
-      }
+      if (!acceptedChannelResults) return new Date();
+      const legs = require('./messaging/billing-prior-delivery')
+        .settledLegTimes({ channelResults: acceptedChannelResults });
+      // App and Text share this invoice rail. A new acceptance wins over an
+      // older sibling, while all-old replay uses the latest stored rail time.
+      if (legs.freshSms) return new Date();
+      if (legs.smsAccepted) return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)", [legs.smsAt]);
       return new Date();
     };
     const finalizeInvoiceAfterSms = () => db.transaction(async (trx) => {
@@ -6201,12 +6196,11 @@ const InvoiceService = {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
     } else if (!operatorInitiated
-      && claim.invoice.sms_sent_at
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
-      // selected Email leg. The dedicated marker ties sms_sent_at to this
-      // schedule episode; a historical stamp alone must not suppress a new
-      // delivery after unvoid + explicit reschedule.
+      // selected Email leg. The dedicated marker is this episode's positive
+      // acceptance proof even when the original acceptance time is unknown;
+      // a historical stamp alone never suppresses a new delivery.
       sms.ok = true;
       sms.deduped = true;
       sms.eventVisibleAt = claim.invoice.sms_sent_at;
@@ -6478,6 +6472,7 @@ const InvoiceService = {
     }
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
       // A direct caller owns this claim, so it must put the accepted Text/App
@@ -6508,7 +6503,7 @@ const InvoiceService = {
             .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
             .update({
               status: "scheduled",
-              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [now]),
+              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
               scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
               scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
               scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
@@ -6535,7 +6530,7 @@ const InvoiceService = {
       };
     }
     if (emailMustRetry && sms.ok
-      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
+      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token, acceptedSmsAt)) {
       logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);
       return {
         ok: false,
@@ -7047,8 +7042,8 @@ const InvoiceService = {
         // and send at their requested time. Fail toward deferral on a
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
-        const acceptedChannelPendingEmail = Boolean(inv.sms_sent_at)
-          && String(inv.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+        const acceptedChannelPendingEmail = String(inv.scheduled_send_error || "")
+          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
         let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {

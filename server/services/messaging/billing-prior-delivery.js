@@ -40,12 +40,11 @@ function scheduledPriorInvoiceEvidence(meta, result, msg) {
   const old = result.deduped === true && !legs.freshLeg;
   const bindings = [];
   let metadataSql = '';
-  if (old && (result.reason === 'app_event_already_visible'
-      || result.channelResults?.push?.reason === 'app_event_already_visible')) {
+  if (old && [result.reason, result.channelResults?.push?.reason].includes('app_event_already_visible')) {
     metadataSql += " || jsonb_build_object('app_event_already_visible_at', ?::timestamptz)";
     bindings.push(result.eventVisibleAt || null);
   }
-  if (meta.mark_invoice_delivery === true
+  if ((meta.mark_invoice_delivery === true || meta.entry_point === 'autopay_completion_decline_deferred')
     && [legs.emailAccepted, legs.smsAccepted].includes(true)) {
     metadataSql += " || jsonb_build_object('invoice_delivery_legs_recorded', true, 'invoice_prior_delivery_deduped', ?::boolean, 'invoice_prior_delivery_at', ?::timestamptz, 'invoice_delivery_email', ?::boolean, 'invoice_prior_email', ?::boolean, 'invoice_prior_email_at', ?::timestamptz, 'invoice_delivery_sms', ?::boolean, 'invoice_prior_sms', ?::boolean, 'invoice_prior_sms_at', ?::timestamptz)";
     bindings.push(old, old ? legs.eventAt : null,

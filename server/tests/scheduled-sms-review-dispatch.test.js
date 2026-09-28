@@ -212,6 +212,24 @@ test('wrapper invoice replay saves original Email and Text times for restart and
   expect(stamp.bindings).toEqual([null, true, textAt, true, true, emailAt, true, true, textAt]);
 });
 
+test('a deferred completion decline persists old App and Email rail evidence without mark_invoice_delivery', async () => {
+  const appAt = new Date('2026-09-08T14:00:00Z');
+  const emailAt = new Date('2026-09-08T16:00:00Z');
+  row.message_body = 'Your payment failed — pay here: https://portal.test/pay';
+  row.metadata = { entry_point: 'autopay_completion_decline_deferred', invoice_id: 'inv-1' };
+  await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, deduped: true,
+    deliveryOutcome: 'accepted', channelResults: {
+      push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+      email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+    },
+  }));
+  const stamp = updates[0].patch.metadata;
+  expect(row.metadata.mark_invoice_delivery).toBeUndefined();
+  expect(row.created_at).toEqual(emailAt);
+  expect(stamp.sql).toContain("'invoice_delivery_legs_recorded', true");
+  expect(stamp.bindings).toEqual([null, true, emailAt, true, true, emailAt, true, true, appAt]);
+});
+
 test('fresh Email beside an old Text does not persist an all-old invoice witness', async () => {
   row.message_body = 'Invoice: https://portal.test/pay';
   row.metadata = { entry_point: 'invoice_send_deferred', invoice_id: 'inv-1', mark_invoice_delivery: true };

@@ -20,7 +20,7 @@ jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: async
 jest.mock('../config/feature-gates', () => ({ gateEnvTimestamp: () => null, isEnabled: () => false }));
 const { randomUUID } = require('node:crypto');
 const Invoice = require('../services/invoice');
-const { settledLegTimes } = require('../services/messaging/billing-prior-delivery');
+const { settledLegTimes, scheduledPriorInvoiceEvidence } = require('../services/messaging/billing-prior-delivery');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const migration = require('../models/migrations/20260911000001_invoice_send_claim_token');
 
@@ -140,6 +140,58 @@ postgres('invoice send episode ownership', () => {
       expect(sms).toHaveBeenCalledTimes(1);
       expect(sendInvoiceEmail).toHaveBeenCalledTimes(2);
     } finally { sms.mockRestore(); }
+  });
+
+  test.each([
+    ['direct', false, '2026-08-21T15:30:00Z'],
+    ['scheduled', true, '2026-08-21T15:30:00Z'],
+    ['direct missing witness', false, null],
+    ['scheduled missing witness', true, null],
+  ])('pending Email after %s old App/Text acceptance preserves its stored SMS time', async (_label, preclaimed, time) => {
+    const claimToken = randomUUID();
+    if (preclaimed) await trx('invoices').where({ id: invoiceId }).update({
+      status: 'sending', send_claim_token: claimToken,
+    });
+    const originalAt = time ? new Date(time) : null;
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce({
+      sent: true, deduped: true, eventVisibleAt: originalAt,
+    });
+    require('../services/invoice-email').sendInvoiceEmail
+      .mockResolvedValueOnce({ ok: false, code: 'billing_prefs_unavailable', error: 'preferences unavailable' })
+      .mockResolvedValueOnce({ ok: true, messageId: 'synthetic-recovered-email' });
+    try {
+      const result = await Invoice.sendViaSMSAndEmail(invoiceId,
+        preclaimed ? { allowClaimed: true, claimToken } : {});
+      expect(result).toMatchObject({ ok: false,
+        ...(preclaimed ? {} : { code: 'INVOICE_EMAIL_RETRY_QUEUED' }),
+        sms: { ok: true, deduped: true }, email: { code: 'billing_prefs_unavailable' },
+      });
+      const parked = await read();
+      expect(parked.scheduled_send_error).toBe('BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED');
+      expect(parked.sms_sent_at).toEqual(originalAt);
+      expect(parked.sent_at).toBeNull();
+      // Simulate a later worker/process reload: the claim is reacquired from
+      // durable invoice state, with no in-memory dispatch result. The marker
+      // alone must retire the accepted App/Text leg even without a timestamp.
+      const retry = await Invoice.sendViaSMSAndEmail(invoiceId,
+        preclaimed ? { allowClaimed: true, claimToken } : {});
+      expect(retry).toMatchObject({ ok: true, sms: { ok: true, deduped: true },
+        email: { ok: true, messageId: 'synthetic-recovered-email' } });
+      expect(sms).toHaveBeenCalledTimes(1);
+      expect((await read()).status).toBe('sent');
+    } finally { sms.mockRestore(); }
+  });
+
+  test('fresh App acceptance wins the shared SMS stamp over a deduped old Text sibling', async () => {
+    const textAt = new Date('2026-08-21T15:30:00Z');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted',
+      channelResults: {
+        sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+        push: { sent: true, deliveryOutcome: 'accepted', bellPersisted: true },
+      },
+    });
+    expect(await Invoice.sendViaSMS(invoiceId)).toMatchObject({ sent: true });
+    expect((await read()).sms_sent_at.getTime()).toBeGreaterThan(textAt.getTime());
   });
 
   test('cancellation leaves an in-flight claim for review and the terminal-visit boundary blocks dispatch', async () => {
@@ -353,6 +405,51 @@ postgres('invoice send episode ownership', () => {
       shape === 'fresh_text' ? expect.any(Date)
         : shape === 'email_only' || shape === 'missing_app_time' ? null : appAt,
     );
+    expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
+      .toMatchObject({ count: allOld ? '0' : '1' });
+  });
+
+  test.each([
+    ['old App and later old Email', 'app_email', true],
+    ['old Email only', 'email_only', true],
+    ['old App missing time and old Email', 'missing_app_time', true],
+    ['old App with fresh Email', 'fresh_email', false],
+  ])('deferred decline %s persists rail evidence through a queue restart', async (_label, shape, allOld) => {
+    const appAt = new Date('2026-08-21T15:30:00.000Z');
+    const emailAt = new Date('2026-08-22T15:30:00.000Z');
+    const meta = { entry_point: 'autopay_completion_decline_deferred', invoice_id: invoiceId };
+    const result = { sent: true, deduped: allOld, deliveryOutcome: 'accepted', channelResults: {
+      ...(shape === 'email_only' ? {} : { push: { sent: false, deliveryOutcome: 'not_sent',
+        reason: 'app_event_already_visible', eventVisibleAt: shape === 'missing_app_time' ? null : appAt } }),
+      email: shape === 'fresh_email' ? { sent: true, deliveryOutcome: 'accepted' }
+        : { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+    } };
+    const [queue] = await trx('sms_log').insert({
+      customer_id: (await read()).customer_id, direction: 'outbound',
+      from_phone: '+12025550101', to_phone: '+12025550102',
+      message_body: 'Payment failed', message_type: 'payment_failed', status: 'sent',
+      metadata: JSON.stringify(meta),
+    }).returning('id');
+    const evidence = scheduledPriorInvoiceEvidence(meta, result, { created_at: new Date() });
+    expect(evidence.metadataSql).toContain("'invoice_delivery_legs_recorded', true");
+    await trx('sms_log').where({ id: queue.id }).update({ metadata: trx.raw(
+      `COALESCE(metadata, '{}'::jsonb)${evidence.metadataSql}`, evidence.bindings,
+    ) });
+    // The finalizer sees only reloaded durable JSON, never the dispatch result.
+    const stored = (await trx('sms_log').where({ id: queue.id }).first()).metadata;
+    expect(stored.mark_invoice_delivery).toBeUndefined();
+    expect(await require('../services/dispatch-completion-deferred')
+      .finalizeDeferredDeclineNotice(stored)).toEqual({ ok: true });
+    const invoice = await read();
+    expect(invoice.status).toBe('sent');
+    expect(invoice.sms_sent_at).toEqual(shape === 'email_only' || shape === 'missing_app_time' ? null : appAt);
+    if (shape === 'fresh_email') {
+      expect(invoice.email_sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+      expect(invoice.sent_at.getTime()).toBeGreaterThan(emailAt.getTime());
+    } else {
+      expect(invoice.email_sent_at).toEqual(emailAt);
+      expect(invoice.sent_at).toEqual(emailAt);
+    }
     expect(await trx('activity_log').where({ action: 'invoice_sent' }).count('* as count').first())
       .toMatchObject({ count: allOld ? '0' : '1' });
   });
