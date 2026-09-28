@@ -115,3 +115,36 @@ describe('sms_log.metadata carries the rendering template key', () => {
     expect(metadata).not.toHaveProperty('template_key');
   });
 });
+
+describe('deferred completion texts keep their template key through the morning replay', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('the enqueue stores template_key and the scheduler replay forwards it', () => {
+    const css = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const deferred = css.slice(css.indexOf("entry_point: 'dispatch_completion_deferred'"));
+    expect(deferred.slice(0, 400)).toMatch(/template_key: sentSmsType/);
+    const sched = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(sched).toMatch(/claimMeta\.template_key \? \{ templateKey: String\(claimMeta\.template_key\) \}/);
+  });
+});
+
+describe('every accepted-send record keeps the template evidence (codex #5284 r1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const twilio = fs.readFileSync(path.join(__dirname, '../services/twilio.js'), 'utf8');
+  test('a promoted provider-handoff reservation carries template_key and template_variant_id', () => {
+    const meta = twilio.slice(twilio.indexOf('const providerSmsMetadata = () => ({'));
+    const body = meta.slice(0, meta.indexOf('\n      });'));
+    expect(body).toMatch(/template_key: options\.templateKey/);
+    expect(body).toMatch(/template_variant_id: options\.templateVariantId/);
+  });
+  test('the push-first proof row carries the variant id too', () => {
+    expect(twilio).toMatch(/templateVariantId: options\.templateVariantId,\n\s*\}\);/);
+    const push = fs.readFileSync(path.join(__dirname, '../services/messaging/push-channel-routing.js'), 'utf8');
+    expect(push).toMatch(/template_variant_id: templateVariantId/);
+  });
+  test('template performance groups by the exact rendered key when recorded', () => {
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-communications.js'), 'utf8');
+    expect(route).toMatch(/COALESCE\(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown'\) as template_key/);
+  });
+});

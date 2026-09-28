@@ -4503,6 +4503,9 @@ function initScheduledJobs() {
                 request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
+              // A deferred template send keeps the key of the row that rendered
+              // its frozen body (complete-scheduled-service enqueue).
+              ...(claimMeta.template_key ? { templateKey: String(claimMeta.template_key) } : {}),
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)

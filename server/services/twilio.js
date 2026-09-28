@@ -886,6 +886,10 @@ const TwilioService = {
         // billingDeliveryLeg==='sms') would never find it — reading a
         // genuinely accepted send as unsent and re-texting the customer.
         ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
+        // Same template evidence as buildSmsLogRow, so a promoted
+        // reservation row stays attributable to the row that rendered it.
+        ...(options.templateKey ? { template_key: options.templateKey } : {}),
+        ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"
@@ -1027,6 +1031,7 @@ const TwilioService = {
           // (buildSmsLogRow below) — a push-delivered notice is the SAME
           // logical send, so its proof row carries the same key.
           templateKey: options.templateKey,
+          templateVariantId: options.templateVariantId,
         });
         if (pushed.delivered) {
           deliveryOutcome = 'accepted';
@@ -1148,12 +1153,14 @@ const TwilioService = {
             : {}),
           ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
           ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
-          // Which sms_templates row (base or variant) rendered this body —
-          // never inferred from messageType (a guessed key is worse than
-          // none). Callers that render through router.getTemplate /
-          // renderSmsTemplate / renderRequiredSmsTemplate pass the exact
-          // key they requested; omitted when the send wasn't
-          // template-rendered (hand-typed composer text, etc.).
+          // The sms_templates key requested for this body — never inferred
+          // from messageType (a guessed key is worse than none). Callers
+          // that render through router.getTemplate / renderSmsTemplate /
+          // renderRequiredSmsTemplate pass the exact key they requested;
+          // omitted when the send wasn't template-rendered (hand-typed
+          // composer text, etc.). getTemplate may render a variant of that
+          // key and does not report which, so template_variant_id stays
+          // empty until a caller can supply it.
           ...(options.templateKey ? { template_key: options.templateKey } : {}),
           ...(options.templateVariantId ? { template_variant_id: options.templateVariantId } : {}),
           // The visit this send is about, on the primary row itself: the

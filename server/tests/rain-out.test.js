@@ -408,7 +408,8 @@ describe('rain-out service', () => {
       // The legacy rung records its own key, not v2's.
       const meta = sendCustomerMessage.mock.calls[0][0].metadata;
       expect(meta.templateKey).toBe('rain_out_moved');
-      expect(meta.original_message_type).toBe('rain_out_moved');
+      // …while original_message_type keeps the v2 kill-switch key.
+      expect(meta.original_message_type).toBe('rain_out_moved_v2');
     });
 
     test('a DISABLED v2 template row is the kill switch — no legacy reroute, no SMS', async () => {

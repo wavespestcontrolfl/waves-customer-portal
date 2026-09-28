@@ -488,7 +488,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory, templateKey }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory, templateKey, templateVariantId }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   let bell = {};
@@ -621,6 +621,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // (services/twilio.js buildSmsLogRow) — never inferred, only
         // carried through when the caller supplied it.
         ...(templateKey ? { template_key: templateKey } : {}),
+        ...(templateVariantId ? { template_variant_id: templateVariantId } : {}),
         ...extra,
       }),
     });
