@@ -23,6 +23,7 @@ const { INTERNAL_TEST_CUSTOMERS } = require('../internal-test-customers');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 const { customerVisibleServiceRecordPredicate } = require('../pest-pressure/history-filter');
 const { CANONICAL_SIBLING } = require('../completion-record-invariants');
+const { REPORT_QUESTION_TOPICS } = require('../service-report/report-assistant');
 
 // Returns a Knex builder with the standard exclusion applied to a
 // query against the `estimates` table aliased as `e`. Use this on every
@@ -1070,6 +1071,9 @@ async function getReserviceWithin14Days(from, to, cutoff) {
 // never stores the question text, only its length and this key (owner
 // ruling 2026-09-28). Keyed by service line, independent of report sends;
 // questions asked before topics were recorded carry none and are left out.
+// Only the fixed topic list is counted: event metadata can also arrive
+// through the report page's public events endpoint, so an arbitrary string
+// must never reach the Intelligence Bar's model as a "topic".
 async function getReportQuestionTopics(fromTs, toTs) {
   const { rows } = await db.raw(`
     SELECT COALESCE(NULLIF(srec.service_line, ''), 'unknown') AS service_line,
@@ -1078,11 +1082,11 @@ async function getReportQuestionTopics(fromTs, toTs) {
     FROM service_report_events sre
     JOIN service_records srec ON srec.id = sre.service_record_id
     WHERE sre.event_name = 'report_question_asked'
-      AND sre.metadata->>'topic' IS NOT NULL
+      AND sre.metadata->>'topic' IN (${REPORT_QUESTION_TOPICS.map(() => '?').join(', ')})
       AND sre.occurred_at >= ? AND sre.occurred_at < ?
     GROUP BY 1, 2
     ORDER BY 1, 3 DESC
-  `, [fromTs, toTs]);
+  `, [...REPORT_QUESTION_TOPICS, fromTs, toTs]);
   const byLine = {};
   for (const row of rows) {
     if (!byLine[row.service_line]) byLine[row.service_line] = {};

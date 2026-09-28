@@ -221,7 +221,12 @@ describe('get_report_engagement', () => {
     ];
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
     expect(res.questionTopics).toEqual({ lawn: { watering: 4, results: 1 }, pest: { reentry: 2 } });
-    const [fromTs, toTs] = rawCalls[2].bindings;
+    // The fixed topic list leads the bindings (an allowlist, never a raw
+    // metadata string), then the same ET window as the main query.
+    const { REPORT_QUESTION_TOPICS } = require('../services/service-report/report-assistant');
+    const bindings = rawCalls[2].bindings;
+    expect(bindings.slice(0, REPORT_QUESTION_TOPICS.length)).toEqual([...REPORT_QUESTION_TOPICS]);
+    const [fromTs, toTs] = bindings.slice(REPORT_QUESTION_TOPICS.length);
     expect(fromTs).toEqual(rawCalls[0].bindings[0]);
     expect(toTs).toEqual(rawCalls[0].bindings[1]);
     expect(rawCalls[2].sql).toMatch(/event_name = 'report_question_asked'/);
