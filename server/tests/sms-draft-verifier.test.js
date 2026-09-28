@@ -139,3 +139,28 @@ describe('verifier — revise addendum', () => {
     expect(a).toMatch(/confirm and get right back/i);
   });
 });
+
+describe('verifier — DECLARED OFFERS mapping (PR #5119: the drafter\'s offered_times rides into the verifier user prompt)', () => {
+  const { buildVerifierUserPrompt } = require('../services/sms-draft-verifier');
+  const base = buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?');
+
+  test('omitted, empty, or malformed offered_times → the prompt is byte-identical to the 3-arg form', () => {
+    expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [])).toBe(base);
+    expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', 'nope')).toBe(base);
+    expect(buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [{ date: 'Tuesday' }])).toBe(base);
+    expect(base).not.toContain('DECLARED OFFERS');
+  });
+
+  test('declared offers are listed verbatim with the day-and-window mapping rule, before the fact-check instruction', () => {
+    const p = buildVerifierUserPrompt('FACTS HERE', 'When can you come?', 'How about Tuesday 9:00 AM - 11:00 AM?', [
+      { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' },
+      { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' },
+    ]);
+    expect(p).toContain('DECLARED OFFERS');
+    expect(p).toContain('- Tuesday, September 29: 9:00 AM - 11:00 AM\n- Wednesday, September 30: 2:00 PM - 4:00 PM');
+    expect(p).toMatch(/writes "Wednesday" for a Tuesday declaration/);
+    expect(p).toMatch(/restate an already-scheduled visit from UPCOMING SERVICES/);
+    expect(p.indexOf('DECLARED OFFERS')).toBeLessThan(p.indexOf('Fact-check the draft now.'));
+    expect(p.startsWith(base.slice(0, base.indexOf('Fact-check')))).toBe(true);
+  });
+});

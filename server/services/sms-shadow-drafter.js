@@ -1373,7 +1373,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
           system: verifier.buildVerifierSystemPrompt(),
-          messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
+          messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply, parsed.offered_times) }],
         });
         // createDeepMessage can transparently cross providers. Preserve the
         // model that actually served each verdict so sealed qualification can

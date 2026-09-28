@@ -327,3 +327,50 @@ describe('generateGroundedDraft — confirming a booked visit whose window text 
     expect(r.openTimesSnapshot).toBeNull();
   });
 });
+
+// PR #5119 pre-push audit P1 (round 3): the deterministic check cannot bind a
+// declared DATE to the day the reply's prose names, so the declaration rides
+// into the verifier's user prompt for the LLM to check like any other fact.
+describe('generateGroundedDraft — the verifier receives the draft\'s offered_times as DECLARED OFFERS', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+    else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('the verifier call\'s user content lists the declared (date, window) pairs; a draft with none gets the unchanged prompt', async () => {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] })),
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = makeClient([
+      {
+        reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
+        offered_times: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+      },
+      { supported: true, violations: [] },
+    ]);
+    await drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage: 'Can we book a visit?', intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: true, city: 'Venice',
+    });
+    const verifierCall = client.calls[1];
+    const userContent = verifierCall.messages[0].content;
+    expect(userContent).toContain('DECLARED OFFERS');
+    expect(userContent).toContain('- Tuesday, September 29: 9:00 AM - 11:00 AM');
+
+    const client2 = makeClient([
+      { reply: 'Sure — I will check on that and get right back to you.', intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    await drafter.generateGroundedDraft({
+      client: client2, context: CTX, inboundMessage: 'Can we book a visit?', intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: true, city: 'Venice',
+    });
+    expect(client2.calls[1].messages[0].content).not.toContain('DECLARED OFFERS');
+  });
+});

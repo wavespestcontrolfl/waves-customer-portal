@@ -47,7 +47,25 @@ or:
 {"supported": false, "violations": ["draft says 'Wednesday' — not in facts or the customer's message", "assumes a 'pickup' the customer never requested", "says 'attic trap' but only 'trap' is grounded"]}`;
 }
 
-function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply) {
+// `offeredTimes` (PR #5119, GATE_SMS_REAL_ANSWERS only): the drafter's own
+// structured declaration of which OPEN TIMES (date, window) pairs the reply
+// offers — already checked deterministically against the OPEN TIMES list
+// (validateOfferedTimes). What that check CANNOT do without parsing prose
+// is bind each declared DATE to the day the customer-visible text names
+// ("Wednesday 9-11" written, Tuesday declared), so the mapping rides here
+// for the verifier to check like any other fact. Empty/omitted → the prompt
+// is byte-identical to before (every gate-off caller and pinned exam).
+function buildVerifierUserPrompt(factsBlock, inboundMessage, draftReply, offeredTimes = []) {
+  const declared = Array.isArray(offeredTimes)
+    ? offeredTimes.filter((e) => e && typeof e.date === 'string' && typeof e.window === 'string' && e.date && e.window)
+    : [];
+  const declaredSection = declared.length
+    ? `
+
+DECLARED OFFERS (the drafter says these are the ONLY new appointment times the draft offers, each copied from OPEN TIMES):
+${declared.map((e) => `- ${e.date}: ${e.window}`).join('\n')}
+Check the mapping: every appointment time the draft OFFERS must name the SAME day and window as one DECLARED OFFER (a draft that writes "Wednesday" for a Tuesday declaration, or offers a time with no declared entry, is a VIOLATION). A time in the draft that is NOT a declared offer may only restate an already-scheduled visit from UPCOMING SERVICES, on that visit's own day.`
+    : '';
   return `FACTS:
 ${factsBlock}
 
@@ -55,7 +73,7 @@ CUSTOMER'S CURRENT MESSAGE:
 "${inboundMessage}"
 
 DRAFT REPLY:
-"${draftReply}"
+"${draftReply}"${declaredSection}
 
 Fact-check the draft now.`;
 }
