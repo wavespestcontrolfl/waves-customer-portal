@@ -151,10 +151,17 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
   });
 
   test('returns null for every comparison phrasing named in review round 2 (Codex P1 follow-up)', () => {
-    expect(matchSpecies('brown recluse and huntsman spider')).toBeNull();
+    // Codex r10 on #5216 narrows the bare and/or/from/not connectors to
+    // require a pest noun on BOTH sides (see the connector tests below), so
+    // the bare-"and"/bare-"or" cases here spell out "recluse SPIDER" — the
+    // ordinary way that name is written — to keep naming a pest on the
+    // uncatalogued side too; every other line already carries an
+    // unconditional comparison word (between/compared to/mistaken for/
+    // confused with/look-alike/instead of) and is unaffected.
+    expect(matchSpecies('brown recluse spider and huntsman spider')).toBeNull();
     expect(matchSpecies('difference between a brown recluse and a huntsman spider')).toBeNull();
     expect(matchSpecies('huntsman spider compared to brown recluse')).toBeNull();
-    expect(matchSpecies('is it a huntsman spider or a brown recluse')).toBeNull();
+    expect(matchSpecies('is it a huntsman spider or a brown recluse spider')).toBeNull();
     expect(matchSpecies('huntsman spider mistaken for a brown recluse')).toBeNull();
     expect(matchSpecies('huntsman spider confused with a brown recluse')).toBeNull();
     expect(matchSpecies('a brown recluse look-alike: the huntsman spider')).toBeNull();
@@ -182,6 +189,25 @@ describe('matchSpecies — ambiguity guard (Codex P1)', () => {
     expect(matchSpecies('bugs that look like fire ants')).toBeNull();
     expect(matchSpecies('what looks like a fire ant but isn\'t')).toBeNull();
     expect(matchSpecies('fire ant-like insects in Florida')).toBeNull();
+  });
+
+  // Codex r10 on #5216 ("Restrict comparison matching to comparison
+  // phrases"): and/or/from/not are ordinary connector words too, and
+  // matching them unconditionally nulled everyday single-species
+  // identification topics that happen to contain one.
+  test('a standalone connector word with no pest on both sides is not comparison-shaped', () => {
+    expect(matchSpecies('where do fire ants come from')).toBe('fire ant');
+    expect(matchSpecies('fire ant signs and identification')).toBe('fire ant');
+    expect(matchSpecies('is it a fire ant or not')).toBe('fire ant');
+  });
+
+  test('a connector naming a pest on BOTH sides still reads as a comparison', () => {
+    expect(matchSpecies('fire ants or red ants')).toBeNull();
+    expect(matchSpecies('fire ants and ghost ants')).toBeNull();
+    // "termite" has no catalog entry at all — the generic pest-noun list
+    // (not the catalog aliases) is what must catch this, or the topic
+    // would wrongly resolve to the carpenter-ant photo.
+    expect(matchSpecies('carpenter ants from termites')).toBeNull();
   });
 
   test('a multi-species-ambiguous topic flags every photo slot rather than guessing', () => {

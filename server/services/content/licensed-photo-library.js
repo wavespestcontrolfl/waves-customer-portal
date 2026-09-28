@@ -194,10 +194,46 @@ function escapeRegExp(value) {
 // vs huntsman spider" names one catalog species plus an uncatalogued one,
 // and a safety post must never show a licensed-but-wrong species as THE
 // pest. Deliberately broad; a false trigger only sends a slot to a human.
-const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences|comparisons?)\b/i;
+// These words are unambiguous comparison constructions on their own, so
+// any occurrence anywhere in the topic fails it closed. `looks?\s+like`
+// here only ever sees a NON-terminal occurrence — a terminal one (the
+// ordinary "what do X look like" identification phrasing) is already
+// stripped from comparisonTestText below before this runs (Codex r5/r7).
+const COMPARISON_WORDS_RE = /\b(vs\.?|versus|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|looks?\s+like|look-?alikes?|difference|differences|comparisons?)\b/i;
+// A hyphenated "-like" suffix ("ant-like insects") is the same look-alike
+// construction without the word "look" — still a comparison, not an
+// identification of the named species itself.
+const SUFFIX_LIKE_RE = /\w-like\b/i;
+
+// Codex r10 on #5216 ("Restrict comparison matching to comparison
+// phrases"): "and"/"or"/"from"/"not" are ordinary connector words that also
+// turn up in plain single-species identification phrasing — "where do fire
+// ants come from", "fire ant signs and identification", "is it a fire ant
+// or not" — so matching them unconditionally nulled every one of those.
+// They read as a comparison only when a pest is named on BOTH sides of the
+// SAME occurrence ("fire ants or red ants", "carpenter ants from
+// termites"). PEST_NOUN_RE is a small, generic, plural-tolerant list of
+// pest nouns — deliberately NOT the catalog's specific aliases — so an
+// uncatalogued species on either side (the whole reason this guard exists;
+// see the "brown recluse" tests below) still counts as a pest.
+const CONNECTOR_RE = /\b(and|or|from|not)\b/gi;
+const PEST_NOUN_RE = /\b(ants?|roach(?:es)?|cockroach(?:es)?|spiders?|beetles?|bugs?|termites?|wasps?|bees?|hornets?|fl(?:y|ies)|moths?|mosquito(?:e?s)?|ticks?|fleas?|mites?|lizards?|geckos?|anoles?|snakes?|rodents?|rats?|mouse|mice|caterpillars?|worms?|grubs?|earwigs?|silverfish|centipedes?|millipedes?|scorpions?|weevils?|aphids?|whitefl(?:y|ies)|crickets?|grasshoppers?)\b/i;
+
+// True when some connector occurrence has a pest noun both before and
+// after it — the shape of an actual comparison ("X and Y", "X from Y").
+function isConnectorComparison(text) {
+  CONNECTOR_RE.lastIndex = 0;
+  let match;
+  while ((match = CONNECTOR_RE.exec(text))) {
+    const before = text.slice(0, match.index);
+    const after = text.slice(match.index + match[0].length);
+    if (PEST_NOUN_RE.test(before) && PEST_NOUN_RE.test(after)) return true;
+  }
+  return false;
+}
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as
-// comparison"): the bare `like` alternative above makes ordinary TERMINAL
+// comparison"): the `looks?\s+like` alternative above makes ordinary TERMINAL
 // identification phrasing — "what do fire ants look like", optional
 // trailing "?" — comparison-shaped, nulling every photo slot on the most
 // common identification-post phrasing there is. Only a trailing "look(s)
@@ -218,7 +254,9 @@ function matchSpeciesEntry(topic) {
   const norm = String(topic || '').trim().toLowerCase();
   if (!norm) return null;
   const comparisonTestText = norm.replace(TERMINAL_LOOKS_LIKE_RE, '').trim();
-  if (COMPARISON_RE.test(comparisonTestText)) return null;
+  if (COMPARISON_WORDS_RE.test(comparisonTestText)
+    || SUFFIX_LIKE_RE.test(comparisonTestText)
+    || isConnectorComparison(comparisonTestText)) return null;
   const matched = new Set();
   for (const entry of PHOTO_LIBRARY) {
     // Trailing e?s? tolerates the ordinary plural ("fire ants").

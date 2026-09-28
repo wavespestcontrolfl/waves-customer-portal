@@ -429,6 +429,45 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null, { ap
   return { ok: true, registryBaseSha };
 }
 
+// Codex r10 on #5216 ("Recheck related-post liveness before auto-merge"):
+// getLiveRelatedPaths only ran while deriving the pre-publish guard options
+// (_deriveGuardrailOptions) — a verified related post unpublished, noindexed
+// or moved AFTER this PR opened but BEFORE the poller merges it would still
+// ship a stale rail forever. Re-verify the HEAD file's own
+// frontmatter.related_posts against the live corpus right here, on the SAME
+// host set the file itself carries (frontmatter.domains, stamped by the
+// publisher after gating — astro-publisher.js), with the SAME helper the
+// runner uses (getLiveRelatedPaths / normalizePathForCompare, related-
+// posts.js). Same withhold posture as the neighbouring merge-time checks
+// (body images / affiliate belt): a stale path withholds, and so does a
+// failed liveness read (fail closed, transient — the next tick retries).
+async function relatedPostsLivenessVerdict(head) {
+  const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
+  if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the related-posts liveness recheck' };
+  let fmHead = {};
+  try {
+    fmHead = require('../content-astro/frontmatter').parse(content)?.data || {};
+  } catch (err) {
+    return { ok: false, transient: true, reason: `head frontmatter unreadable for the related-posts liveness recheck: ${err.message}` };
+  }
+  const paths = Array.isArray(fmHead.related_posts)
+    ? fmHead.related_posts.filter((p) => typeof p === 'string' && p.trim())
+    : [];
+  if (!paths.length) return { ok: true };
+  try {
+    const { getLiveRelatedPaths, _internals } = require('./related-posts');
+    const hosts = Array.isArray(fmHead.domains) && fmHead.domains.length ? fmHead.domains : undefined;
+    const live = await getLiveRelatedPaths(paths, hosts ? { hosts } : {});
+    const stale = paths.filter((p) => !live.has(_internals.normalizePathForCompare(p)));
+    if (stale.length) {
+      return { ok: false, reason: `frontmatter related_posts no longer live: ${stale.join(', ')}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, transient: true, reason: `related-post liveness recheck failed: ${err.message}` };
+  }
+}
+
 // The belt's registry snapshot must still be the base tip right before the
 // merge call — a registry merge landing mid-gate invalidates the verdict.
 async function registryBaseMoved(aff, gh) {
@@ -1790,6 +1829,15 @@ async function maybeAutoMerge(run, pr) {
           withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
+        // 3.8b Related-post liveness — see relatedPostsLivenessVerdict. Reuses
+        //      the SAME head content the topic recheck just fetched (no
+        //      second GitHub read).
+        const related = await relatedPostsLivenessVerdict(topic.content);
+        if (!related.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
+          withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };
+          return null;
+        }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
         //     an operator dismiss/requeue landing during it must still block
         //     the merge — repeat the queue re-check immediately before merging.
@@ -1830,12 +1878,22 @@ async function maybeAutoMerge(run, pr) {
       let withheld = null;
       const { withTopicMergeLock } = require('./topic-targeting-gate');
       mergeRes = await withTopicMergeLock(db, async (trx) => {
-        const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh, {
+        // One fetch of the refresh target's HEAD file feeds both the
+        // affiliate belt and the related-post liveness recheck below.
+        const headContent = await headRefreshFileContent(run, pr);
+        const aff = await affiliateBeltVerdict(run, headContent, pr.head?.sha, gh, {
           approvedEvidenceChild: verifiedApprovedEvidenceChild,
         });
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
           withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
+          return null;
+        }
+        // 3.8b Related-post liveness — see relatedPostsLivenessVerdict.
+        const related = await relatedPostsLivenessVerdict(headContent);
+        if (!related.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
+          withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };
           return null;
         }
         if (!(await queueRowStillParkedLocked(run, trx))) {
@@ -2389,6 +2447,7 @@ module.exports = {
   _internals: {
     pollInternalLinkPr,
     affiliateBeltVerdict,
+    relatedPostsLivenessVerdict,
     autoMergeEnabled,
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,
