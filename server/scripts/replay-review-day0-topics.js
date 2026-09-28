@@ -61,10 +61,13 @@ function usage() {
 
 function snippet(evidence) {
   const c = evidence?.completion || {};
-  const parts = [c.concernText, c.recap, ...(Array.isArray(c.observations) ? c.observations : []),
-    ...(Array.isArray(evidence?.texts) ? evidence.texts.map((t) => t.body) : [])].filter(Boolean);
+  const parts = [c.concernText, ...(Array.isArray(evidence?.texts) ? evidence.texts.map((t) => t.body) : [])].filter(Boolean);
   const joined = redactAccessCodes(parts.join(' | '));
   return joined.length > 160 ? `${joined.slice(0, 157)}...` : joined;
+}
+
+function hasCustomerTexts(evidence) {
+  return Array.isArray(evidence?.texts) && evidence.texts.length > 0;
 }
 
 function mdEscape(value) {
@@ -103,7 +106,7 @@ async function classifyVisit(visit) {
     topic = await extractReviewTopic(evidence);
   } catch (err) {
     error = err.message;
-    evidence = evidence || { completion: { concernText: null, observations: [], recap: null }, texts: [] };
+    evidence = evidence || { completion: { concernText: null }, texts: [] };
   }
   return {
     visitId: visit.visit_id,
@@ -120,12 +123,18 @@ async function classifyVisit(visit) {
 function summarize(results) {
   const summary = { service_concern: 0, question: 0, logistics: 0, praise: 0, none: 0, no_topic: 0 };
   let wouldFireCount = 0;
+  let withTextsCount = 0;
+  let withTextsFiredCount = 0;
   for (const r of results) {
     if (r.wouldFire) wouldFireCount += 1;
     if (r.topic) summary[r.topic.kind] = (summary[r.topic.kind] || 0) + 1;
     else summary.no_topic += 1;
+    if (hasCustomerTexts(r.evidence)) {
+      withTextsCount += 1;
+      if (r.wouldFire) withTextsFiredCount += 1;
+    }
   }
-  return { summary, wouldFireCount };
+  return { summary, wouldFireCount, withTextsCount, withTextsFiredCount };
 }
 
 function renderMarkdownRow(result, customerFirstName) {
@@ -136,13 +145,14 @@ function renderMarkdownRow(result, customerFirstName) {
     mdEscape(result.topic?.kind || (result.error ? 'error' : 'none')),
     mdEscape(result.topic?.topic || ''),
     mdEscape(result.topic?.source || ''),
+    result.topic ? result.topic.confidence.toFixed(2) : '',
     mdEscape(snippet(result.evidence)),
     result.wouldFire ? 'yes' : 'no',
   ];
   return `| ${cols.join(' | ')} |`;
 }
 
-function renderMarkdown({ days, since, now, visits, results, summary, wouldFireCount }) {
+function renderMarkdown({ days, since, now, visits, results, summary, wouldFireCount, withTextsCount, withTextsFiredCount }) {
   const lines = [
     `# Review Day-0 context topics — replay (${days}-day window)`,
     '',
@@ -150,8 +160,8 @@ function renderMarkdown({ days, since, now, visits, results, summary, wouldFireC
     '',
     'This is a READ-ONLY replay for review. No sends, no writes, no gate flip.',
     '',
-    '| Visit date | Service type | Customer | Kind | Topic | Source | Evidence snippet | Would fire? |',
-    '|---|---|---|---|---|---|---|---|',
+    '| Visit date | Service type | Customer | Kind | Topic | Source | Confidence | Evidence snippet | Would fire? |',
+    '|---|---|---|---|---|---|---|---|---|',
     ...results.map((r, i) => renderMarkdownRow(r, visits[i].customer_first_name)),
     '',
     '## Summary by kind',
@@ -162,6 +172,8 @@ function renderMarkdown({ days, since, now, visits, results, summary, wouldFireC
     `- praise: ${summary.praise}`,
     `- no topic stored (none / ungrounded / low confidence / no evidence): ${summary.no_topic}`,
     `- would fire (topic stored): ${wouldFireCount} / ${visits.length}`,
+    `- visits with any customer texts in the evidence window: ${withTextsCount} / ${visits.length}`,
+    `- of those, would fire (real customer-texts hit rate): ${withTextsFiredCount} / ${withTextsCount}`,
     '',
   ];
   return lines.join('\n');
@@ -188,13 +200,15 @@ async function main() {
 
   fs.writeFileSync(jsonlPath, results.map((r) => JSON.stringify(r)).join('\n') + (results.length ? '\n' : ''));
 
-  const { summary, wouldFireCount } = summarize(results);
-  fs.writeFileSync(outPath, renderMarkdown({ days, since, now, visits, results, summary, wouldFireCount }));
+  const { summary, wouldFireCount, withTextsCount, withTextsFiredCount } = summarize(results);
+  fs.writeFileSync(outPath, renderMarkdown({ days, since, now, visits, results, summary, wouldFireCount, withTextsCount, withTextsFiredCount }));
 
   console.log(`[replay] wrote ${outPath}`);
   console.log(`[replay] wrote ${jsonlPath}`);
   console.log('[replay] summary by kind:', summary);
   console.log(`[replay] would fire (topic stored): ${wouldFireCount} / ${visits.length}`);
+  console.log(`[replay] visits with any customer texts: ${withTextsCount} / ${visits.length}`);
+  console.log(`[replay] of those, would fire (real hit rate): ${withTextsFiredCount} / ${withTextsCount}`);
 }
 
 main()

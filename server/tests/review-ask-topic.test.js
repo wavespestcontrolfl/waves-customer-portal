@@ -158,7 +158,7 @@ describe('collectTopicEvidence', () => {
     expect(evidence.texts[0].body).toContain('[redacted]');
   });
 
-  test('reads completion fields from the service record structured_notes, defensively parsed', async () => {
+  test('reads ONLY customerConcernText from structured_notes, defensively parsed — the technician\'s own findings are never a source', async () => {
     db.mockImplementation(makeDb({
       scheduled_services: [],
       service_records: [
@@ -168,23 +168,29 @@ describe('collectTopicEvidence', () => {
     }));
 
     const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-1', completedAt: NOW });
-    expect(evidence.completion).toEqual({
-      concernText: 'ants in the kitchen',
-      observations: ['found ant trail under sink'],
-      recap: 'treated the kitchen',
-    });
+    expect(evidence.completion).toEqual({ concernText: 'ants in the kitchen' });
   });
 
   test('never throws — a lookup failure returns fully empty evidence', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
     const evidence = await collectTopicEvidence({ customerId: 'c1', completedAt: NOW });
-    expect(evidence).toEqual({ completion: { concernText: null, observations: [], recap: null }, texts: [] });
+    expect(evidence).toEqual({ completion: { concernText: null }, texts: [] });
   });
 });
 
 describe('extractReviewTopic', () => {
   test('empty evidence never calls the model and returns null', async () => {
-    const result = await extractReviewTopic({ completion: { concernText: null, observations: [], recap: null }, texts: [] });
+    const result = await extractReviewTopic({ completion: { concernText: null }, texts: [] });
+    expect(result).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a topic grounded only in the technician\'s observations is impossible — that key is never read as evidence, so no model call happens', async () => {
+    // Simulates a caller (or a stale shape) that still carries `observations`
+    // on the completion object — hasEvidenceToClassify only ever looks at
+    // concernText, so this must never trigger a model call.
+    const evidence = { completion: { concernText: null, observations: ['ghost ants, widow spiders'] }, texts: [] };
+    const result = await extractReviewTopic(evidence);
     expect(result).toBeNull();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -194,7 +200,7 @@ describe('extractReviewTopic', () => {
       ok: true,
       json: { topic: '', kind: 'logistics', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null, observations: [], recap: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
@@ -203,7 +209,7 @@ describe('extractReviewTopic', () => {
       ok: true,
       json: { topic: 'termite swarm activity', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.9 },
     });
-    const evidence = { completion: { concernText: null, observations: [], recap: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
   });
 
@@ -212,7 +218,7 @@ describe('extractReviewTopic', () => {
       ok: true,
       json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.85 },
     });
-    const evidence = { completion: { concernText: null, observations: [], recap: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     const result = await extractReviewTopic(evidence, { firstName: 'Pat' });
     expect(result).toEqual({
       topic: 'ants in kitchen',
@@ -224,28 +230,46 @@ describe('extractReviewTopic', () => {
     });
   });
 
-  test('a grounded question from completion notes is stored', async () => {
+  test('a grounded question from completion notes (customerConcernText) is stored', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
-      json: { topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidence_id: 'completion', confidence: 0.7 },
+      json: { topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidence_id: 'completion', confidence: 0.85 },
     });
-    const evidence = { completion: { concernText: 'asked about the wasp nest treatment', observations: [], recap: null }, texts: [] };
+    const evidence = { completion: { concernText: 'asked about the wasp nest treatment' }, texts: [] };
     const result = await extractReviewTopic(evidence);
     expect(result).toMatchObject({ topic: 'wasp nest treatment', kind: 'question', source: 'completion', evidenceId: 'completion' });
   });
 
-  test('confidence below 0.6 is rejected even when grounded', async () => {
+  test('confidence below 0.8 is rejected even when grounded', async () => {
     mockDispatch.mockResolvedValue({
       ok: true,
       json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.4 },
     });
-    const evidence = { completion: { concernText: null, observations: [], recap: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
     expect(await extractReviewTopic(evidence)).toBeNull();
+  });
+
+  test('confidence just under the 0.8 floor (0.79) is rejected even when grounded', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.79 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    expect(await extractReviewTopic(evidence)).toBeNull();
+  });
+
+  test('confidence exactly at the 0.8 floor is accepted when grounded', async () => {
+    mockDispatch.mockResolvedValue({
+      ok: true,
+      json: { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidence_id: 's-1', confidence: 0.8 },
+    });
+    const evidence = { completion: { concernText: null }, texts: [{ id: 's-1', at: NOW.toISOString(), body: 'The ants in the kitchen are still bad' }] };
+    expect(await extractReviewTopic(evidence)).toMatchObject({ topic: 'ants in kitchen' });
   });
 
   test('a model throw or provider failure never throws — returns null', async () => {
     mockDispatch.mockRejectedValue(new Error('provider timeout'));
-    const evidence = { completion: { concernText: 'ants in the kitchen', observations: [], recap: null }, texts: [] };
+    const evidence = { completion: { concernText: 'ants in the kitchen' }, texts: [] };
     await expect(extractReviewTopic(evidence)).resolves.toBeNull();
 
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
