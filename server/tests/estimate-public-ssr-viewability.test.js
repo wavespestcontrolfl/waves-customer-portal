@@ -169,6 +169,22 @@ describe('handleEstimateView — SSR viewability gate', () => {
     expect(res.redirectUrl).toBe('/estimate/tok-ssr-gate');
   });
 
+  test('a failed contact-gap lookup fails CLOSED toward the React view', async () => {
+    mockDb.mockImplementation((table) => (table === 'customers'
+      ? { where: () => ({ first: async () => { throw new Error('lookup boom'); } }) }
+      : { where: () => ({ first: async () => currentRow }) }));
+    try {
+      const { res, next } = await runView(
+        { status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: 'cust-x' },
+        ESTIMATE_MOUNT,
+      );
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.sent).toBe(false);
+    } finally {
+      mockDb.mockImplementation(() => ({ where: () => ({ first: async () => currentRow }) }));
+    }
+  });
+
   test('unknown token still gets the generic not-found shell', async () => {
     currentRow = undefined;
     const req = makeReq(API_MOUNT);

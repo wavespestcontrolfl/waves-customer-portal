@@ -8640,7 +8640,10 @@ async function handleEstimateView(req, res, next) {
         const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
         contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email);
       } catch (e) {
-        logger.warn(`[estimate-view] contact-gap routing check skipped: ${e.message}`);
+        // Fail CLOSED toward the React view: it can collect the fields,
+        // the legacy page cannot (codex #5102 r7).
+        contactGapsForceReactView = true;
+        logger.warn(`[estimate-view] contact-gap routing check failed, forcing the React view: ${e.message}`);
       }
     }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
@@ -9112,9 +9115,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     let acceptContactView = null;
     // The estimate's own first name (pre-fill) — the identity an existing
     // profile must match before the accept card may fill it.
-    let acceptContactFirstName = null;
+    let acceptContactIdentityName = null;
+    // Set when an existing profile's blank email was filled — the open
+    // customer_email_missing review cards resolve after commit.
+    let acceptContactEmailBackfill = null;
 
-    const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
+    // Reassigned after the accept-card contact patch lands (below), so the
+    // confirmation texts greet with the name the customer just supplied.
+    let firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
     // Commercial auto-priced lawn/tree: approval-only manual-billing workflow.
     // No booking deposit/card, no auto-schedule, no auto-invoice; the converter
@@ -10823,7 +10831,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? await trx('customers').where({ id: lockedContact.customer_id }).first('first_name', 'last_name', 'email')
             : null;
           const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
-          acceptContactFirstName = contactGapNameTokens(lockedContact.customer_name)[0] || null;
+          acceptContactIdentityName = contactGapNameTokens(lockedContact.customer_name).join(' ') || null;
           if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
           // The first name the patched estimate name starts with: the one
           // the page asked for when there was none (gaps.firstName), else the
@@ -10897,7 +10905,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // customer's own standing value, so the estimate copy is harmless.
       const applyAcceptContactEmailFill = async (targetCustomerId) => {
         if (!contactFillEmail) return;
-        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedFirstName: acceptContactFirstName });
+        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail, { expectedName: acceptContactIdentityName });
+        if (claim?.emailApplied) acceptContactEmailBackfill = { customerId: targetCustomerId, email: contactFillEmail };
         const reason = claim?.emailDroppedReason || '';
         // An identity mismatch keeps the value on the estimate: it belongs
         // to whoever the estimate is addressed to, just not this profile.
@@ -10915,7 +10924,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // already fenced this row since acceptPreLockedCommsId === customerId
       // here). Never overwrites a real value already on file.
       if (customerId) {
-        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
+        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
         await applyAcceptContactEmailFill(customerId);
       }
       // Grouped multi-property accept: a sibling estimate in the same group
@@ -10960,7 +10969,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
           // Sibling's existing customer: same guarded, never-overwrite fill.
-          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
           await applyAcceptContactEmailFill(customerId);
         }
       }
@@ -10999,7 +11008,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Reused an existing profile: fill its last_name/email ONLY if
           // blank/the 'Customer' placeholder — same guarded helpers as the
           // already-linked branch above, now under this authoritative lock.
-          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedFirstName: acceptContactFirstName });
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName, { expectedName: acceptContactIdentityName });
           await applyAcceptContactEmailFill(customerId);
         } else {
           const nameParts = ((acceptContactView ? acceptContactView.customer_name : estimate.customer_name) || 'New Customer').split(' ');
@@ -11060,7 +11069,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // Customer resolved on the pre-fill identity; from here on (billing,
       // notifications, the success payload) the accept reads the stored
       // contact values.
-      if (acceptContactView) Object.assign(estimate, acceptContactView);
+      if (acceptContactView) {
+        Object.assign(estimate, acceptContactView);
+        firstName = contactFillFirstName || contactGapNameTokens(estimate.customer_name)[0] || firstName;
+      }
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
       // accept actually landed on (Codex #3723 r3 P1): the pre-transaction
@@ -12378,6 +12390,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     });
 
     const { customerId, reservationCommitted } = txResult;
+    // Post-commit, same as the call-capture backfill: the customer now has
+    // an email, so open customer_email_missing review cards are settled.
+    // Best-effort — a miss leaves them for the nightly auto-resolve sweep.
+    if (acceptContactEmailBackfill) {
+      try {
+        await require('../services/customer-email-fanout').resolveOpenEmailReviewCards({
+          customerId: acceptContactEmailBackfill.customerId,
+          email: acceptContactEmailBackfill.email,
+          source: 'estimate accept contact card',
+          reasonCodes: ['customer_email_missing'],
+        });
+      } catch (e) {
+        logger.warn(`[estimate-accept] email review-card resolve skipped for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
     // Sign-before-pay: the slot hold this accept did not commit is released
     // now rather than left to block the slot until its TTL sweep.
     if (isTermiteAnnualSignBeforePay) {
@@ -26856,16 +26883,14 @@ async function composeEstimateDataPayload(estimate, {
     // surface/unpublished state, so those never ask. Booleans only; the
     // linked customer's own name/email are read here but never returned —
     // computeContactGaps folds them down to lastName/email flags.
+    // A lookup error propagates (the page's load retries) rather than
+    // serving an accept surface that silently skips a required field.
     let contactGaps = null;
     if (isEstimateAcceptActive(estimate) && !isPdfRenderPass) {
-      try {
-        const linkedCustomerForGaps = estimate.customer_id
-          ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
-          : null;
-        contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
-      } catch (e) {
-        logger.warn(`[estimate-data] contact-gap computation skipped: ${e.message}`);
-      }
+      const linkedCustomerForGaps = estimate.customer_id
+        ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
+        : null;
+      contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
     }
 
     // "Want us to come look first?" consultation offer (GATE_ESTIMATE_

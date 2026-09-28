@@ -127,8 +127,8 @@ function sanitizeContactEmail(raw) {
 // Fills for an EXISTING customer row (the linked, grouped-sibling or
 // phone-matched profile the accept lands on). Three rules, each the same
 // mechanism an operator edit uses (codex #5102 r5):
-//   - IDENTITY: only when the estimate's own first name matches the
-//     profile's — an estimate addressed to someone else under this account
+//   - IDENTITY: only when the profile's whole first name opens the
+//     estimate's own name — an estimate addressed to someone else under this account
 //     (a tenant under the landlord's record) keeps its values on the
 //     estimate and never renames or re-addresses the account holder.
 //   - VERSION: every fill stamps customers.updated_at, the optimistic-lock
@@ -145,16 +145,19 @@ function firstNameKey(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function identityMatches(row, expectedFirstName) {
-  const expected = firstNameKey(expectedFirstName);
-  return !!expected && firstNameKey(row?.first_name) === expected;
+// The profile's WHOLE first name ("Mary Ann") must open the estimate's
+// cleaned name ("Mary Ann Smith") on a token boundary (codex #5102 r7).
+function identityMatches(row, expectedName) {
+  const name = firstNameKey(expectedName);
+  const first = firstNameKey(row?.first_name);
+  return !!name && !!first && (name === first || name.startsWith(`${first} `));
 }
 
-async function fillExistingCustomerLastName(trx, customerId, lastName, { expectedFirstName } = {}) {
+async function fillExistingCustomerLastName(trx, customerId, lastName, { expectedName } = {}) {
   if (!customerId || !lastName) return { applied: false, reason: null };
   const row = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'first_name', 'last_name');
   if (!row || hasRealLastName(row.last_name)) return { applied: false, reason: 'last name already on file' };
-  if (!identityMatches(row, expectedFirstName)) return { applied: false, reason: IDENTITY_MISMATCH };
+  if (!identityMatches(row, expectedName)) return { applied: false, reason: IDENTITY_MISMATCH };
   await trx('customers').where({ id: customerId }).update({ last_name: lastName, updated_at: new Date() });
   await require('./customer-contact-fanout').propagateCustomerNameChange({
     before: row,
@@ -168,11 +171,11 @@ async function fillExistingCustomerLastName(trx, customerId, lastName, { expecte
 // recheck) in a savepoint — the same serialization every other automated
 // blank-email backfill takes. A blank → address backfill has no old copies
 // to retarget (the call-capture backfill likewise skips the email fan-out).
-async function fillExistingCustomerEmail(trx, customerId, email, { expectedFirstName } = {}) {
+async function fillExistingCustomerEmail(trx, customerId, email, { expectedName } = {}) {
   if (!customerId || !email) return null;
   const row = await trx('customers').where({ id: customerId }).first('id', 'first_name');
   if (!row) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
-  if (!identityMatches(row, expectedFirstName)) return { emailApplied: false, emailDroppedReason: IDENTITY_MISMATCH };
+  if (!identityMatches(row, expectedName)) return { emailApplied: false, emailDroppedReason: IDENTITY_MISMATCH };
   const { backfillCustomerEmailInTrx } = require('./customer-email-fanout');
   return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }

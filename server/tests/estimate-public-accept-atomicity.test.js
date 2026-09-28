@@ -2041,6 +2041,33 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.first_name).not.toBe('Customer');
   });
 
+  test('a multi-word profile first name ("Mary Ann") still proves identity and gets filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-23',
+      token: 'tok-contact-23-x0123456789',
+      customer_id: 'cust-maryann',
+      customer_phone: null,
+      customer_name: 'Mary Ann Sample',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-maryann', first_name: 'Mary Ann', last_name: 'Sample', email: null, phone: null }];
+    conversionOk('cust-maryann');
+    const fanout = require('../services/customer-email-fanout');
+    const resolveSpy = jest.spyOn(fanout, 'resolveOpenEmailReviewCards').mockResolvedValue(0);
+    try {
+      const res = await putAccept('tok-contact-23-x0123456789', { contactEmail: 'maryann@example.com' });
+      expect(res.status).toBe(200);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-maryann');
+      expect(cust.email).toBe('maryann@example.com');
+      // Post-commit, open customer_email_missing cards settle.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-maryann', email: 'maryann@example.com', reasonCodes: ['customer_email_missing'],
+      }));
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',
