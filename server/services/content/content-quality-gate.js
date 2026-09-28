@@ -108,6 +108,23 @@ const HARD_CHECKS = [
   // Owner ruling 2026-08-28: bodies outside the writer's plain Markdown
   // subset park for human review instead of being parsed (fail-closed).
   { name: 'body_syntax_supported', weight: 0, evaluate: checkBodySyntaxSupported },
+  // Owner ruling 2026-09-28 (work order C2): every identification
+  // (post_type "diagnostic") or customer-question draft must open on the
+  // verdict box, never a pitch. Weight 0 — pure hard gate, matches the
+  // other structural checks above.
+  { name: 'verdict_box_first', weight: 0, evaluate: checkVerdictBoxFirst },
+  { name: 'cta_after_verdict_box', weight: 0, evaluate: checkCtaAfterVerdictBox },
+  // Owner ruling 2026-09-28 (work order C3): an identification draft's
+  // pest/sign/look-alike photos are a CLOSED set — exactly the licensed
+  // URLs the brief's voice_constraints.photo_slots supplied. Common (not
+  // page-type-scoped) because post_type is independent of page_type.
+  { name: 'photo_slots_licensed_only', weight: 0, evaluate: checkPhotoSlotsLicensedOnly },
+  // next_steps can ship on any body lane (supporting blogs included), so
+  // their PII scan is common — next_steps only, never a body (#5216 r4).
+  { name: 'next_steps_redacted', weight: 0, evaluate: checkNextStepsRedacted },
+  // (C2 frontmatter next_steps / related_posts are NOT checked here: they
+  // render as links, so content-guardrails.evaluate() judges them with the
+  // body-link chokepoints — Codex r2 on #5216.)
 ];
 
 const PAGE_TYPE_CHECKS = {
@@ -146,6 +163,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Blog refreshes use this bundle too. These remain weight-zero signals;
+    // nonBlogTarget() makes them no-ops for ordinary service/city pages.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   'supporting-blog': [
     // Hard: hub links are the point of a supporting blog (hub-and-spoke
@@ -163,6 +186,18 @@ const PAGE_TYPE_CHECKS = {
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
     { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
+    // Citability nudges (2026-09-25): the traits AI answer engines cite —
+    // a named source behind the claims, supported facts stated as numbers
+    // with units, a ComparisonTable wherever the reader faces a choice, and a
+    // "How to choose" section beside it. Weight 0 like blog_meta_soft_cta:
+    // signal-only BY DESIGN — the writer prompt forbids a stat quota and
+    // invented products/sources, so a weighted check would pressure the
+    // writer toward fabrication. They ride the redraft feedback and the
+    // review queue (soft_failures) without moving the pass threshold.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -628,17 +663,74 @@ function checkLocalBusinessServiceSchema(draft) {
 
 // ── customer-question checks ────────────────────────────────────────
 
+// When the answer-first contract puts the verdict box first (C2), the
+// box's verdict IS the first answer: its text is judged, never the raw
+// component tag, and a direct verdict ("Yes, some species can.") need not
+// repeat a noun from the question (Codex r4 on #5216).
+function leadingVerdictBox(body) {
+  const trimmed = String(body || '').replace(/^\s+/, '');
+  if (!/^<BottomLineBox\b/.test(trimmed)) return null;
+  const tag = trimmed.match(BOTTOM_LINE_BOX_TAG_RE);
+  if (!tag || tag.index !== 0) return null;
+  return {
+    verdict: String(attrValue(tag[0], 'verdict') || '').trim(),
+    recommendation: String(attrValue(tag[0], 'recommendation') || '').trim(),
+  };
+}
+
+// A yes/no-shaped question is one that opens with an auxiliary/modal —
+// "Can…", "Do…", "Is…" — where a direct answer word alone (not a repeated
+// question noun) IS the answer ("Yes, some species can.").
+const YES_NO_QUESTION_RE = /^\s*(can|do|does|did|is|are|will|should|could|would|has|have)\b/i;
+const DIRECT_ANSWER_WORD_RE = /^\s*(yes|no|usually|rarely|sometimes|often|generally|mostly|not|only|it\s+depends)\b/i;
+
+// Codex r5 on #5216 ("Require the verdict to answer the customer question"):
+// r4 accepted ANY nonempty short verdict once the box was first, so a
+// generic "Professional help is available." verdict passed as long as SOME
+// text was there. Judged by the SAME rule the plain-paragraph path below
+// uses (a question noun >4 chars appears in the answer) OR, for a
+// yes/no-shaped question, a verdict that leads with a direct answer word —
+// "Yes, some species can." answers "Can cockroaches fly?" without repeating
+// "cockroaches". Kept deliberately small: no growing phrase list beyond this.
+// Codex r6: question tokens are read with punctuation stripped ("like?"
+// never matched anything) and without question scaffolding; a short WH
+// question ("What do fire ants look like?") falls back to its 4-letter
+// words. A question with no judgeable word at all is not failed on wording.
+const QUESTION_SCAFFOLD_WORDS = new Set(['what', 'when', 'where', 'which', 'whose', 'does', 'look', 'looks', 'like', 'with', 'that', 'this', 'have', 'your', 'they', 'them', 'from', 'into', 'there', 'their', 'about', 'should', 'would', 'could']);
+function questionKeywords(question) {
+  const words = String(question || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter((w) => w && !QUESTION_SCAFFOLD_WORDS.has(w));
+  // Four letters and up: "fire ants" must survive beside "florida"
+  // (Codex r9).
+  return words.filter((w) => w.length >= 4);
+}
+// Whole words only (Codex r7: "plants" contained "ants"); a plain plural
+// on either side still matches ("ant" / "ants", "cockroach" / "cockroaches").
+function verdictAnswersQuestion(question, verdictText) {
+  const keys = questionKeywords(question);
+  const words = new Set(String(verdictText || '').toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean));
+  const said = (k) => words.has(k) || words.has(`${k}s`) || words.has(`${k}es`)
+    || (k.endsWith('es') && words.has(k.slice(0, -2))) || (k.endsWith('s') && words.has(k.slice(0, -1)));
+  if (keys.some(said)) return true;
+  if (YES_NO_QUESTION_RE.test(question)) return DIRECT_ANSWER_WORD_RE.test(String(verdictText || '').trim());
+  return keys.length === 0;
+}
+
 function checkAnswerInFirstParagraph(draft, brief) {
   const body = String(draft.body || '');
-  const firstParagraph = body.split(/\n\s*\n/)[0] || '';
   const q = brief.customer_signal?.normalized_question || brief.target_keyword || '';
   if (!q) return { ok: false, reason: 'no_question_to_check_against' };
+  const box = leadingVerdictBox(body);
+  if (box) {
+    if (!box.verdict) return { ok: false, reason: 'verdict_box_has_no_verdict' };
+    if (`${box.verdict} ${box.recommendation}`.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
+    if (!verdictAnswersQuestion(q, box.verdict)) return { ok: false, reason: 'verdict_does_not_answer_question' };
+    return { ok: true };
+  }
+  const firstParagraph = body.split(/\n\s*\n/)[0] || '';
   // First paragraph should be a direct answer — short (< 400 chars)
   // and contain at least one key noun from the question.
   if (firstParagraph.length > 600) return { ok: false, reason: 'first_paragraph_too_long_for_quick_answer' };
-  const qNouns = q.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
-  const matched = qNouns.some((n) => firstParagraph.toLowerCase().includes(n));
-  if (!matched) return { ok: false, reason: 'first_paragraph_doesnt_address_question' };
+  if (!verdictAnswersQuestion(q, firstParagraph)) return { ok: false, reason: 'first_paragraph_doesnt_address_question' };
   return { ok: true };
 }
 
@@ -779,35 +871,108 @@ function headingCustomerNamePair(headingText) {
   return null;
 }
 
-function checkRedactionPassed(draft) {
-  const body = String(draft.body || '');
-  // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
-  // 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
-  // 10-digit-only pattern could not match an 11-digit run (no interior
-  // word boundary), so a customer number pasted in E.164 form sailed
-  // through. The digit lookbehind keeps mid-run starts out, so long
-  // numeric IDs still don't false-match.
-  // The CORE number is captured separately from an optional attached
-  // extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
-  // and an `x` (both word chars), so `212-555-1234x99` previously matched
-  // nothing at all — and extension digits must not pollute the last-10
-  // comparison against the Waves allowlist.
-  const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
-  const scanPhones = (text, where) => {
-    const re = new RegExp(phoneRe.source, phoneRe.flags);
-    let pm;
-    while ((pm = re.exec(text)) !== null) {
-      const digits = pm[1].replace(/\D/g, '');
-      const last10 = digits.length >= 10 ? digits.slice(-10) : null;
-      if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
-      // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
-      // carries domain/GBP tracking lines, which are Waves' own numbers too.
-      if (!isWavesPhone(last10)) {
-        return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
-      }
+// Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
+// 11-digit / E.164 forms (`+19415551234`, `19415551234`) — the earlier
+// 10-digit-only pattern could not match an 11-digit run (no interior
+// word boundary), so a customer number pasted in E.164 form sailed
+// through. The digit lookbehind keeps mid-run starts out, so long
+// numeric IDs still don't false-match.
+// The CORE number is captured separately from an optional attached
+// extension (`x99`, `ext. 4`): the trailing \b cannot sit between a digit
+// and an `x` (both word chars), so `212-555-1234x99` previously matched
+// nothing at all — and extension digits must not pollute the last-10
+// comparison against the Waves allowlist.
+const phoneRe = /(?<!\d)(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?\b/gi;
+const scanPhones = (text, where) => {
+  const re = new RegExp(phoneRe.source, phoneRe.flags);
+  let pm;
+  while ((pm = re.exec(text)) !== null) {
+    const digits = pm[1].replace(/\D/g, '');
+    const last10 = digits.length >= 10 ? digits.slice(-10) : null;
+    if (!last10) return { ok: false, reason: `malformed_phone_number_in_${where}` };
+    // isWavesPhone, not the core-office set: spoke/refresh copy legitimately
+    // carries domain/GBP tracking lines, which are Waves' own numbers too.
+    if (!isWavesPhone(last10)) {
+      return { ok: false, reason: `non_business_phone_number_in_${where}:${last10}` };
     }
-    return null;
-  };
+  }
+  return null;
+};
+
+const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
+
+// Percent/plus-decoding for scanning only — a malformed escape keeps the
+// raw text rather than hiding it.
+function decodeLinkText(text) {
+  const plus = String(text || '').replace(/\+/g, ' ');
+  try { return decodeURIComponent(plus); } catch { return plus.replace(/%40/gi, '@').replace(/%20/g, ' '); }
+}
+
+// One public frontmatter field's PII scan — the SEO fields in
+// checkRedactionPassed and the next_steps check below share it. Phones and
+// emails use the Waves allowlists; name/address/ssn/card use the redactor.
+// Name semantics follow FIELD SHAPE: Title-Case furniture (titles, link
+// labels) gets the heading-pair name check (the raw scan reads "Chinch Bug
+// Control" as a person); sentence-cased prose (metas) gets the raw name
+// scan plus the low-confidence backstop. Throws if the redactor is missing
+// — callers fail closed.
+function scanPublicFieldForPii(where, raw, { titleCased }) {
+  if (!String(raw || '').trim()) return null;
+  const { redact } = require('./pii-redactor');
+  const phoneHit = scanPhones(raw, where);
+  if (phoneHit) return phoneHit;
+  const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
+  if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
+    return { ok: false, reason: `email_in_${where}` };
+  }
+  const stripped = stripWavesOfficeAddresses(raw);
+  const fieldScan = redact(stripped);
+  const fieldHit = (fieldScan.findings || [])
+    .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
+  if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
+  if (titleCased && headingCustomerNamePair(stripped)) {
+    return { ok: false, reason: `unredacted_name_in_${where}` };
+  }
+  // A lowercase self-intro meta ("this is john smith ants are back")
+  // reports low confidence with ZERO findings; Title-Case fields skip this
+  // (the heading-pair check covers casing-blind names there).
+  if (!titleCased && fieldScan.confidence === 'low') {
+    return { ok: false, reason: `pii_confidence_low_in_${where}` };
+  }
+  return null;
+}
+
+// next_steps render publicly as links on every lane that ships them
+// (supporting blogs included), so they get the PII scan wherever they can
+// ship — a COMMON hard check scoped to next_steps only; it never starts
+// scanning a supporting-blog body (Codex r3/r4 on #5216). Each entry is the
+// SAME "[label](href)" text the guardrails synthesize
+// (content-guardrails.nextStepsLinkMarkdown), with the href's query decoded
+// ("name=Jane+Doe", "%40") so the redactor sees what a visitor would.
+// Title-Case semantics: link labels are UI furniture, and the heading-pair
+// name check also catches a lowercase name in a query string.
+// Codex r5 on #5216 ("Skip draft next-step PII checks on refreshes"):
+// publishRefresh keeps the LIVE frontmatter and applies only the title/meta
+// fields (astro-publisher.js) — a refresh draft's own next_steps never ship,
+// so scanning them can only park a clean refresh on text that will never
+// publish. Same refresh predicate content-guardrails.evaluate() uses to skip
+// next_steps there (nextStepsLinks = isRefresh ? '' : nextStepsLinkMarkdown
+// (frontmatter)) — the two must agree on what "a refresh" is.
+function checkNextStepsRedacted(draft, brief) {
+  if (brief?.action_type === 'refresh_existing_page') return { ok: true, reason: 'refresh_frontmatter_not_published' };
+  const text = decodeLinkText(require('./content-guardrails').nextStepsLinkMarkdown(draft?.frontmatter || {}));
+  if (!text.trim()) return { ok: true, reason: 'no_next_steps' };
+  try {
+    return scanPublicFieldForPii('next_steps', text, { titleCased: true }) || { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `pii_scan_unavailable:${err.message}` };
+  }
+}
+
+function checkRedactionPassed(draft) {
+  // Exact licensed-photo attribution lines (a photographer's name, a long
+  // numeric Commons URL) are catalog text, not customer PII — Codex r7.
+  const body = require('./licensed-photo-library').blankLibraryPhotoAttributions(String(draft.body || ''));
   const bodyPhoneHit = scanPhones(body, 'body');
   if (bodyPhoneHit) return bodyPhoneHit;
   // Waves' own addresses are legitimate page furniture (city-service NAP
@@ -842,7 +1007,6 @@ function checkRedactionPassed(draft) {
     //     destination); a long https URL is a citation, not per-se PII.
     // Everything else — name, address, ssn, card — is customer PII with no
     // legitimate page-furniture form and hard-fails the publish gate.
-    const BLOCKING_PII_TYPES = new Set(['name', 'address', 'ssn', 'card']);
     // Markdown HEADING lines are excluded from the redactor's raw NAME scan
     // (title-case section headings like "## Why Choose Waves Pest Control"
     // read as name pairs) but NOT from name detection altogether: a
@@ -901,32 +1065,8 @@ function checkRedactionPassed(draft) {
       ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
     ];
     for (const [where, raw] of seoFields) {
-      if (!raw.trim()) continue;
-      const phoneHit = scanPhones(raw, where);
-      if (phoneHit) return phoneHit;
-      const fieldEmails = raw.match(/[\w._%+-]+@[\w-]+\.[A-Za-z]{2,}/g) || [];
-      if (fieldEmails.some((e) => !e.toLowerCase().endsWith('@wavespestcontrol.com'))) {
-        return { ok: false, reason: `email_in_${where}` };
-      }
-      const stripped = stripWavesOfficeAddresses(raw);
-      const fieldScan = redact(stripped);
-      const titleCased = where === 'title';
-      const fieldHit = (fieldScan.findings || [])
-        .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
-      if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
-      if (titleCased && headingCustomerNamePair(stripped)) {
-        return { ok: false, reason: `unredacted_name_in_${where}` };
-      }
-      // Prose-shaped metas get the body's low-confidence backstop too: a
-      // lowercase self-intro meta ("this is john smith ants are back")
-      // reports low confidence with ZERO findings — the redactor is saying
-      // its heuristics were blind, so "no findings" proves nothing. Titles
-      // skip this: the case-promoting heading-pair check above already
-      // covers casing-blind names there, and Title Case never trips the
-      // lowercase arms anyway.
-      if (!titleCased && fieldScan.confidence === 'low') {
-        return { ok: false, reason: `pii_confidence_low_in_${where}` };
-      }
+      const hit = scanPublicFieldForPii(where, raw, { titleCased: where === 'title' });
+      if (hit) return hit;
     }
   } catch (err) {
     // Redactor unavailable = we cannot prove the body is clean — this is a
@@ -1074,6 +1214,256 @@ function checkBodySyntaxSupported(draft, _brief, context = {}) {
   return { ok: false, reason: `unsupported_body_syntax:${added.join(',')}` };
 }
 
+// ── C2/C3 structural checks (owner ruling 2026-09-28) ─────────────────
+
+// True for every draft the ANSWER FIRST, PITCH SECOND writer instruction
+// covers: any post_type "diagnostic" draft (whatever page type it landed
+// on — post_type is a writer decision independent of the brief's page_type)
+// and every customer-question page (post_type doesn't gate that one; the
+// page type itself IS the "question" case).
+// Codex r2 on #5216: a refresh ships the LIVE frontmatter (publishRefresh
+// freezes it), so a refresh is classified by the live post_type the runner
+// hands in as context.liveFrontmatter — never by whatever the refresh draft
+// happened to repeat (the refresh tool schema does not require post_type).
+// When the runner reports the live load FAILED (liveFrontmatterUnavailable)
+// the refresh is held to the identification checks — fail closed, so an
+// unknown classification routes to review. A caller that supplies neither
+// (unit tests, older callers) falls back to the draft's own value. The
+// post_type comparison itself is licensed-photo-library.isIdentification
+// Post — the SAME predicate the publisher and the merge-time image check use.
+function effectiveFrontmatter(draft, brief, context) {
+  const isRefresh = brief?.action_type === 'refresh_existing_page';
+  if (isRefresh && context?.liveFrontmatter && typeof context.liveFrontmatter === 'object') return context.liveFrontmatter;
+  return draft?.frontmatter || {};
+}
+function isIdentificationDraft(draft, brief, context) {
+  if (brief?.action_type === 'refresh_existing_page' && context?.liveFrontmatterUnavailable && !context?.liveFrontmatter) return true;
+  return isIdentificationPost(effectiveFrontmatter(draft, brief, context));
+}
+// A customer-question page keeps its answer-first contract through a
+// refresh. Codex r5 on #5216 ("Persist customer-question identity across
+// publication"): the r4 fix keyed this on liveFrontmatter.page_type, but
+// page_type is not in the blog schema (packages/blog-schema/schema.json)
+// and normalizeAutonomousBlogFrontmatter never writes it — no live post
+// actually carries it. The durable marker is the LIVE BODY itself: a
+// refresh whose live body (context.previousVersion.body — the runner
+// already hands this in) opens with a BottomLineBox as its first block was
+// published under the answer-first contract, whatever its frontmatter says,
+// so the refresh is held to it too. Same test as leadingVerdictBox / the
+// `^<BottomLineBox` check checkVerdictBoxFirst runs on the DRAFT.
+function isIdentificationOrQuestionDraft(draft, brief, context) {
+  if (isIdentificationDraft(draft, brief, context) || brief?.page_type === 'customer-question') return true;
+  // A "decision" post carries a BottomLineBox by its own post-type contract
+  // (and answer-first does not apply to it), so its leading box proves
+  // nothing about the page being a question page (Codex r7).
+  const livePostType = String(context?.liveFrontmatter?.post_type || '').trim().toLowerCase();
+  if (brief?.action_type === 'refresh_existing_page' && livePostType !== 'decision' && leadingVerdictBox(context?.previousVersion?.body)) return true;
+  return false;
+}
+
+// C2: the verdict box (BottomLineBox) must be the LITERAL first block of
+// the body — before any heading, prose, or other component. A plain
+// leading `[BottomLineBox` component tag is unambiguous: the writer's
+// Markdown subset never puts significant whitespace or commentary before
+// the first real content.
+function checkVerdictBoxFirst(draft, brief, context) {
+  if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
+  const body = String(draft.body || '').trim();
+  if (!body) return { ok: false, reason: 'empty_body' };
+  if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
+  // Codex r6 on #5216: an identification post's box must also say
+  // something — the writer frames verdict as the answer to "Is it
+  // dangerous?" and recommendation as "What to do now". The verdict is
+  // judged by the same answer rule as a customer question (a direct answer
+  // word leads it), or names a risk in the catalog's own safety terms
+  // (stings, venom, toxic to pets, damage…). Customer-question pages judge
+  // theirs against the reader's own question (answer_in_first_paragraph).
+  if (isIdentificationDraft(draft, brief, context)) {
+    const box = leadingVerdictBox(body);
+    if (!box?.verdict) return { ok: false, reason: 'verdict_box_has_no_verdict' };
+    if (!box.recommendation) return { ok: false, reason: 'verdict_box_has_no_recommendation' };
+    if (!verdictAnswersQuestion('Is it dangerous?', box.verdict) && !DANGER_TERMS_RE.test(box.verdict)) {
+      return { ok: false, reason: 'verdict_does_not_answer_is_it_dangerous' };
+    }
+  }
+  return { ok: true };
+}
+// The catalog's safety fields (stings, bites, venomous, disease_vector,
+// structural, allergen, toxic_to_pets, irritant) in plain words, plus the
+// verdict scale's own words.
+const DANGER_TERMS_RE = /\b(dangerous|danger|harmless|safe|unsafe|venom\w*|stings?|stinging|bites?|biting|toxic|poison\w*|irritat\w*|allerg\w*|disease\w*|damag\w*|risk\w*|threat\w*|medically|beneficial)\b/i;
+
+// C2: on the same drafts, the early estimate/quote CTA link must land
+// AFTER the verdict box closes, never before it. checkVerdictBoxFirst
+// already covers "no box at all" / "box isn't first" — this check only
+// judges relative order once a box is present, so the two never double-
+// report the same root cause.
+// Codex P2 (2nd round): the estimate/quote-labelled check only ever
+// scanned for a CTA-SHAPED link, so a non-CTA markdown-link-shaped string
+// INSIDE the box's own props (e.g. recommendation="See our [guide]
+// (/pest-control-services/)") was invisible to it, AND any pitch-style
+// link BEFORE the box worded differently ("Book Now", "Call Today",
+// "Schedule Service") was equally invisible — only the estimate/quote
+// wording was ever checked, with no broader catch-all. Both are now the
+// SAME check: ANY markdown-link-shaped substring anywhere before the box
+// closes (inside its own tag OR in the prose before it) is a hard
+// failure — verdict_box_first already requires the box to be the literal
+// first block, so a compliant draft has NOTHING at all before boxEnd;
+// this is the fail-closed backstop for whatever reaches this check
+// without that having held.
+const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
+const BOTTOM_LINE_BOX_TAG_RE = /<BottomLineBox\b(?:[^>"']|"[^"]*"|'[^']*')*\/?>/;
+function checkCtaAfterVerdictBox(draft, brief, context) {
+  if (!isIdentificationOrQuestionDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_or_question' };
+  const body = String(draft.body || '');
+  // Codex P1 (r10): quote-aware — a naive `[^>]*` stopped at the first
+  // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
+  // tag so a link later in the same prop escaped both checks below.
+  const boxMatch = body.match(BOTTOM_LINE_BOX_TAG_RE);
+  if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  const boxStart = boxMatch.index;
+  ANY_MD_LINK_RE.lastIndex = 0;
+  if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
+  ANY_MD_LINK_RE.lastIndex = 0;
+  let m;
+  while ((m = ANY_MD_LINK_RE.exec(body))) {
+    if (m.index < boxStart) return { ok: false, reason: 'cta_before_verdict_box' };
+  }
+  return { ok: true };
+}
+
+// C3: an identification draft's photos are a CLOSED set — the licensed
+// photo library (licensed-photo-library.js: photos already committed in the
+// Astro repo, embedded by their LOCAL path). Codex r3 on #5216: the gate
+// looks each image up in the library by src — one lookup that works the
+// same for a new post, a refresh and a remediation revalidation, with no
+// brief allowlist, grants or provenance. Anything else (AI art, a remote
+// URL, another post's image) fails.
+// Each library photo must carry its catalog alt exactly and the EXACT
+// attribution line on the RENDERED view (comments and code blanked — the
+// guardrails' blankNonRenderedMarkdown):
+//   Photo: [credit](source_page) ([license](license_url))
+const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page'];
+function validateLibraryPhoto(photo, alt, url, renderedBody) {
+  if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+  if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
+  if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
+  if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
+  return null;
+}
+// Every rendered image FORM is collected — Codex r5 on #5216 (3rd round on
+// image parsing): the gate's OWN inline/reference regexes missed the
+// CommonMark shortcut form (`![alt]` + `[alt]: /path`), which the publisher
+// DOES render. There is now exactly ONE parser for "what Markdown images does
+// this body render": the publisher's own bodyImageRefs (astro-publisher.js,
+// built on renderedBodyView + contentGuardrails.eachMarkdownLink), lazily
+// required — the gate must accept exactly what the publisher publishes, no
+// more and no less. `mdx: true` matches the publisher's own default for the
+// autonomous lane that mints identification posts (resolveBodyImages:
+// "filePath is always `.mdx` here" — see astro-publisher.js). A raw `<img>`
+// (src and srcset) is OUTSIDE that Markdown subset — validateBodyImageRefs parks
+// it at publish — so it is still scanned separately here and tagged its own
+// form, never folded into 'markdown'. An MDX component is not an image
+// source today — SAFE_MDX_COMPONENTS carries none with an image-shaped prop;
+// add an entry here if one is ever added.
+const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
+const { htmlAttrValue: attrValue, isIdentificationPost, photoAttributionLine, libraryPhotoBySrc } = require('./licensed-photo-library');
+// alt is trimmed in every form.
+function collectBodyImageOccurrences(body, { mdx = true } = {}) {
+  const out = [];
+  // bodyImageRefs is an internal (astro-publisher requires this module at
+  // load time for DANGLING_META_ENDINGS, so this stays a lazy, in-function
+  // require — never top-level, or the two modules deadlock on load).
+  const { bodyImageRefs } = require('../content-astro/astro-publisher')._internals;
+  for (const ref of bodyImageRefs(body, { mdx })) {
+    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown' });
+  }
+
+  let m;
+  RAW_IMG_TAG_RE.lastIndex = 0;
+  while ((m = RAW_IMG_TAG_RE.exec(body))) {
+    const attrs = m[1] || '';
+    const alt = String(attrValue(attrs, 'alt') || '').trim();
+    const src = attrValue(attrs, 'src');
+    if (src) out.push({ alt, url: src.trim(), form: 'img' });
+    const srcset = attrValue(attrs, 'srcset');
+    if (srcset) {
+      for (const entry of srcset.split(',')) {
+        const url = entry.trim().split(/\s+/)[0];
+        if (url) out.push({ alt, url, form: 'srcset' });
+      }
+    }
+  }
+  return out;
+}
+
+// Codex r4 on #5216: the library lookup proves a photo is licensed and
+// attributed, but a post may only show the photos its OWN brief assigned —
+// a fire-ant post must not borrow the cockroach photo. The allowed set is
+// the brief's voice_constraints.photo_slots srcs; remediation revalidation
+// re-runs this with the run's own stored brief, so it gets the same set.
+// A refresh (whose brief carries no slots) may also keep a library photo
+// the LIVE previous body already showed (context.previousVersion, rendered
+// view) — never add a new one.
+function allowedIdentificationPhotoSrcs(brief, context) {
+  const allowed = new Set(
+    (Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [])
+      .map((slot) => slot?.photo?.src)
+      .filter(Boolean),
+  );
+  const prior = context?.previousVersion?.body;
+  if (brief?.action_type === 'refresh_existing_page' && typeof prior === 'string' && prior.trim()) {
+    // Same parser as everywhere else here (bodyImageRefs, via
+    // collectBodyImageOccurrences) — a shortcut or reference-style photo the
+    // live body already carried grandfathers exactly like an inline one now.
+    for (const { url, form } of collectBodyImageOccurrences(prior, { mdx: !markdownOnlyTarget(brief) })) {
+      if (form === 'markdown' && libraryPhotoBySrc(url)) allowed.add(url);
+    }
+  }
+  return allowed;
+}
+
+function checkPhotoSlotsLicensedOnly(draft, brief, context) {
+  if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
+  const body = String(draft.body || '');
+  // Codex r6: the attribution must be READER-VISIBLE — comments and code
+  // blanked, then every definitely-hidden container (hidden, aria-hidden,
+  // display:none…) through the guardrails' own walker. Every image in the
+  // raw body is still judged (a hidden image still ships), but only a
+  // visible one counts as showing its slot.
+  const cg = require('./content-guardrails');
+  const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
+  const allowed = allowedIdentificationPhotoSrcs(brief, context);
+  // Same Markdown/MDX flavor the publisher reads the target with (a legacy
+  // .md refresh renders Markdown inside raw HTML as literal text) — Codex r7.
+  const mdx = !markdownOnlyTarget(brief);
+  const occurrences = collectBodyImageOccurrences(body, { mdx });
+  for (const { alt, url, form } of occurrences) {
+    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
+    if (failure) return failure;
+    // Raw <img> (src or srcset) is outside the publisher's Markdown subset —
+    // validateBodyImageRefs parks it at publish — so a library photo shipped
+    // that way still fails here. Every Markdown FORM bodyImageRefs resolves
+    // (inline, full/collapsed reference, shortcut) is accepted, matching
+    // what the publisher actually ships.
+    if (form !== 'markdown') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
+    if (!allowed.has(url)) return { ok: false, reason: `identification_photo_not_in_brief_slots:${url}` };
+  }
+  // Codex r5 on #5216: the writer must embed every slot its brief
+  // POPULATED (null slots stay empty) — the loop above only judges images
+  // that are present, so a draft that omitted them all passed. A refresh
+  // carries no slots and is never required to add a photo.
+  if (brief?.action_type !== 'refresh_existing_page') {
+    const shown = new Set(collectBodyImageOccurrences(cg.blankDefinitelyHiddenContent(body), { mdx }).filter((o) => o.form === 'markdown').map((o) => o.url));
+    const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
+    for (const slot of slots) {
+      const src = slot?.photo?.src;
+      if (src && !shown.has(src)) return { ok: false, reason: `identification_photo_slot_missing:${slot.slot || 'unknown'}:${src}` };
+    }
+  }
+  return { ok: true };
+}
+
 function checkVoiceMatch(draft) {
   const body = String(draft.body || '').toLowerCase();
   // Lightweight voice signals from the canonical waves_default voice
@@ -1085,6 +1475,409 @@ function checkVoiceMatch(draft) {
   if (youMatches >= 5) signals++;
   if (signals === 0) return { ok: false, reason: 'no_voice_match_signals' };
   return { ok: true };
+}
+
+// ── citability nudges (supporting-blog, weight 0) ────────────────────
+//
+// Mirrors the writer prompt's CITABILITY section (same bracket codes). All
+// four are heuristics over the raw body: they detect the SHAPE of a citable
+// post, never the truth of a claim — truth stays with the guardrails and the
+// evidence rules. Failing any of them only adds a nudge.
+
+// Post types whose contract is a choice (packages/blog-schema
+// postTypeRequirements: decision + comparison + cost all require a
+// ComparisonTable). Read from the writer's frontmatter; unset or unknown
+// post types are treated as non-choice (the astro publisher's own
+// normalization decides the final type — this gate only nudges).
+const CHOICE_POST_TYPES = new Set(['decision', 'comparison', 'cost']);
+
+// A refresh ships the LIVE page's non-meta frontmatter (publishRefresh
+// freezes it), so the prior version's post_type is what actually publishes
+// (Codex r6 P2); a new post uses the writer's own frontmatter.
+function draftPostType(draft, context) {
+  const frozen = context?.previousVersion?.frontmatter?.post_type;
+  const type = frozen != null && String(frozen).trim() ? frozen : (draft?.frontmatter?.post_type ?? draft?.post_type ?? '');
+  return String(type).trim().toLowerCase();
+}
+
+// Named authorities the evidence rules already point the writer at (UF/IFAS,
+// FDACS, EPA, CDC, county mosquito programs, product labels). Deliberately a
+// SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
+// recommendation context and competitor names live only inside the
+// ComparisonTable, so neither may count toward this nudge.
+// The county prefix is REQUIRED: a bare "Mosquito Control" is our own
+// service name and must not count as an external authority (fallback P2).
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|NPMA|FPMA|National Pest Management Association|Florida Pest Management Association|National Hurricane Center|USGS|U\.S\. Geological Survey|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+// Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
+// EPA-registered product" names EPA without citing it for any claim. A named
+// authority counts only in a citation frame — led by an attribution phrase,
+// or followed by a reporting verb / source noun.
+const NAMED_SOURCE_RE = new RegExp(
+  String.raw`\b(?:[Aa]ccording to|[Pp]er|[Ff]rom|[Bb]y|[Cc]it(?:es?|ing)|[Uu]nder|[Ss]ee)\s+(?:the\s+)?(?:[\w.&'’-]+\s+){0,2}${NAMED_AUTHORITY}\b`
+  + String.raw`|\b${NAMED_AUTHORITY}(?:'s|’s)?\s+(?:[\w-]+\s+){0,2}?(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publish(?:es)?|estimates?|confirms?|defines?|guidance|data|research|fact sheets?|publications?|stud(?:y|ies)|surveys?|rules?|records?|recommendations?|label(?:ing)?)\b`
+  + String.raw`|\b(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label\b`,
+);
+
+// Refresh lane: the runner stamps target_page_type 'page' for non-blog
+// targets (service/city pages), where the blog citability contract does not
+// apply. Supporting-blog briefs carry no target_page_type → checks apply.
+function nonBlogTarget(brief) {
+  return brief?.target_page_type === 'page';
+}
+
+// Unquoted HTML attribute values (<aside aria-label=Recheck-in-14-days>)
+// are configuration, like quoted ones — blank them in place so the
+// equivalent attribute syntax cannot change a signal (Codex r6 P2).
+function maskUnquotedAttrValues(src) {
+  return String(src || '').replace(/<[A-Za-z][\w.:-]*(?:\s[^<>]*)?>/g, (tag) => tag.replace(
+    /(\s[A-Za-z_:][\w:.-]*\s*=\s*)([^\s"'`{}<>=]+)/g,
+    (_m, lead, value) => lead + ' '.repeat(value.length),
+  ));
+}
+
+// Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
+// Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
+// The shared guardrails blanker preserves line structure but flattens list
+// indentation, so restore only leading whitespace onto the masked text —
+// never restore inline comments or code beside otherwise visible prose.
+function renderedCitabilityBody(body) {
+  const raw = String(body || '');
+  const {
+    blankNonRenderedMarkdown, blankDefinitelyHiddenContent, blankExpressions, maskJsxAttrQuotes, projectMdxDisplayText,
+  } = require('./content-guardrails');
+  // First remove comments/code, then containers a browser definitely hides;
+  // finally mask JSX/HTML attribute values, which are configuration rather
+  // than reader-visible copy. Keep tag names so visible ComparisonTable
+  // components remain detectable.
+  const visible = maskUnquotedAttrValues(blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw)));
+  const blanked = maskJsxAttrQuotes(blankExpressions(visible));
+  const orig = raw.split(/\r?\n/);
+  const mask = blanked.split(/\r?\n/);
+  if (orig.length !== mask.length) return blanked;
+  const prose = orig.map((line, i) => (
+    mask[i].trim() ? line.match(/^[\t ]*/)[0] + mask[i].trimStart() : ''
+  )).join('\n');
+  const componentText = projectMdxDisplayText(visible);
+  return componentText ? `${prose}\n${componentText}` : prose;
+}
+
+// Attribution to ANY proper-noun source ("according to the Florida Forest
+// Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
+// contract asks for the SPECIFIC authority the evidence came from, so the
+// hardcoded list above cannot be exhaustive (Codex P2, 2026-09-26). The
+// source must start with a capital; our own company never counts as the
+// authority behind a claim.
+const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+// Natural subject-first attribution for named institutions outside the
+// finite authority list ("Florida Forest Service reports ..."). Require an
+// institutional head noun so a sentence-leading generic group such as
+// "Homeowners report" does not become a named source merely by casing.
+const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
+const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
+// Capitalization is not evidence that a source is specific. These generic
+// source head nouns are common LLM attribution filler and must not satisfy
+// the named-source contract even when arbitrary title-cased modifiers make
+// the whole phrase look proper ("Leading Experts", "Trusted Research").
+const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
+const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)\b/i;
+const GENERIC_ORG_NAME_TOKEN_RE = /^(?:local|county|state|federal|national|regional|city|municipal|government|public|health|pest|control|industry|professional|professionals|management|community|trusted|leading|independent|official|recognized|respected|expert|research|science|scientific)$/i;
+const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
+const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
+
+function genericAttributedSource(source) {
+  return GENERIC_SOURCE_HEAD_RE.test(String(source || '').trim());
+}
+
+function hasSpecificOrganizationName(source) {
+  const words = String(source || '').trim().replace(/^the\s+/i, '').split(/\s+/)
+    .map((word) => word.replace(/^[^\w&]+|[^\w&]+$/g, ''))
+    .filter(Boolean);
+  const head = words.findIndex((word) => SPECIFIC_SOURCE_ORG_RE.test(word));
+  if (head < 0) return false;
+  const identifying = words.filter((word, index) => index !== head
+    && !SPECIFIC_SOURCE_ORG_RE.test(word)
+    && !/^(?:of|for|and|&)$/i.test(word)
+    && !GENERIC_ORG_NAME_TOKEN_RE.test(word));
+  // Universities, extension offices, services, and laboratories commonly
+  // have one distinctive name token (Cornell University, University of
+  // Miami, Florida Forest Service), and so do centers, surveys, and clinics
+  // (National Hurricane Center, U.S. Geological Survey, Mayo Clinic) and
+  // named organizations or stations (World Health Organization, Smithsonian
+  // Institution, Everglades Research and Education Station) once the generic
+  // tokens are gone (Codex r4/r5 P2). Looser heads such as Program
+  // and Association need two, so locality-shaped filler like "Sarasota
+  // County Program" does not become evidence merely through capitalization.
+  const distinctiveHead = /^(?:University|Extension|Service|Laboratory|Center|Centre|Survey|Clinic|Hospital|Organization|Organisation|Institution|Station|Museum|Garden|Gardens)$/i.test(words[head]);
+  return identifying.length >= (distinctiveHead ? 1 : 2);
+}
+
+function hasAttributedSource(body) {
+  for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
+    const source = m[1].trim();
+    const withoutArticle = source.replace(/^the\s+/i, '');
+    if (!OWN_COMPANY_RE.test(source)
+      && !genericAttributedSource(source)
+      && (hasSpecificOrganizationName(source) || CREDENTIALED_PERSON_RE.test(source)
+        || NAMED_PUBLICATION_RE.test(withoutArticle))) return true;
+  }
+  for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
+    const source = m[1].trim();
+    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)
+      && hasSpecificOrganizationName(source)) return true;
+  }
+  return false;
+}
+
+// Reduce inline Markdown/HTML to its visible text so a LINKED or emphasized
+// source ("According to [UF/IFAS](…)", "**CDC** recommends") reads the same
+// as plain text to the attribution matchers (Codex P2, 2026-09-26).
+function visibleInlineText(body) {
+  return String(body || '')
+    .replace(/^[ \t]{0,3}\[[^\]\n]+\]:[^\n]*(?:\n|$)/gm, ' ')
+    .replace(/!\[[^\]\n]*\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, ' ')
+    .replace(/\[([^\]\n]+)\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, '$1')
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+    .replace(/(\*\*|__|\*|_)(?=\S)([^*_\n]+?)\1/g, '$2');
+}
+
+function checkCitabilityNamedSources(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = visibleInlineText(renderedCitabilityBody(draft.body));
+  if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
+  return { ok: false, reason: 'no_named_source_attribution' };
+}
+
+// A "concrete specific" is a number bound to a unit of measure, time, or
+// rate. Dollar amounts are excluded on purpose (HARDCODED_PRICE bans them),
+// as are bare years and bare counts ("3 ways", "2024") — those are not the
+// extractable measurements the nudge is after. Ranges ("3.5–4 inches",
+// "10-14 days") count once.
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.,\/])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?(?:\s?(?:-|–|to)\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)(?:\s+(?:per|a|an|each|every)\s+(?:year|month|week|day|application|treatment|visit)\b)?/gi;
+const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
+
+// Vague stand-ins for a measurement — the prompt's own examples ("tall",
+// "a couple of weeks", "deeply"). Softening is what the nudge targets.
+const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while|(?:in|during|this|next|last|early|late|each|every|throughout|by|before|after) (?:the )?(?:spring|summer|fall|autumn|winter)|(?:spring|summer|fall|autumn|winter) (?:season|months?|weather|rains?|rainfall|temperatures?|conditions?|timing|window|applications?|treatments?|service|pressure|activity)|(?:rainy|dry) season)\b/i;
+
+const UNIT_KEYS = [
+  [/^(?:%|percent)$/, '%'],
+  [/^inch(?:es)?$/, 'inch'],
+  [/^(?:feet|foot|ft)$/, 'foot'],
+  [/^(?:sq\.? ?ft|square feet)$/, 'sq ft'],
+  [/^(?:°\s?f|degrees)$/, 'degree'],
+  [/^(?:lbs?|pounds?)$/, 'pound'],
+  [/^(?:oz|ounces?)$/, 'ounce'],
+  [/^(?:mm|millimeters?)$/, 'mm'],
+  [/^(?:cm|centimeters?)$/, 'cm'],
+];
+
+// One comparable key per measurement: the number (range dashes unified) and
+// its unit in a single spelling, so "14 days", "14-day", and "14 day"
+// compare equal while "4 inches" never stands in for "10–14 days".
+function measurementKey(match) {
+  const m = match.toLowerCase().replace(/\s+/g, ' ').trim();
+  // Whole formatted numbers: "1,000" and "3 1/2" never shrink to a
+  // trailing "000" / "1/2" (Codex r6 P2).
+  const num = m.match(/^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)(?:\s?(?:-|–|to)\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?))?/);
+  let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
+  unit = unit.replace(/^times? (?:a|per) /, 'times per ');
+  // Keep the trailing cadence ("1 inch per week" vs "1 inch per month",
+  // Codex r7 P2) in one spelling: "a/each/every week" reads as "per week".
+  let rate = '';
+  const cadence = unit.match(/\s+(?:per|a|an|each|every)\s+(year|month|week|day|application|treatment|visit)$/);
+  if (cadence && !/^(?:times per|per)\b/.test(unit)) {
+    rate = ` per ${cadence[1]}`;
+    unit = unit.slice(0, cadence.index);
+  }
+  const alias = UNIT_KEYS.find(([re]) => re.test(unit));
+  if (alias) unit = alias[1];
+  else unit = unit.split(' ').map((w) => w.replace(/s$/, '')).join(' ');
+  const clean = (v) => v.replace(/,/g, '');
+  return `${clean(num[1])}${num[2] ? `-${clean(num[2])}` : ''} ${unit}${rate}`;
+}
+
+function calendarKey(match) {
+  const t = match.toLowerCase()
+    .replace(/(\d)(?:st|nd|rd|th)\b/g, '$1')
+    .replace(/\s*(?:–|—|-|\bto\b|\bthrough\b)\s*/g, '-')
+    .replace(/\b([a-z]{3})[a-z]*\.?/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `cal:${t}`;
+}
+
+function concreteSpecificKeys(body) {
+  // Remove complete dollar literals before scanning. Otherwise a
+  // comma-formatted price such as "$1,200 per year" can be entered midway
+  // at "200 per year" and masquerade as a non-price measurement.
+  const text = visibleInlineText(body).replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
+  return [
+    ...(text.match(CONCRETE_SPECIFIC_RE) || []).map(measurementKey),
+    ...(text.match(CALENDAR_WINDOW_RE) || []).map(calendarKey),
+  ];
+}
+
+function countConcreteSpecifics(body) {
+  return concreteSpecificKeys(body).length;
+}
+
+// How many of the prior page's measurements the refresh still states, each
+// counted at most as often as the draft repeats it — an unrelated new
+// number or a repeated retained one cannot stand in for a dropped value
+// (Codex r4 P2).
+function retainedMeasurements(beforeKeys, afterKeys) {
+  const available = new Map();
+  for (const key of afterKeys) available.set(key, (available.get(key) || 0) + 1);
+  let retained = 0;
+  for (const key of beforeKeys) {
+    const left = available.get(key) || 0;
+    if (left > 0) {
+      retained += 1;
+      available.set(key, left - 1);
+    }
+  }
+  return retained;
+}
+
+// NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every
+// brief whose evidence held fewer measurements, pressuring a redraft toward
+// invented numbers. The gate cannot see the writer's tool evidence, so it
+// flags only what is visible as softening: a refresh that states fewer
+// measurements than the page it replaces, or a draft with no measurement at
+// all that leans on a vague stand-in instead.
+function checkCitabilityConcreteSpecifics(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const keys = concreteSpecificKeys(renderedCitabilityBody(draft.body));
+  const n = keys.length;
+  const prev = context?.previousVersion?.body;
+  if (prev != null) {
+    const beforeKeys = concreteSpecificKeys(renderedCitabilityBody(prev));
+    const retained = retainedMeasurements(beforeKeys, keys);
+    if (retained < beforeKeys.length) {
+      return { ok: false, reason: `refresh_dropped_measurements_${beforeKeys.length}_to_${retained}` };
+    }
+  }
+  if (n === 0) {
+    const vague = renderedCitabilityBody(draft.body).match(VAGUE_QUALIFIER_RE);
+    if (vague) return { ok: false, reason: `vague_qualifier_without_measurement:${vague[0].toLowerCase()}` };
+  }
+  return { ok: true };
+}
+
+const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
+// A choice the post itself frames: the title or a heading pits options
+// against each other, or the post type's contract is a choice. Body prose
+// is NOT scanned ("DIY" appears in most posts) — the nudge must not push a
+// generic DIY-vs-pro table onto every post (the no-filler visual rule).
+// Deliberately narrow: "X vs Y", "X or Y?" as a whole heading/title, and
+// "which option/approach…". A bare "Should you…?" or a yes/no question is
+// NOT a two-path comparison (it fired on 73% of the live corpus in the
+// 2026-09-25 calibration run — most were single-answer questions).
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^ {0,3}#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\??\s*$|\bwhich (?:[\w'’-]+ ){0,2}?(?:one|option|approach|method|plan|product|treatment|service)s? (?:is|are|fits|works|makes|do|does|should)\b|\bwhich (?:one |option )?(?:is|works|fits) (?:better|best)\b/i;
+
+function headingLines(body) {
+  return String(body || '').split(/\r?\n/).filter((l) => /^ {0,3}#{1,3}\s+\S/.test(l));
+}
+
+function postFramesAChoice(draft, context) {
+  if (CHOICE_POST_TYPES.has(draftPostType(draft, context))) return true;
+  const title = String(draft.title || draft.frontmatter?.title || '');
+  if (CHOICE_FRAMING_RE.test(visibleInlineText(title))) return true;
+  // Rendered heading text only: a link destination such as
+  // "(/bait-vs-spray/)" is invisible to the reader (Codex r4 P2).
+  return headingLines(renderedCitabilityBody(draft.body))
+    .some((h) => CHOICE_FRAMING_RE.test(visibleInlineText(h)));
+}
+
+// Legacy .md posts cannot carry MDX components: publishRefresh keeps the
+// extension and 422s a refreshed .md body containing <ComparisonTable>, so
+// asking for one there could never publish (Codex r7 P2; same rule as the
+// #4845 backfill scan). The markdown-only signals still apply.
+function markdownOnlyTarget(brief) {
+  return /\.md$/i.test(String(brief?.target_file_path || ''));
+}
+
+function checkCitabilityComparison(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  if (markdownOnlyTarget(brief)) return { ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' };
+  const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
+  if (hasTable) return { ok: true };
+  if (!postFramesAChoice(draft, context)) return { ok: true, reason: 'no_choice_framed' };
+  return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
+}
+
+const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
+
+const HOW_TO_CHOOSE_MIN_CRITERIA = 3;
+const HOW_TO_CHOOSE_MAX_CRITERIA = 5;
+
+// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2s,
+// 2026-09-26 — both bounds): an H3, or an H2 over plain prose, is not the extractable
+// structure the nudge measures. Criteria = list items before the next H1/H2.
+function howToChooseSectionCriteria(body) {
+  const lines = String(body || '').split(/\r?\n/);
+  let best = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(visibleInlineText(lines[i]))) continue;
+    // Top-level criteria only; nested explanation bullets never count.
+    let items = 0;
+    let topContentColumn = null;
+    for (let j = i + 1; j < lines.length && !/^ {0,3}#{1,2}\s/.test(lines[j]); j += 1) {
+      const m = lines[j].match(/^(\s*)[-*+]([ \t]+)(\S.*)$/);
+      if (!m) continue;
+      const indent = m[1].replace(/\t/g, '    ').length;
+      // CommonMark decides nesting against the preceding peer item's
+      // content column, not one global minimum marker indent. Thus 0/1/2
+      // and 1/2/3 marker columns are peers, while 0/1/3 nests the third
+      // marker beneath the second (whose content begins at column 3).
+      const topLevel = topContentColumn === null || indent < topContentColumn;
+      if (topLevel) topContentColumn = indent + 1 + m[2].replace(/\t/g, '    ').length;
+      const criterion = visibleInlineText(m[3]).trim();
+      // An observable condition: a conditional lead word, or any noun-phrase
+      // check ahead of an arrow ("Active mud tubes → choose liquid", Codex r6 P2).
+      const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion)
+        || /^[^→]*\w[^→]*\s*(?:→|->)\s*\S/.test(criterion);
+      const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
+      if (topLevel && hasCondition && namesOption) items += 1;
+    }
+    best = Math.max(best, items);
+  }
+  return best; // -1 = no H2 found
+}
+
+function checkCitabilityHowToChoose(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = renderedCitabilityBody(draft.body);
+  const applies = COMPARISON_TABLE_RE.test(body) || postFramesAChoice(draft, context);
+  if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
+  const criteria = howToChooseSectionCriteria(body);
+  if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
+  if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
+  if (criteria > HOW_TO_CHOOSE_MAX_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_max_${HOW_TO_CHOOSE_MAX_CRITERIA}` };
+  return { ok: true };
+}
+
+// The four optional signals as retry advisories ({ code, message }), for
+// the writer's in-session emit_draft redraft, which runs before any
+// run-level evaluate() (5013 Codex r2 P2). Same checks, same codes as the
+// run-level soft_failures path.
+const CITABILITY_CHECKS = [
+  ['citability_named_sources', checkCitabilityNamedSources],
+  ['citability_concrete_specifics', checkCitabilityConcreteSpecifics],
+  ['citability_comparison', checkCitabilityComparison],
+  ['citability_how_to_choose', checkCitabilityHowToChoose],
+];
+
+function citabilityAdvisories(draft, brief, context) {
+  const out = [];
+  for (const [name, check] of CITABILITY_CHECKS) {
+    let result;
+    try { result = check(draft, brief, context); } catch { continue; }
+    if (result && result.ok === false) {
+      out.push({ code: name.toUpperCase(), message: String(result.reason || 'optional citability signal').slice(0, 300) });
+    }
+  }
+  return out;
 }
 
 // ── metadata checks ─────────────────────────────────────────────────
@@ -1246,7 +2039,7 @@ function checkNoDuplicateTitle(draft, _brief, context) {
 // DANGLING_META_ENDINGS is exported as the single source of truth for
 // "words a meta may not end on" — astro-publisher's clamp fallback strips
 // against the SAME set so a clamped meta can never fail this gate.
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS, citabilityAdvisories };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
@@ -1261,10 +2054,15 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
   checkBlogMetaSoftCta, checkAuthoredMetaLength,
   checkNoRawMarkdownTables,
   checkBodySyntaxSupported,
+  checkVerdictBoxFirst, checkCtaAfterVerdictBox,
+  checkPhotoSlotsLicensedOnly, isIdentificationOrQuestionDraft, effectiveFrontmatter, checkNextStepsRedacted,
+  collectBodyImageOccurrences,
 };

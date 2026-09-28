@@ -194,7 +194,6 @@ const REPORT_DATA = 'server/services/service-report/report-data.js';
 const REPORT_VIEW_PAGE = 'client/src/pages/ReportViewPage.jsx';
 const PREMIUM_EXPERIENCE = 'server/services/service-report/premium-experience.js';
 const ACTIVITY_INDICATORS = 'server/services/service-report/activity-indicators.js';
-const CROSS_SELL = 'server/services/service-report/cross-sell.js';
 const RESERVICE_REPORT = 'server/services/service-report/reservice-report.js';
 const LAWN_REPORT_V2 = 'server/services/service-report/lawn-report-v2.js';
 const MOSQUITO_REPORT_V2 = 'server/services/service-report/mosquito-report-v2.js';
@@ -1275,7 +1274,6 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('cockroach', {
         notes: {
-          activity_level: 'cross-sell.js reads activity_level only from a COMPANION cockroach snapshot under a non-cockroach primary, so it is not a reader for this primary-form line.',
           evidence_observed: 'Evidence can reconcile the status away from the activity select ("Signs found").',
           work_completed: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
         },
@@ -1305,16 +1303,7 @@ const VISIT_FACTS_CONTRACT = {
     catalogKeys: ['termite_bait', 'termite_active_annual', 'termite_active_bait_quarterly', 'termite_monitoring', 'termite_cartridge_replacement', 'termite_installation_setup'],
     voiceFill: true,
     facts: [
-      ...typedFormFacts('termite_bait_station', {
-        // No cross-sell reader: #5200 took termite out of the offer ladder,
-        // so cross-sell.js no longer reads any termite snapshot key. The
-        // registry test caught the stale edge on main (#5190 merged before
-        // #5200's change was in its base).
-        notes: {
-          termite_activity: 'Not a cross-sell signal since #5200 (termite left the offer ladder).',
-          bait_consumption: 'cross-sell.js reads bait_consumption only for rodent_bait_station snapshots.',
-        },
-      }),
+      ...typedFormFacts('termite_bait_station'),
       ...typedSharedCompletionFacts(),
       ...typedActivityScoreFacts('termite_bait_station'),
       typedPhotoSummaryFact(),
@@ -1343,7 +1332,6 @@ const VISIT_FACTS_CONTRACT = {
           traps_checked: [{ file: REPORT_DATA, section: 'Trap counts (station summary)' }],
           captures: [
             { file: RODENT_REPORT_NARRATIVE, section: 'Grounded capture sentence' },
-            { file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent trapping)' },
           ],
         },
       }),
@@ -1383,11 +1371,7 @@ const VISIT_FACTS_CONTRACT = {
     catalogKeys: ['rodent_bait_quarterly', 'rodent_bait_setup'],
     voiceFill: true,
     facts: [
-      ...typedFormFacts('rodent_bait_station', {
-        readers: {
-          bait_consumption: [{ file: CROSS_SELL, section: 'Cross-sell V2 findings signal (rodent bait stations)' }],
-        },
-      }),
+      ...typedFormFacts('rodent_bait_station'),
       ...typedSharedCompletionFacts(),
       ...typedActivityScoreFacts('rodent_bait_station'),
       typedPhotoSummaryFact(),

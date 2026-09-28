@@ -151,6 +151,11 @@ const DEFAULTS = Object.freeze({
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
+  // Newsletter writer + event-curation scoring (owner ruling 2026-09-27):
+  // Opus 5.5 at effort 'max' — Opus 5.5 defaults to 'medium', so the
+  // newsletterWriter policy pins effort explicitly rather than relying on
+  // the model's own default.
+  NEWSLETTER: 'claude-opus-5-5',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
@@ -204,6 +209,13 @@ const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC ||
 // re-baselines every scorecard, so it moves only when MODEL_VOICE_JUDGE is
 // set deliberately.
 const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
+
+// Newsletter writer + event-curation scoring (owner ruling 2026-09-27:
+// stop skipping the weekly issue — auto-curation was starving at 0-5
+// approved events/week). Own selector rather than riding FLAGSHIP/WORKHORSE
+// so this one lane can move to Opus 5.5 without affecting every other
+// FLAGSHIP/WORKHORSE call site.
+const NEWSLETTER = process.env.MODEL_NEWSLETTER || DEFAULTS.NEWSLETTER;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -500,6 +512,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE_JUDGE }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  newsletterWriter: Object.freeze({
+    name: 'newsletterWriter',
+    // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5 at
+    // effort 'max', and community-event curation scoring rides the same
+    // model/effort (event-curation.js). `effort` on a route is honored only
+    // on the Anthropic leg (services/llm/call.js#dispatch); a caller that
+    // needs a lighter interactive path (the admin Compose UI) overrides it
+    // per-call rather than moving the whole policy off 'max'.
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: NEWSLETTER, effort: 'max' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
 });
 
 module.exports = {
@@ -520,6 +543,7 @@ module.exports = {
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,
+  NEWSLETTER,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,

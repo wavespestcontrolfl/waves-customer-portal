@@ -423,17 +423,111 @@ async function itemizeFirstApplication({ estimateId, customerId, scheduledServic
 // The visit's accept-time first-application stamp
 // (scheduled_services.first_application_invoice_id — written once, by
 // estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage or the
-// history backfill below). A caller whose svc row carries the column (any
-// `scheduled_services.*` / `.first()` read) is trusted as-is, NULL included.
-// A caller with a NARROW select (the column is `undefined` on its object) gets
-// one extra read by id, so no call site can silently bypass the stamp just
-// because it listed columns by hand (Codex round 14 on PR #5021). No svc.id →
-// nothing to read; treated as unstamped (pure/unit-test callers).
+// history backfill below). The stamp is write-once and never cleared, so a
+// NON-NULL value on the caller's svc row cannot be stale and is trusted. A
+// NULL can be: the sweep's runtime reconciliation may stamp the row after the
+// caller read it (Codex r2/r3 P1 on #5237 — Charge Now, then completion), and
+// a narrow select leaves the column undefined (Codex round 14 on #5021).
+// Both re-read by id, so every consumer (the stamped lookup, the coverage
+// verdict, the priced-member gate) decides from the current stamp. No svc.id
+// → nothing to read; treated as unstamped (pure/unit-test callers).
 async function readFirstApplicationStamp(svc, conn) {
-  if (svc?.first_application_invoice_id !== undefined) return svc.first_application_invoice_id || null;
-  if (!svc?.id) return null;
+  if (svc?.first_application_invoice_id) return svc.first_application_invoice_id;
+  if (!svc?.id || !conn) return null;
   const row = await conn('scheduled_services').where({ id: svc.id }).first('first_application_invoice_id');
   return row?.first_application_invoice_id || null;
+}
+
+// Is svc a NON-ANCHOR member of its own stamped combined invoice? (Codex r21
+// P1 on PR #5021, deferred to this follow-up.) first_application_invoice_id
+// is stamped on the ANCHOR too (stampCombinedFirstApplicationInvoiceCoverage
+// / the backfill above stamp the anchor alongside every covered sibling), so
+// carrying a stamp alone never says whether THIS row is the invoice's own
+// anchor or a covered member — only comparing the stamped invoice's OWN
+// scheduled_service_id (its anchor) against svc.id does. This is a WIDENING
+// GATE for isSiblingCoverageEligibleVisit's priced branch, never a mint
+// decision itself: siblingInvoiceCoverageVerdict / combinedInvoiceVoidedWithoutLiveReplacement
+// still make the actual (fail-closed) call once a caller is eligible to ask
+// them. A missing svc.id/conn, no stamp, or a missing invoice row all
+// read false (a read ERROR reads true — see the catch) — never toward a false "is a member" that would wrongly widen
+// an ANCHOR's own priced mint (see that predicate's own header for why an
+// anchor must never reach the terminal-match-ahead-of-own-visit branches
+// this gate exists to keep the anchor out of).
+async function isPricedCoveredMemberVisit(svc, conn) {
+  if (!svc?.id || !conn) return false;
+  try {
+    const stampedInvoiceId = await readFirstApplicationStamp(svc, conn);
+    if (!stampedInvoiceId) return false;
+    const invoice = await conn('invoices').where({ id: stampedInvoiceId }).first('scheduled_service_id');
+    if (!invoice?.scheduled_service_id) return false;
+    if (String(invoice.scheduled_service_id) === String(svc.id)) return false;
+    // An own REFUNDED invoice keeps the member in review even beside a live
+    // replacement (Codex r3 P2 on #5237): completion parks whenever a
+    // refunded and a live invoice coexist, since the refund may still fail
+    // and restore the original payment. Staying a member routes Charge Now
+    // and the schedule sheet to pricedCoveredMemberOwnRefundHold → review.
+    if (await pricedCoveredMemberOwnRefundHold(svc, conn)) return true;
+    // Split off by hand (#5237 review P2): a member whose base application a
+    // live invoice of its OWN already bills is no longer covered — the same
+    // split evidence the backfill and the sweep use
+    // (liveBaseApplicationInvoiceVisitIdsOn). Without this, a stamped visit
+    // the office split off could never be collected in person again.
+    return !(await liveBaseApplicationInvoiceVisitIdsOn(conn, [svc.id])).size;
+  } catch (err) {
+    // A failed read is NOT "unstamped" (pre-push P1 on acb6a0ad54): false
+    // would let a covered priced member fall through to minting its own
+    // price — the double charge this gate exists to stop. Unknown admits the
+    // visit to the coverage verdict, which fails closed on its own (an error
+    // or ambiguous match refuses / holds for review, never mints).
+    require('./logger').warn(`[estimate-first-application-invoice] isPricedCoveredMemberVisit read failed for ${svc.id}; routing to the fail-closed coverage check: ${err?.message || err}`);
+    return true;
+  }
+}
+
+// Completion's in-lock mint guard (Codex r4 P1 on #5237). Completion decides
+// "nothing covers this visit" from reads taken BEFORE its mint lock, and the
+// runtime reconciliation (stampGroupRevalidated) can stamp the visit between
+// those reads and the mint. Call this under the visit's row lock (after
+// acquireScheduledMintLockChain's FOR UPDATE): stampGroupRevalidated locks
+// the same scheduled_services rows before it stamps, so the read here is
+// authoritative. Either the stamp committed first and this refuses, or the
+// stamper waits for this mint, sees the visit's own live invoice
+// (liveBaseApplicationInvoiceVisitIdsOn) and leaves it unstamped. A refusal
+// is a retryable 409: the retry's pre-lock lookup now sees the stamp and
+// reuses the combined invoice. A read error refuses too (isPricedCovered-
+// MemberVisit reads true on error), so a failed read never mints.
+async function refuseCoveredMemberMintInTrx(trx, scheduledServiceId) {
+  if (!scheduledServiceId) return;
+  if (!(await isPricedCoveredMemberVisit({ id: scheduledServiceId }, trx))) return;
+  const e = new Error('This visit is billed on its trip\'s combined first-application invoice — no separate invoice was created.');
+  e.status = 409;
+  e.statusCode = 409;
+  e.code = 'FIRST_APPLICATION_COVERED';
+  throw e;
+}
+
+// A priced covered member's OWN refunded base-application invoice (#5237
+// review r2 P2): isPricedCoveredMemberVisit's own "split off by hand" check
+// (liveBaseApplicationInvoiceVisitIdsOn, above) only excludes a LIVE own
+// invoice — a REFUNDED one leaves the member still coverage-eligible there,
+// so the ordinary sibling verdict would report 'covered' on the (still
+// live) combined invoice while completion — which checks THIS VISIT's own
+// refunded invoice FIRST, unconditionally, before ever consulting the
+// sibling group at all (completionTerminalInvoiceLookup,
+// completion-invoice-candidate.js) — parks it for manual review instead.
+// Called ONLY by the priced-covered-member widening's own entry points
+// (resolveScheduledServiceCharge, siblingCoverageForSchedule), and only
+// once isPricedCoveredMemberVisit has already confirmed a genuine covered
+// member, so it can never disagree with completion for exactly the input
+// this widening admits — reuses completion's own classifier rather than a
+// second one. Deliberately does NOT swallow a read failure the way
+// isPricedCoveredMemberVisit does: this decides a REFUSAL, not a widening
+// gate, so a failure here must propagate to the caller's own fail-closed
+// verdict handling, never silently fall through to an ordinary mint.
+async function pricedCoveredMemberOwnRefundHold(svc, conn) {
+  if (!svc?.id || !conn) return null;
+  const { completionTerminalInvoiceLookup } = require('./completion-invoice-candidate');
+  return completionTerminalInvoiceLookup(conn, { scheduledServiceId: svc.id });
 }
 
 // The candidate-row query. Unstamped: byte-identical to the pre-stamp
@@ -752,6 +846,9 @@ module.exports = {
   // its void fallback can never disagree about which rows form the group.
   firstApplicationCandidateQuery,
   readFirstApplicationStamp,
+  isPricedCoveredMemberVisit,
+  refuseCoveredMemberMintInTrx,
+  pricedCoveredMemberOwnRefundHold,
   isAutoGeneratedPayPerApplicationInvoice,
   isInvoiceModeRecurringAcceptInvoice,
   isCombinedFirstApplicationInvoiceForBackfill,

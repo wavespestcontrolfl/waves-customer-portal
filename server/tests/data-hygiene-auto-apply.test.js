@@ -183,17 +183,17 @@ describe('runAutoApplySweep', () => {
     expect(result).toEqual({ skipped: 'gate_off' });
   });
 
-  test('applies green candidates and sends ONE digest', async () => {
+  // Admin-alerts-brevity scope (owner ruling 2026-09-28, decisions 2 + 5):
+  // good-news auto-applies and the standing pending count never ring the
+  // bell any more — only the logger.info summary line remains.
+  test('applies green candidates and never rings the bell', async () => {
     const p1 = greenProposal({ id: 'p1' });
     const p2 = greenProposal({ id: 'p2', field: 'phone', rule_id: 'phone.e164', current_value: '(941) 555-0100', proposed_value: '+19415550100' });
     const dbi = makeDbi({ candidates: [p1, p2], proposalRows: [p1, p2] });
     const result = await runAutoApplySweep({ dbi });
     expect(result.applied).toBe(2);
     expect(result.errors).toBe(0);
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    const [category, title] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(category).toBe('system');
-    expect(title).toContain('2 fixes auto-applied');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('candidate reviewed by a human mid-sweep (re-check under lock) is skipped', async () => {

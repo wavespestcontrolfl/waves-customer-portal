@@ -196,7 +196,7 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
-import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { serviceWindowLabel, groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, stopHasCustomerSentPhotos, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
@@ -1520,6 +1520,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
   // separate invoices, so a prepaid primary must not hide a sibling's
   // amount due.
   const money = stopCollectSummary(stop);
+  const customerSentPhotos = stopHasCustomerSentPhotos(stop);
   const street = shortAddress(service.address);
   const serviceLabel = stopSummaryLabel(stop)
     || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
@@ -1561,7 +1562,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           }}>
             {serviceLabel}{street ? ` · ${street}` : ''}
           </p>
-          {(indicator.hasAlerts || money.collectNeeded) && (
+          {(indicator.hasAlerts || money.collectNeeded || customerSentPhotos) && (
             <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
               {indicator.hasAlerts && (
                 <span style={chipStyle(indicator.hasChemical ? '#ef4444' : DARK.teal)}>
@@ -1570,6 +1571,9 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
               )}
               {money.collectNeeded && (
                 <span style={chipStyle('#f59e0b')}>💵 Collect {fmtMoney(money.amount)}</span>
+              )}
+              {customerSentPhotos && (
+                <span style={chipStyle(DARK.teal)}>📷 Customer sent photos</span>
               )}
             </div>
           )}

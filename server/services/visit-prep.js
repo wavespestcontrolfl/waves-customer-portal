@@ -30,6 +30,7 @@ const { convertHeicToJpeg } = require('./heic-to-jpeg');
 const { hashBuffer } = require('./service-report/photo-chain');
 const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
+const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 // The same location-chip set the customer portal's service-request form
 // uses (server/routes/requests.js) — reused rather than redefined, the same
 // route-module-from-a-service pattern already used by several services
@@ -335,7 +336,7 @@ async function persistLocked(trx, {
 
   if (toStore.length === 0) {
     await preserveResubmittedFields(trx, current, dropped[0], { topic, locationOnProperty, note });
-    return { created: false, dropped, current, summary: await visitPrepSummary(current, trx) };
+    return { created: false, stored: 0, dropped, current, summary: await visitPrepSummary(current, trx) };
   }
 
   const locked = await visitPrepSummary(current, trx);
@@ -371,7 +372,7 @@ async function persistLocked(trx, {
   // Counts come from THIS transaction (Codex r1 P2): a post-commit read
   // that failed would 500 a request whose photos were already durably
   // stored and invite a retry of a write that had succeeded.
-  return { created: true, dropped, current, summary: await visitPrepSummary(current, trx) };
+  return { created: true, stored: toStore.length, dropped, current, summary: await visitPrepSummary(current, trx) };
 }
 
 // A resubmit of already-stored photos carrying a corrected or newly added
@@ -436,7 +437,13 @@ async function withStopLock(svcId, fn) {
  *   `svc`, at least id/customer_id/property_id/visit_id) or null when the
  *   visit is no longer eligible. REQUIRED — the caller (appointment-public.js)
  *   owns the eligibility rule and must not let this service go stale.
- * @returns {Promise<{ created: boolean, summary: { photoCount, photosRemaining, submissionCount } }>}
+ * @returns {Promise<{ created: boolean, stored: number, summary: { photoCount, photosRemaining, submissionCount }, svc: object }>}
+ *   `stored` = NEW photos this request stored (0 for an all-duplicate resubmit).
+ *   `svc` is the RECHECKED row (`recheck`'s own return value, read fresh
+ *   under the stop lock) — additive, for callers (the office feed item)
+ *   that must not build off the stale pre-lock row a caller passed in: the
+ *   visit can be rescheduled between the pre-lock read and the locked
+ *   write, and the pre-lock `svc` argument is never mutated to match.
  */
 async function createVisitPrepSubmission({
   svc, files, note, topic, locationOnProperty, entry, recheck,
@@ -460,7 +467,140 @@ async function createVisitPrepSubmission({
   // their already-uploaded objects are cleaned up regardless of outcome.
   await Promise.all(result.dropped.map((u) => deleteUploadedObject(u.s3Key)));
 
-  return { created: result.created, summary: result.summary };
+  return { created: result.created, stored: result.stored, summary: result.summary, svc: result.current };
+}
+
+// ── Technician Visit Brief surface (PR 3a) ──────────────────────────────────
+// Two new, self-contained reads consumed by previsit-brief.js's
+// deterministicVisitFacts (facts.customerFlagged) and by
+// admin-schedule.js's GET /:id/visit-prep-photos. Neither touches any of
+// the write path above; both resolve the stop from CURRENT scheduled_services
+// rows through techStopMemberIds (below) — NEVER a submission's own
+// snapshotted visit_id (see the file header).
+
+// The stop AS IT STANDS for whoever holds `svc`: the member set for the
+// two tech-facing reads below. A frozen visit keeps visit_id on a member
+// dispatch reassigned or moved (handleChildStopChanged preserves
+// membership), so `stopMemberIds` can include rows that are now someone
+// else's stop or a second physical stop. The caller authorized `svc` only,
+// so a member counts only while:
+// - it is on svc's CURRENT technician (Codex #5239 r1 P1); and
+// - it is still at the visit's physical stop by the canonical grouping rule,
+//   `visit-groups.js` `rowStillAtVisitStop` (same date, customer and property,
+//   and a window that overlaps the live members still at the stop; Codex
+//   #5239 r4 P2: a member moved to a non-overlapping window on the same day
+//   is a second stop).
+// The requested row is re-read by id (Codex #5239 r3 P2), so a row detached
+// or regrouped mid-request resolves its CURRENT stop, and a requested row no
+// longer at its visit's stop resolves to itself. Status does not matter for
+// a candidate: a cancelled service at the same technician's same stop is the
+// same customer's visit and nobody else sees it. `stopMemberIds` keeps its
+// wider set for the customer-side cap counts, which are about the visit, not
+// access.
+async function techStopMemberIds(svc, conn) {
+  if (!svc?.id) return [];
+  const cols = ['id', 'visit_id', 'technician_id', 'customer_id', 'property_id',
+    'scheduled_date', 'window_start', 'window_end', 'status'];
+  const anchor = await conn('scheduled_services').where({ id: svc.id }).first(...cols);
+  if (!anchor) return [];
+  if (!anchor.visit_id) return [anchor.id];
+  const [visit, rows] = await Promise.all([
+    conn('service_visits').where({ id: anchor.visit_id })
+      .first('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end'),
+    conn('scheduled_services').where({ visit_id: anchor.visit_id }).select(...cols),
+  ]);
+  if (!visit) return [anchor.id];
+  const { rowStillAtVisitStop } = require('./visit-groups');
+  // Same inputs the grouping code uses: the row against the visit, anchored
+  // on the OTHER members that are still live.
+  const atStop = (row) => rowStillAtVisitStop(row, visit, rows.filter((m) => String(m.id) !== String(row.id)
+    && !TERMINAL_ROW_STATUSES.includes(m.status)));
+  if (!atStop(anchor)) return [anchor.id];
+  const techKey = anchor.technician_id == null ? null : String(anchor.technician_id);
+  const others = rows.filter((r) => String(r.id) !== String(anchor.id)
+    && (r.technician_id == null ? null : String(r.technician_id)) === techKey
+    && atStop(r));
+  return [anchor.id, ...others.map((r) => r.id)];
+}
+
+// Re-resolves the stop AFTER the read/signing work and returns the member
+// ids still on it (Codex #5239 r2 P1). A sibling reassigned or moved while
+// the notes were read or the URLs signed drops out here, so neither read
+// returns data from a row that left this technician's stop mid-request;
+// the routes then recheck the requested row itself, as before.
+async function stillOnTechStop(svc, conn) {
+  return new Set((await techStopMemberIds(svc, conn)).map(String));
+}
+
+// Short-lived signed VIEW urls for every photo on the stop's CURRENT
+// membership — same TTL as the technician's own service photos
+// (GET /api/tech/services/:id/photos, tech-track.js: getSignedUrl(...,
+// { expiresIn: 3600 })), not the 24h PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+// (that TTL is for a customer-facing tokenized page's in-page dwell, not a
+// staff-authenticated one-shot fetch). Authorization is entirely the
+// caller's job — admin-schedule.js's GET /:id/visit-prep-photos mirrors
+// GET /:id/visit-brief's own ownership scoping + reassignment recheck
+// before and after calling this; this function trusts `svc` as already
+// authorized for the read.
+const TECH_PHOTO_VIEW_TTL_SECONDS = 3600;
+
+async function stopPhotoViewUrls(svc, conn = db) {
+  const ids = await techStopMemberIds(svc, conn);
+  if (ids.length === 0) return [];
+  const photos = await conn('visit_prep_photos')
+    .whereIn('scheduled_service_id', ids)
+    .orderBy('submission_id', 'asc')
+    .orderBy('photo_index', 'asc')
+    .select('id', 'submission_id', 'scheduled_service_id', 's3_key');
+  const signed = await Promise.all(photos.map(async (p) => ({
+    scheduledServiceId: p.scheduled_service_id,
+    id: p.id,
+    submissionId: p.submission_id,
+    url: await PhotoService.getViewUrl(p.s3_key, TECH_PHOTO_VIEW_TTL_SECONDS),
+  })));
+  const current = await stillOnTechStop(svc, conn);
+  return signed
+    .filter((p) => current.has(String(p.scheduledServiceId)))
+    .map(({ scheduledServiceId, ...photo }) => photo);
+}
+
+// Deterministic-facts entry point for `facts.customerFlagged`
+// (previsit-brief.js's deterministicVisitFacts) — called ONLY when
+// visitPrepPhotosLive() (the caller's job, not re-checked here so this
+// stays a plain read). Returns null (never an empty array) when the
+// stop's CURRENT membership has no submissions, so the caller can omit
+// the key entirely rather than serve an empty customerFlagged: [] — gate
+// off or no submissions must both read as "key absent," not "empty list."
+// Never returns S3 keys or URLs — photoIds only; the thumbnails endpoint
+// above signs those on its own authorized read.
+async function customerFlaggedFacts(svc, conn = db) {
+  const ids = await techStopMemberIds(svc, conn);
+  if (ids.length === 0) return null;
+  const submissions = await conn('visit_prep_submissions')
+    .whereIn('scheduled_service_id', ids)
+    .orderBy('created_at', 'asc')
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note');
+  if (submissions.length === 0) return null;
+  const photos = await conn('visit_prep_photos')
+    .whereIn('submission_id', submissions.map((s) => s.id))
+    .orderBy('photo_index', 'asc')
+    .select('id', 'submission_id');
+  const photoIdsBySubmission = new Map();
+  for (const p of photos) {
+    if (!photoIdsBySubmission.has(p.submission_id)) photoIdsBySubmission.set(p.submission_id, []);
+    photoIdsBySubmission.get(p.submission_id).push(p.id);
+  }
+  const current = await stillOnTechStop(svc, conn);
+  const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
+  if (kept.length === 0) return null;
+  return kept.map((s) => ({
+    id: s.id,
+    sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
+    topic: s.topic || null,
+    locationOnProperty: s.location_on_property || null,
+    note: s.note || null,
+    photoIds: photoIdsBySubmission.get(s.id) || [],
+  }));
 }
 
 module.exports = {
@@ -472,6 +612,10 @@ module.exports = {
   capReached,
   visitPrepSummary,
   createVisitPrepSubmission,
+  TECH_PHOTO_VIEW_TTL_SECONDS,
+  stopPhotoViewUrls,
+  customerFlaggedFacts,
+  techStopMemberIds,
   _internal: {
     detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg,
   },

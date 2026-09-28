@@ -1085,7 +1085,7 @@ describe('invoice-followups rail', () => {
       purpose: 'invoice_followup',
       invoiceIds: ['inv-1'],
       source: 'invoice_followups',
-      metadata: { step_id: 'd3_friendly' },
+      metadata: { step_id: 'd3_friendly', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
     });
     expect(ContactLedger.recordContact.mock.calls[1][0]).toEqual(expect.objectContaining({
       channel: 'sms', purpose: 'invoice_followup',
@@ -1097,6 +1097,21 @@ describe('invoice-followups rail', () => {
     expect(emailRecordAt).toBeLessThan(emailSendAt);
     expect(smsRecordAt).toBeLessThan(smsSendAt);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test('EXPLICIT MULTI-CHANNEL: every leg of one touch shares the same notificationEventKey (codex r2 P2 — keyless same-event ledger siblings)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
+    const sequenceUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push', 'sms'] } });
+
+    await InvoiceFollowUps.runPending();
+
+    const calls = ContactLedger.recordContact.mock.calls.map(([args]) => args);
+    expect(calls.map((c) => c.channel).sort()).toEqual(['email', 'push', 'sms']);
+    const keys = calls.map((c) => c.metadata.notificationEventKey);
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toBe('invoice-followup:seq-1:d3_friendly');
+    expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
   });
 
   test('LEDGER FAILURE ⇒ NO SENDS, and the sequence is NOT paused (transient hold, retried later)', async () => {

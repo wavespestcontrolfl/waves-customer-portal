@@ -97,8 +97,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "570abb4528b73e249a60472f967854802d095c6d5aee3c9a6c07a393ac71e6a6"
     },
     "role": "weed",
     "risk": "low",
@@ -222,8 +223,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "df9685bc08f4c183b06738b0a2aa3474b8e0c0c453818d0c8f78bfddc0b4277a"
     },
     "role": "weed",
     "risk": "low",
@@ -272,13 +274,13 @@
       {
         "slug": "st-augustinegrass",
         "difference": "Torpedograss has coarser, grayish-green blades and hard, sharp rhizome tips; St. Augustine has wide, blunt blades on soft surface runners, no sharp points.",
-        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point.",
+        "next_photo": "A close-up comparing blade texture and color, plus a dug-up rhizome tip checked for a hard, sharp point; wear sturdy gloves, since the tip can pierce skin.",
         "photo_can_confirm": true
       },
       {
         "slug": "bermudagrass",
         "difference": "Torpedograss has stiffer blades and sharply pointed rhizome tips that can pierce skin; bermudagrass has fine, soft blades and blunt, thin rhizomes throughout.",
-        "next_photo": "A close-up of a dug-up rhizome tip — a hard, sharp point (torpedograss) versus a blunt, thin rhizome (bermuda).",
+        "next_photo": "Wearing sturdy gloves, a close-up of a dug-up rhizome tip — a hard, sharp point that can pierce skin (torpedograss) versus a blunt, thin rhizome (bermuda).",
         "photo_can_confirm": true
       }
     ],
@@ -344,8 +346,9 @@
       "https://gardeningsolutions.ifas.ufl.edu/care/weeds-and-invasive-plants/weedy-grasses/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "982f6356b025c9793cb998f4435e50620c11bb18bbc6f6aa12f178ff4280d833"
     },
     "role": "weed",
     "risk": "low",
@@ -401,7 +404,7 @@
       {
         "slug": "tropical-signalgrass",
         "difference": "Alexandergrass has broader, hairier, yellow-green blades; tropical signalgrass has narrower blades and low, mat-forming stems rooting densely at every node.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       }
     ],
@@ -465,8 +468,9 @@
       "https://plant-directory.ifas.ufl.edu/plant-directory/urochloa-plantaginea"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "d84ff7fbd6ab23cf48241eedd973ca2485fbf9eebc0422ec4b3fa88399e28f45"
     },
     "role": "weed",
     "risk": "low",
@@ -586,8 +590,9 @@
       "https://florida.plantatlas.usf.edu/plant/species/429"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "816ab67d7ff3f0e4395b857c25b52c7bf9c4a6cafefd12520ded118501e7f2e1"
     },
     "role": "weed",
     "risk": "low",
@@ -712,8 +717,9 @@
       "https://plants.sc.egov.usda.gov/DocumentLibrary/factsheet/pdf/fs_pase5.pdf"
     ],
     "review": {
-      "status": "draft",
-      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail."
+      "status": "owner_approved",
+      "notes": "SWFL-specific range and seasonal peak are a best-estimate judgment call; the cited USDA NRCS fact sheet gives only a broad Atlantic/Gulf Coastal Plain range with no Florida county-level detail.",
+      "approval_hash": "637da06f7933be4e88c3894b6c169416fc4fe7c0d0bfa3a691964d1cdbcda9b5"
     },
     "role": "weed",
     "risk": "low",
@@ -831,8 +837,9 @@
       "https://ask.ifas.ufl.edu/publication/aa261"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "bbfb873a1611b3db408aadee4f6044a651f2e1c57fe352440b37ed24946bd0cb"
     },
     "role": "weed",
     "risk": "low",
@@ -881,7 +888,7 @@
       {
         "slug": "alexandergrass",
         "difference": "Tropical signalgrass has narrow blades and low, densely rooting, mat-forming stems; alexandergrass has broader, hairier, yellow-green blades, a looser habit.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       },
       {
@@ -951,8 +958,9 @@
       "https://ask.ifas.ufl.edu/ep141"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "f584084083e5c8c24634a0f6ebbb4465fee50807ac823cfbb9e2cd79c6427f6a"
     },
     "role": "weed",
     "risk": "low",
