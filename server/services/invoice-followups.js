@@ -1274,21 +1274,24 @@ async function fireCombinedTouchClaimed(rows) {
 
   const includedIds = includedIdsOf(included);
 
-  // The combined message says "pay them all" through ONE link — only send
-  // it combined when a link exists that will actually settle EVERY
-  // included invoice (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read
-  // degradation, no sibling excluded for its own reason). Short of full
-  // coverage, do NOT send a combined message with a link (or copy) that
-  // overclaims what it can charge — fall back to firing every included
-  // invoice through its own per-invoice touch instead, same as the
-  // single-survivor fallback above (Codex pre-push r2).
+  // The combined message quotes an exact invoice_count and total_due — the
+  // link behind it must settle EXACTLY the included set, not a superset
+  // (GATE_PAY_INCLUDE_BALANCE on, no payer/incomplete-read degradation, no
+  // sibling excluded for its own reason, and no OTHER open invoice not due
+  // today riding along and inflating the page's total past what the
+  // message promised). Anything short of an exact match does NOT send a
+  // combined message with a link (or copy) that quotes a different set —
+  // fall back to firing every included invoice through its own per-invoice
+  // touch instead, same as the single-survivor fallback above (Codex
+  // pre-push r2 + r4).
   const { buildPayBalanceLink } = require('./composer-customer-links');
   let payUrl = null;
   try {
     const balanceLink = await buildPayBalanceLink([customer.id]);
     const coveredIds = new Set((balanceLink?.coveredInvoiceIds || []).map(String));
-    const coversEveryIncludedInvoice = includedIds.every((id) => coveredIds.has(String(id)));
-    payUrl = coversEveryIncludedInvoice ? (balanceLink?.url || null) : null;
+    const matchesIncludedSetExactly = coveredIds.size === includedIds.length
+      && includedIds.every((id) => coveredIds.has(String(id)));
+    payUrl = matchesIncludedSetExactly ? (balanceLink?.url || null) : null;
   } catch (err) {
     logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
   }
@@ -1354,6 +1357,37 @@ async function fireCombinedTouchClaimed(rows) {
   const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
   const totalDue = totalDueNum.toFixed(2);
 
+  // LAST-MINUTE re-verification, immediately before dispatch (Codex
+  // pre-push r4): the guard pass above ran before several awaits (channel
+  // preferences, the collections-policy consult, the ledger id lookups,
+  // the pay-balance link) during which a sibling's Bill-To could still
+  // change — the claim only protects each row's SEQUENCE state, not this.
+  // fireTouch's own final safeguard is a single fresh re-read right before
+  // it sends; the combined equivalent covers every quoted invoice, not
+  // only the anchor. Any invoice that moved bails the WHOLE combined send
+  // (the totals/copy already reflect the stale set) — each invoice still
+  // legitimate goes through its own per-invoice touch instead, same as the
+  // coverage fallback above; the one that moved is picked up correctly by
+  // fireTouch's own guards on a later run.
+  const freshOwnership = await Promise.all(included.map((inv) => db('invoices')
+    .where({ id: inv.invoice_id }).first('payer_id', 'scheduled_send_error', 'status').catch(() => undefined)));
+  const stillEligible = included.every((inv, index) => {
+    const fresh = freshOwnership[index];
+    if (!fresh) return false;
+    if (fresh.payer_id || invoiceWithdrawnFromCustomer({ scheduled_send_error: fresh.scheduled_send_error })) return false;
+    if (isTerminalInvoice(fresh)) return false;
+    return true;
+  });
+  if (!stillEligible) {
+    logger.info(`[invoice-followups] an included invoice's ownership changed just before dispatch for customer ${customerId} — abandoning the combined send; falling back to ${included.length} individual touches`);
+    for (const inv of included) {
+      // Sequential: each fireTouch re-reads and re-guards its own invoice.
+      const individualRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+      await fireTouch(individualRow, {});
+    }
+    return;
+  }
+
   // Durable vs transient policy denials, per selected channel — a
   // transient denial (spacing window, a releasable hold) must HOLD the
   // whole touch until it clears, same as fireTouch; a durable one (a flag,
@@ -1409,7 +1443,11 @@ async function fireCombinedTouchClaimed(rows) {
               customerId: customer.id, invoiceId: anchorRow.invoice_id, entryPoint: 'invoice_followup_sequence_combined',
               metadata: {
                 original_message_type: 'invoice_followup_combined',
-                notificationEventKey: `invoice-followup-combined:${customer.id}:${step.id}`,
+                // Scoped to the included set, same as the ledger/email keys
+                // — otherwise a later group reaching the same step reuses
+                // this App-push dedupe key and can silently skip the new
+                // reminder (Codex pre-push r4).
+                notificationEventKey: `invoice-followup-combined:${customer.id}:${step.id}:${includedIdsKey}`,
                 billingDeliveryCategory: category, billingDeliveryLeg: smsChannel,
                 invoice_ids: includedIds, rendered_amount: totalDue, collections_ledger_id: ledger.id,
                 ...(smsChannel === 'push' ? { appOnly: true } : {}),

@@ -76,11 +76,12 @@ beforeEach(() => {
   sendMicrodepositVerificationEmail.mockResolvedValue({ ok: true });
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
   ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({ id: `ledger-${idempotencyKey}` }));
-  // Covers every invoice id used anywhere in this file by default — the one
-  // "coverage falls short" scenario below overrides this narrower.
+  // Matches the two-invoice group's included set EXACTLY by default (never
+  // a superset — the combined path now requires an exact match, not just
+  // coverage) — the one "coverage falls short" scenario below overrides it.
   buildPayBalanceLink.mockResolvedValue({
     url: 'https://portal.wavespestcontrol.com/pay/combined',
-    coveredInvoiceIds: ['inv-1', 'inv-A', 'inv-B'],
+    coveredInvoiceIds: ['inv-A', 'inv-B'],
   });
   smsTemplatesRouter.getTemplate.mockResolvedValue('rendered sms body');
   sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
@@ -399,6 +400,54 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // SMS attempted and delivered
     expect(seqTable.rows.get('seq-A').step_index).toBe(0); // held anyway — email still pending
     expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+  });
+
+  test('a pay link covering MORE than the included set (a superset) is also rejected, not just an undershoot', async () => {
+    const { seqTable } = twoInvoiceSetup();
+    // The linked page would also charge inv-C, which isn't due and isn't
+    // in this message's invoice_count/total_due — an exact match is
+    // required, not merely "covers everything we listed".
+    buildPayBalanceLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/pay/combined', coveredInvoiceIds: ['inv-A', 'inv-B', 'inv-C'],
+    });
+    await runPending();
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2); // individual fallback
+    expect(seqTable.rows.get('seq-A').step_index).toBe(1);
+  });
+
+  test('the last-minute re-verification re-reads every included invoice right before dispatch (not just the anchor)', async () => {
+    const { invoiceTable } = twoInvoiceSetup();
+    const readsPerInvoice = { 'inv-A': 0, 'inv-B': 0 };
+    const originalQuery = invoiceTable.query;
+    invoiceTable.query = () => {
+      const q = originalQuery();
+      const originalFirst = q.first;
+      q.first = jest.fn(async (...args) => {
+        const found = await originalFirst(...args);
+        if (found && readsPerInvoice[found.id] !== undefined) readsPerInvoice[found.id] += 1;
+        return found;
+      });
+      return q;
+    };
+    await runPending();
+    // At least one read after the guard pass's own read (the guard pass
+    // already reads each invoice once) — proves the last-minute check
+    // covers inv-B too, not only the anchor (inv-A).
+    expect(readsPerInvoice['inv-A']).toBeGreaterThanOrEqual(2);
+    expect(readsPerInvoice['inv-B']).toBeGreaterThanOrEqual(2);
+  });
+
+  test('an invoice found ineligible at the last-minute re-check abandons the combined send; every included invoice falls back to its own touch', async () => {
+    const { seqTable, invoiceTable } = twoInvoiceSetup();
+    invoiceTable.rows.get('inv-B').payer_id = 'payer-1';
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
+    // inv-A is still legitimate and gets its own touch; inv-B's own guard
+    // (fireTouch's Bill-To check) pauses it.
+    expect(seqTable.rows.get('seq-A').step_index).toBe(1);
+    expect(seqTable.rows.get('seq-B').status).toBe('paused');
   });
 
   test('an SMS deferred/retryable rejection holds the touch, even though it is a "definite" not_sent outcome', async () => {
