@@ -1753,17 +1753,6 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
     if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
-      // A JSX closing tag's `<` (immediately followed by `/`, as in
-      // `</span>` or a bare fragment `</>`) must not leave the FOLLOWING
-      // `/` in a regex-allowing position — `<` alone legitimately allows
-      // one (the rare `a < /x/.test(b)`), but `</` inside JSX-in-expression
-      // content (`{cond && <span>text</span>}`) is overwhelmingly a closing
-      // tag. Misreading it as a regex opener scans for the NEXT literal
-      // `/` in the document — which can be a markdown link's destination
-      // slash — and blanks everything in between (including the link's own
-      // `[label](` opener), then jumps the outer loop past the expression's
-      // own closing `}` entirely (Codex #4984 r7 P2).
-      if (c === '<' && s[i + 1] === '/') { prevSig = ')'; word = ''; continue; }
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
         for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
@@ -1785,7 +1774,16 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
       }
       // Regex literal (operator-position /, char-class aware) — its content
       // is text, and its quote/tag characters must not leak into pairing.
-      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+      // `<` is deliberately absent from this allow-set (Codex #4984 r7+r8
+      // P2s): JSX-in-expression content (`{cond && <span>text</span>}`) puts
+      // a `/` right after `<` on EVERY closing tag, and reading that as the
+      // rare `a < /x/.test(b)` comparison-then-regex scans forward for the
+      // NEXT literal `/` in the document — which can be a markdown link's
+      // own destination slash — blanking everything between, including the
+      // link's `[label](` opener, and skipping this scan past the
+      // expression's own closing `}` entirely. Losing the genuine
+      // less-than-then-regex reading costs nothing real content here spells.
+      if (c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
         let j = i + 1; let inClass = false; let closed = -1;
         for (; j < s.length && s[j] !== '\n'; j += 1) {
           const d = s[j];
@@ -1828,15 +1826,14 @@ function closeOfExpressionAt(s, i) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
-    // See the identical guard in blankExpressionStringLiterals (Codex #4984
-    // r7 P2) — kept in parity: a JSX closing tag's `<` before `/` must not
-    // leave that `/` reading as a regex opener, or this scan can jump past
-    // the expression's own closing `}` to whatever `}` follows the next
-    // unrelated `/` in the document.
-    if (depth > 0 && c === '<' && s[j + 1] === '/') { prevSig = ')'; word = ''; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
-    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
+    // `<` is deliberately absent from this allow-set (Codex #4984 r7+r8
+    // P2s) — see the identical, fully-commented allow-set in
+    // blankExpressionStringLiterals, kept in parity: reading a JSX closing
+    // tag's `/` as the rare less-than-then-regex case can jump this scan
+    // past the expression's own closing `}`.
+    if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
       let k = j + 1; let inClass = false; let closed = -1;
       for (; k < s.length && s[k] !== '\n'; k += 1) {
         const d = s[k];

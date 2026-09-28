@@ -80,10 +80,6 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   const relatedPostPaths = (Array.isArray(relatedPostLinks) ? relatedPostLinks : [])
     .map((entry) => (typeof entry === 'string' ? entry : entry?.path))
     .filter(Boolean);
-  const allowedInternalLinks = [
-    ...(Array.isArray(briefLinks) ? briefLinks : []),
-    ...(curatedHubLink ? [curatedHubLink] : []),
-  ];
   const selectedRelatedHosts = brief?.voice_constraints?.related_posts_target_sites;
   const effectiveSpoke = resolveSpokeTarget(brief);
   const effectiveRelatedHosts = normalizeSpokeSites(effectiveSpoke ? [effectiveSpoke] : HUB_SITE_KEYS).sort();
@@ -91,6 +87,23 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   const relatedTargetMatches = selectedRelatedHosts != null
     && frozenRelatedHosts.length === effectiveRelatedHosts.length
     && frozenRelatedHosts.every((host, index) => host === effectiveRelatedHosts[index]);
+  // A persisted supporting-blog brief with related_posts but no
+  // related_posts_target_sites marker predates target-drift verification
+  // entirely — it is neither "matches" (require the links, host-bound) nor
+  // "mismatched" (deny them, quarantined): the hard requirement in
+  // content-quality-gate.js's relatedPostPrecondition does not apply to it
+  // either. Fold its paths into the ordinary, host-agnostic
+  // allowedInternalLinks instead of the host-bound relatedPostLinks/Hosts/
+  // Live triad, so a legacy brief's writer-added link is an ordinary
+  // brief-mandated internal link, never required by one gate and denied by
+  // the other (Codex #4984 r8 P0 — that mismatch burned the draft's one
+  // redraft for nothing).
+  const legacyUnmarkedRelated = selectedRelatedHosts == null && relatedPostPaths.length > 0;
+  const allowedInternalLinks = [
+    ...(Array.isArray(briefLinks) ? briefLinks : []),
+    ...(curatedHubLink ? [curatedHubLink] : []),
+    ...(legacyUnmarkedRelated ? relatedPostPaths : []),
+  ];
   const isRefresh = brief.action_type === 'refresh_existing_page';
   // A supporting-blog run IS a blog target: the affiliate gate builds its
   // product index only for blog targets, so without this every valid
@@ -147,7 +160,7 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     // wrong-host link past the host check entirely if check_existing_content
     // separately re-admitted the same path into the generic allowlist
     // (Codex #4984 r6+ P1).
-    relatedPostLinks: relatedPostPaths,
+    relatedPostLinks: legacyUnmarkedRelated ? [] : relatedPostPaths,
     relatedPostHosts: frozenRelatedHosts,
     relatedPostLinksLive: relatedTargetMatches,
     isRefresh,

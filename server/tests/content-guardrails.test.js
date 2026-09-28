@@ -2501,6 +2501,63 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     }
   });
 
+  test('a legacy brief (related_posts but no related_posts_target_sites marker) passes BOTH related-link gates the same way (Codex #4984 r8 P0)', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const { checkRelatedPostsLinked } = require('../services/content/content-quality-gate')._internals;
+    // A persisted brief from before related_posts_target_sites existed:
+    // related_posts is present, the marker is not. content-quality-gate.js's
+    // hard check trusts the CURRENT live target for these (relatedPostTargetSitesMatch
+    // returns true when the marker is absent) and requires min(3, N) links —
+    // that half was never broken. The bug was guardrail-options.js: its OWN
+    // relatedTargetMatches requires the marker to be PRESENT to ever be
+    // true, so it marked these same links non-live and internalRouteFinding
+    // rejected them as UNKNOWN_INTERNAL_ROUTE — the writer satisfies one
+    // gate's requirement only to have the other gate discard the draft.
+    const legacyBrief = {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      target_sites: ['wavespestcontrol.com'],
+      voice_constraints: {
+        // No related_posts_target_sites — the pre-marker shape.
+        related_posts: [
+          { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
+          { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
+          { title: 'Brown Patch Fungus', path: '/lawn-care/brown-patch-fungus/', keyword: 'brown patch' },
+        ],
+      },
+    };
+    const options = deriveSyncGuardrailOptions({}, legacyBrief);
+    // Folded into the ordinary, host-agnostic allowedInternalLinks — never
+    // the host-bound related-post triad — so internalRouteFinding's
+    // generic (path-only) allowlist check admits them.
+    expect(options.allowedInternalLinks).toEqual(expect.arrayContaining([
+      '/lawn-care/fall-armyworm-outbreak/', '/lawn-care/chinch-bug-damage/', '/lawn-care/brown-patch-fungus/',
+    ]));
+    expect(options.relatedPostLinks).toEqual([]);
+
+    const body = 'See our guides on [fall armyworms](/lawn-care/fall-armyworm-outbreak/), '
+      + '[chinch bugs](/lawn-care/chinch-bug-damage/), and [brown patch](/lawn-care/brown-patch-fungus/).';
+
+    // Gate 1: content-quality-gate.js's hard link-count requirement.
+    const linked = checkRelatedPostsLinked({ body }, legacyBrief);
+    expect(linked.ok).toBe(true);
+
+    // Gate 2: content-guardrails.js's internal-route allowlist — the ACTUAL
+    // discard mechanism the finding describes. Must NOT reject as unknown.
+    const routed = guardrails.evaluate({ body }, options);
+    expect(routed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+
+    // A wrong-host absolute link to the SAME legacy path is still an
+    // ordinary internal link under the generic (path-only) check — this
+    // brief never froze a host to enforce, unlike a genuinely mismatched
+    // one (the sibling test above).
+    const wrongHostAbsolute = guardrails.evaluate(
+      { body: 'See [fall armyworms](https://www.sarasotaflpestcontrol.com/lawn-care/fall-armyworm-outbreak/).' },
+      options
+    );
+    expect(wrongHostAbsolute.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
   test('member-expression components are rejected (Codex round 2)', () => {
     const r = guardrails.evaluate({ body: 'See <ComparisonTable.Row label="x" /> for details.' }, {});
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
