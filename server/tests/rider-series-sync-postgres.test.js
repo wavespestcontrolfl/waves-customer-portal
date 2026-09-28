@@ -762,4 +762,33 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
       expect(shape(result)).toEqual(shape(baseline));
     },
   );
+
+  // Card rows are checked by what is dead, not what is live: any other
+  // status (every in-flight money state, or one added later) pins the row.
+  const CARD_CASES = [
+    ...['pending', 'completing', 'charging', 'charge_review', 'charged', 'completed', 'satisfied', 'some_future_status']
+      .map((status) => ['appointment_card_requests', status, true]),
+    ...['held', 'charging', 'charge_review', 'charged_completion', 'charged_no_show', 'pending']
+      .map((status) => ['estimate_card_holds', status, true]),
+    ...['released', 'cancelled', 'failed', 'expired'].map((status) => ['appointment_card_requests', status, false]),
+    ...['released', 'cancelled', 'failed'].map((status) => ['estimate_card_holds', status, false]),
+  ];
+  test.each(CARD_CASES)('%s status=%s -> immovable=%s', async (table, status, immovable) => {
+    const { pestParent } = await linkedPair();
+    const [row] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id })
+      .orderBy('scheduled_date', 'asc').limit(1);
+    if (table === 'appointment_card_requests') {
+      await trx('appointment_card_requests').insert({ id: randomUUID(), scheduled_service_id: row.id, customer_id: customerId, status });
+    } else {
+      const estimateId = randomUUID();
+      await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted', service_interest: 'Quarterly Pest Control' });
+      await trx('estimate_card_holds').insert({
+        id: randomUUID(), estimate_id: estimateId, customer_id: customerId, scheduled_service_id: row.id,
+        stripe_setup_intent_id: `seti_${randomUUID().replaceAll('-', '')}`, status,
+      });
+    }
+    const { _internals } = require('../services/rider-series');
+    const set = await _internals.immovableRowIdSet(trx, [row.id]);
+    expect(set.has(row.id)).toBe(immovable);
+  });
 });

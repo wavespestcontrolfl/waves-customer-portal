@@ -36,7 +36,7 @@
  */
 const logger = require('./logger');
 const {
-  parseETDateTime, etDateString, addETDays,
+  parseETDateTime, etDateString, addETDays, etCalendarDayOf,
 } = require('../utils/datetime-et');
 const { TERMINAL_ROW_STATUSES, JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { LIVE_COMPLETION_CLAIM_STATUSES, maybeGroupRow } = require('./visit-groups');
@@ -62,9 +62,7 @@ const IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 
 function dateOnly(value) {
   if (!value) return null;
-  if (typeof value === 'string') return value.slice(0, 10);
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
+  return etCalendarDayOf(value);
 }
 
 function addDaysStr(dateStr, days) {
@@ -180,18 +178,26 @@ async function tryLockCustomerCommsIfKnown(trx, customerId) {
 // this whole reconcile inside a savepoint, so the thrown error aborts and
 // rolls back JUST this rider's sync (nothing moved/inserted/cancelled),
 // logged as skipped: 'error'; the nightly reconcile retries later.
+// Card holds and card requests are checked by what is DEAD, not by what is
+// live: both tables carry several in-flight money states (pending,
+// completing, charging, charge_review, charged, held, charged_completion,
+// charged_no_show, satisfied, completed), and a new one must never quietly
+// make a row movable. Any status outside this list — including one added
+// later — keeps the row where it is.
+const DEAD_CARD_STATUSES = ['released', 'cancelled', 'failed', 'expired'];
+
 async function immovableRowIdSet(trx, rowIds) {
   const ids = (rowIds || []).filter(Boolean);
   const immovable = new Set();
   if (!ids.length) return immovable;
   const [
-    invoiced, held, cardApproved, packeted, completionClaims, reminderSent,
+    invoiced, cardHeld, cardRequested, packeted, completionClaims, reminderSent,
   ] = await Promise.all([
     trx('invoices').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
     trx('estimate_card_holds').whereIn('scheduled_service_id', ids)
-      .whereIn('status', ['held', 'charged_completion', 'charged_no_show']).pluck('scheduled_service_id'),
+      .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id'),
     trx('appointment_card_requests').whereIn('scheduled_service_id', ids)
-      .whereIn('status', ['completed', 'satisfied']).pluck('scheduled_service_id'),
+      .whereNotIn('status', DEAD_CARD_STATUSES).pluck('scheduled_service_id'),
     trx('visit_completion_packet_items').whereIn('scheduled_service_id', ids).pluck('scheduled_service_id'),
     trx('service_completion_attempts').whereIn('service_id', ids)
       .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).pluck('service_id'),
@@ -204,7 +210,7 @@ async function immovableRowIdSet(trx, rowIds) {
       .where((q) => q.where('confirmation_sent', true).orWhere('reminder_72h_sent', true).orWhere('reminder_24h_sent', true))
       .pluck('scheduled_service_id'),
   ]);
-  for (const id of [...invoiced, ...held, ...cardApproved, ...packeted, ...completionClaims, ...reminderSent]) immovable.add(id);
+  for (const id of [...invoiced, ...cardHeld, ...cardRequested, ...packeted, ...completionClaims, ...reminderSent]) immovable.add(id);
   return immovable;
 }
 
@@ -646,5 +652,7 @@ module.exports = {
   planRiderDates,
   syncRiderSeries,
   syncRidersOfHost,
-  _internals: { immovableByOwnFields, buildRiderRowFromTemplate, addDaysStr, tryLockSeriesMaintenance },
+  _internals: {
+    immovableByOwnFields, immovableRowIdSet, buildRiderRowFromTemplate, addDaysStr, tryLockSeriesMaintenance,
+  },
 };

@@ -87,8 +87,9 @@ own 84-day cadence rather than lapsing.
    `JOIN_INELIGIBLE_STATUSES` excluded, `>= today`).
 4. `lastRiderDate` (the anchor) = the rider's latest row that is
    `completed` OR **immovable**: en_route/on_site, an invoice linked, a
-   prepaid stamp, an active/charged card hold or an approved appointment-
-   card request, a `visit_completion_packet_items` row, a live
+   prepaid stamp, any card hold or appointment-card request that is not
+   `released` / `cancelled` / `failed` / `expired` (checked by what is
+   dead, so an in-flight or future status pins the row), a `visit_completion_packet_items` row, a live
    `service_completion_attempts` claim, `customer_confirmed` /
    `field_confirmed_at` set, a **non-null `visit_id`** (a grouped row's
    date is kept in sync with its `service_visits` stop only through
