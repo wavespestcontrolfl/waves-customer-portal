@@ -853,6 +853,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     if (isToolFailure(preview)) {
       return { failed: true, modelResult: preview };
     }
+    // An unconfigured integration ({ configured: false } — a missing token)
+    // is a refusal, not a card: confirming it could only fail (Codex r1 on
+    // #5275, P2).
+    if (preview?.configured === false) {
+      return { failed: true, modelResult: preview };
+    }
     // A duplicate phone/email makes create_customer a no-op: the preview
     // returns already_exists rather than an error, and confirming would
     // insert nothing while the card reports Done (GH r9 P2). Refuse the
@@ -2595,7 +2601,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       const results = [];
       for (const toolUse of toolUses) {
         // PII-bearing tool inputs (name/phone/email/address/SMS search terms) — log keys only
-        const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name)
+        // Outside-service writes too (Codex r1 on #5275, P1): assign_sentry_issue
+        // takes an account email, and their scope is 'none' so they are never
+        // in PII_TOOL_NAMES.
+        const loggableInput = platformEnabled || PII_TOOL_NAMES.has(toolUse.name) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(toolUse.name)
           ? { fields: Object.keys(toolUse.input || {}), confirmed: toolUse.input?.confirmed === true }
           : toolUse.input;
         logger.info(`[intelligence-bar] Tool call: ${toolUse.name}`, loggableInput);
@@ -3083,7 +3092,7 @@ router.post('/execute', async (req, res, next) => {
     };
     const result = await executeToolByName(action, executionParams, techContextForExecution(req), actionContext);
 
-    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action)
+    logger.info(`[intelligence-bar] Executed action: ${action}`, PII_TOOL_NAMES.has(action) || FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(action)
       ? { fields: Object.keys(executionParams) }
       : {
         ...executionParams,

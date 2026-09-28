@@ -179,6 +179,31 @@ describe('outside-service write tools are full-access-only in the /query dispatc
       expect(String(toolResults[0].content)).not.toContain('limited to the owner account');
       const parsed = JSON.parse(toolResults[0].content);
       expect(parsed.configured).toBe(false);
+      // Codex r1 on #5275, P2: an unconfigured integration is a refusal,
+      // never a confirmation card that could only fail on Confirm.
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect((await res.json()).pendingActions || []).toHaveLength(0);
+    });
+  });
+
+  // Codex r1 on #5275, P1: assign_sentry_issue takes an account email and its
+  // scope is 'none' (not a PII tool) — the legacy path must still log field
+  // names only for every outside write.
+  test('outside-write tool inputs are logged as field names only (assignee email never reaches logs)', async () => {
+    const logger = require('../services/logger');
+    await withServer(async (baseUrl) => {
+      mockMessagesCreate
+        .mockResolvedValueOnce(toolUseTurn('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'someone@example.com' }))
+        .mockResolvedValueOnce(finalTextTurn());
+      await fetch(`${baseUrl}/admin/intelligence-bar/query`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context: 'customers', prompt: 'assign that sentry issue' }),
+      });
+      const call = logger.info.mock.calls.find(([msg]) => String(msg).includes('Tool call: assign_sentry_issue'));
+      expect(call).toBeDefined();
+      expect(call[1]).toEqual({ fields: ['issue_short_id', 'assignee'], confirmed: false });
+      expect(JSON.stringify(logger.info.mock.calls)).not.toContain('someone@example.com');
     });
   });
 
