@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -22920,6 +22920,7 @@ router.post('/generate-report', async (req, res) => {
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
+      photoCaptions, photoSummary,
       includeCustomerComms,
       structuredFindings, companionFindings, typedActivityScore,
       treeShrubReview,
@@ -22941,8 +22942,41 @@ router.post('/generate-report', async (req, res) => {
     const productsText = typeof productsApplied === 'string' ? productsApplied.trim() : '';
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
     const suppliedTreeShrubReview = treeShrubReview !== undefined && treeShrubReview !== null;
+    // Tech-reviewed photo captions/summary (GATE_REPORT_PHOTO_CONTENT, owner
+    // spec 2026-09-27). Never trust the client's own cap — re-derive it here.
+    // A photo the tech deleted before Generate never reaches this route at
+    // all (the client builds this array from its CURRENT photo list), so
+    // there is nothing to filter out server-side.
+    const MAX_REPORT_PHOTO_CAPTIONS = 5;
+    const MAX_REPORT_PHOTO_CAPTION_CHARS = 200;
+    const MAX_REPORT_PHOTO_SUMMARY_CHARS = 600;
+    const photoContentLive = reportPhotoContentLive();
+    // Same redactor every other free-text field in this prompt already runs
+    // through (promptNotes/promptActions/… below) — a tech-typed caption or
+    // summary is exactly as capable of carrying a gate/lockbox/alarm code as
+    // a notes field is, and this text reaches both the AI prompt and (via
+    // the MMS preview thumbnail) customer-visible copy. Redact BEFORE the
+    // char cap so a code isn't left half-truncated into something that
+    // still reads like a code.
+    const cappedPhotoCaptions = photoContentLive && Array.isArray(photoCaptions)
+      ? photoCaptions
+        .filter((c) => typeof c === 'string')
+        .map((c) => c.trim())
+        .filter(Boolean)
+        .slice(0, MAX_REPORT_PHOTO_CAPTIONS)
+        .map((c) => redactAccessCodes(c).slice(0, MAX_REPORT_PHOTO_CAPTION_CHARS))
+      : [];
+    const photoSummaryText = photoContentLive && typeof photoSummary === 'string'
+      ? redactAccessCodes(photoSummary.trim()).slice(0, MAX_REPORT_PHOTO_SUMMARY_CHARS)
+      : '';
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
+    // Tech-reviewed CAPTIONS are different: like TREE & SHRUB REVIEWED PHOTO
+    // SIGNALS below, they are real, tech-vetted text describing what a photo
+    // shows — not a bare count — so their presence alone is substantive
+    // visit input and may open generation (never the summary alone, and
+    // never without at least one caption — matches the labeled grounding
+    // block below, which only renders with captions present).
     // A confirmed photo-scored lawn assessment is substantive input on its
     // own — but only a VALIDATED one (exists, tech-confirmed, linked to the
     // authorized visit). A stale/crafted id must not open the gate for an
@@ -23049,7 +23083,8 @@ router.post('/generate-report', async (req, res) => {
       || ratingNum !== null
       || typedHasFindingInput
       || hasValidLawnAssessment
-      || suppliedTreeShrubReview;
+      || suppliedTreeShrubReview
+      || cappedPhotoCaptions.length > 0;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     // Typed findings ground ONLY through the visit's completion profile —
     // without a scheduledServiceId the entire grounding block is skipped,
@@ -23084,6 +23119,19 @@ router.post('/generate-report', async (req, res) => {
       return res.status(500).json({ error: 'AI model not configured' });
     }
 
+    // Pre-push P1 (Codex #5145 r1): the prompt text itself must be the kill
+    // switch, not just the caption block below it — with the gate off the
+    // route was still handing the model the REWRITTEN provenance clause and
+    // photo-count instruction on EVERY generation, byte-different from the
+    // pre-gate prompt even though no caption ever reaches it. Both clauses
+    // below restore the EXACT prior wording when the gate is off; only the
+    // gate-on branch mentions TECHNICIAN PHOTO OBSERVATIONS.
+    const invalidObservationsProvenanceClause = photoContentLive
+      ? 'Three narrowly scoped sources may also be used, each with its own limited provenance: tech-confirmed LAWN ASSESSMENT scores (from GROUNDING CONTEXT) are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS (from GROUNDING CONTEXT) may describe reviewed visual appearances only; TECHNICIAN PHOTO OBSERVATIONS below may reference what a specific photo shows ("the photo under the kitchen sink shows droppings") but never upgrades that observation into a confirmed finding, diagnosis, or completed work beyond what the photo visibly shows. None of these three establish a diagnosis, confirmed cause, observed pest species, or completed work.'
+      : 'Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work.';
+    const photoCountProvenanceNote = photoContentLive
+      ? 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS or a TECHNICIAN PHOTO OBSERVATIONS block below, each with its own limited provenance — never infer unseen photo contents'
+      : 'use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents';
     const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v4
 
 ## CONTEXT
@@ -23107,7 +23155,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
+3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. ${invalidObservationsProvenanceClause} Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -23294,7 +23342,28 @@ Customer concern (as reported, not a verified finding): ${promptConcern || 'None
 [FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents)`;
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
+
+    // TECHNICIAN PHOTO OBSERVATIONS (GATE_REPORT_PHOTO_CONTENT, owner spec
+    // 2026-09-27): the tech's own reviewed/edited captions for this visit's
+    // photos. Rendered only with the gate on and at least one caption — a
+    // summary alone never opens this block (mirrors the generation-gate rule
+    // above: real, tech-vetted photo text is substantive, a bare count or an
+    // unreviewed summary is not).
+    const photoObservationsBlock = cappedPhotoCaptions.length
+      ? `\n\nTECHNICIAN PHOTO OBSERVATIONS (tech-reviewed captions; observations only — never a diagnosis or a product claim)\n`
+        + (photoSummaryText ? `Summary: ${photoSummaryText}\n` : '')
+        + cappedPhotoCaptions.map((c, i) => `Photo ${i + 1}: ${c}`).join('\n')
+      : '';
+    // Pre-push P2 (Codex #5145 r3): the client's generated-draft-invalidation
+    // watcher needs to know whether THIS generation actually included the
+    // photo block — with the gate off (the default), cappedPhotoCaptions is
+    // always [] and no caption/summary ever reaches the model, so editing
+    // either afterward must not clear an otherwise-untouched draft. Exactly
+    // mirrors when photoObservationsBlock is non-empty; reused across every
+    // response branch below (a cache hit reuses a prior generation built
+    // from this SAME identity, so it carries the same grounding truth).
+    const photoGroundingUsed = cappedPhotoCaptions.length > 0;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -23581,7 +23650,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
       || hasValidLawnAssessment
-      || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;
+      || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
+      || cappedPhotoCaptions.length > 0;
     if (!baseHasReportInput && !companionCustomerInput) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
@@ -23643,7 +23713,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       // internal_only companion facts never reach the prompt, so they must
       // not defeat the assessment-only retryable 503 (codex r30; the
       // primary term is the confirmed flag for the same reason, r72).
-      && !(primaryTypedConfirmed || companionCustomerInput);
+      && !(primaryTypedConfirmed || companionCustomerInput)
+      // Reviewed photo captions are substantive on their own (pre-push P2,
+      // Codex #5145 r2) — cappedPhotoCaptions is only ever non-empty when
+      // the gate is on AND at least one caption survived capping, so a gate
+      // check here would be redundant. A request grounded by captions must
+      // proceed on the photo block even when the assessment load itself
+      // fails; only a TRUE assessment-only request (no captions either)
+      // still 503s retryable.
+      && !cappedPhotoCaptions.length;
     if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
       return res.status(503).json({
         error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
@@ -23680,7 +23758,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
-    const fullUserMessage = `${userMessage}${typedFindingsBlock}${contextText}${commsBlock}`;
+    const fullUserMessage = `${userMessage}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.
@@ -23688,7 +23766,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
-    if (cached) return res.json({ report: cached, cached: true });
+    if (cached) return res.json({ report: cached, cached: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
 
     // Output guard for trade names from THIS visit's own product records —
     // selected products, the free-text productsApplied names, and any typed
@@ -23768,6 +23846,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
         failures: generated.failures,
       });
+      // No photoGroundingUsed here (Codex #5145 r5): the deterministic
+      // fallback is built from structured actions only and never reads the
+      // photo captions, so the client must not treat captions as inputs to it.
       return res.json({ report: fallbackReport, fallback: true, deterministic: true });
     }
 
@@ -23780,7 +23861,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       hasGrounding: !!groundingCustomerId,
       ...contextSignals,
     });
-    res.json({ report });
+    res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
   } catch (err) {
     logger.error('[generate-report] AI failed', {
       message: err.message,
