@@ -1280,7 +1280,7 @@ function checkCitabilityNamedSources(draft, brief) {
 // as are bare years and bare counts ("3 ways", "2024") — those are not the
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
-const CONCRETE_SPECIFIC_RE = /(?<![$\d.,\/])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?(?:\s?(?:-|–|to)\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.,\/])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?(?:\s?(?:-|–|to)\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)(?:\s+(?:per|a|an|each|every)\s+(?:year|month|week|day|application|treatment|visit)\b)?/gi;
 const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
 
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
@@ -1309,11 +1309,19 @@ function measurementKey(match) {
   const num = m.match(/^((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?)(?:\s?(?:-|–|to)\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+|\/\d+| \d+\/\d+)?))?/);
   let unit = m.slice(num[0].length).replace(/^[\s\-–—]+/, '').trim();
   unit = unit.replace(/^times? (?:a|per) /, 'times per ');
+  // Keep the trailing cadence ("1 inch per week" vs "1 inch per month",
+  // Codex r7 P2) in one spelling: "a/each/every week" reads as "per week".
+  let rate = '';
+  const cadence = unit.match(/\s+(?:per|a|an|each|every)\s+(year|month|week|day|application|treatment|visit)$/);
+  if (cadence && !/^(?:times per|per)\b/.test(unit)) {
+    rate = ` per ${cadence[1]}`;
+    unit = unit.slice(0, cadence.index);
+  }
   const alias = UNIT_KEYS.find(([re]) => re.test(unit));
   if (alias) unit = alias[1];
   else unit = unit.split(' ').map((w) => w.replace(/s$/, '')).join(' ');
   const clean = (v) => v.replace(/,/g, '');
-  return `${clean(num[1])}${num[2] ? `-${clean(num[2])}` : ''} ${unit}`;
+  return `${clean(num[1])}${num[2] ? `-${clean(num[2])}` : ''} ${unit}${rate}`;
 }
 
 function calendarKey(match) {
@@ -1409,8 +1417,17 @@ function postFramesAChoice(draft, context) {
     .some((h) => CHOICE_FRAMING_RE.test(visibleInlineText(h)));
 }
 
+// Legacy .md posts cannot carry MDX components: publishRefresh keeps the
+// extension and 422s a refreshed .md body containing <ComparisonTable>, so
+// asking for one there could never publish (Codex r7 P2; same rule as the
+// #4845 backfill scan). The markdown-only signals still apply.
+function markdownOnlyTarget(brief) {
+  return /\.md$/i.test(String(brief?.target_file_path || ''));
+}
+
 function checkCitabilityComparison(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  if (markdownOnlyTarget(brief)) return { ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' };
   const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
   if (hasTable) return { ok: true };
   if (!postFramesAChoice(draft, context)) return { ok: true, reason: 'no_choice_framed' };

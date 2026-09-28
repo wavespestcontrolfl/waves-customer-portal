@@ -1003,13 +1003,17 @@ class AutonomousRunner {
         // meta-completeness contract. Resolution failure fails CLOSED to
         // the stricter blog contract — such a target cannot publish anyway.
         let targetPageType = 'supporting-blog';
+        let targetFilePath = null;
         try {
           const resolved = publisher?.resolveExistingAstroFileForTarget
             ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
             : null;
           if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+          if (resolved?.path) targetFilePath = String(resolved.path);
         } catch (_) { /* keep the stricter blog contract */ }
-        gateBrief = { ...brief, target_page_type: targetPageType };
+        // target_file_path lets the citability comparison signal skip legacy
+        // .md targets, which publishRefresh cannot give an MDX component.
+        gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
       }
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);

@@ -23,7 +23,10 @@ invented number, product, competitor, or source:
   instead of a vague qualifier. This is not a quota and never a dollar amount.
 - [CITABILITY_COMPARISON] When the reader faces two or more real paths, render ONE <ComparisonTable> with the decision
   criteria as rows. CATEGORY mode is the default; a brief that specifically needs named businesses keeps NAMED-COMPETITOR mode. Do NOT bolt a generic "DIY vs pro" table onto a post
-  whose reader faces no choice.
+  whose reader faces no choice. On a refresh whose target file_path (from
+  get_existing_page) ends in .md — a legacy Markdown post — skip this rule
+  entirely and never add a <ComparisonTable>: publishing rejects any MDX
+  component in a .md file.
 - [CITABILITY_HOW_TO_CHOOSE] Whenever the post carries a <ComparisonTable>
   (and always on decision/comparison/cost posts), add an H2 that reads
   "How to choose …"

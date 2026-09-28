@@ -35,6 +35,13 @@ describe('writer-agent-config CITABILITY section', () => {
     }
   });
 
+  test('tells both agents to skip ComparisonTable on legacy .md refresh targets (Codex r7 P2)', () => {
+    for (const prompt of [system, REFRESH_AGENT_CONFIG.system]) {
+      expect(prompt).toMatch(/file_path \(from\s+get_existing_page\) ends in \.md/);
+      expect(prompt).toMatch(/never add a <ComparisonTable>: publishing rejects any MDX\s+component in a \.md file/);
+    }
+  });
+
   test('keeps the no-quota and no-invented-source guardrails explicit', () => {
     expect(system).toMatch(/This is not a quota/);
     expect(system).toMatch(/There is NO quota for statistics/);

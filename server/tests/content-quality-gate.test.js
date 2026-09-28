@@ -1588,6 +1588,28 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityComparison(draft, {}, {})).toEqual({ ok: true, reason: 'no_choice_framed' });
   });
 
+  test('measurement keys keep the trailing cadence (Codex r7 P2)', () => {
+    const prev = (body) => ({ previousVersion: { body } });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1 inch per month.' }, {}, prev('Water 1 inch per week.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Apply 3 treatments per month.' }, {}, prev('Apply 3 treatments per year.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1 inch.' }, {}, prev('Water 1 inch per week.')))
+      .toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityConcreteSpecifics({ body: 'Water 1/2 inch each week.' }, {}, prev('Water 1/2 inch per week.')))
+      .toEqual({ ok: true });
+    expect(countConcreteSpecifics('Water 1 inch per week and 2 ounces per application.')).toBe(2);
+  });
+
+  test('legacy .md refresh targets get no ComparisonTable signal (Codex r7 P2)', () => {
+    const draft = { title: 'Bait vs. Spray for Ghost Ants', body: '## Overview\nText.' };
+    expect(checkCitabilityComparison(draft, { target_file_path: 'src/content/blog/ghost-ants.md' }))
+      .toEqual({ ok: true, reason: 'markdown_only_post_cannot_carry_ComparisonTable' });
+    expect(checkCitabilityComparison(draft, { target_file_path: 'src/content/blog/ghost-ants.mdx' }))
+      .toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityComparison(draft, {})).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+  });
+
   test('choice framing reads rendered heading text only (Codex r4 P2)', () => {
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## [Related guide](/bait-vs-spray/)\nText.' }))
       .toEqual({ ok: true, reason: 'no_choice_framed' });
