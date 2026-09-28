@@ -5,10 +5,12 @@
 const db = require('../../models/db');
 const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
+const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true, sourceScope: { ai: ['fipronil'], name: ['taurus sc'] } },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', sourced: true }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', outOfScopePhrase: 'a contact product applied at this visit', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', sourced: true }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
   igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true, sourceScope: { ai: ['hydroprene'], name: ['gentrol'] } },
   fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', dryRule: null, notes: [], factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, verified: false },
   herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', dryRule: null, notes: [], factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, verified: false },
@@ -24,6 +26,7 @@ function allCustomerFacingStrings() {
   const out = [];
   for (const def of Object.values(FAMILIES)) {
     if (def.phrase) out.push(def.phrase);
+    if (def.outOfScopePhrase) out.push(def.outOfScopePhrase);
     if (def.dryRule?.text) out.push(def.dryRule.text);
     for (const note of def.notes) out.push(note.text);
   }
@@ -54,11 +57,17 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
     // spray) or Demand CS (lambda-cyhalothrin). A generic, unsourced
     // dryRule (non_repellent's "stay off treated areas until dry" — no
     // product-specific citation) applies to the whole family regardless.
+    // The customer phrase itself is scoped the same way: contact_residual's
+    // "works on the surfaces it is sprayed on" describes a liquid spray, so
+    // an out-of-scope member (a dust, or a different active ingredient)
+    // falls back to `outOfScopePhrase`, a neutral, method-free description
+    // — never `def.phrase` when the family declares one.
     const inScope = !def.sourceScope || matchesAny(def.sourceScope, row.product_name, row.active_ingredient);
     const dryRuleInScope = inScope || !def.dryRule?.sourced;
+    const phrase = inScope || !def.outOfScopePhrase ? def.phrase : def.outOfScopePhrase;
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
-      phrase: def.phrase, dryRule: dryRuleInScope ? def.dryRule : null, notes: inScope ? def.notes : [],
+      phrase, dryRule: dryRuleInScope ? def.dryRule : null, notes: inScope ? def.notes : [],
       factSlugs: inScope ? def.factSlugs : [], customerVisible: def.customerVisible, verified: inScope && def.verified,
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
@@ -180,10 +189,23 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
  * (visit_number is assigned per line — a pest visit #2 and a mosquito visit
  * #2 are different cohorts and must never be averaged together), rounded
  * to one decimal. A (service_line, visit_number) cohort with fewer than 20
- * rated visits is omitted. */
+ * rated visits is omitted. Rows are restricted to the same completed /
+ * customer-visible / performed-outcome predicate Pest Pressure's first-visit
+ * history uses (server/services/pest-pressure/first-visit.js +
+ * history-filter.js) — an incomplete, inspection-only, or customer-declined
+ * closeout can carry a selected rating but never represents a real
+ * treatment outcome, and a report-suppressed row was never shown to this
+ * customer either. */
 async function getActivityRatingAverages({ conn = db } = {}) {
-  const rows = await conn('service_records')
-    .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line')
+  const query = conn('service_records')
+    .where('status', 'completed')
+    .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line');
+  applyCustomerVisibleServiceRecordFilter(query);
+  query.whereRaw(
+    `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
+    NON_PERFORMED_VISIT_OUTCOMES,
+  );
+  const rows = await query
     .select('service_line', 'visit_number').avg('client_pest_rating as avg_rating').count('client_pest_rating as n')
     .groupBy('service_line', 'visit_number');
 

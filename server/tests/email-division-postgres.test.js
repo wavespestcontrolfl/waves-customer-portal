@@ -51,6 +51,15 @@ suite('email division against real Postgres', () => {
   async function makeVisits(customerId, count, overrides = {}) {
     for (let i = 0; i < count; i++) await makeVisit(customerId, overrides);
   }
+  // `count` DISTINCT customers in `city`, each with exactly one matching
+  // visit — the privacy floor is distinct customers, so area-intel tests
+  // must never qualify a city from one customer's repeated visits.
+  async function makeCityVisits(city, count, overrides = {}) {
+    for (let i = 0; i < count; i++) {
+      const customerId = await makeCustomer({ city });
+      await makeVisit(customerId, overrides);
+    }
+  }
   // A visit booked/serviced at a property whose stamped city differs from
   // the customer's own (current) city — a rental or second property.
   async function makeVisitAtCity(customerId, serviceAddressCity, overrides = {}) {
@@ -96,15 +105,20 @@ suite('email division against real Postgres', () => {
     ]);
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const talstar = products.find((p) => p.productName === 'Talstar P');
-    expect(talstar).toMatchObject({ family: 'contact_residual', verified: true });
+    expect(talstar).toMatchObject({ family: 'contact_residual', verified: true, phrase: 'a contact product that works on the surfaces it is sprayed on' });
     expect(talstar.dryRule?.hours).toBe(24);
     expect(talstar.factSlugs.length).toBeGreaterThan(0);
     for (const name of ['Delta Dust', 'Demand CS']) {
       const p = products.find((prod) => prod.productName === name);
       // Same family (still shown, still ranked as contact_residual) but the
-      // Talstar-P-specific "spray has dried" rain instruction and its fact
-      // slugs never ride along on a dust or a different active ingredient.
-      expect(p).toMatchObject({ family: 'contact_residual', verified: false, dryRule: null, notes: [], factSlugs: [] });
+      // Talstar-P-specific "spray has dried" rain instruction, its fact
+      // slugs, AND the "sprayed on" phrase (inaccurate for a dust) never
+      // ride along on a dust or a different active ingredient — a neutral,
+      // method-free phrase is used instead.
+      expect(p).toMatchObject({
+        family: 'contact_residual', verified: false, dryRule: null, notes: [], factSlugs: [],
+        phrase: 'a contact product applied at this visit',
+      });
     }
   });
 
@@ -189,9 +203,17 @@ suite('email division against real Postgres', () => {
     // so this cohort alone (15 < 20) stays omitted and never drags the pest
     // #1 average toward it.
     await makeVisits(customerId, 15, { visit_number: 1, service_line: 'mosquito', client_pest_rating: 2, service_date: '2026-09-03' });
+    // Non-performed/non-visible rows that carry a rating but must never
+    // enter the pest #1 average or count — same predicate Pest Pressure's
+    // first-visit history uses (server/services/pest-pressure/first-visit.js
+    // + history-filter.js): 'incomplete' status, a completed-but-declined
+    // visitOutcome, and a report-suppressed (not auto_send) closeout.
+    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-04', status: 'incomplete' });
+    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-05', structured_notes: { visitOutcome: 'customer_declined' } });
+    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-06', structured_notes: { typedReportDelivery: 'manual_review' } });
     const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
-    expect(byVisit.pest[1]).toBe(5);
-    expect(counts.pest[1]).toBe(25);
+    expect(byVisit.pest[1]).toBe(5); // unmoved by the 15 excluded low ratings
+    expect(counts.pest[1]).toBe(25); // still exactly the performed, visible visits
     expect(byVisit.pest[2]).toBeUndefined();
     expect(byVisit.mosquito?.[1]).toBeUndefined();
   });
@@ -201,19 +223,15 @@ suite('email division against real Postgres', () => {
   // worked-example sentence), Nocatee (10 visits, 100% flea mentions but
   // below minVisits -> null), Bradenton (25 visits, only 1 (4%) names a
   // pest, below the 10% floor -> null).
-  test('computeAreaIntel + getAreaIntelSentence: 5-visit floor, minVisits, 10% floor, exact wording', async () => {
+  test('computeAreaIntel + getAreaIntelSentence: 5-customer floor, minVisits, 10% floor, exact wording', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
     const sentenceMonth = new Date('2026-09-20T12:00:00Z');
-    const ellenton = await makeCustomer({ city: 'Ellenton' });
-    await makeVisits(ellenton, 4, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fire ants.' });
-    const parrish = await makeCustomer({ city: 'Parrish' });
-    await makeVisits(parrish, 35, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for big-headed ants.' });
-    await makeVisits(parrish, 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
-    const nocatee = await makeCustomer({ city: 'Nocatee' });
-    await makeVisits(nocatee, 10, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
-    const bradenton = await makeCustomer({ city: 'Bradenton' });
-    await makeVisits(bradenton, 24, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
-    await makeVisit(bradenton, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for a single wasp nest.' });
+    await makeCityVisits('Ellenton', 4, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fire ants.' });
+    await makeCityVisits('Parrish', 35, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for big-headed ants.' });
+    await makeCityVisits('Parrish', 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
+    await makeCityVisits('Nocatee', 10, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeCityVisits('Bradenton', 24, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
+    await makeCityVisits('Bradenton', 1, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for a single wasp nest.' });
     // Stale row from a prior recompute; must not survive a fresh one.
     await trx('email_area_intel_monthly').insert({ month: '2026-09-01', city: 'venice', visits: 40, pest_key: 'fleas', visits_with_pest: 30 });
     const result = await computeAreaIntel({ month, conn: trx });
@@ -231,11 +249,10 @@ suite('email division against real Postgres', () => {
 
   test('computeAreaIntel: excludes non-performed (incomplete) service records from both counts', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
-    const customerId = await makeCustomer({ city: 'Oneco' });
-    await makeVisits(customerId, 5, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.', status: 'completed' });
+    await makeCityVisits('Oneco', 5, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.', status: 'completed' });
     // An office-handoff closeout for a visit that did NOT happen — must not
     // inflate the denominator or seed a pest count of its own.
-    await makeVisits(customerId, 3, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for ticks.', status: 'incomplete' });
+    await makeCityVisits('Oneco', 3, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for ticks.', status: 'incomplete' });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'oneco' });
     expect(rows).toHaveLength(1);
@@ -243,14 +260,23 @@ suite('email division against real Postgres', () => {
     expect(rows.find((r) => r.pest_key === 'ticks')).toBeUndefined();
   });
 
+  test('computeAreaIntel: one customer with 5+ completed visits never alone clears the privacy floor', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    const customerId = await makeCustomer({ city: 'Wimauma' });
+    // Several service lines/callbacks for the SAME household — a real
+    // scenario, but distinct CUSTOMERS is the privacy floor, not raw visits.
+    await makeVisits(customerId, 6, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await computeAreaIntel({ month, conn: trx });
+    expect(await trx('email_area_intel_monthly').where({ city: 'wimauma' })).toHaveLength(0);
+  });
+
   test('computeAreaIntel: a completed visit with blank technician_notes still counts toward the visit denominator', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
-    const customerId = await makeCustomer({ city: 'Terra' });
-    await makeVisits(customerId, 3, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeCityVisits('Terra', 3, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
     // A completed visit with no notes at all still happened — it must add
-    // to `visits` (the denominator behind the 5-visit floor AND the
-    // percentage sentence), just not to any pest's numerator.
-    await makeVisits(customerId, 2, { service_date: '2026-09-06', technician_notes: null });
+    // to `visits` (the denominator behind the percentage sentence), just
+    // not to any pest's numerator.
+    await makeCityVisits('Terra', 2, { service_date: '2026-09-06', technician_notes: null });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'terra' });
     expect(rows).toMatchObject([{ visits: 5, pest_key: 'fleas', visits_with_pest: 3 }]);
@@ -258,11 +284,12 @@ suite('email division against real Postgres', () => {
 
   test('computeAreaIntel: attributes a visit to the booked service_address_city, not the customer\'s own city', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
-    // The account's primary/current city is Bradenton, but every visit was
-    // booked and serviced at a Venice rental — the immutable booking-time
-    // stamp, not the account's mirror address, decides the city.
-    const customerId = await makeCustomer({ city: 'Bradenton' });
+    // Five DISTINCT customers whose primary/current city is Bradenton, but
+    // every visit was booked and serviced at a Venice rental/second
+    // property — the immutable booking-time stamp, not the account's
+    // mirror address, decides the city.
     for (let i = 0; i < 5; i++) {
+      const customerId = await makeCustomer({ city: 'Bradenton' });
       await makeVisitAtCity(customerId, 'Venice', { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
     }
     await computeAreaIntel({ month, conn: trx });
@@ -275,9 +302,8 @@ suite('email division against real Postgres', () => {
     const month = new Date('2026-09-15T12:00:00Z');
     const sentenceMonth = new Date('2026-09-20T12:00:00Z');
     // 2/21 = 9.52% — rounds to "10%" but must still fail the floor.
-    const customerId = await makeCustomer({ city: 'Palmetto' });
-    await makeVisits(customerId, 2, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
-    await makeVisits(customerId, 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
+    await makeCityVisits('Palmetto', 2, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeCityVisits('Palmetto', 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'palmetto' });
     expect(rows).toMatchObject([{ visits: 21, pest_key: 'fleas', visits_with_pest: 2 }]);
