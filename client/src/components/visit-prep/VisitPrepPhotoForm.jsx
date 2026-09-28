@@ -135,6 +135,7 @@ function PickerButton({ icon, label, onClick, disabled }) {
   return (
     <button
       type="button"
+      data-glass="soft"
       onClick={onClick}
       disabled={disabled}
       style={{
@@ -146,7 +147,9 @@ function PickerButton({ icon, label, onClick, disabled }) {
         minHeight: 48,
         padding: '0 12px',
         borderRadius: 8,
-        border: `1px dashed ${S.borderStrong}`,
+        // Same soft-glass secondary treatment as the page's own
+        // "Add to calendar" action.
+        border: `1px solid ${S.softBorder}`,
         background: S.soft,
         color: S.text,
         fontSize: 16,
@@ -519,6 +522,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
 
       <button
         type="button"
+        data-glass-accent=""
         onClick={send}
         disabled={sendDisabled}
         style={{
