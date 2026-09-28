@@ -31,7 +31,10 @@ const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-te
 // callback card, a technician's line) and the statuses meaning the call
 // connected. Automated outbound voice never carries these sources.
 const STAFF_CALL_SOURCES = ['admin-click', 'admin-callback', 'tech-click'];
-const CONNECTED_CALL_STATUSES = ['completed', 'in-progress', 'answered'];
+const CONNECTED_CALL_STATUSES = ['completed', 'in-progress', 'answered', 'bridged'];
+// sms_log.message_type values a person types under (the Intelligence Bar
+// included) — see send-manual-customer-sms.js.
+const STAFF_SMS_TYPES = ['manual', 'manual_reply', 'staff_reply'];
 
 const REASONS = {
   CUSTOMER_MISSING: 'CUSTOMER_MISSING',
@@ -69,11 +72,15 @@ function isWinbackKey(emailKey) {
 }
 
 // The suppression group each stream/emailKey combination rides on.
-function groupKeyFor(stream, emailKey) {
+// The suppression group a send answers to. A lifecycle send classified as
+// MARKETING (a pest tip riding the lifecycle stream) is marketing mail: it
+// answers to the marketing_newsletter unsubscribe and to marketing_offers,
+// never to the operational exemption (codex GitHub round P1).
+function groupKeyFor(stream, emailKey, marketingClass = 'relationship') {
   if (stream === 'lifecycle') {
     if (isReferralKey(emailKey)) return 'marketing_referral';
     if (isWinbackKey(emailKey)) return 'marketing_nurture';
-    return 'service_operational';
+    return marketingClass === 'marketing' ? 'marketing_newsletter' : 'service_operational';
   }
   if (stream === 'nurture') return 'marketing_nurture';
   return 'marketing_newsletter'; // broadcast, alert
@@ -82,8 +89,9 @@ function groupKeyFor(stream, emailKey) {
 // Whether the stream's own opt-in/opt-out flag on notification_prefs passes.
 // `prefs` may be undefined (no row yet) — every flag column defaults to
 // true in the schema, so a missing row reads the same as an unset column.
-function streamFlagOk(stream, emailKey, prefs) {
+function streamFlagOk(stream, emailKey, prefs, marketingClass = 'relationship') {
   if (stream === 'broadcast') return prefs?.marketing_offers === true;
+  if (stream === 'lifecycle' && marketingClass === 'marketing') return prefs?.marketing_offers === true;
   if (stream === 'alert') return prefs?.weather_alerts !== false;
   if (stream === 'lifecycle' && isReferralKey(emailKey)) return prefs?.referral_nudge !== false;
   return true; // plain lifecycle relationship mail, win-back, nurture
@@ -96,14 +104,15 @@ function streamFlagOk(stream, emailKey, prefs) {
 // null/unset/'email'/'both'/anything unrecognized passes (never fail-closed
 // on a channel value we don't understand — that mirrors legacyChannel's own
 // permissive fallback, not a stricter allowlist of our own).
-function streamChannelColumn(stream, emailKey) {
+function streamChannelColumn(stream, emailKey, marketingClass = 'relationship') {
   if (stream === 'broadcast') return 'marketing_channel';
+  if (stream === 'lifecycle' && marketingClass === 'marketing') return 'marketing_channel';
   if (stream === 'alert') return 'weather_alert_channel';
   if (stream === 'lifecycle' && isReferralKey(emailKey)) return 'referral_channel';
   return null; // plain lifecycle relationship mail, win-back, nurture: no channel gate
 }
-function streamChannelBlocksEmail(stream, emailKey, prefs) {
-  const column = streamChannelColumn(stream, emailKey);
+function streamChannelBlocksEmail(stream, emailKey, prefs, marketingClass = 'relationship') {
+  const column = streamChannelColumn(stream, emailKey, marketingClass);
   if (!column) return false;
   return String(prefs?.[column] || '').trim().toLowerCase() === 'sms';
 }
@@ -169,7 +178,7 @@ async function checkSuppression(ctx) {
   // null-group row (codex pre-push r2 P1). `template: null` is safe here —
   // the classifier's template-only branches (transactional-bypass) never
   // trigger for a real send_stream group key like ours.
-  const groupKey = groupKeyFor(stream, emailKey);
+  const groupKey = groupKeyFor(stream, emailKey, ctx.marketingClass);
   const suppressions = await activeSuppressionsFor(null, customer.email, groupKey, database);
   if (!suppressions.length) return null;
   const isGlobal = suppressions.some((row) => (
@@ -191,9 +200,13 @@ async function checkEmailSwitchStreamFlagAndChannel(ctx) {
   // An embedded pitch is marketing: it needs the marketing_offers flag AND
   // no active marketing unsubscribe — an operational email's own suppression
   // check only looked at service_operational (codex GitHub round P1).
-  checks.allowPitch = prefs?.marketing_offers === true && !(await marketingSuppressed(ctx));
-  if (!streamFlagOk(stream, emailKey, prefs)) return REASONS.STREAM_FLAG_OFF;
-  if (streamChannelBlocksEmail(stream, emailKey, prefs)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
+  // …and the customer's marketing channel must include email: an SMS-only
+  // marketing choice keeps promotional copy out of an operational email too
+  // (codex GitHub round P1).
+  const marketingChannelIsSmsOnly = String(prefs?.marketing_channel || '').trim().toLowerCase() === 'sms';
+  checks.allowPitch = prefs?.marketing_offers === true && !marketingChannelIsSmsOnly && !(await marketingSuppressed(ctx));
+  if (!streamFlagOk(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_FLAG_OFF;
+  if (streamChannelBlocksEmail(stream, emailKey, prefs, ctx.marketingClass)) return REASONS.STREAM_CHANNEL_NOT_EMAIL;
   return null;
 }
 
@@ -243,9 +256,14 @@ async function checkRecentHumanContact(ctx) {
   const { customerId, nowDate, database } = ctx;
   const threeDaysAgo = new Date(nowDate.getTime() - 3 * DAY_MS);
 
+  // A staff-authored text is one with an admin on it OR a manual message
+  // type: the Intelligence Bar sends as the symbolic 'intelligence_bar'
+  // reviewer, which send-manual-customer-sms.js deliberately keeps out of the
+  // uuid admin_user_id column while typing the message 'manual' (codex GitHub
+  // round P2).
   const staffSms = await database('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
-    .whereNotNull('admin_user_id')
+    .where((qb) => qb.whereNotNull('admin_user_id').orWhereIn('message_type', STAFF_SMS_TYPES))
     .where('created_at', '>', threeDaysAgo)
     .first('id');
   if (staffSms) return REASONS.RECENT_HUMAN_CONTACT;
@@ -266,9 +284,14 @@ async function checkRecentHumanContact(ctx) {
   // round P2). Staff-placed calls are the click-to-call bridge rows
   // (call-bridge.js, direction 'outbound', a staff source) that connected;
   // automated outbound voice (collections, reminders) is not human contact.
+  // The click-to-call row is the PARENT leg to the staff phone; it reads
+  // 'in-progress'/'completed' even when staff never pressed 1. The customer
+  // leg is evidenced by /outbound-connect stamping bridged_at, and by the
+  // dial status the customer leg ended with (codex GitHub round P2).
   const staffCall = await database('call_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     .whereIn('source', STAFF_CALL_SOURCES)
+    .whereNotNull('bridged_at')
     .whereIn('status', CONNECTED_CALL_STATUSES)
     .where('created_at', '>', threeDaysAgo)
     .first('id');

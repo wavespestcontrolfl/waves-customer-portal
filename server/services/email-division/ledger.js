@@ -59,8 +59,8 @@ async function messageStateFor(trx, idempotencyKey) {
 // caps then count an email that went out (or may have), never the other way
 // round — a duplicate marketing email is the failure this ledger exists to
 // prevent, a possibly-uncounted miss is not.
-async function completeFromMessage(trx, id, state) {
-  return trx('marketing_email_ledger').where({ id, status: 'reserved' }).update({
+async function completeFromMessage(trx, id, state, fromStatuses = ['reserved']) {
+  return trx('marketing_email_ledger').where({ id }).whereIn('status', fromStatuses).update({
     status: 'sent',
     sent_at: state.message.sent_at || state.message.updated_at || trx.fn.now(),
     email_message_id: state.message.id,
@@ -68,6 +68,12 @@ async function completeFromMessage(trx, id, state) {
     updated_at: trx.fn.now(),
   });
 }
+
+// A `failed` row whose message the library later retried under the shared
+// key and got accepted must count too: markSent promotes such a row, and
+// this sweep catches the case where nobody called markSent (codex GitHub
+// round P1). Bounded to the window the caps read.
+const FAILED_RECONCILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 async function settleAbandonedReservations(trx, customerId, now) {
   const staleCutoff = new Date(now.getTime() - RESERVATION_LIFETIME_MS);
@@ -88,6 +94,14 @@ async function settleAbandonedReservations(trx, customerId, now) {
           updated_at: trx.fn.now(),
         });
     }
+  }
+  const failedRecently = await trx('marketing_email_ledger')
+    .where({ customer_id: customerId, status: 'failed' })
+    .where('reserved_at', '>', new Date(now.getTime() - FAILED_RECONCILE_WINDOW_MS))
+    .select('id', 'idempotency_key');
+  for (const row of failedRecently) {
+    const state = await messageStateFor(trx, row.idempotency_key);
+    if (state.kind === 'accepted' || state.kind === 'uncertain') await completeFromMessage(trx, row.id, state, ['failed']);
   }
   return stale.length;
 }
@@ -158,10 +172,15 @@ async function markSent(id, { emailMessageId = null } = {}, { conn } = {}) {
     const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id');
     if (!existing) return 0;
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
-    return trx('marketing_email_ledger').where({ id, status: 'reserved' }).update({
+    // `reserved` OR `failed`: a same-key provider retry that succeeded after
+    // the caller had marked the row failed must still count (codex GitHub
+    // round P1). Never `sent` (a retry of markSent stays a no-op) and never
+    // `skipped` (the caller chose not to send).
+    return trx('marketing_email_ledger').where({ id }).whereIn('status', ['reserved', 'failed']).update({
       status: 'sent',
       sent_at: trx.fn.now(),
       email_message_id: emailMessageId,
+      reason: null,
       updated_at: trx.fn.now(),
     });
   });
@@ -254,6 +273,29 @@ async function reserveWithCap({
       if (!sameOperation(existingByKey, { customerId, stream, emailKey })) {
         return { ok: false, reason: REASONS.IDEMPOTENCY_KEY_CONFLICT, row: null, duplicate: false };
       }
+      if (existingByKey.status === 'failed') {
+        // A same-key retry of a FAILED reservation. If the provider in fact
+        // accepted the message since, the row completes as sent and reads
+        // back as the duplicate it is; if the message is definitely unsent,
+        // the row goes back to `reserved` — through the same eligibility and
+        // cap checks a fresh reservation faces — so the caller's retry can
+        // be completed by markSent (codex GitHub round P1).
+        const state = await messageStateFor(trx, idempotencyKey);
+        if (state.kind === 'accepted' || state.kind === 'uncertain') {
+          await completeFromMessage(trx, existingByKey.id, state, ['failed']);
+          const completed = await trx('marketing_email_ledger').where({ id: existingByKey.id }).first();
+          return { ok: true, reason: null, row: completed, duplicate: true };
+        }
+        const retryVerdict = await eligibleForEmail({ customerId, stream, marketingClass, emailKey, pestKey, now, conn: trx });
+        if (!retryVerdict.ok) return { ok: false, reason: retryVerdict.reason, row: null, duplicate: false };
+        const otherOutstanding = marketingClass === 'marketing' ? await outstandingReservation(trx, customerId, idempotencyKey) : null;
+        if (otherOutstanding) return { ok: false, reason: capReasonFor(stream, otherOutstanding.stream), row: null, duplicate: false };
+        await trx('marketing_email_ledger').where({ id: existingByKey.id, status: 'failed' }).update({
+          status: 'reserved', reserved_at: now, reason: null, recipient_email: retryVerdict.checks.customerEmail, updated_at: trx.fn.now(),
+        });
+        const reopened = await trx('marketing_email_ledger').where({ id: existingByKey.id }).first();
+        return { ok: true, reason: null, row: reopened, duplicate: false, reopened: true };
+      }
       return { ok: true, reason: null, row: existingByKey, duplicate: true };
     }
 
@@ -263,24 +305,39 @@ async function reserveWithCap({
     if (!verdict.ok) return { ok: false, reason: verdict.reason, row: null, duplicate: false };
 
     if (marketingClass === 'marketing') {
-      const outstanding = await trx('marketing_email_ledger')
-        .where({ customer_id: customerId, marketing_class: 'marketing', status: 'reserved' })
-        .whereNot({ idempotency_key: idempotencyKey })
-        .first('stream');
-      if (outstanding) {
-        const reason = (stream === 'broadcast' || stream === 'alert') && outstanding.stream === stream
-          ? (stream === 'broadcast' ? REASONS.CAP_WEEKLY_BROADCAST : REASONS.CAP_WEEKLY_ALERT)
-          : REASONS.CAP_SAME_DAY;
-        return { ok: false, reason, row: null, duplicate: false };
-      }
+      const outstanding = await outstandingReservation(trx, customerId, idempotencyKey);
+      if (outstanding) return { ok: false, reason: capReasonFor(stream, outstanding.stream), row: null, duplicate: false };
     }
 
-    const { row, duplicate } = await reserve({
-      customerId, stream, marketingClass, emailKey, idempotencyKey,
-      recipientEmail: verdict.checks.customerEmail, pestKey, conn: trx,
-    });
-    return { ok: true, reason: null, row, duplicate };
+    try {
+      const { row, duplicate } = await reserve({
+        customerId, stream, marketingClass, emailKey, idempotencyKey,
+        recipientEmail: verdict.checks.customerEmail, pestKey, conn: trx,
+      });
+      return { ok: true, reason: null, row, duplicate };
+    } catch (err) {
+      // Two customers reserving the same global key at once: their
+      // per-customer locks do not serialize them, the loser's insert hits
+      // ON CONFLICT DO NOTHING and its read-back is another customer's row.
+      // That is the same policy denial as the pre-insert check, never a
+      // thrown server error (codex GitHub round P2).
+      if (err.code === 'IDEMPOTENCY_KEY_CONFLICT') return { ok: false, reason: REASONS.IDEMPOTENCY_KEY_CONFLICT, row: null, duplicate: false };
+      throw err;
+    }
   });
+}
+
+function outstandingReservation(trx, customerId, idempotencyKey) {
+  return trx('marketing_email_ledger')
+    .where({ customer_id: customerId, marketing_class: 'marketing', status: 'reserved' })
+    .whereNot({ idempotency_key: idempotencyKey })
+    .first('stream');
+}
+
+function capReasonFor(stream, outstandingStream) {
+  return (stream === 'broadcast' || stream === 'alert') && outstandingStream === stream
+    ? (stream === 'broadcast' ? REASONS.CAP_WEEKLY_BROADCAST : REASONS.CAP_WEEKLY_ALERT)
+    : REASONS.CAP_SAME_DAY;
 }
 
 module.exports = { reserve, markSent, markSkipped, markFailed, reserveWithCap };

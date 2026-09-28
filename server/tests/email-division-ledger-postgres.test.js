@@ -198,6 +198,44 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     }
   });
 
+  test('GitHub round P1: markSent promotes a FAILED row after a same-key provider retry succeeded, and the sweep does the same from email_messages', async () => {
+    const first = await attempt('retry-key');
+    expect(await Ledger.markFailed(first.row.id, 'provider_rejected')).toBe(true);
+    // The library retries the same key and SendGrid accepts it this time.
+    expect(await Ledger.markSent(first.row.id, { emailMessageId: null })).toBe(1);
+    expect((await db('marketing_email_ledger').where({ id: first.row.id }).first()).status).toBe('sent');
+
+    // Nobody called markSent for this one; the sweep finds the accepted message.
+    const second = await db('marketing_email_ledger').insert({
+      customer_id: customerId, stream: 'alert', marketing_class: 'marketing', email_key: 'mkt.alert.storm', idempotency_key: 'retry-key-2',
+      recipient_email: customerEmail, status: 'failed', reason: 'provider_rejected', reserved_at: new Date(Date.now() - 60 * 60 * 1000),
+    }).returning(['id']);
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'retry-key-2', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.alert.storm', status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic-3',
+    }).returning(['id']);
+    try {
+      const next = await attempt('after-retries');
+      const promoted = await db('marketing_email_ledger').where({ id: second[0].id }).first();
+      expect(promoted.status).toBe('sent');
+      expect(promoted.email_message_id).toBe(message.id);
+      // Two marketing sends now stand: the next attempt is denied by the caps.
+      expect(next.ok).toBe(false);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
+  test('GitHub round P1: a same-key retry of a FAILED reservation whose message never went out is reopened as reserved', async () => {
+    const first = await attempt('reopen-key');
+    await Ledger.markFailed(first.row.id, 'timeout');
+    const again = await attempt('reopen-key');
+    expect(again.ok).toBe(true);
+    expect(again.reopened).toBe(true);
+    expect(again.row.status).toBe('reserved');
+    expect(again.row.id).toBe(first.row.id);
+  });
+
   test('GitHub round P1: a failure reported against a message the provider accepted completes the row as sent instead', async () => {
     const first = await attempt('lost-response-key');
     const [message] = await db('email_messages').insert({

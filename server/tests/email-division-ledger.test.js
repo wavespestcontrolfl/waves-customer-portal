@@ -61,7 +61,8 @@ test('finding 1: a stale reservation is settled to failed/abandoned_reservation 
   const idempQ = chain({ first: undefined });
   const outstandingQ = chain({ first: undefined });
   const insertQ = chain({ result: [{ id: 'row-1', status: 'reserved' }] });
-  setQueue([staleQ, settleQ, idempQ, outstandingQ, insertQ], [chain({ first: undefined })]); // no accepted message for key-old
+  const failedQ = chain({ rows: [] }); // no recently failed rows to reconcile
+  setQueue([staleQ, settleQ, failedQ, idempQ, outstandingQ, insertQ], [chain({ first: undefined })]); // no accepted message for key-old
 
   const result = await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
@@ -84,7 +85,7 @@ test('GitHub round P1: a stale reservation whose key email_messages shows as acc
   const insertQ = chain({ result: [{ id: 'row-1', status: 'reserved' }] });
   const accepted = { id: 'msg-9', sent_at: new Date('2026-09-28T11:31:00Z') };
   const acceptedQ = chain({ first: accepted });
-  setQueue([staleQ, settleQ, idempQ, outstandingQ, insertQ], [acceptedQ]);
+  setQueue([staleQ, settleQ, chain({ rows: [] }), idempQ, outstandingQ, insertQ], [acceptedQ]);
 
   await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
@@ -106,7 +107,7 @@ test.each([
   eligibleForEmail.mockResolvedValue({ ok: true, reason: null, checks: { customerEmail: 'sandy@example.test' } });
   const staleQ = chain({ rows: [{ id: 'row-stale', idempotency_key: 'key-old' }] });
   const settleQ = chain({ updateReturn: 1 });
-  setQueue([staleQ, settleQ, chain({ first: undefined }), chain({ first: undefined }), chain({ result: [{ id: 'row-1' }] })], [chain({ first: message })]);
+  setQueue([staleQ, settleQ, chain({ rows: [] }), chain({ first: undefined }), chain({ first: undefined }), chain({ result: [{ id: 'row-1' }] })], [chain({ first: message })]);
 
   await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
@@ -120,7 +121,7 @@ test('finding 2: an existing idempotency key returns duplicate:true for whatever
   const staleQ = chain({ rows: [] });
   const existingRow = { id: 'row-existing', status: 'sent', customer_id: 'cust-1', stream: 'broadcast', email_key: 'mkt.broadcast.fall' };
   const idempQ = chain({ first: existingRow });
-  setQueue([staleQ, idempQ]);
+  setQueue([staleQ, chain({ rows: [] }), idempQ]);
 
   const result = await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
@@ -133,7 +134,7 @@ test('finding 2: an existing idempotency key returns duplicate:true for whatever
 
 test('GitHub round P2: an idempotency key that already names ANOTHER customer/stream/email is refused, not returned as a duplicate', async () => {
   const otherCustomersRow = { id: 'row-other', status: 'reserved', customer_id: 'cust-2', stream: 'broadcast', email_key: 'mkt.broadcast.fall' };
-  setQueue([chain({ rows: [] }), chain({ first: otherCustomersRow })]);
+  setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: otherCustomersRow })]);
 
   const result = await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
@@ -144,7 +145,7 @@ test('GitHub round P2: an idempotency key that already names ANOTHER customer/st
   expect(eligibleForEmail).not.toHaveBeenCalled();
 
   // …and the same key for the same customer but a different email is a conflict too.
-  setQueue([chain({ rows: [] }), chain({ first: { ...otherCustomersRow, customer_id: 'cust-1', email_key: 'mkt.broadcast.other' } })]);
+  setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: { ...otherCustomersRow, customer_id: 'cust-1', email_key: 'mkt.broadcast.other' } })]);
   const sameCustomer = await Ledger.reserveWithCap({
     customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
     emailKey: 'mkt.broadcast.fall', idempotencyKey: 'campaign-key', now: new Date(),
@@ -173,5 +174,57 @@ test('CI push audit: a markSent retry on an already-sent row is a no-op (scoped 
   const changed = await Ledger.markSent('row-1', { emailMessageId: 'msg-retry' });
   expect(changed).toBe(0);
   const updateWhere = updateQ.calls.find((c) => c[0] === 'where');
-  expect(updateWhere[1]).toEqual({ id: 'row-1', status: 'reserved' });
+  expect(updateWhere[1]).toEqual({ id: 'row-1' });
+  // reserved OR failed (a same-key provider retry that succeeded) — never sent, never skipped.
+  expect(updateQ.calls).toEqual(expect.arrayContaining([['whereIn', 'status', ['reserved', 'failed']]]));
+});
+
+test('GitHub round P1: a same-key retry of a FAILED reservation completes as sent when the provider accepted the retried message', async () => {
+  const failedRow = { id: 'row-failed', status: 'failed', customer_id: 'cust-1', stream: 'broadcast', email_key: 'mkt.broadcast.fall' };
+  const completed = { ...failedRow, status: 'sent', email_message_id: 'msg-2' };
+  const completeQ = chain({ updateReturn: 1 });
+  setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: failedRow }), completeQ, chain({ first: completed })],
+    [chain({ first: { id: 'msg-2', sent_at: new Date('2026-09-28T13:00:00Z'), status: 'sent', provider_handoff_phase: 'started' } })]);
+
+  const result = await Ledger.reserveWithCap({
+    customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
+    emailKey: 'mkt.broadcast.fall', idempotencyKey: 'retry-key', now: new Date(),
+  });
+
+  expect(result).toEqual({ ok: true, reason: null, row: completed, duplicate: true });
+  expect(completeQ.calls).toEqual(expect.arrayContaining([['whereIn', 'status', ['failed']]]));
+  expect(completeQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'sent', email_message_id: 'msg-2' });
+  expect(eligibleForEmail).not.toHaveBeenCalled();
+});
+
+test('GitHub round P1: a same-key retry of a FAILED reservation whose message is definitely unsent reopens it as reserved — through eligibility and the cap', async () => {
+  eligibleForEmail.mockResolvedValue({ ok: true, reason: null, checks: { customerEmail: 'sandy@example.test' } });
+  const failedRow = { id: 'row-failed', status: 'failed', customer_id: 'cust-1', stream: 'broadcast', email_key: 'mkt.broadcast.fall' };
+  const reopened = { ...failedRow, status: 'reserved' };
+  const reopenQ = chain({ updateReturn: 1 });
+  setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: failedRow }), chain({ first: undefined }), reopenQ, chain({ first: reopened })],
+    [chain({ first: undefined })]);
+
+  const result = await Ledger.reserveWithCap({
+    customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
+    emailKey: 'mkt.broadcast.fall', idempotencyKey: 'retry-key', now: new Date(),
+  });
+
+  expect(result).toEqual({ ok: true, reason: null, row: reopened, duplicate: false, reopened: true });
+  expect(eligibleForEmail).toHaveBeenCalledTimes(1);
+  expect(reopenQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'reserved', reason: null, recipient_email: 'sandy@example.test' });
+});
+
+test('GitHub round P2: losing the insert race to another customer\'s same key is the structured conflict, never a thrown error', async () => {
+  eligibleForEmail.mockResolvedValue({ ok: true, reason: null, checks: { customerEmail: 'sandy@example.test' } });
+  const theirs = { id: 'row-theirs', status: 'reserved', customer_id: 'cust-2', stream: 'broadcast', email_key: 'mkt.broadcast.fall' };
+  // pre-insert lookup misses; ON CONFLICT DO NOTHING inserts nothing; the read-back is the other customer's row
+  setQueue([chain({ rows: [] }), chain({ rows: [] }), chain({ first: undefined }), chain({ first: undefined }), chain({ result: [] }), chain({ first: theirs })]);
+
+  const result = await Ledger.reserveWithCap({
+    customerId: 'cust-1', stream: 'broadcast', marketingClass: 'marketing',
+    emailKey: 'mkt.broadcast.fall', idempotencyKey: 'shared-key', now: new Date(),
+  });
+
+  expect(result).toEqual({ ok: false, reason: 'IDEMPOTENCY_KEY_CONFLICT', row: null, duplicate: false });
 });

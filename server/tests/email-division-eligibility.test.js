@@ -243,7 +243,47 @@ describe('email-division eligibility', () => {
     expect(r.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
     // Only staff-placed, connected calls count — the query names both.
     expect(outboundQ.whereIn).toHaveBeenCalledWith('source', ['admin-click', 'admin-callback', 'tech-click']);
-    expect(outboundQ.whereIn).toHaveBeenCalledWith('status', ['completed', 'in-progress', 'answered']);
+    // …and only once the CUSTOMER leg was dialed: /outbound-connect stamps bridged_at.
+    expect(outboundQ.whereNotNull).toHaveBeenCalledWith('bridged_at');
+    expect(outboundQ.whereIn).toHaveBeenCalledWith('status', ['completed', 'in-progress', 'answered', 'bridged']);
+  });
+
+  test('a lifecycle send classified as MARKETING answers to the marketing rules, not the operational exemption (codex GitHub P1)', async () => {
+    const marketing = { stream: 'lifecycle', marketingClass: 'marketing', emailKey: 'lc.pest_tip' };
+    const noOffers = await evalWith({ ledger: [chain({ result: [] })], prefs: { email_enabled: true, marketing_offers: false } }, marketing);
+    expect(noOffers.reason).toBe(REASONS.STREAM_FLAG_OFF);
+    const unsubscribed = await evalWith({ ledger: [chain({ result: [] })],
+      suppressions: [{ email: 'sandy@example.test', group_key: 'marketing_newsletter', suppression_type: 'unsubscribe', status: 'active' }] }, marketing);
+    expect(unsubscribed.reason).toBe(REASONS.EMAIL_SUPPRESSED_GROUP);
+    const smsOnly = await evalWith({ ledger: [chain({ result: [] })], prefs: { email_enabled: true, marketing_offers: true, marketing_channel: 'sms' } }, marketing);
+    expect(smsOnly.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
+    // the operational welcome email is untouched by any of that
+    const operational = await evalWith({ prefs: { email_enabled: true, marketing_offers: false, marketing_channel: 'sms' } }, { emailKey: 'lc.welcome' });
+    expect(operational.ok).toBe(true);
+    expect(operational.checks.allowPitch).toBe(false);
+  });
+
+  test('an SMS-only marketing channel switches the embedded pitch off even with marketing_offers on (codex GitHub P1)', async () => {
+    const r = await evalWith({ prefs: { email_enabled: true, marketing_offers: true, marketing_channel: 'sms' } }, { emailKey: 'lc.welcome' });
+    expect(r.ok).toBe(true);
+    expect(r.checks.allowPitch).toBe(false);
+  });
+
+  test('a manual or Intelligence Bar text (message_type manual, no admin uuid) is recent human contact (codex GitHub P2)', async () => {
+    const staffQ = chain({ first: { id: 'sms-ib' } });
+    const r = await evalWith({ ledger: [chain({ result: [] })], tables: {
+      customers: chain({ first: customerRow() }),
+      messaging_suppression: chain({ first: undefined }),
+      email_suppressions: chain({ result: [] }),
+      notification_prefs: chain({ first: { email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true } }),
+      estimates: chain({ first: undefined }),
+      marketing_email_ledger: [chain({ result: [] })],
+      sms_log: [staffQ, chain({ first: undefined })],
+      call_log: [chain({ first: undefined }), chain({ first: undefined })],
+    } }, { marketingClass: 'marketing', emailKey: 'lc.pest_tip' });
+    expect(r.reason).toBe(REASONS.RECENT_HUMAN_CONTACT);
+    // the provenance predicate is a grouped where (admin uuid OR a manual message type)
+    expect(staffQ.where).toHaveBeenCalledWith(expect.any(Function));
   });
 
   test('a marketing unsubscribe (marketing_newsletter group) does not block an OPERATIONAL lifecycle email but does switch the embedded pitch off (codex GitHub P1)', async () => {
