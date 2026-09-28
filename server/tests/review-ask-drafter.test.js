@@ -418,6 +418,9 @@ describe('verifyTopicFollowupQuestion — a closed vocabulary, not a banned-word
     expect(v('How are the ants in the kitchen looking since the visit?')).toBeNull();
     expect(v('Still seeing the bugs in your bathroom?', 'bugs in my bathroom', 'bugs')).toBeNull();
     expect(v('How is the Bermuda grass looking since the visit?', 'Bermuda grass', 'Bermuda grass')).toBeNull();
+    // Contractions split into a word plus a bare "s"/"t", both function words.
+    expect(v("How's the Bermuda grass looking?", 'Bermuda grass', 'Bermuda grass')).toBeNull();
+    expect(v("How's it going with the ants?")).toBeNull();
   });
 
   test('claims of work, promised results, days, weather, places, names and second pests cannot be written (Codex r1 on #5246)', () => {
