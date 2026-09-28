@@ -3159,8 +3159,19 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
   const current = await conn('scheduled_services').where({ id: scheduledServiceId }).first('estimated_price');
   const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
   if (!current || cents(current.estimated_price) === cents(nextPrice)) return;
+  // The visit's own invoices plus a shared (combined-visit packet) invoice
+  // this visit is a member of.
+  const hasPacketItems = await conn.schema.hasTable('visit_completion_packet_items').catch(() => false);
   const openInvoices = await conn('invoices')
-    .where({ scheduled_service_id: scheduledServiceId })
+    .where(function ownOrPacket() {
+      this.where({ scheduled_service_id: scheduledServiceId });
+      if (hasPacketItems) {
+        this.orWhereIn('id', conn('visit_completion_packet_items')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .whereNotNull('invoice_id')
+          .select('invoice_id'));
+      }
+    })
     .whereNotIn('status', ['void', 'paid', 'prepaid', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'status', 'total', 'credit_applied');
   const owed = (openInvoices || []).find((inv) => invoiceAmountDue(inv) > 0);
@@ -3172,7 +3183,9 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
   }
   const hold = await conn('estimate_card_holds')
     .where({ scheduled_service_id: scheduledServiceId })
-    .whereNotIn('status', ['released', 'cancelled', 'failed'])
+    // A settled (charged) hold is money already collected, not a pending
+    // commitment.
+    .whereNotIn('status', ['released', 'cancelled', 'failed', 'charged_completion', 'charged_no_show'])
     .first('id');
   if (hold) {
     throw Object.assign(
@@ -3181,7 +3194,8 @@ async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
     );
   }
   const cardLane = await conn('appointment_card_requests')
-    .where({ scheduled_service_id: scheduledServiceId, status: 'completed' })
+    .where({ scheduled_service_id: scheduledServiceId })
+    .whereIn('status', ['completed', 'satisfied'])
     .where('accepted_amount', '>', 0)
     .first('id');
   if (cardLane) {

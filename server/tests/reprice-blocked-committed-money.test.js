@@ -8,9 +8,10 @@ db.raw = jest.fn(async () => ({ rows: [] }));
 const { assertRepriceAllowed } = require('../routes/admin-schedule');
 
 function conn({ price = 129, invoices = [], hold = null, cardLane = null } = {}) {
-  return (table) => {
+  const fn = (table) => {
     const chain = {
-      where() { return chain; }, whereNotIn() { return chain; },
+      where(arg) { if (typeof arg === 'function') arg.call(chain); return chain; },
+      whereNotIn() { return chain; }, whereIn() { return chain; }, orWhereIn() { return chain; }, whereNotNull() { return chain; },
       select: async () => invoices,
       first: async () => {
         if (table === 'scheduled_services') return { estimated_price: price };
@@ -21,6 +22,8 @@ function conn({ price = 129, invoices = [], hold = null, cardLane = null } = {})
     };
     return chain;
   };
+  fn.schema = { hasTable: async () => true };
+  return fn;
 }
 
 describe('assertRepriceAllowed', () => {
@@ -58,4 +61,18 @@ test('update-details and the "following visits" propagation both run the guard b
   expect(src.slice(editWrite - 700, editWrite)).toContain('assertRepriceAllowed(trx, req.params.id, updates.estimated_price)');
   const siblingWrite = src.indexOf("await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);");
   expect(src.slice(siblingWrite - 300, siblingWrite)).toContain('assertRepriceAllowed(conn, sibling.id, siblingUpdates.estimated_price)');
+});
+
+test('a shared combined-visit (packet) invoice the visit belongs to is part of the check', async () => {
+  const calls = [];
+  const c = conn({ invoices: [{ status: 'sent', total: 200 }] });
+  const wrapped = (table) => {
+    const ch = c(table);
+    const orig = ch.orWhereIn;
+    ch.orWhereIn = (...args) => { calls.push({ table, col: args[0] }); return orig.apply(ch, args); };
+    return ch;
+  };
+  wrapped.schema = c.schema;
+  await expect(assertRepriceAllowed(wrapped, 's1', 0)).rejects.toMatchObject({ code: 'REPRICE_BLOCKED_OPEN_INVOICE' });
+  expect(calls).toContainEqual({ table: 'invoices', col: 'id' });
 });
