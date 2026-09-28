@@ -28,6 +28,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { formatETDateTime } from '../../lib/timezone';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -164,6 +165,112 @@ function AccessSection({ alerts, access }) {
           <span style={{ color: DARK.muted }}>{label}: </span>{value}
         </p>
       ))}
+    </>
+  );
+}
+
+// Customer photos sent before the visit (PR 3a, GATE_VISIT_PREP_PHOTOS —
+// facts.customerFlagged). Stop-level, not per-member: deterministicVisitFacts
+// resolves the CURRENT stop membership server-side, so every member's own
+// facts carry the SAME list — the caller (the main render below) passes
+// whichever member's brief answered it, and its service.id doubles as the
+// id for the thumbnails fetch (the server resolves the same stop from any
+// of its member ids). No AI read line here (PR 5 adds it once the pest
+// engine adapter lands).
+const VISIT_PREP_TOPIC_LABELS = {
+  pest: 'Pest',
+  lawn: 'Lawn',
+  tree_shrub: 'Tree & shrub',
+  other: 'Something else',
+};
+
+// Same VALID_LOCATIONS set the customer service-request form's picker
+// uses (PortalPage.jsx's ReportIssueOverlay locationOptions) — kept as a
+// small local map rather than importing that component-local array.
+const VISIT_PREP_LOCATION_LABELS = {
+  front_yard: 'Front yard',
+  back_yard: 'Back yard',
+  side_yard: 'Side yard',
+  inside_home: 'Inside home',
+  garage_lanai: 'Garage / lanai',
+  garden_beds: 'Garden beds',
+  other: 'Other',
+};
+
+function formatFlaggedSentAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return formatETDateTime(d, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+// Thumbnails are fetched lazily, once, from GET /:id/visit-prep-photos —
+// the SAME ownership-scoped endpoint the server pairs with this facts key
+// (technicianCurrentVisitFilter + the reassignment recheck), so a fetch
+// from a technician the stop was reassigned away from 404s exactly like
+// the facts key itself would have been withheld. A fetch failure just
+// leaves the placeholder boxes — never an error banner over a section
+// that is otherwise informative (the note/topic/location still render).
+function useVisitPrepPhotoUrls(serviceId, active, request) {
+  const [byId, setById] = useState({});
+  useEffect(() => {
+    if (!active || !serviceId || typeof request !== 'function') return;
+    let cancelled = false;
+    request(`/admin/schedule/${serviceId}/visit-prep-photos`)
+      .then((data) => {
+        if (cancelled) return;
+        const next = {};
+        for (const p of (data?.photos || [])) { if (p?.id) next[p.id] = p.url; }
+        setById(next);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [serviceId, active, request]);
+  return byId;
+}
+
+function CustomerFlaggedSection({ serviceId, customerFlagged, request }) {
+  const photoUrls = useVisitPrepPhotoUrls(serviceId, !!customerFlagged?.length, request);
+  if (!customerFlagged?.length) return null;
+  return (
+    <>
+      <SectionLabel>Customer flagged</SectionLabel>
+      {customerFlagged.map((entry) => {
+        const meta = [VISIT_PREP_LOCATION_LABELS[entry.locationOnProperty], VISIT_PREP_TOPIC_LABELS[entry.topic]]
+          .filter(Boolean).join(' · ');
+        return (
+          <div key={entry.id} style={{ marginBottom: 10 }}>
+            <p style={factMutedStyle}>sent {formatFlaggedSentAt(entry.sentAt)}</p>
+            {entry.note && <p style={{ ...factRowStyle, fontStyle: 'italic' }}>&ldquo;{entry.note}&rdquo;</p>}
+            {meta && <p style={factMutedStyle}>{meta}</p>}
+            {entry.photoIds?.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                {entry.photoIds.map((photoId) => {
+                  const url = photoUrls[photoId];
+                  if (!url) {
+                    return (
+                      <div key={photoId} aria-hidden="true" style={{
+                        width: 56, height: 56, borderRadius: 6, background: DARK.card, border: `1px solid ${DARK.border}`,
+                      }} />
+                    );
+                  }
+                  return (
+                    <button
+                      key={photoId}
+                      type="button"
+                      onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+                      aria-label="Open customer photo"
+                      style={{ padding: 0, border: `1px solid ${DARK.border}`, borderRadius: 6, background: 'transparent', cursor: 'pointer', lineHeight: 0 }}
+                    >
+                      <img src={url} alt="Customer-sent photo" style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 5, display: 'block' }} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -673,6 +780,13 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // code changed since generation would otherwise show stale next to the
   // freshly-built alert text.
   const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
+  // Customer-sent photos before the visit — same "first member that
+  // answered carries it" dedup as access (deterministicVisitFacts resolves
+  // ONE stop-level list, identical on every member's own facts). Keep the
+  // member alongside the entries: its service.id is what the thumbnails
+  // fetch uses (any current member id resolves the same stop server-side).
+  const customerFlaggedMember = memberBits.find((m) => m.facts?.customerFlagged?.length) || null;
+  const customerFlagged = customerFlaggedMember?.facts?.customerFlagged || null;
   // Estimates dedupe by id: siblings booked from ONE estimate render it
   // once; separately-quoted siblings each render their own.
   const estimates = [];
@@ -719,6 +833,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 
       <AccessSection alerts={alerts} access={access} />
+
+      <CustomerFlaggedSection
+        serviceId={customerFlaggedMember?.service?.id}
+        customerFlagged={customerFlagged}
+        request={request}
+      />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

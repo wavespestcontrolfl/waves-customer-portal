@@ -20570,6 +20570,24 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         // just the facts: a served brief's cached access codes must not
         // reach the former technician once the recheck has the signal.
         if (!stillOwned) return { brief: null };
+        // "Seen" stamp for the customer-flagged photos (PR 3a): same
+        // fire-and-forget, whereNull-guarded, first-time-only pattern as
+        // pest_identifications.report_first_viewed_at
+        // (public-pest-identifier.js) — never adds latency or failure to
+        // the brief read, and the guard makes concurrent reads idempotent.
+        // ASSIGNED-TECHNICIAN reads only (isTechnicianRequest): an
+        // admin/dispatcher previewing the same stop must not mark a
+        // customer's photos "seen" before the technician has actually
+        // opened them. Runs only after the reassignment recheck above
+        // confirms this request still owns the stop.
+        if (isTechnicianRequest(req) && facts.customerFlagged?.length) {
+          const submissionIds = facts.customerFlagged.map((c) => c.id);
+          void db('visit_prep_submissions')
+            .whereIn('id', submissionIds)
+            .whereNull('tech_seen_at')
+            .update({ tech_seen_at: db.fn.now() })
+            .catch((err) => logger.warn(`[admin-schedule] visit-prep tech_seen_at stamp failed for ${svc.id}: ${err.message}`));
+        }
         return { ...payload, facts };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief facts failed for ${svc.id}: ${err.message}`);
@@ -20605,6 +20623,38 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a gate code changed since generation must reach the tech from the
     // live facts, not the cached copy.
     res.json(await withFacts(served));
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-prep-photos
+// Short-lived signed VIEW urls for the stop's customer-sent visit-prep
+// photos (PR 3a — the tech Visit Brief panel's "Customer flagged"
+// thumbnails). Gate off (GATE_VISIT_PREP_PHOTOS) = 404, same generic shape
+// every other gated route in this lane answers with. Authorization is
+// EXACTLY GET /:id/visit-brief's own model: one ownership-scoped fetch
+// (technicianCurrentVisitFilter — a technician request is scoped to their
+// OWN current assignment; an admin/office request is unscoped) plus a
+// reassignment recheck AFTER the (S3-signing) work, since dispatch can
+// reassign the stop while those signed urls are being minted — a former
+// technician must never receive a batch of live links into a customer's
+// home.
+router.get('/:id/visit-prep-photos', async (req, res, next) => {
+  try {
+    const { visitPrepPhotosLive } = require('../config/feature-gates');
+    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Not found' });
+    const VisitPrep = require('../services/visit-prep');
+    const photos = await VisitPrep.stopPhotoViewUrls(svc);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Not found' });
+    res.json({ photos });
   } catch (err) { next(err); }
 });
 

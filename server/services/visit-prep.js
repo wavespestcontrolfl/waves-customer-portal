@@ -463,6 +463,77 @@ async function createVisitPrepSubmission({
   return { created: result.created, summary: result.summary };
 }
 
+// ── Technician Visit Brief surface (PR 3a) ──────────────────────────────────
+// Two new, self-contained reads consumed by previsit-brief.js's
+// deterministicVisitFacts (facts.customerFlagged) and by
+// admin-schedule.js's GET /:id/visit-prep-photos. Neither touches any of
+// the write path above; both reuse stopMemberIds (unchanged) for the same
+// CURRENT-membership resolution every other read/count in this file uses —
+// NEVER a submission's own snapshotted visit_id (see the file header).
+
+// Short-lived signed VIEW urls for every photo on the stop's CURRENT
+// membership — same TTL as the technician's own service photos
+// (GET /api/tech/services/:id/photos, tech-track.js: getSignedUrl(...,
+// { expiresIn: 3600 })), not the 24h PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+// (that TTL is for a customer-facing tokenized page's in-page dwell, not a
+// staff-authenticated one-shot fetch). Authorization is entirely the
+// caller's job — admin-schedule.js's GET /:id/visit-prep-photos mirrors
+// GET /:id/visit-brief's own ownership scoping + reassignment recheck
+// before and after calling this; this function trusts `svc` as already
+// authorized for the read.
+const TECH_PHOTO_VIEW_TTL_SECONDS = 3600;
+
+async function stopPhotoViewUrls(svc, conn = db) {
+  const ids = await stopMemberIds(svc, conn);
+  if (ids.length === 0) return [];
+  const photos = await conn('visit_prep_photos')
+    .whereIn('scheduled_service_id', ids)
+    .orderBy('submission_id', 'asc')
+    .orderBy('photo_index', 'asc')
+    .select('id', 'submission_id', 's3_key');
+  return Promise.all(photos.map(async (p) => ({
+    id: p.id,
+    submissionId: p.submission_id,
+    url: await PhotoService.getViewUrl(p.s3_key, TECH_PHOTO_VIEW_TTL_SECONDS),
+  })));
+}
+
+// Deterministic-facts entry point for `facts.customerFlagged`
+// (previsit-brief.js's deterministicVisitFacts) — called ONLY when
+// visitPrepPhotosLive() (the caller's job, not re-checked here so this
+// stays a plain read). Returns null (never an empty array) when the
+// stop's CURRENT membership has no submissions, so the caller can omit
+// the key entirely rather than serve an empty customerFlagged: [] — gate
+// off or no submissions must both read as "key absent," not "empty list."
+// Never returns S3 keys or URLs — photoIds only; the thumbnails endpoint
+// above signs those on its own authorized read.
+async function customerFlaggedFacts(svc, conn = db) {
+  const ids = await stopMemberIds(svc, conn);
+  if (ids.length === 0) return null;
+  const submissions = await conn('visit_prep_submissions')
+    .whereIn('scheduled_service_id', ids)
+    .orderBy('created_at', 'asc')
+    .select('id', 'created_at', 'topic', 'location_on_property', 'note');
+  if (submissions.length === 0) return null;
+  const photos = await conn('visit_prep_photos')
+    .whereIn('submission_id', submissions.map((s) => s.id))
+    .orderBy('photo_index', 'asc')
+    .select('id', 'submission_id');
+  const photoIdsBySubmission = new Map();
+  for (const p of photos) {
+    if (!photoIdsBySubmission.has(p.submission_id)) photoIdsBySubmission.set(p.submission_id, []);
+    photoIdsBySubmission.get(p.submission_id).push(p.id);
+  }
+  return submissions.map((s) => ({
+    id: s.id,
+    sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
+    topic: s.topic || null,
+    locationOnProperty: s.location_on_property || null,
+    note: s.note || null,
+    photoIds: photoIdsBySubmission.get(s.id) || [],
+  }));
+}
+
 module.exports = {
   VISIT_PREP_LIMITS,
   TOPICS,
@@ -472,6 +543,9 @@ module.exports = {
   capReached,
   visitPrepSummary,
   createVisitPrepSubmission,
+  TECH_PHOTO_VIEW_TTL_SECONDS,
+  stopPhotoViewUrls,
+  customerFlaggedFacts,
   _internal: {
     detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg,
   },
