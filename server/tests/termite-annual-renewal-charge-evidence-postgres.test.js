@@ -112,6 +112,9 @@ async function createScratchDb() {
     -- exclusion marker — reconcileParentRenewedStamps' scan excludes on it
     -- directly in SQL (20260928000100).
     renewal_parent_deleted_conflict_belled_at timestamptz,
+    -- Codex #4971 r20 P1 (finding 2): a term-window move's own timestamp,
+    -- one more arm of parentChangedAtSql (20260928020000).
+    term_window_changed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -1324,6 +1327,47 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await expect(Charge._private.paidAfterParentChanged(
         db, await db('annual_prepay_terms').where({ id: successor.id }).first(), parent,
       )).resolves.toBe(false);
+    });
+  });
+
+  // Codex #4971 r20 P1 (finding 2): a staff term-window move on a parent
+  // that otherwise still authorizes its renewal (still active — no other
+  // arm of parentChangedAtSql fires) is dated by the parent's own
+  // term_window_changed_at stamp (20260928020000) — but ONLY a move made
+  // AFTER this successor was minted. The mint validated the successor's
+  // window against the parent's window as it stood, so an earlier move
+  // (the installation anchor's year-1 move, a correction before the
+  // renewal existed) changed nothing this renewal relies on; unscoped, that
+  // year-old stamp would date EVERY later renewal of an anchored plan as
+  // paid late.
+  describe('r20: a parent term-window move after the successor was minted', () => {
+    const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
+
+    async function movedParentRenewal({ mintedAt, movedAt, paidAt }) {
+      const parent = await insertParent({ term_window_changed_at: movedAt });
+      const invoice = await insertInvoice({ status: 'paid', paid_at: paidAt });
+      const successor = await insertSuccessor(parent, invoice, { created_at: mintedAt });
+      return { parent, successor: await db('annual_prepay_terms').where({ id: successor.id }).first() };
+    }
+
+    test('moved AFTER the mint, paid after the move: dated late (the refund-or-honor bell can ring)', async () => {
+      const { parent, successor } = await movedParentRenewal({ mintedAt: hoursAgo(3), movedAt: hoursAgo(2), paidAt: hoursAgo(1) });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(true);
+    });
+
+    test('moved AFTER the mint but paid BEFORE the move: not dated late by it', async () => {
+      const { parent, successor } = await movedParentRenewal({ mintedAt: hoursAgo(3), movedAt: hoursAgo(1), paidAt: hoursAgo(2) });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(false);
+    });
+
+    test('moved BEFORE the mint (an installation anchor, an old correction): never dates this renewal late', async () => {
+      const { parent, successor } = await movedParentRenewal({ mintedAt: hoursAgo(2), movedAt: hoursAgo(3), paidAt: hoursAgo(1) });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(false);
+    });
+
+    test('never moved (NULL stamp): a still-authorizing parent dates no change at all, exactly as before', async () => {
+      const { parent, successor } = await movedParentRenewal({ mintedAt: hoursAgo(2), movedAt: null, paidAt: hoursAgo(1) });
+      await expect(Charge._private.paidAfterParentChanged(db, successor, parent)).resolves.toBe(false);
     });
   });
 

@@ -1346,28 +1346,79 @@ function assertRenewalLockAlive() {
 // in-flight parent can't cross-deadlock two concurrent deletion attempts).
 // No renewable parent → fn() runs directly, no lock taken.
 async function withCustomerDeletionGate(customerId, fn) {
-  if (!customerId) return fn();
+  return withCustomerDeletionGateForCustomers([customerId], fn);
+}
+
+// Codex #4971 round-20 P2 (finding 4): the array form. auth.js's
+// self-service DELETE /account can affect several profiles (a merged
+// account's linked customers) in one request — nine profiles used to mean
+// nine NESTED withCustomerDeletionGate calls (auth.js's own reduceRight),
+// each opening its own raw lock session against the shared
+// PARENT_DECISION_LOCK_SESSIONS cap (8), all held open at once by the outer
+// calls waiting on their inner ones: a 9th profile deterministically
+// exhausted the cap. Collect every key across every customer id first, then
+// take them ALL, sorted, in ONE withParentDecisionLock call — the same
+// "one session, every key via alsoTermIds" fix r17 P2 already applied to
+// this function's own per-parent loop. admin-customers.js's single-id
+// DELETE /:id still calls this with a one-element array.
+async function withCustomerDeletionGateForCustomers(customerIds, fn) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return fn();
+  // Both queries below keep the SAME top-level chain shape (where →
+  // whereNotNull → whereIn → select, matching the pre-existing single-id
+  // query) — any customer-scoping or extra predicate is folded into the
+  // first `.where(callback)`, so a `db('annual_prepay_terms')` mock/stub
+  // built for the original single-query shape (see this function's own
+  // unit tests) still resolves both calls correctly.
   const parents = await db('annual_prepay_terms')
-    .where({ customer_id: customerId })
+    .where(function scopeCustomers() { this.whereIn('customer_id', ids); })
     .whereNotNull('annual_plan_version')
     .whereIn('status', RENEWABLE_STATUSES)
     .select('id');
-  if (!parents?.length) return fn();
+  // Codex #4971 r20 P1 (finding 3): a staff-recorded 'renew' decision moves
+  // the PARENT to 'renewed' (renewal_decision 'renew') while its successor
+  // can still sit payment_pending, unbilled/unpaid — a status no longer in
+  // RENEWABLE_STATUSES, so the parents query above misses that pair
+  // entirely and this gate then takes NOTHING for it, even though every
+  // renewal action on the successor (withRenewalGate: {parent.id,
+  // successor.id}) still keys on exactly this parent. The full lock set is
+  // therefore: every renewable termite parent of these customers (above) ∪
+  // every payment_pending renewal successor of theirs (renewed_from_term_id
+  // NOT NULL — a plain, non-renewal annual-prepay term never matches) ∪
+  // those successors' own parents, whatever status the parent is currently
+  // in — the SAME key pair withRenewalGate holds for any in-flight renewal
+  // action on that successor.
+  const successors = await db('annual_prepay_terms')
+    .where(function scopeCustomers() { this.whereIn('customer_id', ids).whereNotNull('renewed_from_term_id'); })
+    .whereNotNull('annual_plan_version')
+    .whereIn('status', [PAYMENT_PENDING_STATUS])
+    .select('id', 'renewed_from_term_id');
+  // Array.isArray, not a truthy/length check alone (r15's own parents query
+  // kept the equivalent `parents?.length` guard) — a query-builder stub in
+  // an existing unit test resolves a bare `.select()` chain to the builder
+  // object itself rather than an array/thenable, and that object must read
+  // as "no rows" here exactly like it always has, never throw on `.map`.
+  const keys = new Set();
+  for (const parent of Array.isArray(parents) ? parents : []) keys.add(String(parent.id));
+  for (const successor of Array.isArray(successors) ? successors : []) {
+    keys.add(String(successor.id));
+    if (successor.renewed_from_term_id) keys.add(String(successor.renewed_from_term_id));
+  }
+  if (!keys.size) return fn();
   // Sorted in JS, not the query (a plain array sort — no ORDER BY needed
   // for a handful of rows, and it keeps this callable against a query
   // builder stub that supports where/whereNotNull/whereIn/select but not
   // orderBy).
   //
-  // Codex #4971 r17 P2: every parent key is taken on ONE session via
+  // Codex #4971 r17 P2: every key is taken on ONE session via
   // withParentDecisionLock's own alsoTermIds — never one nested
-  // withParentDecisionLock call per parent. Nesting them (the old
+  // withParentDecisionLock call per key. Nesting them (the old
   // `reduceRight` chain) opened one raw lock session (PARENT_DECISION_LOCK_
-  // SESSIONS, capped at 8) PER PARENT, all held open at once by the outer
-  // calls waiting on their inner ones — a customer with 9 renewable parent
-  // terms deterministically exhausted the cap and failed the 9th. Passing
-  // every id through alsoTermIds takes them all, sorted, on the single
-  // session withParentDecisionLock already opens for that call.
-  const sorted = [...new Set(parents.map((parent) => String(parent.id)))].sort();
+  // SESSIONS, capped at 8) PER KEY, all held open at once by the outer
+  // calls waiting on their inner ones. Passing every id through
+  // alsoTermIds takes them all, sorted, on the single session
+  // withParentDecisionLock already opens for that call.
+  const sorted = [...keys].sort();
   return require('./annual-prepay-renewals').withParentDecisionLock(sorted[0], fn, { alsoTermIds: sorted.slice(1) });
 }
 
@@ -1573,12 +1624,27 @@ async function bellLatePaidRenewalUnderGate(original, conn) {
 // Columns a narrow schema may lack are read through to_jsonb (NULL when
 // absent; LEAST ignores NULLs). `p` is the parent term, `pi` its prepay
 // invoice (a LEFT JOIN — a parent with no invoice has no invoice evidence).
-function parentChangedAtSql(p = 'p', pi = 'pi') {
+function parentChangedAtSql(p = 'p', pi = 'pi', s = 't') {
   const ts = (alias, column) => `(to_jsonb(${alias}) ->> '${column}')::timestamptz`;
   return `LEAST(
     CASE WHEN ${p}.renewal_decision IS DISTINCT FROM 'renew' THEN ${p}.renewal_decision_at END,
     ${ts(p, 'dispute_suspended_at')},
     CASE WHEN NOT (${p}.status IN ('active', 'renewal_pending') OR (${p}.status = 'renewed' AND ${p}.renewal_decision = 'renew')) THEN ${p}.updated_at END,
+    -- Codex #4971 r20 P1 (finding 2): a term-window move (parent_term_moved
+    -- — annual-prepay-renewals.js's createTermForAnnualPrepay editing an
+    -- EXISTING term's term_start/term_end) on a parent that otherwise still
+    -- authorizes its renewal (active/renewal_pending, or renewed+'renew')
+    -- trips no other arm above — none of them fire while the status still
+    -- reads as authorizing. ONLY a move made AFTER this successor was
+    -- minted counts: the mint validated the successor's own window
+    -- against the parent's window as it stood, so an earlier move (the
+    -- installation anchor's own year-1 move, a staff correction before
+    -- the renewal ever existed) changed nothing this renewal relies on —
+    -- unscoped, that year-old stamp would date EVERY later renewal of an
+    -- anchored plan as "paid after a change" (the r6 P2 class of bug).
+    -- s is the successor row. Column-tolerant: a schema without the
+    -- column (pre-migration) reads NULL, same as never having moved.
+    CASE WHEN ${ts(p, 'term_window_changed_at')} > ${s}.created_at THEN ${ts(p, 'term_window_changed_at')} END,
     CASE WHEN lower(coalesce(${pi}.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded') THEN ${ts(pi, 'updated_at')} END,
     (SELECT MIN(${ts('rp', 'updated_at')}) FROM payments rp
       WHERE ${revokedPaymentSql('rp')}
@@ -1603,8 +1669,11 @@ function parentChangedAtSql(p = 'p', pi = 'pi') {
 // JS entry for the same test: was the renewal paid after the parent changed?
 async function paidAfterParentChanged(conn, successor, parent) {
   if (!parent?.id) return false;
+  // The successor row rides the query as `t` (parentChangedAtSql's
+  // term-window arm dates a parent move only against ITS mint time).
   const row = await conn('annual_prepay_terms as p')
     .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
+    .joinRaw('JOIN annual_prepay_terms AS t ON t.id = ?', [successor.id])
     .where('p.id', parent.id)
     .first(conn.raw(`(SELECT i.paid_at FROM invoices i WHERE i.id = ?) > ${parentChangedAtSql()} AS paid_after`, [successor.prepay_invoice_id]));
   return row?.paid_after === true;
@@ -4037,6 +4106,7 @@ module.exports = {
   withRenewalSendClearance,
   withRenewalGate,
   withCustomerDeletionGate,
+  withCustomerDeletionGateForCustomers,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,

@@ -163,6 +163,9 @@ async function createScratchDb() {
     -- excludes on this directly in SQL (20260928000100) — needed on every
     -- test in this file that calls it, not only a specific scenario.
     renewal_parent_deleted_conflict_belled_at timestamptz,
+    -- Codex #4971 r20 P1 (finding 2): a term-window move's own timestamp,
+    -- one more arm of parentChangedAtSql (20260928020000).
+    term_window_changed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);

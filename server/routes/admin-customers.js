@@ -4721,10 +4721,10 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // closes the remaining crash-adjacent window (a successor minted, or a
     // send already past its own reads, in the instant between that guard's
     // check and this transaction's commit).
-    const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    const { withCustomerDeletionGateForCustomers } = require('../services/termite-annual-renewal-charge');
     let relink;
     try {
-      relink = await withCustomerDeletionGate(req.params.id, () => db.transaction(async (trx) => {
+      relink = await withCustomerDeletionGateForCustomers([req.params.id], () => db.transaction(async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {

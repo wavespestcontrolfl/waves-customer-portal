@@ -6538,6 +6538,26 @@ async function createTermForAnnualPrepay({
     if (hasExplicitTermStart) updates.term_start = normalizedStart;
     if (hasExplicitTermEnd) updates.term_end = normalizedEnd;
     else if (hasExplicitTermStart) updates.term_end = normalizedEnd;
+    // Codex #4971 round-20 P1 (charge.js:1581): stamp the moment this term's
+    // OWN window actually moves. parentChangedAtSql (the renewal charge's
+    // "when did the parent stop authorizing its renewal" scan, read by both
+    // paidAfterParentChanged and leg 7e's late-paid backstop) has no arm for
+    // a term-window edit on a parent that otherwise still authorizes its
+    // renewal (still active/renewal_pending, or renewed with a 'renew'
+    // decision) — so a successor paid after a plain date edit was never
+    // dated as "paid after a change", the refund-or-honor bell never rang,
+    // and recordParentRenewedIfEligible kept rejecting the same paid
+    // successor forever with no escalation. Column-tolerant (a narrow
+    // schema without the column just skips the stamp) and VALUE-compared,
+    // never presence-compared — resupplying the SAME dates (the estimate
+    // re-run path, a no-op save) must not read as a move.
+    if (termCols.term_window_changed_at) {
+      const startMoved = Object.prototype.hasOwnProperty.call(updates, 'term_start')
+        && dateOnly(existing.term_start) !== updates.term_start;
+      const endMoved = Object.prototype.hasOwnProperty.call(updates, 'term_end')
+        && dateOnly(existing.term_end) !== updates.term_end;
+      if (startMoved || endMoved) updates.term_window_changed_at = new Date();
+    }
     if (termCols.coverage_service_type && normalizedCoverageServiceType !== undefined) {
       updates.coverage_service_type = normalizedCoverageServiceType;
     }

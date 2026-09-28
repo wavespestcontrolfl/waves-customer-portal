@@ -2222,6 +2222,19 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     let term;
     try {
       term = await db.transaction(async (trx) => {
+        // Codex #4971 round-20 P1 (charge.js:925): this route can edit an
+        // EXISTING term's term_start/term_end/prepay_amount (the "existing"
+        // branch of createTermForAnnualPrepay below), which is exactly the
+        // parent-decision-sensitive write the renewal charge's own
+        // withParentDecisionLock gate exists for — a term-window move (or an
+        // amount change) between chargeRefusalUnderGate's validation and the
+        // Stripe submission. Take the gate FIRST, before the overlap lock
+        // (gate → customer → invoice → term, the ordering every other
+        // termite writer follows): termite-only (acquireTermiteGateAtEntry
+        // no-ops when this invoice names no termite term) and keyed on the
+        // invoice, so it finds the term this edit is actually about even
+        // though the term id itself isn't known yet at this point.
+        await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
         await trx.raw(
           'SELECT pg_advisory_xact_lock(?, hashtext(?))',
           [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],

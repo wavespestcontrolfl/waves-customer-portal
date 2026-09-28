@@ -551,4 +551,91 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(invoiceId, trx);
     expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('cancelled');
   });
+
+  // Codex #4971 round-20 P1 (finding 1, charge.js:925): editing an EXISTING
+  // termite term through this route (a plain prepayAmount/date re-save —
+  // createTermForAnnualPrepay's "existing" branch) must take the SAME
+  // parent-decision gate the renewal charge holds across its own Stripe
+  // submission, and take it BEFORE the per-customer overlap lock — a writer
+  // that only took the overlap lock could move the parent's window or
+  // amount between chargeRefusalUnderGate's validation and the charge's
+  // Stripe submission. Proven against REAL Postgres: a separate session
+  // holding the SAME advisory key (pg_advisory_xact_lock, the exact
+  // mechanism acquireTermiteGateAtEntry/acquireParentDecisionXactLock use)
+  // makes this route's edit WAIT for that session to release before it
+  // proceeds — never an instant, unserialized write. Pre-fix (no gate call
+  // in this route) the edit would return almost immediately, never
+  // observing the holder's release first.
+  test('editing an existing termite term WAITS on the parent-decision gate held by another session', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    // Termite-marked: acquireTermiteGateAtEntry's termiteGateKeys only
+    // resolves rows with annual_plan_version set.
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ annual_plan_version: 'v3' });
+
+    const holdMs = 500;
+    const order = [];
+    const holder = database.transaction(async (holderTrx) => {
+      await holderTrx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['annual-prepay-parent-decision', String(term.id)],
+      );
+      order.push('holder-has-gate');
+      await new Promise((resolve) => { setTimeout(resolve, holdMs); });
+      order.push('holder-releasing');
+    });
+    // Let the holder actually acquire the lock before the edit fires.
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+
+    const startedAt = Date.now();
+    const edit = request('POST', `/${prepayInvoiceId}/annual-prepay`, { prepayAmount: 500 });
+    const [editResult] = await Promise.all([edit, holder]);
+    order.push('edit-done');
+
+    expect(editResult.status).toBe(200);
+    expect(Number((await trx('annual_prepay_terms').where({ id: term.id }).first('prepay_amount')).prepay_amount)).toBe(500);
+    // The edit only ever ran after the holder released — proof it genuinely
+    // waited on the gate, not merely that it was slow for some other reason
+    // (never timing-only: a heavily loaded box can slow anything).
+    expect(order).toEqual(['holder-has-gate', 'holder-releasing', 'edit-done']);
+    // A loose bound, not a tight one (this machine can be heavily loaded) —
+    // only rules out an instant, unserialized write; well under the 5s
+    // lock_timeout either way.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
+    expect(Date.now() - startedAt).toBeLessThan(5000);
+  }, 20000);
+
+  // Codex #4971 round-20 P1 (finding 2, charge.js:1581): editing an
+  // EXISTING term's dates through this route stamps
+  // term_window_changed_at (20260928020000) — the arm parentChangedAtSql
+  // reads to date a parent's window move for the late-paid renewal alert —
+  // and ONLY when a date actually changes value: a same-date re-save and an
+  // amount-only re-save must not read as a move (a stale stamp would date
+  // a later renewal as "paid after a change").
+  test('editing an existing term stamps term_window_changed_at only when a date actually moves', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    const stampOf = async () => (await trx('annual_prepay_terms').where({ id: term.id }).first('term_window_changed_at')).term_window_changed_at;
+    expect(await stampOf()).toBeNull();
+
+    // Amount-only re-save (no dates in the body): no move, no stamp.
+    expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { prepayAmount: 450 })).status).toBe(200);
+    expect(await stampOf()).toBeNull();
+
+    // Same dates resupplied: value-compared, still no stamp.
+    const start = etDateString();
+    const sameEnd = String(term.term_end instanceof Date ? term.term_end.toISOString().slice(0, 10) : term.term_end).slice(0, 10);
+    expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: sameEnd })).status).toBe(200);
+    expect(await stampOf()).toBeNull();
+
+    // The end date moves: stamped.
+    const [y, m, d] = sameEnd.split('-').map(Number);
+    const movedEnd = `${y}-${String(m).padStart(2, '0')}-${String(Math.min(d + 1, 28)).padStart(2, '0')}`;
+    expect(movedEnd).not.toBe(sameEnd);
+    expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: movedEnd })).status).toBe(200);
+    const stamped = await stampOf();
+    expect(stamped).toBeInstanceOf(Date);
+
+    // Re-saving the moved dates unchanged leaves the original stamp alone.
+    expect((await request('POST', `/${prepayInvoiceId}/annual-prepay`, { termStart: start, termEnd: movedEnd })).status).toBe(200);
+    expect(await stampOf()).toEqual(stamped);
+  });
 });
