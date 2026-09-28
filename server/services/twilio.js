@@ -1357,7 +1357,13 @@ const TwilioService = {
           // sendCustomerMessage returns. Same predicate as the outer catch
           // below, so the two can never disagree. Best-effort: never lets
           // a hook failure change the original error.
-          if (typeof options.onDispatchRejected === 'function' && isDefinitiveTwilioRejection(createErr)) {
+          // 21610 is excluded: its opt-out is recorded only in the outer
+          // catch (recordSyncProviderOptOut), after this lock releases, so
+          // the marker must stay until then or a queued sender could see
+          // neither and text an opted-out number. The caller's post-return
+          // cleanup removes it after that write.
+          if (typeof options.onDispatchRejected === 'function' && isDefinitiveTwilioRejection(createErr)
+              && String(createErr.code) !== '21610') {
             try {
               await options.onDispatchRejected();
             } catch (hookErr) {

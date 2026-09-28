@@ -47,6 +47,7 @@ jest.mock('../services/conversations', () => ({
   recordTouchpoint: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => {}) }));
+jest.mock('../services/messaging/sync-optout', () => ({ recordSyncProviderOptOut: jest.fn(async () => {}) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -1332,6 +1333,22 @@ describe('onDispatchRejected (codex #5196 r4 P2)', () => {
     })).rejects.toBeTruthy();
 
     expect(onDispatchRejected).not.toHaveBeenCalled();
+  });
+
+  // 21610's opt-out is recorded after the lock releases (outer catch), so
+  // the attempt marker must survive until then — the hook must not fire.
+  test('a 21610 opt-out rejection never calls onDispatchRejected, and still records the opt-out', async () => {
+    const { recordSyncProviderOptOut } = require('../services/messaging/sync-optout');
+    const onDispatchRejected = jest.fn();
+    mockTwilioCreate.mockRejectedValueOnce(Object.assign(new Error('unsubscribed recipient'), { status: 400, code: 21610 }));
+
+    await expect(TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, onDispatchRejected,
+      withSmsHandoff: async dispatch => dispatch(),
+    })).rejects.toMatchObject({ status: 400, providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+
+    expect(onDispatchRejected).not.toHaveBeenCalled();
+    expect(recordSyncProviderOptOut).toHaveBeenCalledTimes(1);
   });
 
   test('a missing SID never calls onDispatchRejected', async () => {
