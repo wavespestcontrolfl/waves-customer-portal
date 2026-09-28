@@ -82,10 +82,10 @@ const SECURE_CARD_SHORT_TOKEN = /^[A-Za-z0-9_-]{22}$/;
 // generic rules below, so any segment under that parent is redacted.
 const CONSULTATION_TOKEN_PARENTS = new Set(['inspection']);
 
-// Link-preview images (server/routes/og-preview.js): /og/<kind>/<token>.jpg.
-// The .jpg suffix defeats the generic rules, and report-project tokens are
-// name slugs, so any .jpg segment under a token-bearing card kind is redacted.
-const OG_CARD_TOKEN_PARENTS = new Set(['report', 'report-project', 'appointment', 'reschedule', 'prep']);
+// Link-preview images (server/routes/og-preview.js): /og/report/<token>.jpg.
+// The .jpg suffix defeats the generic hex rule, so a .jpg segment under the
+// token-bearing card kind is redacted.
+const OG_CARD_TOKEN_PARENTS = new Set(['report']);
 
 function isTokenLikePathSegment(segment, previousSegment) {
   const decoded = decodeQueryPart(segment);

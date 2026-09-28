@@ -8,10 +8,13 @@
 const express = require('express');
 
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/link-preview-metadata', () => ({
-  FIXED_CARDS: { pay: { eyebrow: 'INVOICE', headline: 'Your invoice', subline: 'View and pay securely online' } },
-  resolveCardContent: jest.fn(),
-}));
+jest.mock('../services/link-preview-metadata', () => {
+  const PAY = { eyebrow: 'INVOICE', headline: 'Your invoice', subline: 'View and pay securely online' };
+  return {
+    fixedCard: jest.fn((kind) => (kind === 'pay' ? PAY : null)),
+    resolveCardContent: jest.fn(),
+  };
+});
 // The image bytes spell out the content, so a test can see what rendered.
 jest.mock('../services/link-preview-card-renderer', () => ({
   renderLinkPreviewJpeg: jest.fn(async (c) => Buffer.from(JSON.stringify([c.eyebrow, c.headline, c.subline]))),
@@ -84,20 +87,3 @@ test('token-free cards are public and cacheable; an unknown name gets the defaul
   expect(resolveCardContent).not.toHaveBeenCalled();
   expect(renderLinkPreviewJpeg).toHaveBeenCalled();
 }));
-
-test('every HTML page whose <head> looks a token up gets privacy headers, then a limiter', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
-  // privacy headers, THEN the limiter (so a 429 carries them), then the page
-  const mount = /app\.get\(\s*(\/\^[^\n]*\/i),\s*\(req, res, next\) => \{ applySensitiveSpaHeaders\(req\.path, res\); next\(\); \},\s*ogPreviewRoutes\.linkPreviewLimiter,\s*sendSpaHtml/.exec(src);
-  expect(mount).not.toBeNull();
-   
-  const re = new Function(`return ${mount[1]};`)();
-  for (const p of ['/report/project/jane-sample-0123456789ab', `/appointment/${HEX}`, `/reschedule/${HEX}`, `/prep/${'c'.repeat(32)}`]) {
-    expect(re.test(p)).toBe(true);
-  }
-  // /report and /recap resolve through the report limiter's own mounts
-  expect(src).toMatch(/app\.get\(\/\^\\\/report\\\/\[a-f0-9\]\{32\}\\\/\?\$\/i, reportsPublicRoutes\.reportLimiter, sendSpaHtml\)/);
-  expect(src).toMatch(/app\.get\(\/\^\\\/recap\\\/\[a-f0-9\]\{32\}\\\/\?\$\/i, reportsPublicRoutes\.reportLimiter, sendSpaHtml\)/);
-});

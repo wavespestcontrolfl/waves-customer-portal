@@ -62,8 +62,6 @@ describe('request URL log redaction', () => {
 
   test('redacts the token in a link-preview image URL; token-free card URLs stay', () => {
     expect(redactRequestUrl(`/og/report/${'a'.repeat(32)}.jpg`)).toBe('/og/report/[REDACTED]');
-    expect(redactRequestUrl('/og/report-project/jane-sample-0123456789ab.jpg')).toBe('/og/report-project/[REDACTED]');
-    expect(redactRequestUrl(`/og/appointment/${'b'.repeat(64)}.jpg`)).toBe('/og/appointment/[REDACTED]');
     expect(redactRequestUrl('/og/pay.jpg')).toBe('/og/pay.jpg');
     expect(redactRequestUrl('/og/default.jpg')).toBe('/og/default.jpg');
   });

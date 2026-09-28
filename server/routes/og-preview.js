@@ -19,7 +19,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
-const { FIXED_CARDS, resolveCardContent } = require('../services/link-preview-metadata');
+const { fixedCard, resolveCardContent } = require('../services/link-preview-metadata');
 const { renderLinkPreviewJpeg } = require('../services/link-preview-card-renderer');
 
 // Token-bearing cards (/og/:kind/:token.jpg) get the privacy headers before
@@ -36,14 +36,13 @@ router.use((req, res, next) => {
 // Public and outside the /api limiter, and a token-bearing card costs a DB
 // lookup — same per-IP budget as the /l short links. Preview crawlers fetch
 // one image per shared link, far under this.
-const linkPreviewLimiter = require('express-rate-limit')({
+router.use(require('express-rate-limit')({
   windowMs: 60 * 1000,
   max: 120,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').unauthenticatedAuthLimitKey,
-});
-router.use(linkPreviewLimiter);
+}));
 
 const DEFAULT_CONTENT = {
   eyebrow: 'CUSTOMER PORTAL',
@@ -101,22 +100,22 @@ async function sendDefault(res) {
     const buffer = await renderCached(DEFAULT_CONTENT);
     return sendJpeg(res, buffer);
   } catch (err) {
-    logger.error(`[og-preview] default card render failed: ${err.message}`);
+    logger.error(`[og-preview] default card render failed: ${err.code || err.name}`);
     return res.status(500).end();
   }
 }
 
 // /og/default.jpg, and /og/<kind>.jpg for a card whose words are the same
-// for every customer (FIXED_CARDS — no token, no lookup). Anything else in
-// this shape gets the default card.
+// for every customer (FIXED_CARDS — no token, no lookup; a dark surface's
+// card is the default). Anything else in this shape gets the default card.
 router.get('/:file', async (req, res) => {
   const match = /^([a-z-]+)\.jpg$/.exec(String(req.params.file || ''));
-  const kind = match && Object.prototype.hasOwnProperty.call(FIXED_CARDS, match[1]) ? match[1] : null;
-  if (!kind) return sendDefault(res);
+  const content = match ? fixedCard(match[1]) : null;
+  if (!content) return sendDefault(res);
   try {
-    return sendJpeg(res, await renderCached(FIXED_CARDS[kind]));
+    return sendJpeg(res, await renderCached(content));
   } catch (err) {
-    logger.error(`[og-preview] card render failed for kind=${kind}: ${err.message}`);
+    logger.error(`[og-preview] card render failed for kind=${match[1]}: ${err.code || err.name}`);
     return sendDefault(res);
   }
 });
@@ -145,7 +144,4 @@ router.get('/:kind/:tokenFile', async (req, res) => {
 });
 
 module.exports = router;
-// The same budget guards the customer HTML pages whose <head> looks a token
-// up for its preview tags (server/index.js).
-module.exports.linkPreviewLimiter = linkPreviewLimiter;
 module.exports._internals = { cache, DEFAULT_CONTENT };

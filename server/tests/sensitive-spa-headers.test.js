@@ -9,8 +9,6 @@ const {
   isPriceChangeNoticePath,
   isContractPath,
   isAppointmentPath,
-  isReschedulePath,
-  isPrepPath,
   isCareersInterviewPath,
   isInspectionPath,
 } = require('../utils/sensitive-spa-headers');
@@ -257,19 +255,5 @@ describe('contract signing shell (/contract/<token>)', () => {
     expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
     expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
     expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
-  });
-
-  test('the reschedule and prep shells get the privacy set — their <head> carries the visit\'s service and date', () => {
-    expect(isReschedulePath(`/reschedule/${'b'.repeat(64)}`)).toBe(true);
-    expect(isReschedulePath(`/reschedule/${'b'.repeat(63)}`)).toBe(false);
-    expect(isPrepPath(`/prep/${'c'.repeat(32)}/`)).toBe(true);
-    expect(isPrepPath(`/prep/${'c'.repeat(31)}`)).toBe(false);
-    for (const path of [`/reschedule/${'b'.repeat(64)}`, `/prep/${'c'.repeat(32)}`]) {
-      const res = mockResponse();
-      applySensitiveSpaHeaders(path, res);
-      expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
-      expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
-      expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
-    }
   });
 });

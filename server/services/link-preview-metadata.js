@@ -1,17 +1,14 @@
 /**
- * Per-link Open Graph preview metadata for the customer-portal token routes.
+ * Per-link Open Graph preview metadata for the customer-portal token routes,
+ * so a texted/emailed link shows a branded card instead of the bare portal
+ * default.
  *
- * Generalizes the report-page-metadata pattern (which stays as the single
- * source of truth for /report/:token — including its typedReportDelivery
- * suppression) to every other customer link route so a texted/emailed link
- * shows a branded card instead of the bare portal default.
- *
- * Every resolver below re-derives its own "is this token real and would the
- * actual page show it" verdict from the SAME table/column/gate the page's
- * own public route reads — never a second, drifting copy of that logic.
- * Anything ambiguous, expensive, or not cheaply/safely re-derivable (most
- * notably the estimate service-name blob) falls back to a GENERIC card for
- * that kind rather than guessing at DB-derived content (see resolveEstimate).
+ * Owner 2026-09-28: only the service report card shows link-specific detail
+ * (its service and date, through report-page-metadata's own lookup and
+ * typedReportDelivery suppression). Every other link gets a fixed card for
+ * its kind: re-deriving each page's own eligibility rules (payment holds,
+ * prep template versions, reschedule eligibility, grouped labels, archived
+ * WDO dates) in a second place kept drifting from the page.
  *
  * NOTHING here ever puts a dollar amount, customer name, address, phone,
  * email, tech name, or finding/note text into a card or a meta tag.
@@ -20,22 +17,15 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
+const { isEnabled, leadInspectionLinkLive } = require('../config/feature-gates');
 const {
-  formatReportDate,
   loadServiceReportCardContent,
   loadServiceReportPageMetadata,
 } = require('./report-page-metadata');
-const {
-  isAppointmentPath, isPrepPath, isReschedulePath, isServiceReportPath,
-} = require('../utils/sensitive-spa-headers');
+const { isServiceReportPath } = require('../utils/sensitive-spa-headers');
 
 const OG_IMAGE_WIDTH = 1200;
 const OG_IMAGE_HEIGHT = 630;
-
-// Token-shape gates bound query cost / weird input before it reaches knex;
-// the DB lookup is the real gate.
-const HEX64_RE = /^[a-f0-9]{64}$/i;
-const HEX32_RE = /^[a-f0-9]{32}$/i;
 
 // What the grey text under a texted link's preview reads (og:title), owner
 // 2026-09-27: just the brand — the card image carries the rest.
@@ -43,17 +33,6 @@ const PREVIEW_TITLE = 'Waves';
 
 function cleanText(value, max = 160) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, max);
-}
-
-// scheduled_services.service_type / prep_template rows are usually already
-// human-readable ("Pest Control"); a few legacy snake_case values
-// ("pest_control") get title-cased. Never anything fancier — this must never
-// become a second copy of the pricing engine's service-name logic.
-function titleCaseServiceType(value) {
-  const raw = cleanText(value, 80);
-  if (!raw) return 'Waves service';
-  if (!/^[a-z0-9]+(_[a-z0-9]+)+$/i.test(raw)) return raw;
-  return raw.split('_').filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
 }
 
 // Knex error messages embed the SQL with its bound values — the token — so
@@ -99,160 +78,20 @@ const ROUTE_MATCHERS = [
   { kind: 'interview', re: /^\/careers\/interview\/([^/]+)\/?$/i },
 ];
 
-// A kind that looks its token up only matches a path the privacy-header set
-// (sensitive-spa-headers.js) also covers, so "the <head> carries visit
-// details" and "the document is noindex/no-referrer/no-store" can never
-// disagree. Tokens are never URL-decoded: an encoded form (/recap/%61…)
-// fails the gate instead of slipping past the raw-path limiter and header
-// checks.
-const LOOKUP_PATH_GATES = {
-  report: isServiceReportPath,
-  'report-project': isServiceReportPath,
-  appointment: isAppointmentPath,
-  reschedule: isReschedulePath,
-  prep: isPrepPath,
-};
-
+// The report card looks its token up, so it only matches a path the
+// privacy-header set (sensitive-spa-headers.js) also covers. Tokens are never
+// URL-decoded: an encoded form (/recap/%61…) fails the gate instead of
+// slipping past the raw-path limiter and header checks.
 function matchLinkPreviewRoute(reqPath) {
   const p = String(reqPath || '');
   for (const { kind, re } of ROUTE_MATCHERS) {
     const m = re.exec(p);
     if (m) {
-      if (LOOKUP_PATH_GATES[kind] && !LOOKUP_PATH_GATES[kind](p)) return null;
+      if (kind === 'report' && !isServiceReportPath(p)) return null;
       return { kind, token: m[1] };
     }
   }
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Per-kind card content resolvers. Each returns { eyebrow, headline, subline }
-// or null (invalid / suppressed / gated off — caller falls back to the
-// generic default card). Every DB read here is READ-ONLY — none of these
-// may stamp a view, unlike the real page routes (a preview-card render, or
-// the LRU cache refilling, must never count as a customer view).
-// ---------------------------------------------------------------------------
-
-async function resolveReportProject(token) {
-  const { extractProjectReportTokenLookup } = require('./project-report-links');
-  const lookup = extractProjectReportTokenLookup(token);
-  if (!lookup) return null;
-  let project = null;
-  try {
-    if (lookup.type === 'full') {
-      project = await db('projects').where({ report_token: lookup.value })
-        .first('project_type', 'project_date', 'created_at');
-    } else {
-      const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`)
-        .limit(2).select('project_type', 'project_date', 'created_at');
-      project = rows.length === 1 ? rows[0] : null;
-    }
-  } catch (err) {
-    logger.warn(`[link-preview] report-project lookup failed: ${err.code || err.name}`);
-    return null;
-  }
-  if (!project) return null;
-  let headline = project.project_type || 'Waves service';
-  try {
-    const { getProjectType } = require('./project-types');
-    headline = getProjectType(project.project_type)?.label || headline;
-  } catch { /* keep raw project_type */ }
-  return {
-    eyebrow: 'PROJECT REPORT',
-    headline: cleanText(headline, 80),
-    subline: formatReportDate(project.project_date || project.created_at) || null,
-  };
-}
-
-async function resolveAppointment(token) {
-  if (!process.env.GATE_APPOINTMENT_PAGE || process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
-  if (!HEX64_RE.test(token)) return null;
-  let svc;
-  try {
-    svc = await db('scheduled_services as s')
-      .where('s.reschedule_token', token)
-      .leftJoin('customers as c', 's.customer_id', 'c.id')
-      .first(
-        's.id', 's.status', 's.visit_id', 's.scheduled_date', 's.window_start', 's.service_type',
-        'c.deleted_at as customer_deleted_at',
-      );
-  } catch (err) {
-    logger.warn(`[link-preview] appointment lookup failed: ${err.code || err.name}`);
-    return null;
-  }
-  if (!svc || svc.customer_deleted_at) return null;
-  // The date/window only goes on the card when the page itself would render
-  // this visit as upcoming — a cancelled, completed, past, or pending-rebook
-  // row still carries its OLD slot, which must never preview as booked — and
-  // the window is the page's own (the visit's canonical one when grouped).
-  let preview = null;
-  try {
-    const { previewForVisit } = require('../routes/appointment-public');
-    preview = await previewForVisit(svc);
-  } catch (err) {
-    logger.warn(`[link-preview] appointment state check failed: ${err.code || err.name}`);
-  }
-  const headline = titleCaseServiceType(svc.service_type);
-  if (!preview || preview.state !== 'upcoming') {
-    return { eyebrow: 'APPOINTMENT', headline, subline: 'View your visit details' };
-  }
-  const date = formatReportDate(svc.scheduled_date);
-  const subline = [date, preview.arrivalWindow].filter(Boolean).join(' · ') || null;
-  return { eyebrow: 'APPOINTMENT', headline, subline };
-}
-
-async function resolveReschedule(token) {
-  if (!HEX64_RE.test(token)) return null;
-  let svc;
-  try {
-    svc = await db('scheduled_services as s')
-      .where('s.reschedule_token', token)
-      .leftJoin('customers as c', 's.customer_id', 'c.id')
-      .first('s.id', 's.service_type', 'c.deleted_at as customer_deleted_at');
-  } catch (err) {
-    logger.warn(`[link-preview] reschedule lookup failed: ${err.code || err.name}`);
-    return null;
-  }
-  if (!svc || svc.customer_deleted_at) return null;
-  return {
-    eyebrow: 'RESCHEDULE',
-    headline: titleCaseServiceType(svc.service_type),
-    subline: 'Pick a time that works for you',
-  };
-}
-
-// Read-only mirror of prep-public.js's resolvePrepSource — deliberately NOT
-// the exported view-stamping path (that mutates prep_view_count /
-// prep_first_viewed_at on every call, which an image LRU refill or a
-// crawler retry must never do).
-async function resolvePrep(token) {
-  if (!HEX32_RE.test(token)) return null;
-  const now = new Date();
-  try {
-    const project = await db('projects').where({ prep_token: token }).first('project_type', 'prep_expires_at');
-    if (project) {
-      if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
-      let headline = project.project_type || 'Waves service';
-      try {
-        const { getProjectType } = require('./project-types');
-        headline = getProjectType(project.project_type)?.label || headline;
-      } catch { /* keep raw */ }
-      return { eyebrow: 'PREP GUIDE', headline: cleanText(headline, 80), subline: 'How to get ready for your visit' };
-    }
-    const service = await db('scheduled_services').where({ prep_token: token })
-      .whereNotNull('prep_template_key')
-      .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now))
-      .first('service_type');
-    if (!service) return null;
-    return {
-      eyebrow: 'PREP GUIDE',
-      headline: titleCaseServiceType(service.service_type),
-      subline: 'How to get ready for your visit',
-    };
-  } catch (err) {
-    logger.warn(`[link-preview] prep lookup failed: ${err.code || err.name}`);
-    return null;
-  }
 }
 
 // Cards whose words are the same for every customer. They read nothing from
@@ -260,6 +99,10 @@ async function resolvePrep(token) {
 // image URL carries no token (/og/<kind>.jpg). Estimates stay generic on
 // purpose: no services or prices (prices-only-on-estimate-pages ruling).
 const FIXED_CARDS = {
+  'report-project': { eyebrow: 'PROJECT REPORT', headline: 'Your project report', subline: 'See your report online' },
+  appointment: { eyebrow: 'APPOINTMENT', headline: 'Your appointment', subline: 'See your visit details' },
+  reschedule: { eyebrow: 'RESCHEDULE', headline: 'Change your visit', subline: 'See your options online' },
+  prep: { eyebrow: 'PREP GUIDE', headline: 'Get ready for your visit', subline: 'What to do before we arrive' },
   estimate: { eyebrow: 'ESTIMATE', headline: 'Your estimate', subline: 'See your options and book online' },
   reservice: { eyebrow: 'RE-SERVICE', headline: 'Book your re-service', subline: 'Pick a time that works for you' },
   inspection: { eyebrow: 'FREE ASSESSMENT', headline: 'Pick a time', subline: 'Book a free Waves assessment' },
@@ -279,34 +122,47 @@ const FIXED_CARDS = {
   interview: { eyebrow: 'CAREERS', headline: 'Schedule your interview', subline: 'Pick a time that works for you' },
 };
 
-// Cards that show the link's own service and/or date — each re-checks that
-// the page would actually show it before any of it reaches a card.
-const RESOLVERS = {
-  report: (token) => loadServiceReportCardContent(token),
-  'report-project': resolveReportProject,
-  appointment: resolveAppointment,
-  reschedule: resolveReschedule,
-  prep: resolvePrep,
+// A surface that is dark serves a uniform 404, so its card must not exist
+// either: while its gate is off the link gets the default card. Each entry
+// reads the same gate the surface's own public route reads.
+const CARD_GATES = {
+  appointment: () => process.env.GATE_APPOINTMENT_PAGE === 'true',
+  'pay-statement': () => isEnabled('payerStatements'),
+  reservice: () => require('./reservice-scheduler').reserviceSelfServeEnabled(),
+  inspection: () => leadInspectionLinkLive(),
+  interview: () => isEnabled('recruitingComms'),
 };
 
-// Resolves card CONTENT for a given (kind, token) — used both by the HTML
-// metadata pass below and, independently, by the /og/:kind/:token.jpg image
-// route (which re-resolves from the URL's own kind/token rather than ever
-// trusting rendered card text passed as a query param).
-async function resolveCardContent(kind, token) {
-  if (FIXED_CARDS[kind]) return FIXED_CARDS[kind];
-  const resolver = RESOLVERS[kind];
-  if (!resolver || !token) return null;
+function fixedCard(kind) {
+  if (!Object.prototype.hasOwnProperty.call(FIXED_CARDS, kind)) return null;
+  const gate = CARD_GATES[kind];
   try {
-    return await resolver(String(token));
+    if (gate && !gate()) return null;
   } catch (err) {
-    logger.warn(`[link-preview] resolver for kind=${kind} failed: ${err.code || err.name}`);
+    logger.warn(`[link-preview] gate check failed for kind=${kind}: ${err.code || err.name}`);
     return null;
   }
+  return FIXED_CARDS[kind];
+}
+
+// Resolves card CONTENT for (kind, token) — used by the HTML metadata pass
+// below and, independently, by the /og image route (which re-resolves from
+// its own URL rather than trusting any rendered text).
+async function resolveCardContent(kind, token) {
+  if (kind === 'report') {
+    if (!token) return null;
+    try {
+      return await loadServiceReportCardContent(String(token));
+    } catch (err) {
+      logger.warn(`[link-preview] report lookup failed: ${err.code || err.name}`);
+      return null;
+    }
+  }
+  return fixedCard(kind);
 }
 
 function ogImageUrl(kind, token) {
-  if (FIXED_CARDS[kind]) return portalUrl(`/og/${kind}.jpg`);
+  if (Object.prototype.hasOwnProperty.call(FIXED_CARDS, kind)) return portalUrl(`/og/${kind}.jpg`);
   return portalUrl(`/og/${encodeURIComponent(kind)}/${encodeURIComponent(token)}.jpg`);
 }
 
@@ -351,9 +207,9 @@ module.exports = {
   OG_IMAGE_HEIGHT,
   FIXED_CARDS,
   PREVIEW_TITLE,
+  fixedCard,
   matchLinkPreviewRoute,
   resolveCardContent,
   loadLinkPreviewMetadata,
   redactLinkPreviewPath,
-  titleCaseServiceType,
 };
