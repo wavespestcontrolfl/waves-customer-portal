@@ -81,6 +81,7 @@ const LANE_RUNTIME = {
   // customer's texts + completion notes and stores it on review_sequences —
   // no customer-visible output of its own, so internal_write like sms_intent.
   review_topic: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
+  sms_service_identity: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // offline: one bounded Anthropic call; a miss returns null so the durable
   // queue retries later — no cross-provider chain, no deterministic answer.
   contact_correction: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', maturity: 'M3' },
@@ -318,9 +319,19 @@ const LANE_RUNTIME = {
   // draft_for_human + M2 (Codex r18): a Veo clip is only made for a draft campaign run and lands in the approval queue.
   video_gen: { side_effect_class: 'draft_for_human', ledger: 'unrecordable', unrecordable_reason: 'video', fallback_class: 'offline', eval_family: null, maturity: 'M2', ...LONG_BATCH },
   events: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M3', ...LONG_BATCH },
-  // events_editorial (main 2026-09-03): curation + normalizing copy on the two-provider contentDraft policy; cron batch.
-  // customer_visible: curation can flip events_raw.admin_status to approved, making model-selected events publishable with no human (pre-push P1).
-  events_editorial: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_editorial (main 2026-09-03; split 2026-09-27 — see events_curation
+  // below): normalizing (freshness/type classification, venue cleanup) on
+  // the two-provider contentDraft policy; cron batch. Never flips
+  // admin_status, so this stays internal_write (events_curation is the
+  // customer-visible half).
+  events_editorial: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
+  // events_curation (split from events_editorial 2026-09-27, owner ruling:
+  // move scoring to the newsletterWriter policy — Opus 5.5 effort max —
+  // and stop penalizing missing price / unclear age so the weekly issue
+  // stops starving at 0 approved events). customer_visible: curation can
+  // flip events_raw.admin_status to approved, making model-selected events
+  // publishable with no human (pre-push P1, unchanged by the split).
+  events_curation: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'offline', eval_family: 'routine_copy', maturity: 'M3', ...LONG_BATCH },
   // M3 (Codex r16): the 8am cron runs generateDailyAdvice unattended, persists ad_advisor_reports and texts the owner.
   ads_advisor: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3' },
 

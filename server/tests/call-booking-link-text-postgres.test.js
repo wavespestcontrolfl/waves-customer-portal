@@ -422,8 +422,12 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     // a competing sender needs.
     const attempt = await mockPg(callBookingLinkText.CONSULTATION_ATTEMPT_TABLE).where({ call_log_id: callId }).first();
     expect(attempt).toMatchObject({ lead_id: leadId, to_phone: '+15555550444', source: 'call_booking_link_text' });
-    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW)).resolves.toBe(true);
-    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550444' })).resolves.toBe(true);
+    // The attempt row is stamped with the real clock (started_at: new
+    // Date(), as in production), not this file's fixed NOW, so the waiter's
+    // read uses the real clock too.
+    const readAt = new Date();
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt)).resolves.toBe(true);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550444' })).resolves.toBe(true);
 
     const outcome = await callBookingLinkText.recoverAbandonedClaim(mockPg, { ...call, metadata: row.metadata }, NOW);
     expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this marker exists to prove
@@ -1351,13 +1355,16 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       mockPg,
     );
 
+    // Real clock, not NOW: insertConsultationLinkAttempt stamps started_at
+    // with new Date(), as in production.
+    const readAt = new Date();
     // Lead-wide (the automated lane's own 14-day dedupe call) still sees it.
-    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW)).resolves.toBe(true);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt)).resolves.toBe(true);
     // Phone-scoped to the OLD number A also sees it.
-    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550601' })).resolves.toBe(true);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550601' })).resolves.toBe(true);
     // Phone-scoped to the NEW, corrected number B does not — the manual
     // send to B must be allowed through.
-    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, NOW, { matchPhone: '+15555550602' })).resolves.toBe(false);
+    await expect(callBookingLinkText.linkSentRecently(mockPg, leadId, readAt, { matchPhone: '+15555550602' })).resolves.toBe(false);
   });
 
   // codex #5196 P2 scenario, extended: with insertConsultationLinkAttempt's

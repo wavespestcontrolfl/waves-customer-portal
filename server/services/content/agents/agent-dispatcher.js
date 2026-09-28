@@ -223,7 +223,11 @@ class AgentDispatcher {
     // guardrail options — the runner derives them from the SAME shared
     // module gate 3c uses, so the lint can never disagree with the gate
     // that parks runs. Cleared with clearDraft below.
-    if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
+    if (selfLintOptions) {
+      const newBlog = brief.action_type !== 'refresh_existing_page'
+        && (brief.page_type === 'supporting-blog' || brief.action_type === 'new_supporting_blog');
+      registerSessionLint(sessionId, selfLintOptions, { citabilityBrief: newBlog ? brief : null });
+    }
     try {
       await registerSessionEditorial(sessionId, brief);
     } catch (err) {

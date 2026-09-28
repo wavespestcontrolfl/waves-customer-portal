@@ -213,7 +213,15 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
             brief_id: null,
           });
         }
-        if (table === 'autonomous_runs') return Promise.resolve(newerRun);
+        if (table === 'autonomous_runs') {
+          if (!newerRun) return Promise.resolve(null);
+          const candidateClaim = newerRun.queue_claim_id ?? null;
+          const requestedClaim = q._filters.queue_claim_id;
+          const matchesClaim = q._filters['null:queue_claim_id']
+            ? candidateClaim === null
+            : requestedClaim === undefined || candidateClaim === requestedClaim;
+          return Promise.resolve(matchesClaim ? newerRun : null);
+        }
         return Promise.resolve(null);
       }),
       update: jest.fn((u) => {
@@ -808,6 +816,188 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
 
+  test.each(['disabled', 'disabled during checks', 'enabled'])('citability backfill merge: %s', async (state) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    gates.citabilityBackfill = state !== 'disabled';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{ id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null, bucket: 'citability_backfill' }],
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockImplementationOnce(async () => {
+      if (state === 'disabled during checks') gates.citabilityBackfill = false;
+      return true;
+    });
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    try {
+      const result = await poller.pollPending();
+      if (state === 'enabled') expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      else {
+        expect(result.results[0]).toMatchObject({ pending: true, reason: 'citability_backfill_disabled' });
+        expect(gh.mergePr).not.toHaveBeenCalled();
+      }
+    } finally {
+      publisher.assertCodexReviewClear.mockReset();
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test('a citability refresh superseded by an ordinary edit is closed, branch-retired, and leaves the poll set', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+    });
+    const open = openPr();
+    const closed = { ...open, state: 'closed' };
+    // Initial read + locked pre-close recheck, then every retirement
+    // verification sees the same closed head.
+    gh.getPr.mockResolvedValueOnce(open).mockResolvedValueOnce(open).mockResolvedValue(closed);
+    // GitHub I/O must run after the page-edit-lock transaction commits, never
+    // inside it: record whether a transaction is open when closePr fires.
+    let openTransactions = 0;
+    const baseTransaction = db.transaction;
+    db.transaction = jest.fn(async (fn) => {
+      openTransactions += 1;
+      try { return await baseTransaction(fn); } finally { openTransactions -= 1; }
+    });
+    let transactionsOpenAtClose = null;
+    gh.closePr.mockImplementationOnce(async () => { transactionsOpenAtClose = openTransactions; return {}; });
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ skipped: true, retired: true, reason: 'citability_backfill_superseded' });
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(transactionsOpenAtClose).toBe(0);
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a superseded citability PR already merged retires its parked queue claim atomically', async () => {
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+    });
+    const merged = { ...openPr(), state: 'closed', merged: true, merged_at: '2026-09-27T01:55:00Z' };
+    gh.getPr.mockResolvedValue(merged);
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded' });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    const mergedStamp = updates.find((u) => u.table === 'autonomous_runs'
+      && u.updates.astro_pr_merged_at instanceof Date);
+    expect(mergedStamp).toBeDefined();
+    expect(mergedStamp.filters['null:astro_pr_merged_at']).toBe(true);
+    expect(mergedStamp.updates.astro_pr_merged_at.toISOString()).toBe('2026-09-27T01:55:00.000Z');
+    expect(pagesPoll.liveUrlResponds).not.toHaveBeenCalled();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  test('a merged superseded PR stays pending until its publish-cap timestamp is durable', async () => {
+    let failMergeStamp = true;
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+      updateResult: (table, _filters, patch) => {
+        if (table === 'autonomous_runs' && patch.astro_pr_merged_at instanceof Date && failMergeStamp) {
+          failMergeStamp = false;
+          return Promise.reject(new Error('temporary stamp failure'));
+        }
+        return 1;
+      },
+    });
+    gh.getPr.mockResolvedValue({
+      ...openPr(), state: 'closed', merged: true, merged_at: '2026-09-27T01:55:00Z',
+    });
+
+    const first = await poller.pollPending();
+
+    expect(first.results[0]).toMatchObject({
+      pending: true, transient: true, reason: 'citability_merge_stamp_pending',
+    });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    expect(runUpdates(updates).some((u) => u.updates.skip_reason === 'superseded_by_review_queue_action')).toBe(false);
+
+    const second = await poller.pollPending();
+
+    expect(second.results[0]).toMatchObject({
+      skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded',
+    });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+  });
+
+  test.each(['locked read', 'close', 'branch retirement'])('a citability retirement failure during %s does not stop the remaining poll batch', async (failure) => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
+    const first = makeRun({ action_type: 'refresh_existing_page' });
+    const second = makeRun({
+      id: 'run-2', opportunity_id: 'opp-2',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/43',
+    });
+    const updates = setupDb({
+      pending: [first, second],
+      queue: [
+        {
+          id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+          bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+        },
+        { id: 'opp-2', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null },
+      ],
+    });
+    const unavailable = new Error('GitHub 503 during retirement');
+    let firstPrReads = 0;
+    gh.getPr.mockImplementation(async (number) => {
+      if (number === 43) return { ...openPr(), number };
+      firstPrReads += 1;
+      if (failure === 'locked read' && firstPrReads === 2) throw unavailable;
+      return { ...openPr(), state: firstPrReads <= 2 ? 'open' : 'closed' };
+    });
+    if (failure === 'close') gh.closePr.mockRejectedValueOnce(unavailable);
+    if (failure === 'branch retirement') gh.retireBranch.mockRejectedValueOnce(unavailable);
+
+    const result = await poller.pollPending();
+
+    expect(result.count).toBe(2);
+    expect(result.results[0]).toMatchObject({ id: first.id, error: unavailable.message, transient: true });
+    expect(result.results[1]).toMatchObject({ id: second.id, pending: true, reason: 'auto_merge_disabled' });
+    expect(gh.getPr).toHaveBeenCalledWith(43);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('poll failed: GitHub 503 during retirement'));
+    expect(runUpdates(updates).filter((update) => update.filters.id === first.id)).toEqual([]);
+  });
+
   test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
     const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());
@@ -1270,21 +1460,61 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
-    const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
-    const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
-      const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
-      return q;
-    });
-    const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
+    const run = makeRun({ created_at: '2026-08-28T04:00:00Z', queue_claim_id: 'claim-b' });
+    const fakeTrx = ({ row, newer = null, throwOn = null }) => {
+      const trx = jest.fn((table) => {
+        const q = {
+          filters: {},
+          where: jest.fn(function (col, value) { if (arguments.length === 2) q.filters[col] = value; return q; }),
+          whereNull: jest.fn(function (col) { q.filters[`null:${col}`] = true; return q; }),
+          whereNot: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => {
+            if (throwOn) throw new Error(throwOn);
+            if (table === 'opportunity_queue') return row;
+            if (!newer) return null;
+            const candidateClaim = newer.queue_claim_id ?? null;
+            return q.filters['null:queue_claim_id']
+              ? (candidateClaim === null ? newer : null)
+              : (candidateClaim === q.filters.queue_claim_id ? newer : null);
+          }),
+        };
+        return q;
+      });
+      trx.raw = jest.fn().mockResolvedValue({});
+      return trx;
+    };
+    const parkedRow = { id: run.opportunity_id, claim_id: 'claim-b', status: 'pending_review', skip_reason: run.skip_reason };
     // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
     let trx = fakeTrx({ row: parkedRow });
     expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
     expect(trx.mock.results[0].value.forUpdate).toHaveBeenCalled();
+    // Blog merges never take the page-edit lock; every refresh merge does,
+    // gate or no gate, so an ordinary refresh merge serializes with page-edit
+    // producers (miner persist, refresh-audit enqueue, intercept seed).
+    expect(trx.raw).not.toHaveBeenCalled();
+    const refreshTrx = fakeTrx({ row: parkedRow });
+    expect(await poller._internals.queueRowStillParkedLocked(
+      makeRun({ action_type: 'refresh_existing_page', created_at: '2026-08-28T04:00:00Z', queue_claim_id: 'claim-b' }),
+      refreshTrx,
+    )).toBe(true);
+    expect(refreshTrx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(refreshTrx.raw.mock.invocationCallOrder[0]).toBeLessThan(refreshTrx.mock.results[0].value.forUpdate.mock.invocationCallOrder[0]);
     // Dismissed / requeued meanwhile → withheld.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
     // A newer sibling owns the opportunity → withheld.
-    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer', queue_claim_id: 'claim-b' } }))).toBe(false);
+    // Worker A lost claim-a, then finished after current owner B parked its
+    // PR under claim-b. A's later audit row is not a newer OWNER.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({
+      row: parkedRow,
+      newer: { id: 'run-a-late-audit', queue_claim_id: 'claim-a' },
+    }))).toBe(true);
+    expect(await poller._internals.queueRowStillParkedLocked(
+      makeRun({ action_type: 'refresh_existing_page' }),
+      fakeTrx({ row: { ...parkedRow, bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: {} } } }),
+    )).toBe(false);
     // Cannot verify (lock error, or a run without created_at) → fail closed.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, throwOn: 'lock timeout' }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(makeRun({ created_at: null }), fakeTrx({ row: parkedRow }))).toBe(false);
@@ -2373,6 +2603,87 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(publisher.planInternalLinksForTarget).not.toHaveBeenCalled();
   });
 
+  test('page supersession landing after merge retires the current-claim citability PR and queue park', async () => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-a' });
+    const parked = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-a',
+      bucket: 'citability_backfill', signal_metadata: {},
+    };
+    const superseded = {
+      ...parked,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:race' } },
+    };
+    const updates = setupDb({ pending: [run], queue: [parked], queueFirst: superseded });
+    gh.getPr.mockResolvedValue({
+      number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z',
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      skipped: true, retired: true, merged: true, reason: 'citability_backfill_superseded',
+    });
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'completed_published')).toBeUndefined();
+    expect(indexNow.submit).not.toHaveBeenCalled();
+  });
+
+  test('a superseded PR from an older claim leaves the poll set without touching the current owner', async () => {
+    const staleRun = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-old' });
+    const currentOwner = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-current',
+      bucket: 'citability_backfill',
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:new' } },
+    };
+    const updates = setupDb({ pending: [staleRun], queue: [currentOwner] });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/stale-claim', sha: 'stale-head' },
+      number: 42, state: 'open', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.retireBranch).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+  });
+
+  test.each([null, 'named_competitor_publishing'])(
+    'pollPending preserves a superseded current-claim PR while queue recovery is pending (%s)', async (skipReason) => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-current' });
+    const recoveryClaim = {
+      id: 'opp-1', status: 'claimed', skip_reason: skipReason, claim_id: 'claim-current',
+      bucket: 'citability_backfill',
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:new' } },
+    };
+    const updates = setupDb({ pending: [run], queue: [recoveryClaim] });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/current-claim', sha: 'current-head' },
+      number: 42, state: 'open', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      pending: true, transient: true, reason: 'citability_retirement_queue_recovery_pending',
+    });
+    expect(runUpdates(updates)).toEqual([]);
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.retireBranch).not.toHaveBeenCalled();
+  });
+
   test('operator action landing between tick-start and finalize (closed PR): superseded, never failed', async () => {
     const updates = setupDb({
       pending: [makeRun()],
@@ -2386,6 +2697,43 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(updates.find((u) => u.updates && u.updates.outcome === 'failed')).toBeUndefined();
     const annotate = runUpdates(updates)[0];
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
+  });
+
+  test('page supersession landing during closed-PR finalization retires the current-claim citability park', async () => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-a' });
+    const parked = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-a',
+      bucket: 'citability_backfill', signal_metadata: {},
+    };
+    const superseded = {
+      ...parked,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:race' } },
+    };
+    const updates = setupDb({
+      pending: [run],
+      queue: [parked],
+      queueFirst: (read) => (read === 0 ? parked : superseded),
+    });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/closed-test', sha: 'closed-head' },
+      number: 42, state: 'closed', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      skipped: true, retired: true, reason: 'citability_backfill_superseded',
+    });
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/closed-test');
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(updates.find((u) => u.updates && u.updates.outcome === 'failed')).toBeUndefined();
   });
 
   test('requeue→re-park cycle: a NEWER run for the same opportunity supersedes this one even though the queue state matches', async () => {
@@ -2407,6 +2755,42 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(indexNow.submit).not.toHaveBeenCalled();
     // the queue row now belongs to the newer run — never touched here
     expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('stale worker A finishing after owner B parks cannot supersede B on a human-merged PR', async () => {
+    const owner = makeRun({
+      id: 'run-b-owner',
+      queue_claim_id: 'claim-b',
+      created_at: '2026-06-11T04:00:00Z',
+    });
+    const updates = setupDb({
+      pending: [owner],
+      // A started on claim-a, was recovered, and persisted its lost-claim
+      // audit after B had already opened and parked the PR on claim-b.
+      newerRun: {
+        id: 'run-a-late-audit',
+        opportunity_id: owner.opportunity_id,
+        queue_claim_id: 'claim-a',
+        created_at: '2026-06-11T04:05:00Z',
+      },
+    });
+    gh.getPr.mockResolvedValue({
+      number: 42,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-06-11T05:00:00Z',
+      merge_commit_sha: 'merge-sha',
+    });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ merged: true });
+    expect(updates.find((u) => u.table === 'autonomous_runs'
+      && u.filters.id === owner.id
+      && u.updates.outcome === 'completed_published')).toBeDefined();
+    expect(updates.find((u) => u.updates?.skip_reason === 'superseded_by_review_queue_action')).toBeUndefined();
   });
 
   test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {

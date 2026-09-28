@@ -17,7 +17,7 @@ const MODELS = require('../config/models');
 const config = require('../config');
 const { getVoiceProfile, validateVoice } = require('../config/voice-profiles');
 const { getNewsletterType } = require('../config/newsletter-types');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime, addETDays } = require('../utils/datetime-et');
 const { FEEDBACK_HTML_TOKEN, FEEDBACK_TEXT_TOKEN } = require('./newsletter-feedback');
 const logger = require('./logger');
 const {
@@ -28,6 +28,7 @@ const {
 const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
 } = require('./newsletter-event-selection');
 const { dispatchWithFallback } = require('./llm/call');
 
@@ -932,6 +933,9 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
       // spreading — only the DB-locked eventUrl below may render as a link.
       ...sanitizeCommentaryFields(ev),
       eventId: row.id,
+      // The locked occurrence, persisted on the send (event_occurrences) so
+      // the sender stamps the date the email shows.
+      startAt: row.start_at,
       date,
       dateStr,
       timeStr,
@@ -1643,6 +1647,28 @@ function buildFlagshipTextBody(draft) {
   return out.filter(Boolean).join('\n\n');
 }
 
+// Owner ruling 2026-09-27: newsletterWriter (Opus 5.5) thinks on every
+// request and spends that from max_tokens ahead of the JSON reply
+// (anthropic-wire.js THINKING_FLOOR_TOKENS=8192 is only a floor — 'max'
+// effort's actual thinking depth runs well past it), so the prior 8192-token
+// cap — sized for a non-thinking Sonnet reply — would starve the ~8k-token
+// Beehiiv-parity JSON reply. 32000 gives headroom for max-effort thinking
+// plus the full reply.
+const NEWSLETTER_WRITE_MAX_TOKENS = 32000;
+// Generous enough for max effort end to end; explicit so callAnthropic
+// passes { timeout } to the SDK (avoids the "streaming is strongly
+// recommended" error a large max_tokens with no explicit timeout can throw
+// on a non-streaming request) and so the fallback chain's own deadline math
+// runs off a real number instead of DEFAULT_FALLBACK_BUDGET_MS (4 min, too
+// short for 'max' effort). reserveFallbackBudget (passed at the call site)
+// splits this across legs instead of handing a stalled Opus leg the whole
+// budget, so the OpenAI fallback still gets real time.
+const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
+// Interactive admin-composer calls run inside a browser request, so they get
+// the dispatcher's standard 4-minute chain budget (what the composer had
+// before the Opus switch) instead of the autopilot's 10 minutes.
+const INTERACTIVE_DRAFT_TIMEOUT_MS = 4 * 60 * 1000;
+
 /**
  * Create a newsletter draft via Claude and persist it.
  *
@@ -1657,6 +1683,10 @@ function buildFlagshipTextBody(draft) {
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
  * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
+ * @param {string} [opts.effort] - Anthropic effort override for the
+ *   newsletterWriter policy's primary leg (default: the policy's own 'max').
+ *   Interactive routes pass 'high' so a synchronous HTTP request can't hang
+ *   the admin composer.
  * @returns {Promise<{send: Object, draft: Object}>}
  */
 async function createNewsletterDraft({
@@ -1671,6 +1701,15 @@ async function createNewsletterDraft({
   issueReference,
   trx,
   persist = true,
+  // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5. Autopilot
+  // (the weekly cron, pest-insider-autopilot.js) never passes this — it gets
+  // the policy's own 'max' effort. The interactive admin composer routes
+  // (routes/admin-newsletter.js /draft-ai, /calendar/:id/draft-from-plan)
+  // pass 'high' instead: a synchronous HTTP request can't afford a
+  // multi-minute max-effort call without risking the admin UI (and any
+  // upstream proxy) timing out on the operator.
+  effort,
+  timeoutMs = NEWSLETTER_WRITE_TIMEOUT_MS,
 }) {
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
@@ -1706,7 +1745,7 @@ async function createNewsletterDraft({
           'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url',
           'e.image_url', 'e.categories', 'e.is_free', 'e.admin_status',
           'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-          'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+          'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
           'e.price_text', 'e.family_friendly', 'e.audience_tags',
           'e.novelty_type', 'e.region_zone', 'e.score_breakdown',
           's.name as source_name',
@@ -1714,17 +1753,28 @@ async function createNewsletterDraft({
         .whereIn('e.id', safeIds)
         .whereIn('e.admin_status', ['approved', 'featured'])
         .whereNull('e.merged_into')
-        .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+        // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+        // 2026-09-27, second pass) — see newsletter-autopilot.js's
+        // buildDigestPlan for why: it used to be, which unconditionally
+        // defeated excludeRoutineRecurringFromQuery's own first-of-year
+        // admission for every routine row before that shared gate even ran.
+        .whereNotIn('e.freshness_status', ['expired'])
         .orderByRaw('e.freshness_score DESC NULLS LAST');
 
       const approvedRows = await excludeRoutineRecurringFromQuery(approvedQuery);
+      // One calendar-year identity pool for this batch, shared by both
+      // filters below (Codex P2, 2026-09-27: "Reuse the calendar-year pool
+      // across eligibility filters") instead of each loading its own copy.
+      const yearPool = await loadSharedYearPool(knex, approvedRows, editorialReference);
       const nonRepeatedRows = await filterRepeatedDateIdentities(approvedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, {
         knex,
         reference: editorialReference,
+        yearPool,
       });
       approvedEvents = dedupeDigestEvents(
         historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
@@ -1761,16 +1811,23 @@ async function createNewsletterDraft({
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
-  // 3. Call the Sonnet → OpenAI Terra content policy. 8192 tokens — the Beehiiv-parity schema is richer
-  // (captions, scoop labels, checklists) and a 10-event lineup at 4096
-  // risked mid-JSON truncation.
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+  // 3. Call the newsletterWriter policy (Opus 5.5 effort 'max' → OpenAI
+  // Terra fallback; owner ruling 2026-09-27). `effort` overrides the
+  // policy's own 'max' only when the caller asked for a lighter interactive
+  // path (see the JSDoc above) — the fallback leg has no effort concept, so
+  // only the primary route needs the override.
+  const basePolicy = MODELS.TEXT_POLICIES.newsletterWriter;
+  const draftPolicy = effort && effort !== basePolicy.primary.effort
+    ? { ...basePolicy, primary: { ...basePolicy.primary, effort } }
+    : basePolicy;
+  const response = await dispatchWithFallback(draftPolicy, {
     laneId: 'newsletter',
-    maxTokens: 8192,
+    maxTokens: NEWSLETTER_WRITE_MAX_TOKENS,
+    timeoutMs,
     jsonMode: true,
     system: systemPrompt,
     text: userPrompt,
-  });
+  }, { reserveFallbackBudget: true });
   if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
 
   // 4. The shared dispatcher parses JSON and crosses providers on malformed output.
@@ -1940,6 +1997,49 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   return { send, draft };
 }
 
+/**
+ * { [eventId]: start_at ISO } for drafted events, from their fact-locked
+ * startAt (lockEventFactsFromDb): the dates the rendered email shows.
+ */
+function lockedEventOccurrences(events) {
+  return Object.fromEntries((Array.isArray(events) ? events : [])
+    .filter((e) => e && e.eventId && e.startAt && !Number.isNaN(new Date(e.startAt).getTime()))
+    .map((e) => [String(e.eventId), new Date(e.startAt).toISOString()]));
+}
+
+// A drafted date further out than this is not an upcoming issue's event.
+const OCCURRENCE_MAX_AHEAD_DAYS = 120;
+
+/**
+ * The occurrence map saved with a send's event list. The Compose client
+ * carries the map the draft generator returned (`provided`, the dates the
+ * email was rendered with); only entries for listed ids with a plausible
+ * date are kept: from yesterday (ET) through OCCURRENCE_MAX_AHEAD_DAYS out,
+ * so a stale tab or a client bug can't write a far-off date into
+ * last_featured_occurrence_at, which the calendar-year rule reads. An id
+ * without one (a hand-picked list, an old client, an implausible date)
+ * falls back to the row's start_at at save time. The sender stamps
+ * last_featured_occurrence_at from this map.
+ */
+async function resolveEventOccurrences(knex, eventIds, provided, reference = new Date()) {
+  const ids = (Array.isArray(eventIds) ? eventIds : []).map(String).filter(Boolean);
+  const given = provided && typeof provided === 'object' && !Array.isArray(provided) ? provided : {};
+  const earliest = parseETDateTime(`${etDateString(addETDays(reference, -1))}T00:00:00`).getTime();
+  const latest = reference.getTime() + OCCURRENCE_MAX_AHEAD_DAYS * 24 * 60 * 60 * 1000;
+  const out = {};
+  for (const id of ids) {
+    const value = given[id];
+    const at = typeof value === 'string' ? new Date(value).getTime() : NaN;
+    if (!Number.isNaN(at) && at >= earliest && at <= latest) out[id] = new Date(at).toISOString();
+  }
+  const missing = ids.filter((id) => !out[id]);
+  if (missing.length) {
+    const rows = await knex('events_raw').whereIn('id', missing).select('id', 'start_at');
+    for (const r of rows) if (r.start_at) out[String(r.id)] = new Date(r.start_at).toISOString();
+  }
+  return JSON.stringify(out);
+}
+
 async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db }) {
   // Generate slug only at persistence time. This lets callers do paid/network
   // generation before opening a short advisory-locked DB transaction.
@@ -1966,11 +2066,17 @@ async function persistNewsletterDraft({ draft, prompt, newsletterType, knex = db
     // .times_featured (+ recompute freshness) for exactly the events that
     // actually shipped, on the first 'sent' transition.
     event_ids: JSON.stringify((draft.events || []).map((e) => e.eventId).filter(Boolean)),
+    // Locked occurrence per event, stamped as last_featured_occurrence_at at
+    // send (the row itself may be advanced in place before delivery).
+    event_occurrences: JSON.stringify(lockedEventOccurrences(draft.events)),
   }).returning('*');
   return send;
 }
 
 module.exports = {
+  INTERACTIVE_DRAFT_TIMEOUT_MS,
+  lockedEventOccurrences,
+  resolveEventOccurrences,
   resolveIssueReference,
   createNewsletterDraft,
   persistNewsletterDraft,

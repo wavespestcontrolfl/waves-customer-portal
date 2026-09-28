@@ -111,9 +111,26 @@ const sessionCheckedRoutes = new Map();
 const SELF_LINT_MAX_REDRAFTS = 2;
 const sessionLintOptions = new Map();
 const sessionLintAttempts = new Map();
+// New supporting-blog sessions only: the brief the optional citability
+// signals are judged against, so an in-session redraft hears them too
+// (5013 Codex r2 P2). Refresh sessions are left to the run-level retry,
+// which knows the resolved target type and the prior version.
+const sessionCitabilityBriefs = new Map();
 
-function registerSessionLint(sessionId, options) {
+function registerSessionLint(sessionId, options, { citabilityBrief = null } = {}) {
   if (sessionId && options) sessionLintOptions.set(sessionId, options);
+  if (sessionId && options && citabilityBrief) sessionCitabilityBriefs.set(sessionId, citabilityBrief);
+}
+
+function sessionCitabilityAdvisories(sessionId, draft) {
+  const brief = sessionCitabilityBriefs.get(sessionId);
+  if (!brief) return [];
+  try {
+    return require('../content-quality-gate').citabilityAdvisories(draft, brief, {});
+  } catch (err) {
+    logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): citability advisories unavailable (${err.message}) — redraft carries hard findings only`);
+    return [];
+  }
 }
 
 function getDraft(sessionId) {
@@ -130,6 +147,7 @@ function clearDraft(sessionId) {
   sessionCheckedRoutes.delete(sessionId);
   sessionLintOptions.delete(sessionId);
   sessionLintAttempts.delete(sessionId);
+  sessionCitabilityBriefs.delete(sessionId);
 }
 
 // Bind the approved answer plan (validate_answer_plan) to the body emit_draft
@@ -602,10 +620,15 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
             // P2 nudges ride the same feedback so the redraft hears them
             // too — blocking stays P0/P1-only (mirrors gate 3c).
             const advisory = (lintResult.findings || []).filter((f) => f.severity === 'P2').slice(0, 2);
+            const citability = sessionCitabilityAdvisories(sessionId, {
+              frontmatter: cleanFrontmatter,
+              title: cleanFrontmatter?.title,
+              body: cleanBody,
+            });
             const retryModule = getGateRetryDirectives();
             const directives = retryModule?.buildRetryDirectives
               ? retryModule.buildRetryDirectives(
-                { findings: [...blocking, ...advisory] },
+                { findings: [...blocking, ...advisory], advisory_messages: citability },
                 { header: `DRAFT REJECTED by the hard content gates (in-session attempt ${attempts + 1} of ${SELF_LINT_MAX_REDRAFTS + 1}). Revise per the directives below and call emit_draft again with the corrected draft:` },
               )
               : blocking.map((f) => `${f.severity} ${f.code}${f.message ? `: ${f.message}` : ''}`);

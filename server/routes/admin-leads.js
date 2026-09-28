@@ -1512,6 +1512,10 @@ router.post('/:id/send-sms', async (req, res, next) => {
         });
       }) : undefined,
       onDispatchAbort: bearerCheck.consultationLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
+      // codex #5196 r4 P2: fires instead of onDispatchAbort when Twilio
+      // rejects the send outright, while lockSmsPhone below is still held —
+      // same cleanup, same condition.
+      onDispatchRejected: bearerCheck.consultationLeadId ? (() => deleteConsultationLinkAttempt(consultationAttemptId)) : undefined,
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, lead.phone);
         if (bearerCheck.consultationLeadId) {

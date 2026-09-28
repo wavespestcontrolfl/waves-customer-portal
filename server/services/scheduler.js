@@ -1596,6 +1596,42 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
+  // Intelligence Bar recorded a gap report (missing capability, tool failure,
+  // or blocked action) in the last 7 days; a clean week sends nothing.
+  // =========================================================================
+  cron.schedule('15 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('agent-gap-digest', async () => {
+        const { runAgentGapDigest } = require('./agent-gap-digest');
+        const result = await runAgentGapDigest();
+        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
+        // A delivery-blocking skip (mailer unconfigured / non-internal
+        // recipient) or a failed send must still read as a FAILED run in
+        // job_health, mirroring the turf-variance digest block above.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      // A tick that got no DB connection returns { skipped } without running
+      // the job, and on the connection-acquire path without any job_health
+      // write: record the missed weekly run. recordMissedTick only writes when
+      // no start or success for this occurrence is already recorded within its
+      // 60 s tick window, so the slot-timeout path (which already recorded
+      // it) is not counted twice. lease_held means another instance ran this
+      // tick, which is not a miss.
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly agent gap digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
   // Each is exception-based (a quiet day sends nothing), carries its own
   // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
@@ -7135,6 +7171,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7PM — Tech open-visit nudge (owner ask 2026-09-28: "just do an
+  // afternoon nudge, at 7 pm"). Arrival/on_site is set automatically by the
+  // geofence and en_route is the tech's only tap — nothing today reminds
+  // them to tap Complete, so ~1/3 of visits a week were left open past their
+  // day. ONE text to each technician who still has open visits from today;
+  // no morning repeat. Gated GATE_TECH_OPEN_VISIT_NUDGE. runExclusive: a
+  // deploy overlap must not double-text a tech (the service also claims a
+  // durable per-tech/per-day tech_notifications row before sending, so a
+  // re-run the same ET day is idempotent even without the lock).
+  // =========================================================================
+  cron.schedule('0 19 * * *', async () => {
+    logger.info('Running: tech open-visit nudge');
+    try {
+      await runExclusive('tech-open-visit-nudge', async () => {
+        const { runTechOpenVisitNudge } = require('./tech-open-visit-nudge');
+        const result = await runTechOpenVisitNudge();
+        logger.info(`Tech open-visit nudge done: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Tech open-visit nudge failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
   // (default 365); tasks use their stored 30-day expiry. The sweep runs with
   // either write gate off so pre-existing conversation data still ages out.
@@ -7527,11 +7587,11 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages silent-loss
-  // classes: past-dated visits stuck in on_site/en_route (performed but
-  // never completed → no service record / invoice / report / SMS), upcoming
-  // recurring series with no price on any row, and recurring-lawn customers
-  // invisible to the Monday irrigation email, and accepted-plan schedule
-  // gaps. 6:40, NOT later (Codex #3209
+  // classes: upcoming recurring series with no price on any row,
+  // recurring-lawn customers invisible to the Monday irrigation email,
+  // prepay coverage gaps, and accepted-plan schedule gaps. (The past-dated
+  // stuck-in-progress class was removed 2026-09-28 — superseded by the 7 PM
+  // ET tech text about today's open visits.) 6:40, NOT later (Codex #3209
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
@@ -7543,8 +7603,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
+      if (!result.skipped && (result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);

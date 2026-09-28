@@ -38,11 +38,15 @@ const {
 } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
-const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
+const {
+  createNewsletterDraft, persistNewsletterDraft, INTERACTIVE_DRAFT_TIMEOUT_MS,
+  lockedEventOccurrences, resolveEventOccurrences,
+} = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadSharedYearPool,
   isFlagshipSend,
 } = require('../services/newsletter-event-selection');
 const { buildDigestPlan } = require('../services/newsletter-autopilot');
@@ -612,6 +616,7 @@ router.post('/sends', async (req, res, next) => {
       created_by: req.technicianId || null,
       auto_share_social: autoShareSocial !== false,
       event_ids: JSON.stringify(safeEventIds),
+      event_occurrences: await resolveEventOccurrences(db, safeEventIds, req.body?.eventOccurrences),
     }).returning('*');
 
     res.json({ success: true, send: row });
@@ -722,6 +727,10 @@ router.patch('/sends/:id', async (req, res, next) => {
       newsletter_type: newsletterType !== undefined ? newsletterType : send.newsletter_type,
       auto_share_social: autoShareSocial !== undefined ? autoShareSocial : send.auto_share_social,
       event_ids: nextEventIds,
+      // The occurrence snapshot moves with the event list.
+      ...(eventIds !== undefined
+        ? { event_occurrences: await resolveEventOccurrences(db, JSON.parse(nextEventIds), req.body?.eventOccurrences) }
+        : {}),
       updated_at: new Date(),
       ...(invalidatesProof ? {
         status: 'draft',
@@ -1268,11 +1277,20 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         includeCTA,
         issueReference: editorialReference || undefined,
         persist: false,
+        // Interactive admin composer (synchronous HTTP request) — 'high'
+        // instead of the autopilot's 'max' so a draft can't hang the UI
+        // (owner ruling 2026-09-27; see createNewsletterDraft's JSDoc).
+        effort: 'high',
+        timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       });
       // Return the locked event ids so the Compose flow can carry them into
       // the /sends save (the saved row needs them for times_featured tracking).
       const lockedEventIds = (draft.events || []).map((e) => e.eventId).filter(Boolean);
-      return res.json({ success: true, draft, eventIds: lockedEventIds });
+      // And the dates the rendered email shows, saved with the ids so the
+      // sender records the occurrence that actually went out.
+      return res.json({
+        success: true, draft, eventIds: lockedEventIds, eventOccurrences: lockedEventOccurrences(draft.events),
+      });
     }
 
     // ── Pest Insider flow: structured humor-sandwich draft ────────────
@@ -1287,6 +1305,9 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         tone,
         includeCTA,
         persist: false,
+        // Interactive admin composer — see the flagship branch above.
+        effort: 'high',
+        timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       });
       return res.json({ success: true, draft });
     }
@@ -1368,13 +1389,27 @@ No prose outside the JSON.`;
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}`;
 
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    // Legacy free-form/template branch of this SAME interactive /draft-ai
+    // handler — moved to the newsletterWriter policy too (owner ruling
+    // 2026-09-27), at effort 'high' (not the policy's default 'max') since
+    // this runs synchronously inside the admin composer's HTTP request.
+    // 8000 tokens: Opus 5+ always thinks and spends that from max_tokens
+    // ahead of the JSON reply (the old 2000-token cap was sized for a
+    // non-thinking Sonnet reply and would starve the JSON under 'high' effort's
+    // thinking).
+    const legacyPolicy = {
+      ...MODELS.TEXT_POLICIES.newsletterWriter,
+      primary: { ...MODELS.TEXT_POLICIES.newsletterWriter.primary, effort: 'high' },
+    };
+    const response = await dispatchWithFallback(legacyPolicy, {
       laneId: 'newsletter',
-      maxTokens: 2000,
+      // Opus 5.5 thinks from max_tokens; leave room for the HTML/text JSON.
+      maxTokens: 24000,
+      timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
       jsonMode: true,
       system: systemPrompt,
       text: userPrompt,
-    });
+    }, { reserveFallbackBudget: true });
     if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
     const draft = response.json;
     res.json({ success: true, draft });
@@ -1609,6 +1644,13 @@ router.patch('/events/:id', async (req, res, next) => {
     const updates = { updated_at: new Date() };
     if (adminStatus !== undefined) {
       updates.admin_status = adminStatus;
+      if (adminStatus === 'pending') {
+        // An operator's return-to-pending is a decision to review it by hand:
+        // mark it examined, with durable provenance, so auto-curation never
+        // picks it up and re-approves it.
+        updates.curated_at = db.raw('COALESCE(curated_at, now())');
+        updates.approved_via = 'operator_reset';
+      }
       // Featuring is an editorial STAR for the upcoming issue — not ship
       // history. times_featured/last_featured_at advance only in
       // markEventsFeatured when an issue actually sends; incrementing on
@@ -1704,6 +1746,12 @@ router.post('/events/bulk-action', async (req, res, next) => {
     }
     if (action === 'approve' || action === 'reset') {
       updates.suppression_reason = null;
+    }
+    if (action === 'reset') {
+      // Marked examined, with durable provenance, so auto-curation never
+      // re-approves what the operator reset for manual review.
+      updates.curated_at = db.raw('COALESCE(curated_at, now())');
+      updates.approved_via = 'operator_reset';
     }
     // Featuring is an editorial star, not ship history — counters advance
     // only in markEventsFeatured when an issue actually sends (Codex r3 P1).
@@ -1883,21 +1931,42 @@ router.get('/events/approved-ids', async (req, res, next) => {
       .select(
         'e.id', 'e.title', 'e.description', 'e.admin_status', 'e.start_at', 'e.end_at',
         'e.event_url', 'e.event_type', 'e.recurrence_type', 'e.freshness_status',
-        'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+        'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
+        // Series context for isSameSeriesSibling (Codex P2, 2026-09-27):
+        // without these every same-title row matches every other regardless
+        // of venue/city, so a recurring identity's first-of-year admission
+        // can never tell two distinct same-named series apart. Match the
+        // columns the other planning paths (digest-plan below, autopilot's
+        // buildDigestPlan, draft loading) already select.
+        'e.venue_name', 'e.city',
       )
       .whereIn('e.admin_status', ['approved', 'featured'])
       .whereNull('e.merged_into')
       .where('e.start_at', '>=', todayET)
       .where('e.start_at', '<=', cutoffET)
       .whereNotNull('e.event_url')
-      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+      // 2026-09-27, second pass) — see newsletter-autopilot.js's
+      // buildDigestPlan for why: it used to be, which unconditionally
+      // defeated excludeRoutineRecurringFromQuery's own first-of-year
+      // admission for every routine row before that shared gate even ran.
+      .whereNotIn('e.freshness_status', ['expired'])
       .orderByRaw('CASE WHEN e.admin_status = \'featured\' THEN 0 ELSE 1 END')
       .orderByRaw('e.freshness_score DESC NULLS LAST')
-      .limit(20);
+      // Over-fetch the week's approved rows: the recurring/identity filters
+      // below can drop many, so the final cap applies after them (slice).
+      .limit(500);
 
     const rows = await excludeRoutineRecurringFromQuery(query);
-    const nonRepeatedRows = await filterRepeatedDateIdentities(rows);
-    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows);
+    // One calendar-year identity pool for this batch, shared by both filters
+    // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+    // eligibility filters") instead of each loading its own copy. Same
+    // reference (now) the filters themselves default to, so the pool's
+    // year range and the filters' own first-of-year/newness math agree.
+    const reference = new Date();
+    const yearPool = await loadSharedYearPool(db, rows, reference);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference, yearPool });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference, yearPool });
 
     const eligible = dedupeDigestEvents(historicallyNewRows.filter((r) => isEligibleForFreshDigest(r))).slice(0, 12);
     res.json({ ids: eligible.map((r) => r.id), count: eligible.length });
@@ -1923,7 +1992,7 @@ router.post('/events/digest-plan', async (req, res, next) => {
         'e.id', 'e.title', 'e.description', 'e.start_at', 'e.end_at',
         'e.venue_name', 'e.city', 'e.event_url',
         'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
-        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+        'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.last_featured_occurrence_at', 'e.pulled_at',
         'e.region_zone', 'e.family_friendly', 'e.is_free',
         's.name as source_name', 's.priority_tier as source_priority_tier',
       )
@@ -1932,19 +2001,38 @@ router.post('/events/digest-plan', async (req, res, next) => {
       .where('e.start_at', '>=', startDate)
       .where('e.start_at', '<=', endDate)
       .whereNotNull('e.event_url')
-      .whereNotIn('e.freshness_status', ['expired', 'stale_recurring'])
+      // 'stale_recurring' is deliberately NOT excluded here (Codex P1,
+      // 2026-09-27, second pass) — see newsletter-autopilot.js's
+      // buildDigestPlan for why: it used to be, which unconditionally
+      // defeated excludeRoutineRecurringFromQuery's own first-of-year
+      // admission for every routine row before that shared gate even ran.
+      .whereNotIn('e.freshness_status', ['expired'])
       .orderByRaw('e.freshness_score DESC NULLS LAST');
 
     const rows = await excludeRoutineRecurringFromQuery(query);
-    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate });
-    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate });
+    // One calendar-year identity pool for this batch, shared by both filters
+    // below (Codex P2, 2026-09-27: "Reuse the calendar-year pool across
+    // eligibility filters") instead of each loading its own copy.
+    const yearPool = await loadSharedYearPool(db, rows, startDate);
+    const nonRepeatedRows = await filterRepeatedDateIdentities(rows, { reference: startDate, yearPool });
+    const historicallyNewRows = await filterPreviouslyFeaturedIdentities(nonRepeatedRows, { reference: startDate, yearPool });
 
     const eligible = historicallyNewRows.filter((r) => isEligibleForFreshDigest(r, startDate));
     const scored = dedupeDigestEvents(
       eligible.map((r) => ({ ...r, compositeScore: scoreFreshEvent(r) }))
         .sort((a, b) => b.compositeScore - a.compositeScore),
     );
-    const suppressed = rows.filter((r) => !isEligibleForFreshDigest(r))
+    // Codex P2, 2026-09-27: "Derive planner suppression from the filtered
+    // candidates" — this used to re-run isEligibleForFreshDigest(r) on the
+    // RAW row (no reference, and none of the __recurringFirstOfYear /
+    // __recurrenceOccurrenceCount markers filterRepeatedDateIdentities just
+    // stamped), so a recurring identity the pipeline just ADMITTED into
+    // `eligible` still showed up in `suppressed` too — an admitted event
+    // rendered as suppressed. Suppression is now the plain set difference:
+    // whatever the identity/history/eligibility pipeline above removed from
+    // `rows` on the way to `eligible`.
+    const eligibleIds = new Set(eligible.map((r) => String(r.id)));
+    const suppressed = rows.filter((r) => !eligibleIds.has(String(r.id)))
       .map((r) => ({ id: r.id, title: r.title, reason: r.freshness_status }));
 
     const assigned = new Set();
@@ -2451,6 +2539,10 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       includeCTA: true,
       issueReference: snapshot.target_send_at || wk.week_of,
       persist: false,
+      // Interactive admin composer (calendar "Draft" button, synchronous
+      // HTTP request) — see createNewsletterDraft's JSDoc.
+      effort: 'high',
+      timeoutMs: INTERACTIVE_DRAFT_TIMEOUT_MS,
     });
 
     const result = await db.transaction(async (trx) => {
