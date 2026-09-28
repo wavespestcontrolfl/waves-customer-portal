@@ -125,8 +125,9 @@ own 84-day cadence rather than lapsing.
    visit-groups.js's own move paths — a plain UPDATE here would desync
    it), a **real, delivered customer-facing send about THIS row** (the
    `messaging_audit_log` ledger — `appointment_id` = this row's id,
-   `purpose` in `appointment_confirmation` / `appointment_reminder_72h` /
-   `appointment_reminder_24h`, `sent_at IS NOT NULL` — the one durable
+   any `purpose` except `appointment_cancellation` (the reschedule text,
+   rain-out notices and prep guides log under the generic `appointment`
+   purpose), `sent_at IS NOT NULL` — the one durable
    record of an actual send tied to a row, per
    `appointment-reminders.js#safeSend`'s own comment; never the
    `appointment_reminders` ledger's `confirmation_sent` / `reminder_72h_sent`

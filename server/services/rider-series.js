@@ -226,16 +226,16 @@ async function tryLockCustomerCommsIfKnown(trx, customerId) {
 // later — keeps the row where it is.
 const DEAD_CARD_STATUSES = ['released', 'cancelled', 'failed', 'expired'];
 
-// Purposes whose delivery genuinely tells the customer THIS row's date/
-// time — appointment_confirmation covers both the original booking
-// confirmation AND the reschedule notice (appointment-reminders.js#
-// safeSendAppointment passes 'appointment_confirmation' as the actual
-// messaging_audit_log purpose for both; 'appointment_rescheduled' is only
-// the SMS template key). appointment_cancellation (cancelled/no-show/
-// series-cancelled notices) is deliberately excluded: those rows are
-// already terminal (JOIN_INELIGIBLE_STATUSES) and never reach the movable
-// set in the first place.
-const MESSAGED_ROW_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
+// Checked by what is EXCLUDED, not by an allowlist: a real send tied to
+// this row pins it whatever its purpose. The booking confirmation and the
+// reminders log as appointment_confirmation / appointment_reminder_72h /
+// appointment_reminder_24h, but the reschedule text (reschedule-sms.js),
+// rain-out notices and prep guides log under the generic 'appointment'
+// purpose with the same appointment_id, and each of those told the
+// customer this row's date. Only appointment_cancellation is excluded: a
+// cancellation notice belongs to a row that is already terminal
+// (JOIN_INELIGIBLE_STATUSES) and never reaches the movable set.
+const NON_PINNING_MESSAGE_PURPOSES = ['appointment_cancellation'];
 
 // FAILS CLOSED like every other lookup this function batches (see above).
 // The customer message ledger (`messaging_audit_log`) is the one durable
@@ -256,7 +256,7 @@ const MESSAGED_ROW_PURPOSES = ['appointment_confirmation', 'appointment_reminder
 async function messagedRowIds(trx, ids) {
   return trx('messaging_audit_log')
     .whereIn('appointment_id', ids.map(String))
-    .whereIn('purpose', MESSAGED_ROW_PURPOSES)
+    .whereNotIn('purpose', NON_PINNING_MESSAGE_PURPOSES)
     .whereNotNull('sent_at')
     .pluck('appointment_id');
 }

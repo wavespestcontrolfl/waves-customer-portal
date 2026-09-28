@@ -1174,16 +1174,25 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(set.has(row.id)).toBe(false);
   });
 
-  test('a real customer-facing send recorded in messaging_audit_log pins the row (Fable review NEW A)', async () => {
+  // 'appointment' is the generic purpose the reschedule text
+  // (reschedule-sms.js), rain-out notices and prep guides log under.
+  test.each([
+    ['appointment_confirmation', true],
+    ['appointment_reminder_72h', true],
+    ['appointment_reminder_24h', true],
+    ['appointment', true],
+    ['appointment_card_request', true],
+    ['appointment_cancellation', false],
+  ])('a real send with purpose %s recorded in messaging_audit_log -> pinned=%s (Fable review NEW A)', async (purpose, pinned) => {
     const { pestParent } = await linkedPair();
     const [row] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc').limit(1);
     await trx('messaging_audit_log').insert({
       id: randomUUID(), to_hash: randomUUID(), to_last4: '1234', appointment_id: String(row.id),
-      audience: 'customer', purpose: 'appointment_confirmation', channel: 'sms', body_hash: randomUUID(), sent_at: new Date(),
+      audience: 'customer', purpose, channel: 'sms', body_hash: randomUUID(), sent_at: new Date(),
     });
     const { _internals } = require('../services/rider-series');
     const set = await _internals.immovableRowIdSet(trx, [row.id]);
-    expect(set.has(row.id)).toBe(true);
+    expect(set.has(row.id)).toBe(pinned);
   });
 
   test('a blocked/failed messaging_audit_log row (no sent_at) never pins the row', async () => {
