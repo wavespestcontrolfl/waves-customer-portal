@@ -178,6 +178,15 @@ jest.setTimeout(30000);
         expect(await hold()).toBe('not_a_prospect');
       });
 
+      test('V2 judged the vendor/partner call spam: holds even with the legacy flag false (shadow-mode row)', async () => {
+        await priorCall({
+          v2_extraction_status: 'valid',
+          ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: true } }),
+          ai_extraction: '{"is_spam": false}',
+        });
+        expect(await hold()).toBe('not_a_prospect');
+      });
+
       test('the V2 clear only exempts vendor/partner: a cleared customer-nature call with a legacy spam flag still holds', async () => {
         await priorCall({
           v2_extraction_status: 'valid',

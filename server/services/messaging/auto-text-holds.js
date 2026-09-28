@@ -151,6 +151,12 @@ async function autoTextHoldReason(phone, {
     .where((q) => q
       .where((v2) => v2.where('v2_extraction_status', 'valid')
         .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
+      // A valid V2 vendor_or_partner call V2 itself judged spam holds on its
+      // own verdict — a shadow-mode row persists that verdict without
+      // stamping the legacy is_spam flag the fallback below reads.
+      .orWhere((v2VendorSpam) => v2VendorSpam.where('v2_extraction_status', 'valid')
+        .whereRaw("ai_extraction_enriched->>'call_nature' = 'vendor_or_partner'")
+        .whereRaw("ai_extraction_enriched->'spam_verdict'->>'is_spam_content' = 'true'"))
       .orWhere((legacy) => legacy
         .where((flag) => flag
           .whereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
