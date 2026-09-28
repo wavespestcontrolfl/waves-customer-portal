@@ -14,8 +14,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "c81e1107efbed2fc711000ecb8feead2953bafbadf956b9f5f9d7200acf3d887"
     },
     "slug": "lovebug",
     "common_name": "Lovebug",
@@ -417,8 +418,9 @@
       "https://journals.flvc.org/edis/article/view/138696"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "1f649ead3f54fbcb7c2acc12d59296ee0d83954cf04fb88f01223bc0bcca92cc"
     }
   },
   {
@@ -531,8 +533,9 @@
       "https://edis.ifas.ufl.edu/publication/in903"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "8e5b78ee638eec326f2fda7463c237aaa999e393fbcf0ed5e3c1e98ca58960de"
     }
   },
   {
@@ -879,8 +882,9 @@
       "https://blogs.ifas.ufl.edu/waltonco/2026/06/26/got-compost-meet-the-black-soldier-fly/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Verdict changed from harmless to ally: it's a beneficial decomposer, not just an inert visitor, so role beneficial / verdict ally fits better."
+      "status": "owner_approved",
+      "notes": "Verdict changed from harmless to ally: it's a beneficial decomposer, not just an inert visitor, so role beneficial / verdict ally fits better. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "167164db361fc5cf1d566ebb631853c087864a4b7c8891a2809046a58856cf48"
     }
   },
   {
@@ -993,8 +997,9 @@
       "https://entomologytoday.org/2015/08/17/mosquito-hawk-skeeter-eater-giant-mosquito-no-no-and-no/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Larvae (leatherjackets) can occasionally feed on grass roots elsewhere in the US, but this is not established as a significant SWFL turf issue; kept scope to the adult, which is the form usually photographed indoors/on screens."
+      "status": "owner_approved",
+      "notes": "Larvae (leatherjackets) can occasionally feed on grass roots elsewhere in the US, but this is not established as a significant SWFL turf issue; kept scope to the adult, which is the form usually photographed indoors/on screens. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "47d9a2f1e5c84af24dada3e2562c463d20c4897ca6578d33f873ecbada41ef76"
     }
   },
   {
@@ -1107,8 +1112,9 @@
       "https://blogs.ifas.ufl.edu/polkco/2017/10/11/aquatic-midges-also-known-as-blind-mosquitoes/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "2273ed3e776b49bcf93aaacc25cedb36316a800c602c5d89f96ab06856c7f4f9"
     }
   },
   {
@@ -1223,8 +1229,9 @@
       "https://en.wikipedia.org/wiki/Syrphidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "a2632e248d3236c8c65256c3b1893e89afd2ab18e55779d9815b9ca8ebbdf929"
     }
   },
   {
@@ -1327,8 +1334,9 @@
       "https://en.wikipedia.org/wiki/Asilidae"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 40: role changed from nuisance to beneficial and verdict from watch to ally, since the copy/tech_notes already describe it as a beneficial predator (validator requires verdict ally when role is beneficial)."
+      "status": "owner_approved",
+      "notes": "Per audit item 40: role changed from nuisance to beneficial and verdict from watch to ally, since the copy/tech_notes already describe it as a beneficial predator (validator requires verdict ally when role is beneficial). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "afa3225c7c2b37d678a5ce998ddbdb3af972bb9eac69aec034fdbc5ee025d875"
     }
   }
 ]

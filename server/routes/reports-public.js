@@ -185,6 +185,7 @@ const {
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 
 const PDF_NAVY = '#1B2C5B';
@@ -373,6 +374,16 @@ async function buildServiceReportV1ResponseData(service, token, {
   // under the general report limiter, repeatedly. Defaulting to off means a
   // future caller cannot inherit that cost by accident either.
   composeOffers = false,
+  // OPT-IN on the same terms: only the /data render shows the "Your plan"
+  // card, so only it pays for the membership + year-history reads
+  // (GATE_REPORT_PLAN_SUMMARY). The Q&A endpoint never reads the field.
+  planSummary = false,
+  // OPT-IN on the same terms (codex round-5 P2): only the /data render
+  // shows "Your upcoming visits", so only it pays for the paged
+  // scheduled_services scan (property/estimate/single-premises reads
+  // included) GATE_REPORT_UPCOMING_VISITS guards. report-assistant.js
+  // (the Q&A endpoint) never reads the field.
+  upcomingVisitsCard = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -384,7 +395,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -1204,6 +1215,18 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
             // service_date/created_at feed the historical-report recency
             // gate (PR r9) — the click path must classify identically.
             'sr.service_date', 'sr.created_at',
+            // GATE_REPORT_CROSS_SELL_V2's findings priority reads the
+            // visit's typed companion identity off service_data (roach
+            // COMPANION vs a cockroach-PRIMARY report) — without it here
+            // the click path always resolved roachesIndoors === false via
+            // that leg (the service_findings-text leg still worked, since
+            // it queries by sr.id independently), silently re-deriving a
+            // DIFFERENT V2 offer than what the render path showed, on top
+            // of which the click/accept flow's own drift check would then
+            // 409 a fingerprint the customer actually saw. The click path
+            // must classify identically to the read path (same doctrine as
+            // scheduled_service_id/service_date above).
+            'sr.service_data',
             db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
             db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
             db.raw('COALESCE(ss.service_address_city, c.city) as city'),
@@ -2330,7 +2353,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2522,6 +2545,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
   doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
+  // Owner ask 2026-09-28: every report, legacy ones included, links to the
+  // public Products & Safety page. The URL prints in full for paper copies.
+  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();
@@ -2532,12 +2558,16 @@ async function ensureReportToken(serviceRecordId) {
   const service = await db('service_records').where({ id: serviceRecordId }).first();
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write (same rule as pdf-queue.js ensureReportToken): a
+  // concurrent mint never overwrites a token another writer already queued.
   const token = crypto.randomBytes(16).toString('hex');
-  await db('service_records').where({ id: serviceRecordId }).update({
+  const updated = await db('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: db.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await db('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 module.exports = router;

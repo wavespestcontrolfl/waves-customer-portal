@@ -531,10 +531,11 @@
     {
       "router": "server/routes/public-pest-forecast.js",
       "mount": "/api/public/pest-forecast",
-      "reason": "Pest forecast content for the marketing sites — public data",
+      "reason": "Pest forecast content for the marketing sites — public data. /nearest (owner ruling 2026-09-27: first-time blog visitors see their own Florida city) returns only a curated city slug or null, derived from Cloudflare's visitor-location request headers; nothing is logged or stored, private/no-store",
       "routes": [
         "GET /api/public/pest-forecast",
-        "GET /api/public/pest-forecast/locations"
+        "GET /api/public/pest-forecast/locations",
+        "GET /api/public/pest-forecast/nearest"
       ]
     },
     {

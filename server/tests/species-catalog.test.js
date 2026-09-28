@@ -30,19 +30,29 @@ const knownSlugs = new Set([...entriesBySlug.keys(), ...plannedSlugs]);
 // ── enums (mirrors validate.js) ──────────────────────────────────────────
 
 const ENUMS = {
-  kind: ['organism', 'sign'],
-  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex'],
+  // `turfgrass`, `weed`, `host_plant`, `disease`, `disorder` are the
+  // plant/condition kinds from the L1 loader PR (BRIEF-PLANTS.md "Kinds and
+  // sections"); no entry of any of these kinds exists yet — the content PR
+  // (L1b) adds them to `entries/*.json` once the owner reviews them.
+  kind: ['organism', 'sign', 'turfgrass', 'weed', 'host_plant', 'disease', 'disorder'],
+  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex', 'condition'],
   size: ['tiny', 'small', 'medium', 'large'],
   where: ['kitchen', 'bathroom', 'bedroom', 'living-areas', 'lanai-patio', 'lawn-garden', 'attic-walls', 'garage-storage', 'lights-windows', 'on-pets', 'trees-shrubs', 'pool-water'],
-  looks: ['ant-like', 'roach-like', 'winged-swarmer', 'worm-caterpillar', 'spider', 'flying-biter', 'small-fly', 'crawler', 'lawn-damage', 'wasp-bee', 'beetle', 'true-bug', 'moth-butterfly', 'snail-slug-worm', 'lizard-frog', 'snake', 'mammal', 'bird', 'plant-damage', 'sign'],
+  looks: ['ant-like', 'roach-like', 'winged-swarmer', 'worm-caterpillar', 'spider', 'flying-biter', 'small-fly', 'crawler', 'lawn-damage', 'wasp-bee', 'beetle', 'true-bug', 'moth-butterfly', 'snail-slug-worm', 'lizard-frog', 'snake', 'mammal', 'bird', 'plant-damage', 'sign',
+    // BRIEF-PLANTS.md "looks (existing values plus new)" — the L1b lawn/plant content.
+    'weed', 'grass', 'palm', 'shrub-tree', 'leaf-spots', 'yellowing', 'wilting-dieback', 'mushroom-conk'],
   verdict: ['ally', 'harmless', 'watch', 'call'],
   range: ['common', 'occasional', 'rare'],
   urgency: ['low', 'moderate', 'high'],
   line: ['pest', 'termite', 'mosquito', 'lawn', 'tree_shrub', 'rodent', 'none'],
   key: ['pest', 'mosquito', 'flea', 'lawnPestControl', null],
-  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone', 'bat_exclusion'],
+  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone', 'bat_exclusion',
+    // BRIEF-PLANTS.md service.referral — the L1b lawn/plant content.
+    'arborist', 'extension_office'],
   // Revision 2 (outside review, 2026-09-26): what it is / the risk / what to do.
-  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife'],
+  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife',
+    // BRIEF-PLANTS.md "role gains…" — the L1b lawn/plant content.
+    'weed', 'lawn_grass', 'landscape_plant', 'plant_disease', 'plant_disorder'],
   risk: ['low', 'defensive', 'irritant', 'medical'],
   action: ['leave_alone', 'monitor', 'fix_conditions', 'inspection', 'specialist', 'report'],
   season_basis: ['observed', 'swarming', 'year_round', 'unverified'],
@@ -85,8 +95,17 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     expect(e.aliases.length).toBeGreaterThanOrEqual(1);
     for (const a of e.aliases) expect(a).toMatch(/^[a-z][a-z \-]*[a-z]$/);
 
-    expect(typeof e.scientific_name).toBe('string');
-    expect(e.scientific_name.trim().length).toBeGreaterThan(0);
+    // BRIEF-PLANTS.md: disorders (abiotic) carry scientific_name: null, rank
+    // "condition" — every other kind (including every pest kind) keeps the
+    // pre-existing non-empty-taxon requirement, unweakened.
+    if (e.kind === 'disorder') {
+      expect(e.scientific_name).toBeNull();
+      expect(e.rank).toBe('condition');
+    } else {
+      expect(typeof e.scientific_name).toBe('string');
+      expect(e.scientific_name.trim().length).toBeGreaterThan(0);
+      expect(e.rank).not.toBe('condition');
+    }
     expect(ENUMS.rank).toContain(e.rank);
 
     expect(groupIds.has(e.group)).toBe(true);
@@ -121,7 +140,14 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     }
 
     expect(Array.isArray(e.look_alikes)).toBe(true);
-    expect(e.look_alikes.length).toBeGreaterThanOrEqual(1);
+    // BRIEF-PLANTS.md: "look_alikes: 1-3 for plants, 0-3 for conditions".
+    // Every pest-section entry (any kind) keeps the pre-existing minimum of 1,
+    // unweakened; plant kinds (turfgrass/weed/host_plant) also require 1;
+    // condition kinds (disease/disorder, and sting-nematode's organism kind
+    // under the condition section) may legitimately carry 0.
+    const isPlantContentKind = ['turfgrass', 'weed', 'host_plant'].includes(e.kind);
+    const laMin = (catalog.sectionOf(e) === 'pest' || isPlantContentKind) ? 1 : 0;
+    expect(e.look_alikes.length).toBeGreaterThanOrEqual(laMin);
     expect(e.look_alikes.length).toBeLessThanOrEqual(3);
     for (const la of e.look_alikes) {
       expect(knownSlugs.has(la.slug)).toBe(true);
@@ -133,6 +159,14 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(typeof la.photo_can_confirm).toBe('boolean');
       expect([undefined, 'sign', 'organism']).toContain(la.photo_veto_applies_to);
       if (la.photo_veto_applies_to) expect(la.photo_can_confirm).toBe(false);
+
+      // The rest of this loop is the live pest engine's photography-safety
+      // rules for venomous/stinging/risky-wildlife organisms and signs —
+      // meaningless (and a false positive: e.g. a mildly irritant weed's sap
+      // is fine to photograph up close) for a plant/condition entry, so it is
+      // scoped to pest-section entries only, unweakened for all 239 of them.
+      if (catalog.sectionOf(e) !== 'pest') continue;
+
       // Any pair with a venomous snake on either side: no photo settles it
       // and the tip never brings anyone closer (Codex #4974 r3).
       const venomousSnake = (slug) => {
@@ -176,7 +210,16 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       }
     }
 
-    expect(ENUMS.size).toContain(e.size);
+    // BRIEF-PLANTS.md: "size is omitted for plants and conditions (organisms
+    // keep it)". Pest kinds (organism, sign) always carried size before this
+    // PR and still do — this covers pest organisms/signs AND sting-nematode
+    // (kind organism, condition section) identically, by kind rather than
+    // section, unweakened for the pre-existing 239.
+    if (e.kind === 'organism' || e.kind === 'sign') {
+      expect(ENUMS.size).toContain(e.size);
+    } else {
+      expect(e.size === undefined || e.size === null).toBe(true);
+    }
     expect(Array.isArray(e.where)).toBe(true);
     expect(e.where.length).toBeGreaterThanOrEqual(1);
     for (const w of e.where) expect(ENUMS.where).toContain(w);
@@ -350,31 +393,23 @@ describe('owner approval content binding', () => {
     expect(catalog.isApproved(entry)).toBe(true);
   });
 
-  test('the history migration preserves only the 73 unchanged approvals', () => {
-    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(73);
-    expect(allEntries.filter((entry) => entry.review.status === 'draft')).toHaveLength(166);
+  // Owner approved every fact-check-clean pest entry 2026-09-27 (after
+  // #5106) and house-centipede 2026-09-28 once its range fact-check closed
+  // (#5114). The L1b lawn/plant content (119 entries: 72 plant + 47
+  // condition) lands owner-approved nowhere yet — every one stays
+  // `review.status: "draft"` until the owner's review pass, so none of it is
+  // nameable by any engine (Codex #5143's whole reason for existing).
+  test('every pest entry is owner-approved; every plant/condition entry is still draft', () => {
+    const approved = allEntries.filter((entry) => entry.review.status === 'owner_approved');
+    const draft = allEntries.filter((entry) => entry.review.status === 'draft');
+    expect(approved).toHaveLength(239);
+    expect(draft).toHaveLength(119);
+    expect(approved.every((entry) => catalog.sectionOf(entry) === 'pest')).toBe(true);
+    expect(draft.every((entry) => catalog.sectionOf(entry) !== 'pest')).toBe(true);
   });
 });
 
-describe('index.json — groups, subgroups, next_photo', () => {
-  test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(77);
-    for (const g of index.groups) {
-      expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
-      expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
-    }
-    for (const s of index.subgroups) {
-      expect(s.next_photo.ask.length).toBeLessThanOrEqual(180);
-      expect(s.next_photo.why.length).toBeLessThanOrEqual(160);
-      expect(groupIds.has(s.group)).toBe(true);
-      if (s.parent) {
-        const parent = index.subgroups.find((candidate) => candidate.id === s.parent);
-        expect(parent).toBeTruthy();
-        expect(parent.group).toBe(s.group);
-      }
-    }
-  });
-
+describe('index.json — groups and subgroups', () => {
   test('every entry group/subgroup reference resolves through the loader', () => {
     for (const e of allEntries) {
       expect(catalog.getGroup(e.group)).toBeTruthy();
@@ -382,72 +417,116 @@ describe('index.json — groups, subgroups, next_photo', () => {
     }
   });
 
-  test('unmatched generic hazard nodes retain shared safety and conservative routing', () => {
-    const expected = {
-      'fire-ants': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'high' },
-      'social-wasps': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'moderate' },
-      'stinging-caterpillars': {
-        trueSafety: ['stinging'], serviceLine: 'tree_shrub', serviceKey: null, urgency: 'low',
-      },
-      'large-lizards': { trueSafety: ['disease_vector'], serviceLine: 'none', serviceKey: null, urgency: 'moderate' },
-      'venomous-snakes': {
-        trueSafety: ['venomous'], serviceLine: 'none', serviceKey: null, urgency: 'high', referral: 'wildlife_trapper',
-      },
-    };
-    const urgencyRank = { low: 0, moderate: 1, high: 2 };
-
-    for (const [nodeId, contract] of Object.entries(expected)) {
-      const node = catalog.getSubgroup(nodeId);
-      const descendants = allEntries.filter((entry) => entry.subgroup === nodeId);
-      expect(descendants.length).toBeGreaterThan(0);
-      expect(node.generic_guidance).toBeTruthy();
-      if (contract.safetyOnly) {
-        expect(node.generic_guidance.compatibility).toEqual({ safety: { stinging: true } });
-      } else {
-        expect(node.generic_guidance.compatibility).toMatchObject({
-          serviceLine: contract.serviceLine, serviceKey: contract.serviceKey, urgency: contract.urgency,
-        });
-      }
-      for (const flag of contract.trueSafety) {
-        const entryFlag = flag === 'stinging' ? 'stings' : flag;
-        expect(descendants.every((entry) => entry.safety[entryFlag] === true)).toBe(true);
-        expect(node.generic_guidance.compatibility.safety[flag]).toBe(true);
-      }
-      if (!contract.safetyOnly) {
-        expect(descendants.every((entry) => entry.service.line === contract.serviceLine)).toBe(true);
-        expect(descendants.every((entry) => entry.service.key === contract.serviceKey)).toBe(true);
-        expect(descendants.every((entry) => urgencyRank[entry.urgency] >= urgencyRank[contract.urgency])).toBe(true);
-      }
-      if (contract.referral) {
-        expect(descendants.every((entry) => entry.service.referral === contract.referral)).toBe(true);
-        expect(node.generic_guidance.referral).toBe(contract.referral);
-      }
-    }
-  });
-
-  test('the turtles fallback retains the shared protected-wildlife no-treatment contract', () => {
-    const node = catalog.getGroup('turtles');
-    const descendants = allEntries.filter((entry) => entry.group === node.id);
-    expect(descendants.length).toBeGreaterThan(0);
-    expect(node.generic_guidance).toMatchObject({
-      referral: 'protected_leave_alone',
-      compatibility: {
-        serviceLine: 'none', serviceKey: null, serviceLabel: 'No Treatment Needed',
-        inspectionRequired: false, urgency: 'low',
-      },
-    });
-    expect(descendants.every((entry) => entry.safety.protected === true)).toBe(true);
-    expect(descendants.every((entry) => entry.service.line === 'none')).toBe(true);
-    expect(descendants.every((entry) => entry.service.key === null)).toBe(true);
-    expect(descendants.every((entry) => entry.service.label === 'No Treatment Needed')).toBe(true);
-    expect(descendants.every((entry) => entry.service.inspection_first === false)).toBe(true);
-    expect(descendants.every((entry) => entry.service.referral === 'protected_leave_alone')).toBe(true);
-  });
-
   test('every look_alike_groups entry names real groups', () => {
     for (const lag of index.look_alike_groups) {
       for (const g of lag.groups) expect(groupIds.has(g)).toBe(true);
     }
+  });
+});
+
+describe('L1: plant and condition sections (index additions, no content)', () => {
+  const SECTIONS = new Set(['pest', 'plant', 'condition']);
+  const NEW_GROUP_IDS = [
+    'turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees',
+    'nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases',
+    'nutrient-disorders', 'water-and-site', 'cultural-and-chemical',
+  ];
+  const NEW_SUBGROUP_IDS = ['date-palms', 'fan-palms', 'turf-nutrient', 'palm-nutrient'];
+  const NEW_SITE_CATEGORIES = [
+    'Lawn grasses', 'Lawn weeds', 'Palms', 'Shrubs & trees',
+    'Lawn problems', 'Plant & palm problems', 'Lawn & plant problems',
+  ];
+
+  test('every category (old and new) declares a section in {pest, plant, condition}', () => {
+    for (const cat of Object.values(index.categories)) {
+      expect(SECTIONS.has(cat.section)).toBe(true);
+    }
+    expect(index.categories.plant.section).toBe('plant');
+    expect(index.categories.condition.section).toBe('condition');
+    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
+      expect(index.categories[id].section).toBe('pest');
+    }
+  });
+
+  test('every new group exists, names a real category, and resolves through the loader', () => {
+    for (const id of NEW_GROUP_IDS) {
+      expect(groupIds.has(id)).toBe(true);
+      const group = catalog.getGroup(id);
+      expect(group).toBeTruthy();
+      expect(index.categories[group.category]).toBeTruthy();
+    }
+    // All 13 new groups sit under `plant`/`condition` — including
+    // `nematodes` (Codex #5143 r1 P2: a nematode's `kind` stays `organism`,
+    // but it can never be a photo identity — a soil assay is the only
+    // confirmation — so it must not be visible to the pest engine at all;
+    // the loader doesn't tie `kind` to `section`, so this is a pure
+    // category move).
+    for (const id of ['turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees']) {
+      expect(catalog.getGroup(id).category).toBe('plant');
+    }
+    for (const id of ['nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases', 'nutrient-disorders', 'water-and-site', 'cultural-and-chemical']) {
+      expect(catalog.getGroup(id).category).toBe('condition');
+    }
+  });
+
+  test('every new subgroup exists and names a real (new) group', () => {
+    for (const id of NEW_SUBGROUP_IDS) {
+      expect(subgroupIds.has(id)).toBe(true);
+      const sg = catalog.getSubgroup(id);
+      expect(sg).toBeTruthy();
+      expect(groupIds.has(sg.group)).toBe(true);
+    }
+    expect(catalog.getSubgroup('date-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('fan-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('turf-nutrient').group).toBe('nutrient-disorders');
+    expect(catalog.getSubgroup('palm-nutrient').group).toBe('nutrient-disorders');
+  });
+
+  test('the 7 new site_categories are declared', () => {
+    for (const sc of NEW_SITE_CATEGORIES) expect(index.site_categories).toContain(sc);
+  });
+
+  test('sectionOf resolves category/group/subgroup nodes to the right section', () => {
+    expect(catalog.sectionOf(catalog.getCategory('plant'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getCategory('condition'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getCategory('insect'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getGroup('turfgrasses'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getGroup('turf-diseases'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('nematodes'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('ants'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getSubgroup('date-palms'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getSubgroup('turf-nutrient'))).toBe('condition');
+    // Bare id/slug form (not just a node object) resolves the same way.
+    expect(catalog.sectionOf('turfgrasses')).toBe('plant');
+    expect(catalog.sectionOf('fire-ant')).toBe('pest');
+    expect(catalog.sectionOf('not-a-real-node')).toBeNull();
+  });
+
+  // L1b landed the 119 drafted lawn/plant entries (72 plant + 47 condition);
+  // the pest section (239) is unaffected and still equals the unfiltered
+  // catalog's pre-L1b size.
+  test('listEntries({ section }) filters by section; L1b landed the 119 plant/condition entries', () => {
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
+    expect(catalog.listEntries()).toHaveLength(358);
+    expect(catalog.listEntries({ section: 'plant' }).every((e) => ['turfgrass', 'weed', 'host_plant'].includes(e.kind))).toBe(true);
+    expect(catalog.listEntries({ section: 'condition' }).every((e) => ['disease', 'disorder', 'organism'].includes(e.kind))).toBe(true);
+  });
+
+  test('a group generic that would equal a section-defining category name (e.g. "a plant") does not collide with the category itself, but no group claims that exact generic today', () => {
+    // "plant" and "condition" resolve to their categories (Codex-style
+    // collision guard already handles category-vs-group generics keyed off
+    // the category's own id/label, not a hardcoded string — see
+    // buildNameIndices' `categoryNames`/`generic()`). No plant/condition
+    // group's generic literally equals "a plant" or the condition
+    // category's generic, so there is nothing to guard against yet; this
+    // pins that fact rather than adding unneeded collision-avoidance code
+    // ahead of any real entries.
+    const plantGroupGenerics = index.groups.filter((g) => g.category === 'plant').map((g) => g.generic);
+    expect(plantGroupGenerics).not.toContain('a plant');
+    expect(catalog.resolveName('plant')).toMatchObject({ node: { level: 'category', id: 'plant' } });
+    expect(catalog.resolveName('condition')).toMatchObject({ node: { level: 'category', id: 'condition' } });
   });
 });
 
@@ -462,10 +541,25 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
     }
   });
 
-  test('the complete 239-entry catalog has no planned slugs left', () => {
-    expect(allEntries).toHaveLength(239);
-    expect(index.planned_slugs).toEqual([]);
+  // Through the pest catalog's own build, `planned_slugs` staged only pest
+  // placeholders and had to end empty once the 239-entry catalog was
+  // complete. The L1 loader PR (plant/condition sections) staged the
+  // lawn/plant build's 119 not-yet-built plant and condition slugs there too,
+  // so cross-worker look-alike and differential references validated before
+  // that content landed. L1b (this PR) built every one of those 119 slugs, so
+  // `planned_slugs` is back to empty — what must never happen is a placeholder
+  // (pest OR plant/condition) going unbuilt, or a built entry staying listed
+  // as planned.
+  test('the whole catalog is complete: no entry is missing, and no built entry is still "planned"', () => {
+    expect(allEntries).toHaveLength(358);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
     for (const slug of entriesBySlug.keys()) expect(plannedSlugs.has(slug)).toBe(false);
+  });
+
+  test('planned_slugs is empty again now that the L1b lawn/plant content has landed', () => {
+    expect(index.planned_slugs).toEqual([]);
   });
 });
 
@@ -474,9 +568,15 @@ describe('name collisions', () => {
   // (Codex #4873 r1): Apis mellifera is both the swarm and the wall colony,
   // so it names the bees subgroup, never one of them. A name that would only
   // meet at a category is too broad and must not exist.
-  test('shared names resolve to a common node unless the common name spans unrelated arachnid groups', () => {
+  test('shared names resolve to a common node unless the common name spans unrelated arachnid groups, or three unrelated disease groups', () => {
     const unresolved = catalog.nameIndexCollisions().filter((c) => !c.resolvesTo);
-    expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs']));
+    // "leaf spot" (L1b lawn/plant content): a generic alias on one entry in
+    // each of turf-diseases, ornamental-diseases and palm-diseases, none of
+    // which identifies its own full common name — same shape as
+    // daddy-longlegs, and just as genuinely ambiguous: a bare "leaf spot"
+    // really could be any of the three, so it stays unresolved rather than
+    // guessing one plant family's disease over another's.
+    expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs', 'leaf spot']));
   });
 
   test.each(['honey bee', 'honey bees', 'honeybee', 'honeybees', 'Apis mellifera'])(
@@ -489,9 +589,6 @@ describe('name collisions', () => {
     '%s retains the broad stinging-insect node without assuming honey bees', (name) => {
       const { node } = catalog.resolveName(name);
       expect(node).toMatchObject({ level: 'group', id: 'wasps-bees', generic: 'a wasp or bee' });
-      expect(catalog.genericGuidance(node.id)).toEqual({
-        compatibility: { safety: { stinging: true } },
-      });
     },
   );
 
@@ -499,14 +596,6 @@ describe('name collisions', () => {
     expect(catalog.lineage('honey-bee-wall-colony').map((node) => node.id)).toEqual([
       'insect', 'wasps-bees', 'bees', 'structure-bee-colonies', 'honey-bee-wall-colony',
     ]);
-    expect(catalog.genericGuidance('structure-bee-colonies')).toMatchObject({
-      referral: 'bee_relocation',
-      compatibility: {
-        safety: { stinging: true, venomous: true },
-        serviceLine: 'pest', serviceKey: null, serviceLabel: 'Bee Assessment & Referral',
-        inspectionRequired: true, urgency: 'high',
-      },
-    });
   });
 
   test('bare rat-snake names stay generic while qualified species names remain specific', () => {
@@ -515,7 +604,9 @@ describe('name collisions', () => {
     }
     expect(catalog.resolveName('eastern rat snake').node.slug).toBe('eastern-rat-snake');
     expect(catalog.resolveName('yellow rat snake').node.slug).toBe('eastern-rat-snake');
-    expect(catalog.resolveName('red rat snake').node.slug).toBe('corn-snake');
+    // A nickname of Corn Snake, not a spelling of it: the snake group.
+    expect(catalog.resolveName('red rat snake').node).toMatchObject({ level: 'group', id: 'snakes' });
+    expect(catalog.resolveName('corn snake').node.slug).toBe('corn-snake');
   });
 
   test('a shared adult and larval binomial resolves stage-neutral while qualified names stay specific', () => {
@@ -580,8 +671,13 @@ describe('resolveName regressions', () => {
 
   test.each(['ladybug', 'ladybugs', 'ladybird beetle', 'lady beetle', 'Coccinellidae'])('generic %s names the shared lady-beetle family', (name) => {
     expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'subgroup', id: 'lady-beetles' } });
-    expect(catalog.resolveName('native ladybug')).toMatchObject({ node: { slug: 'lady-beetle' } });
-    expect(catalog.resolveName('Asian ladybug')).toMatchObject({ node: { slug: 'asian-lady-beetle' } });
+    // "ladybug" swaps words of "Native Lady Beetles" / "Asian Lady Beetle", so
+    // these nicknames name the beetle group, never one species; the full
+    // names still do.
+    expect(catalog.resolveName('native ladybug')).toMatchObject({ node: { level: 'group', id: 'beetles' } });
+    expect(catalog.resolveName('Asian ladybug')).toMatchObject({ node: { level: 'group', id: 'beetles' } });
+    expect(catalog.resolveName('native lady beetle')).toMatchObject({ node: { slug: 'lady-beetle' } });
+    expect(catalog.resolveName('Asian lady beetle')).toMatchObject({ node: { slug: 'asian-lady-beetle' } });
   });
 
   test.each(['garden caterpillar', 'garden caterpillars'])(
@@ -635,13 +731,13 @@ describe('resolveName regressions', () => {
   test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
     expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
-    expect(catalog.getEntry('termite-swarmers').review.status).toBe('draft');
   });
 
   test.each(['swarmer', 'swarmers'])('bare %s does not claim termites when ants also swarm', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
     expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
-    expect(catalog.resolveName('ant swarmers')).toMatchObject({ node: { slug: 'winged-ants' } });
+    // "ant swarmers" is a nickname, not a spelling of "Winged Ants": the ant group.
+    expect(catalog.resolveName('ant swarmers')).toMatchObject({ node: { level: 'group', id: 'ants' } });
   });
 
   test.each(['white fly', 'white flies'])('generic spaced %s names the shared whitefly subgroup', (name) => {
@@ -671,7 +767,9 @@ describe('resolveName regressions', () => {
   test.each(['black snake', 'black snakes'])('generic %s names the shared snake group', (name) => {
     expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id: 'snakes' } });
     expect(catalog.resolveName('southern black racer')).toMatchObject({ node: { slug: 'southern-black-racer' } });
-    expect(catalog.resolveName('black racer')).toMatchObject({ node: { slug: 'southern-black-racer' } });
+    // "black racer" drops a word of "Southern Black Racer", so it can't be
+    // told apart from a shared name: the snake group.
+    expect(catalog.resolveName('black racer')).toMatchObject({ node: { level: 'group', id: 'snakes' } });
   });
 
   test.each(['ground wasp', 'ground wasps'])('generic %s names the shared wasp and bee group', (name) => {
@@ -695,6 +793,43 @@ describe('resolveName regressions', () => {
   test.each(['bat', 'bats'])('generic %s names the neutral bats subgroup', (name) => {
     expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'subgroup', id: 'bats' } });
     expect(catalog.resolveName('Brazilian free-tailed bat')).toMatchObject({ node: { slug: 'brazilian-free-tailed-bat' } });
+  });
+
+  // One rule instead of a species-by-species call on which nicknames are
+  // specific: a nickname names its species only when it spells one of the
+  // species' own names (common name, a name in its parenthetical, a
+  // scientific name) or qualifies the common name with every word kept.
+  test.each([
+    ['love bug', 'lovebug'],
+    ['raccoons', 'raccoon'],
+    ['cow killer', 'velvet-ant'],
+    ['yellow rat snake', 'eastern-rat-snake'],
+    ['tomato hornworm', 'tomato-hornworm'],
+    ['multicolored asian lady beetle', 'asian-lady-beetle'],
+  ])('the nickname %s spells or qualifies its own species name, so it names the species', (name, slug) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'entry', slug } });
+  });
+
+  test.each([
+    ['palmetto bug', 'roaches'],
+    ['water bug', 'roaches'],
+    ['gray squirrel', 'wild-mammals'],
+    ['black racer', 'snakes'],
+    ['electric ant', 'ants'],
+    ['halloween beetle', 'beetles'],
+  ])('the nickname %s drops or swaps words of its species name, so it names only the %s group', (name, group) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'group', id: group } });
+  });
+
+  test('no entry nickname ever resolves to a different species', () => {
+    const wrong = [];
+    for (const entry of catalog.listEntries()) {
+      for (const name of [...(entry.aliases || []), ...(entry.aka || [])]) {
+        const hit = catalog.resolveName(name);
+        if (hit?.node.level === 'entry' && hit.node.slug !== entry.slug) wrong.push(`${entry.slug}: ${name} -> ${hit.node.slug}`);
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
@@ -735,7 +870,6 @@ describe('resolveName regressions', () => {
     ['Carolina Mantis', 'carolina-mantis'],
     ['Stagmomantis carolina', 'carolina-mantis'],
     ['Eastern Gray Squirrel', 'eastern-gray-squirrel'],
-    ['gray squirrel', 'eastern-gray-squirrel'],
     ['Sciurus carolinensis', 'eastern-gray-squirrel'],
     ['Yellow Fever Mosquito', 'aedes-mosquito'],
     ['Aedes aegypti', 'aedes-mosquito'],
@@ -770,7 +904,7 @@ describe('resolveName regressions', () => {
     ['Archipsocus', 'small-crawlers'],
     ['Archipsocus on the bark', 'small-crawlers'],
   ])('genus-only input %s cannot select a species', (name, id) => {
-    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id } });
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'group', id } });
   });
 
   test.each([
@@ -788,32 +922,31 @@ describe('resolveName regressions', () => {
     }
   });
 
-  test('a genus-level subgroup name covers every catalog member of that genus', () => {
-    const genusNodes = index.subgroups.flatMap((subgroup) => String(subgroup.scientific || '')
-      .split('/')
-      .map((part) => part.trim())
-      .filter((part) => subgroup.rank === 'genus' && /^[A-Z][a-z]+$/.test(part)));
-
-    for (const genus of genusNodes) {
-      const resolved = catalog.resolveName(genus)?.node;
-      const resolvedId = resolved?.slug || resolved?.id;
-      const members = allEntries.filter((entry) => entry.kind === 'organism'
-        && String(entry.scientific_name || '').split('/')
-          .some((name) => name.trim() === genus || name.trim().startsWith(`${genus} `)));
-      expect({ genus, resolvedId }).toEqual({ genus, resolvedId: expect.any(String) });
-      expect(members.length).toBeGreaterThan(0);
-      for (const member of members) {
-        expect({ genus, slug: member.slug, lineage: catalog.lineage(member.slug).map((node) => node.id) })
-          .toMatchObject({ lineage: expect.arrayContaining([resolvedId]) });
+  // Codex #4974 (21:22Z round): a genus whose species sit in different
+  // subgroups (Solenopsis: fire ants and the thief ant; Blattella) must
+  // resolve to a node holding ALL of them, not one subgroup's taxon.
+  test('every bare genus resolves to a node that holds every catalog entry of that genus', () => {
+    const members = new Map();
+    for (const entry of allEntries.filter((e) => e.kind !== 'sign')) {
+      for (const part of String(entry.scientific_name || '').split('/')) {
+        const genus = part.trim().match(/^([A-Z][a-z]+)(?: [a-z]| spp?\.?$)/);
+        if (!genus) continue;
+        if (!members.has(genus[1])) members.set(genus[1], new Set());
+        members.get(genus[1]).add(entry.slug);
       }
     }
-  });
-
-  test.each([
-    ['Solenopsis', 'group', 'ants'],
-    ['Blattella', 'group', 'roaches'],
-  ])('a partial genus subgroup cannot capture %s', (name, level, id) => {
-    expect(catalog.resolveName(name)).toMatchObject({ via: 'scientific', node: { level, id } });
+    const outside = [];
+    for (const [genus, slugs] of members) {
+      const hit = catalog.resolveName(genus);
+      if (!hit) continue;
+      const id = hit.node.slug || hit.node.id;
+      for (const slug of slugs) {
+        if (!catalog.lineage(slug).some((rung) => rung.id === id)) outside.push(`${genus} -> ${id} misses ${slug}`);
+      }
+    }
+    expect(outside).toEqual([]);
+    expect(catalog.resolveName('Solenopsis').node).toMatchObject({ level: 'group', id: 'ants' });
+    expect(catalog.resolveName('Blattella').node.id).not.toBe('small-roaches');
   });
 
   test.each([
@@ -852,7 +985,8 @@ describe('resolveName regressions', () => {
   });
 
   test('a curated short alias still matches inside a sentence (Codex #4873 r1)', () => {
-    expect(catalog.resolveName('I found an asp on the oak').node.slug).toBe('puss-caterpillar');
+    // A nickname that is not the species' own name resolves to its group.
+    expect(catalog.resolveName('I found an asp on the oak').node.id).toBe('caterpillars-moths');
   });
 
   test('a -ies plural keeps the specific species (Codex #4873 r2)', () => {
@@ -929,21 +1063,11 @@ describe('reviewed catalog correction regressions', () => {
     const entry = catalog.getEntry('sooty-mold');
     expect(entry.traits.join(' ')).toMatch(/insects are no longer present/i);
     expect(entry.traits.join(' ')).not.toMatch(/always found.+also has/i);
-    expect(entry.review.status).toBe('draft');
   });
 
   test('oleander caterpillar customer copy keeps its qualified related-host range', () => {
     const entry = catalog.getEntry('oleander-caterpillar');
     expect(entry.copy.what_it_means).toMatch(/mainly on oleander.+occasionally.+related plants/i);
-    expect(entry.review.status).toBe('draft');
-  });
-
-  test('changed hunting billbug aliases require owner re-review', () => {
-    expect(catalog.getEntry('hunting-billbug').review.status).toBe('draft');
-  });
-
-  test('bagworm resolver exclusions added after approval require owner re-review', () => {
-    expect(catalog.getEntry('bagworm').review.status).toBe('draft');
   });
 });
 
@@ -955,8 +1079,20 @@ describe('loader API surface', () => {
   test('listEntries filters by group, subgroup, and kind', () => {
     expect(catalog.listEntries({ group: 'ants' }).length).toBe(19);
     expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(4);
-    expect(catalog.listEntries({ kind: 'organism' }).length).toBe(allEntries.length - 12);
+    // The pest section's own kind mix is unchanged by L1b: still 227 organism
+    // + 12 sign = 239. `kind: 'organism'` alone now also picks up
+    // sting-nematode (condition section), so the pest-only comparison stays
+    // scoped to `section: 'pest'`.
+    expect(catalog.listEntries({ section: 'pest', kind: 'organism' }).length).toBe(catalog.listEntries({ section: 'pest' }).length - 12);
     expect(catalog.listEntries({ kind: 'sign' }).length).toBe(12);
+    // L1b's own kind mix: 6 turfgrass + 29 weed + 37 host_plant = 72 plant;
+    // 24 disease + 22 disorder = 46 condition kinds, plus sting-nematode
+    // (kind organism) = 47 condition-section entries.
+    expect(catalog.listEntries({ kind: 'turfgrass' }).length).toBe(6);
+    expect(catalog.listEntries({ kind: 'weed' }).length).toBe(29);
+    expect(catalog.listEntries({ kind: 'host_plant' }).length).toBe(37);
+    expect(catalog.listEntries({ kind: 'disease' }).length).toBe(24);
+    expect(catalog.listEntries({ kind: 'disorder' }).length).toBe(22);
   });
 
   test('getNode resolves entries, subgroups, groups, and categories', () => {
@@ -974,36 +1110,6 @@ describe('loader API surface', () => {
     expect(rungs[3].id).toBe('fire-ant');
   });
 
-  test('generic guidance merges ancestors and subgroup overlays without consulting descendants', () => {
-    expect(catalog.genericGuidance('toads')).toMatchObject({
-      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'No Treatment Needed', urgency: 'low' },
-    });
-    expect(catalog.genericGuidance('anoles')).toMatchObject({
-      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'Wildlife Referral', urgency: 'low' },
-    });
-    expect(catalog.genericGuidance('geckos')).toMatchObject({
-      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'Wildlife Referral', urgency: 'low' },
-    });
-    expect(catalog.genericGuidance('wasps-bees')).toEqual({ compatibility: { safety: { stinging: true } } });
-    expect(catalog.genericGuidance('wasps-bees')).not.toHaveProperty('referral');
-  });
-
-  test('every draft medical-risk fallback exposes source-backed generic safety copy', () => {
-    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    const affected = allEntries.filter((entry) => entry.review.status === 'draft' && entry.risk === 'medical');
-    expect(affected.length).toBeGreaterThan(40);
-    for (const entry of affected) {
-      const candidate = { ...resolveCandidate({ slug: entry.slug, confidence: 0.95 }), checked: true, verified: true };
-      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
-      if (built.entry) continue;
-      const guidance = catalog.genericGuidance(built.answer.node_id);
-      expect({ slug: entry.slug, safety: built.genericSafetyLine }).toEqual({
-        slug: entry.slug, safety: expect.any(String),
-      });
-      expect(guidance.sources?.length).toBeGreaterThan(0);
-    }
-  });
-
   test('lineage on a bare group has no subgroup/entry rungs', () => {
     const rungs = catalog.lineage('ants');
     expect(rungs.map((r) => r.level)).toEqual(['category', 'group']);
@@ -1018,124 +1124,17 @@ describe('loader API surface', () => {
     expect(rungs).toEqual([{ level: 'category', id: 'insect', label: 'Insect', generic: 'an insect' }]);
   });
 
-  test('nextPhoto has guidance for a category too (Codex #4873 r1)', () => {
-    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
-      const np = catalog.nextPhoto(id);
-      expect(np.ask.length).toBeGreaterThan(0);
-      expect(np.why.length).toBeGreaterThan(0);
-    }
-  });
-
-  test('nextPhoto returns the authored next_photo for a group/subgroup', () => {
-    const np = catalog.nextPhoto('ants');
-    expect(np.ask.length).toBeGreaterThan(0);
-    expect(np.why.length).toBeGreaterThan(0);
-  });
-
   test('the actual draft fire-ant fallback keeps customers away from the mound', () => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    expect(catalog.getEntry('fire-ant').review.status).toBe('draft');
-    const candidate = { ...resolveCandidate({ slug: 'fire-ant', confidence: 0.95 }), checked: true, verified: true };
+    const resolved = resolveCandidate({ slug: 'fire-ant', confidence: 0.95 });
+    const candidate = {
+      ...resolved, entry: { ...resolved.entry, review: { status: 'draft', notes: '' } }, checked: true, verified: true,
+    };
     const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
     expect(built.answer).toMatchObject({ level: 'subgroup', node_id: 'fire-ants' });
     expect(built.nextPhoto.ask).toMatch(/safe distance/);
     expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|collect|pick up/i);
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
-  });
-
-  test.each([
-    ['little-fire-ant', 'subgroup', 'fire-ants', /without approaching or disturbing/i],
-    ['honey-bee-wall-colony', 'subgroup', 'structure-bee-colonies', /Do not approach, disturb, or seal/i],
-    ['puss-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
-    ['io-moth-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
-    ['saddleback-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
-    ['black-widow', 'subgroup', 'widow-spiders', /Do not approach, disturb, or handle/i],
-    ['mud-dauber', 'subgroup', 'medical-solitary-wasps', /without approaching or disturbing/i],
-    ['yellowjacket', 'subgroup', 'high-risk-social-wasps', /Do not approach or disturb/i],
-    ['paper-wasp', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
-    ['brown-recluse', 'subgroup', 'medically-significant-spiders', /Do not approach, disturb, or handle/i],
-    ['cane-toad', 'subgroup', 'toxic-toads', /Do not touch or handle/i],
-    ['cuban-treefrog', 'subgroup', 'irritant-treefrogs', /do not approach, touch, or handle/i],
-  ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
-    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    expect(catalog.getEntry(slug).review.status).toBe('draft');
-    const candidate = { ...resolveCandidate({ slug, confidence: 0.95 }), checked: true, verified: true };
-    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
-    expect(built.answer).toMatchObject({ level, node_id: nodeId });
-    expect(built.nextPhoto.ask).toMatch(/safe distance/i);
-    expect(built.nextPhoto.ask).toMatch(distanceRule);
-    expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up/i);
-    expect(built.nextPhoto.photo_can_confirm).toBe(true);
-  });
-
-  test.each(['aedes-mosquito', 'asian-tiger-mosquito', 'southern-house-mosquito', 'saltmarsh-mosquito'])(
-    'the actual draft %s fallback asks for a non-contact surface', (slug) => {
-      const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-      const candidate = { ...resolveCandidate({ slug, confidence: 0.95 }), checked: true, verified: true };
-      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
-      expect(built.entry).toBeNull();
-      expect(built.nextPhoto.ask).toMatch(/wall or another non-contact surface/i);
-      expect(built.nextPhoto.ask).toMatch(/do not use your skin.*or allow it to bite/i);
-      expect(built.nextPhoto.ask).not.toMatch(/rests? on skin|on skin or a wall/i);
-    },
-  );
-
-  test('risky and protected-wildlife draft fallbacks retain conservative photo guidance', () => {
-    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    const riskyDrafts = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
-      && (['medical', 'irritant'].includes(entry.risk) || entry.safety.venomous
-        || entry.safety.toxic_to_pets || entry.role === 'protected_wildlife'));
-    expect(riskyDrafts.length).toBeGreaterThan(30);
-    for (const entry of riskyDrafts) {
-      const candidate = { ...resolveCandidate({ slug: entry.slug, confidence: 0.95 }), checked: true, verified: true };
-      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
-      expect({ slug: entry.slug, ask: built.nextPhoto.ask }).toEqual({
-        slug: entry.slug, ask: expect.stringMatching(/safe distance/i),
-      });
-      expect(built.nextPhoto.ask).not.toMatch(/close-up|next to a coin|a few feet|several feet|rests? on skin/i);
-      if (entry.role === 'protected_wildlife') {
-        expect(built.entry).toBeNull();
-        expect(built.nextPhoto.ask).toMatch(/never approach.*disturb/i);
-      }
-    }
-  });
-
-  test.each(['ground wasp', 'centipede'])('the generic %s fallback asks for distance instead of handling or approaching', (name) => {
-    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    const { node } = catalog.resolveName(name);
-    const candidate = resolveCandidate({ off_catalog_name: name, group_id: node.id, confidence: 0.95 });
-    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
-    expect(built.answer).toMatchObject({ level: 'group', node_id: node.id });
-    expect(built.nextPhoto.ask).toMatch(/zoom from a safe distance/i);
-    expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|a few feet away/i);
-  });
-
-  test('a mixed large and small lizard fallback keeps the customer at a safe distance', () => {
-    const { buildAnswer, mapToV1, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
-    const candidates = [
-      ['green-iguana', 0.35],
-      ['brown-anole', 0.30],
-    ].map(([slug, confidence]) => ({
-      ...resolveCandidate({ slug, confidence }), checked: true, verified: true,
-    }));
-    const built = buildAnswer({ candidates, qualityUsable: true, currentMonth: 6 });
-    expect(built).toMatchObject({
-      answer: { level: 'group', node_id: 'lizards' }, entry: null,
-      nextPhoto: { ask: expect.stringMatching(/zoom from a safe distance/i) },
-    });
-    expect(built.nextPhoto.ask).toMatch(/do not approach, corner, touch, or handle/i);
-    expect(built.nextPhoto.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
-    expect(mapToV1(built).report_contract).toMatchObject({
-      service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
-      safety: { venomous: false },
-    });
-  });
-
-  test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
-    const np = catalog.nextPhoto('fire-ant');
-    const firstLookAlike = catalog.getEntry('fire-ant').look_alikes[0];
-    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference, photo_can_confirm: firstLookAlike.photo_can_confirm !== false });
-    expect(np.why).toBeTruthy();
   });
 
   test('lookAlikes resolves each pair, leaving node null for an unbuilt cross-worker slug', () => {
@@ -1158,8 +1157,72 @@ describe('loader API surface', () => {
   });
 });
 
+// The one rule behind every unnamed answer: customer text comes from an
+// owner-approved entry or from the engine's fixed templates, never from an
+// unreviewed entry and never from group prose. Checked for EVERY entry,
+// forced to draft, so a new or re-drafted species can't reopen it.
+describe('unnamed answers show only fixed text (real catalog)', () => {
+  const {
+    buildAnswer, resolveCandidate, UNNAMED_SAFETY_CLAUSES, UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS,
+  } = require('../services/photo-id-v2/pest-engine');
+  const clauses = Object.values(UNNAMED_SAFETY_CLAUSES);
+  // A fixed-clause line: the base clause, then only other fixed clauses.
+  const isFixedLine = (line) => {
+    if (!line.startsWith(UNNAMED_SAFETY_CLAUSES.base)) return false;
+    let rest = line;
+    for (const clause of clauses) rest = rest.replace(clause, '');
+    return rest.trim() === '';
+  };
+  const keepsDistance = (e) => (!!e.risk && e.risk !== 'low') || !!e.safety?.protected
+    || e.role === 'wildlife' || e.role === 'protected_wildlife';
+  const unapproved = catalog.listEntries();
+
+  test('the catalog has entries to check', () => {
+    expect(unapproved.length).toBeGreaterThan(0);
+  });
+
+  test.each(unapproved.map((e) => [e.slug]))('a confident, unapproved %s shows none of its own text', (slug) => {
+    const entry = catalog.getEntry(slug);
+    const resolved = resolveCandidate({ slug, confidence: 0.95 });
+    const candidate = {
+      ...resolved, entry: { ...resolved.entry, review: { status: 'draft', notes: '' } }, checked: true, verified: true,
+    };
+    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+    expect(built.entry).toBeNull();
+    expect(built.referral).toBeNull();
+    expect([UNNAMED_NEXT_PHOTO, NO_PHOTO_CONFIRMS]).toContainEqual(built.nextPhoto);
+    if (keepsDistance(entry)) expect(built.genericSafetyLine).toEqual(expect.any(String));
+    if (built.genericSafetyLine !== null) expect(isFixedLine(built.genericSafetyLine)).toBe(true);
+    const shown = JSON.stringify({
+      answer: built.answer, group: built.group, evidence: built.evidence, candidates: built.candidatesBlock,
+      next_photo: built.nextPhoto, referral: built.referral, safety_line: built.genericSafetyLine,
+    }).toLowerCase();
+    // A group named for its kind ("carpenter bees", family Coccinellidae)
+    // can share words with a species in it; the group's own label, generic
+    // and scientific name are catalog structure, not the entry's text.
+    const nodeText = catalog.lineage(built.answer.node_id || '')
+      .flatMap((rung) => {
+        const node = catalog.getNode(rung.id) || {};
+        return [rung.label, rung.generic, node.scientific];
+      })
+      .filter(Boolean).join(' | ').toLowerCase();
+    const own = [entry.common_name, entry.scientific_name, entry.safety_line, entry.copy?.what_it_means, entry.copy?.fact,
+      ...(entry.traits || []), ...(entry.look_alikes || []).flatMap((la) => [la.next_photo, la.difference])];
+    const leaked = own
+      .filter((t) => typeof t === 'string' && t.trim().length > 3)
+      .map((t) => t.toLowerCase())
+      .filter((t) => shown.includes(t) && !nodeText.includes(t));
+    expect(leaked).toEqual([]);
+  });
+});
+
 describe('catalog size (sanity)', () => {
-  test('exactly 239 entries are loaded (60 owner-A + 179 owner-B/C)', () => {
-    expect(allEntries.length).toBe(239);
+  // 239 pest (60 owner-A + 179 owner-B/C) + 119 L1b lawn/plant draft entries
+  // (72 plant + 47 condition) = 358.
+  test('exactly 358 entries are loaded (239 pest + 72 plant + 47 condition)', () => {
+    expect(allEntries.length).toBe(358);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
   });
 });

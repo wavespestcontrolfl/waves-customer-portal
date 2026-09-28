@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/twilio.js',
+    snippet: "const alreadyLogged = await trx('sms_log').where({ twilio_sid: message.sid }).first('id');",
+    reason: 'accepted-send recovery idempotency check keyed by the provider SID Twilio just returned; a pre-provider reservation carries no SID, so it structurally cannot match.',
+  },
+  {
     file: 'services/messaging/billing-text-leg-dedupe.js',
     snippet: "return conn('sms_log')",
     reason: 'findLiveClaim: deliberately reads this module\'s own in-flight claim placeholder (status sending + billing_text_leg_claim marker) for one customer+notice; hiding reservations here would defeat the claim.',
@@ -445,11 +450,6 @@ const ALLOWLIST = [
     file: 'services/sms-additional-properties.js',
     snippet: 'const live = await trx(\'sms_log\').where({ id: message.id }).forUpdate().first();',
     reason: 'single-row lookup by id — not a list read.',
-  },
-  {
-    file: 'services/sms-auto-send.js',
-    snippet: "const anchor = await trx('sms_log').where({ id: smsLogId, direction: 'inbound' })",
-    reason: 'single-row inbound lookup for the gratitude thread lock; an outbound send reservation cannot match the id plus inbound direction predicate.',
   },
   {
     file: 'services/sms-auto-send.js',

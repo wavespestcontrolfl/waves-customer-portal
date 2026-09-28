@@ -67,6 +67,48 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
     expect(saved.metadata).toMatchObject({ finalize_pending: true, provider_message_id: 'SM-synthetic', entry_point: 'invoice_send_deferred' });
   });
 
+  test('old Email and Text replay persists original rail witnesses for finalize-only restart', async () => {
+    const queuedAt = new Date('2026-09-09T08:00:00Z');
+    const emailAt = new Date('2026-09-08T14:00:00Z');
+    const textAt = new Date('2026-09-08T16:00:00Z');
+    const row = await message({ status: 'sending', created_at: queuedAt,
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: randomUUID(), mark_invoice_delivery: true } });
+    await markScheduledSmsSent(row, row.metadata, { sent: true, deduped: true, deliveryOutcome: 'accepted',
+      channelResults: {
+        email: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: emailAt },
+        sms: { sent: true, deduped: true, deliveryOutcome: 'accepted', sentAt: textAt },
+      } });
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.created_at).toEqual(textAt);
+    expect(new Date(saved.metadata.queued_at)).toEqual(queuedAt);
+    expect(saved.metadata).toMatchObject({ finalize_pending: true,
+      invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: true,
+      invoice_delivery_email: true, invoice_prior_email: true,
+      invoice_delivery_sms: true, invoice_prior_sms: true });
+    expect(new Date(saved.metadata.invoice_prior_delivery_at)).toEqual(textAt);
+    expect(new Date(saved.metadata.invoice_prior_email_at)).toEqual(emailAt);
+    expect(new Date(saved.metadata.invoice_prior_sms_at)).toEqual(textAt);
+  });
+
+  test('legacy wrapper persists old App rail beside fresh Email without an all-old marker', async () => {
+    const appAt = new Date('2026-09-08T14:00:00Z');
+    const row = await message({ status: 'sending',
+      metadata: { entry_point: 'invoice_send_deferred', invoice_id: randomUUID(), mark_invoice_delivery: true } });
+    await markScheduledSmsSent(row, row.metadata, { sent: true, deliveryOutcome: 'accepted',
+      channelResults: {
+        email: { sent: true, deliveryOutcome: 'accepted' },
+        push: { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: appAt },
+      } });
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.metadata).toMatchObject({ finalize_pending: true,
+      invoice_delivery_legs_recorded: true, invoice_prior_delivery_deduped: false,
+      invoice_delivery_email: true, invoice_prior_email: false,
+      invoice_delivery_sms: true, invoice_prior_sms: true });
+    expect(new Date(saved.metadata.invoice_prior_sms_at)).toEqual(appAt);
+    expect(saved.metadata.invoice_prior_delivery_at).toBeNull();
+    expect(saved.created_at.getTime()).toBeGreaterThan(appAt.getTime());
+  });
+
   test('crash recovery keeps an enqueue time an earlier pass already saved (codex #4334)', async () => {
     const now = new Date();
     const queuedAt = new Date('2026-01-01T16:00:00Z');

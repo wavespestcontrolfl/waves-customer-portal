@@ -89,6 +89,15 @@ describe('hard checks: schema/canonical/indexable', () => {
     // the exemption is keyed on the bucket — other buckets can't ride competitor fields past the check
     expect(checkGscSignalAttached({}, { gsc_signal: { bucket: 'striking_distance', competitor_position: 5, search_volume: 100, competitor_domain: 'x.com' } }).ok).toBe(false);
   });
+  test('gsc_signal_attached accepts answer-engine evidence only for aeo_question_gap', () => {
+    const evidence = { bucket: 'aeo_question_gap', impressions: null, aeo_benchmark_id: 'Q6', aeo_engines_missing: ['chatgpt', 'claude', 'gemini'] };
+    expect(checkGscSignalAttached({}, { gsc_signal: evidence })).toEqual({ ok: true, reason: 'aeo_question_gap_evidence' });
+    // provenance lost → still fails closed
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, aeo_engines_missing: [] } }).ok).toBe(false);
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, aeo_benchmark_id: null } }).ok).toBe(false);
+    // keyed on the bucket — another bucket can't ride the AEO fields past the check
+    expect(checkGscSignalAttached({}, { gsc_signal: { ...evidence, bucket: 'aeo_gap' } }).ok).toBe(false);
+  });
   test('no_duplicate_intent fails on cannibalization human_review reason', () => {
     expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'cannibalization bucket' }).ok).toBe(false);
     expect(checkNoDuplicateIntent({}, { human_review_required: true, human_review_reason: 'first publish trust-build' }).ok).toBe(true);

@@ -415,6 +415,14 @@
     "approval": null,
     "scope": "record"
   },
+  "repair_closeout": {
+    "module": "closeout-repair-tools.js",
+    "domain": "closeout",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "get_cloudflare_edge_errors": {
     "module": "cloudflare-ops-tools.js",
     "domain": "cloudflare-ops",

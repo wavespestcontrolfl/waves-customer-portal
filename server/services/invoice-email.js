@@ -30,6 +30,11 @@ const {
   loadBillingEmailContext, dispatchUnderBillingEmailAuthority,
 } = require('./billing-channel-email-authority');
 const { billingEmailRefusal } = require('./billing-email-sender');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+
+function acceptedInvoiceEmailEvidence(result) {
+  return result.deduped ? { deduped: true, sentAt: storedEmailAcceptedAt(result.message) } : {};
+}
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -214,11 +219,16 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // never flip a delivered email into a reported send failure (the caller
   // restores the claim to draft on failure, and a later automatic resend
   // would duplicate the delivered email).
-  const markEmailDelivered = async () => {
+  const markEmailDelivered = async ({ deduped = false, sentAt = null } = {}) => {
     try {
       const updated = await db('invoices')
         .where({ id: invoice.id, send_claim_token: claimToken })
-        .update({ email_sent_at: new Date(), updated_at: new Date() });
+        .update({
+          email_sent_at: deduped
+            ? db.raw('COALESCE(email_sent_at, ?::timestamptz)', [sentAt])
+            : new Date(),
+          updated_at: new Date(),
+        });
       if (updated === 0) return;
     } catch (err) {
       logger.warn(`[invoice-email] email_sent_at stamp failed for ${invoice.invoice_number}: ${err.message}`);
@@ -490,9 +500,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           ...(refusal.retryable ? { retryable: true } : {}),
           recipient: recipientPayload };
       }
-      await markEmailDelivered();
+      const evidence = acceptedInvoiceEmailEvidence(result);
+      await markEmailDelivered(evidence);
       logger.info(`[invoice-email] Template invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);
-      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl };
+      return { ok: true, messageId: result.message?.provider_message_id || null, recipient: recipientPayload, payUrl,
+        ...evidence };
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template send failed for ${invoice.invoice_number}: ${err.message}`);

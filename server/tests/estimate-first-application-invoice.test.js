@@ -245,10 +245,25 @@ function makeKnex(rows = []) {
       calls.push(['orderBy', ...args]);
       return chain;
     }),
-    select: jest.fn(async (...args) => {
+    // Real knex's query builder stays chainable (and only thenable) after
+    // `.select(...)` — `.forUpdate()`/`.noWait()` can still follow it, and
+    // nothing actually runs until the whole thing is awaited. Mirror that
+    // here (record the call, stay on `chain`) rather than resolving `rows`
+    // immediately, which would break the lockRows path chaining
+    // `.forUpdate('i')` (and `.noWait()`) onto whatever `.select()` returned.
+    select: jest.fn((...args) => {
       calls.push(['select', ...args]);
-      return rows;
+      return chain;
     }),
+    forUpdate: jest.fn((...args) => {
+      calls.push(['forUpdate', ...args]);
+      return chain;
+    }),
+    noWait: jest.fn((...args) => {
+      calls.push(['noWait', ...args]);
+      return chain;
+    }),
+    then: (resolve) => resolve(rows),
   };
   const knex = jest.fn((table) => {
     calls.push(['table', table]);
@@ -324,6 +339,31 @@ describe('estimate first-application invoice lookup', () => {
     // Only void is filtered here — deliberately NOT the terminal vocabulary.
     expect(knex.calls).toContainEqual(['whereNot', 'i.status', 'void']);
     expect(knex.calls.some((c) => c[0] === 'whereNotIn')).toBe(false);
+  });
+
+  test('lockRows: true takes FOR UPDATE OF i without NOWAIT by default', async () => {
+    const knex = makeKnex([]);
+    await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex, { lockRows: true },
+    );
+    expect(knex.calls).toContainEqual(['forUpdate', 'i']);
+    expect(knex.calls.some((c) => c[0] === 'noWait')).toBe(false);
+  });
+
+  // Codex round-6 P1 (pre-push): a caller that already holds the
+  // estimate.deposit.ledger advisory lock (the schedule mint's own sibling
+  // recheck) passes noWait so a busy row fails fast instead of blocking
+  // into a deadlock against withInvoiceDepositSettlement's invoice-row-
+  // then-ledger-lock order (estimate-deposits.js).
+  test('lockRows + noWait takes FOR UPDATE OF i NOWAIT', async () => {
+    const knex = makeKnex([]);
+    await findFirstApplicationInvoiceForEstimateService(
+      { customer_id: 'customer-1', source_estimate_id: 'est-1', scheduled_date: '2026-06-08' },
+      knex, { lockRows: true, noWait: true },
+    );
+    expect(knex.calls).toContainEqual(['forUpdate', 'i']);
+    expect(knex.calls).toContainEqual(['noWait']);
   });
 
   test('does not query when the service is not linked to an estimate date', async () => {

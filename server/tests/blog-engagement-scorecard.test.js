@@ -2,6 +2,7 @@ const {
   addReadDepth,
   blogPostLoads,
   classifyPath,
+  classifyTrafficSource,
   countsAsPageView,
   formatMarkdown,
   isInternalHost,
@@ -56,6 +57,35 @@ describe('blog scorecard path classes', () => {
     expect(isInternalHost('')).toBe(false);
     expect(isInternalHost('portal.wavespestcontrol.com')).toBe(false);
   });
+
+  test.each([
+    ['google.com', 'google'],
+    ['www.google.com', 'google'],
+    ['google.co.uk', 'google'],
+    ['news.google.com', 'google'],
+    ['GOOGLE.COM', 'google'],
+    [' google.com ', 'google'],
+    ['facebook.com', 'facebook'],
+    ['www.facebook.com', 'facebook'],
+    ['m.facebook.com', 'facebook'],
+    ['l.facebook.com', 'facebook'],
+    ['lm.facebook.com', 'facebook'],
+    ['fb.me', 'facebook'],
+    ['FB.ME', 'facebook'],
+    ['', 'direct'],
+    [null, 'direct'],
+    [undefined, 'direct'],
+    ['www.bing.com', 'other'],
+    ['notgoogle.com', 'other'],
+    ['googleusercontent.com', 'other'],
+    ['google.example.com', 'other'],
+    ['google.com.evil.example', 'other'],
+    ['google.evil.example.com', 'other'],
+    ['facebook.com.evil.example', 'other'],
+    ['fb.me.example.com', 'other'],
+  ])('classifies referrer host %s as %s', (host, expected) => {
+    expect(classifyTrafficSource(host)).toBe(expected);
+  });
 });
 
 describe('summarize', () => {
@@ -78,6 +108,30 @@ describe('summarize', () => {
   test('counts post views, entries and onward clicks per view, ignoring reloads', () => {
     const s = summarize(groups);
     expect(s.totals).toEqual({ blogEntries: 190, blogViews: 196, onwardClicks: 9, onwardRate: 9 / 196 });
+  });
+
+  test('breaks landings down by traffic source, volume and share only', () => {
+    const s = summarize(groups);
+    // huntsman got 100 views from google and 50 with no referrer (direct);
+    // bagworm got 40 from bing (other); 190 external landings in all.
+    expect(s.sources).toEqual([
+      { source: 'google', label: 'Google', views: 100, share: 100 / 190 },
+      { source: 'facebook', label: 'Facebook', views: 0, share: 0 },
+      { source: 'other', label: 'Other', views: 40, share: 40 / 190 },
+      { source: 'direct', label: 'Direct/none', views: 50, share: 50 / 190 },
+    ]);
+  });
+
+  test('never reports a per-source engagement rate', () => {
+    const s = summarize([
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', views: 10 },
+      { path: '/contact/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/', views: 4 },
+      { path: '/pest-control/b/', refererHost: 'm.facebook.com', refererPath: '/', views: 5 },
+    ]);
+    for (const src of s.sources) expect(src).not.toHaveProperty('rate');
+    expect(s.totals).not.toHaveProperty('googleOnwardRate');
+    expect(s.sources).toContainEqual({ source: 'google', label: 'Google', views: 10, share: 10 / 15 });
+    expect(s.sources).toContainEqual({ source: 'facebook', label: 'Facebook', views: 5, share: 5 / 15 });
   });
 
   test('breaks down destinations by class', () => {
@@ -159,6 +213,12 @@ describe('summarize', () => {
       totals: { blogEntries: 0, blogViews: 0, onwardClicks: 0, onwardRate: null },
       destinations: [],
       posts: [],
+      sources: [
+        { source: 'google', label: 'Google', views: 0, share: null },
+        { source: 'facebook', label: 'Facebook', views: 0, share: null },
+        { source: 'other', label: 'Other', views: 0, share: null },
+        { source: 'direct', label: 'Direct/none', views: 0, share: null },
+      ],
     });
   });
 
@@ -167,7 +227,15 @@ describe('summarize', () => {
     expect(md).toContain('## Blog engagement scorecard, 2026-09-19 to 2026-09-25');
     expect(md).toContain('Blog post views (fresh navigations): 196, of which 190 began a visit');
     expect(md).toContain('Onward page views referred by a post: 9 (4.6% per post view)');
+    expect(md).toContain('Blog landings from Google: 100 (52.6% of blog landings)');
+    expect(md).not.toContain('Onward rate, Google');
     expect(md).toContain('| Another blog post | 6 |');
+    expect(md).toContain('### Traffic source (blog-post landings)');
+    expect(md).toContain('| Source | Page loads | Share |');
+    expect(md).toContain('| Google | 100 | 52.6% |');
+    expect(md).toContain('| Facebook | 0 | 0.0% |');
+    expect(md).toContain('| Other | 40 | 21.1% |');
+    expect(md).toContain('| Direct/none | 50 | 26.3% |');
     expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
   });

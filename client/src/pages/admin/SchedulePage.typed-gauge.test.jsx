@@ -22,8 +22,6 @@ const DERIVED_SCHEMA = {
     { key: 'species', label: 'Species', type: 'select', options: ['German', 'American'] },
     { key: 'activity_level', label: 'Activity level', type: 'select', required: true, options: ['None observed', 'Low', 'Moderate', 'Heavy', 'Severe'] },
   ],
-  nextStepChips: ['Follow-up recommended'],
-  nextStepRequired: true,
   activity: {
     indicatorKey: 'roach_activity',
     label: 'Roach Activity',
@@ -39,8 +37,6 @@ const TECH_SET_SCHEMA = {
   fields: [
     { key: 'species', label: 'Species', type: 'select', options: ['Roof rat', 'Norway rat'] },
   ],
-  nextStepChips: ['Continue trapping'],
-  nextStepRequired: true,
   activity: {
     indicatorKey: 'rodent_activity',
     label: 'Rodent Activity',
@@ -60,8 +56,6 @@ function renderSection(schema, values, extra = {}) {
       activityScore={null}
       activityScoreTouched={false}
       onActivityTap={() => {}}
-      nextStepChips={[]}
-      onToggleChip={() => {}}
       recommendations=""
       onRecommendationsChange={() => {}}
       {...extra}
@@ -82,6 +76,21 @@ describe('TypedFindingsSection — gauge/findings merge (owner ruling 2026-09-26
     const { container } = renderSection(TECH_SET_SCHEMA, { species: 'Roof rat' });
     expect(container.textContent).toContain('Rodent Activity');
     expect(container.textContent).toContain('Prefills from findings until you choose');
+  });
+});
+
+// Owner ruling 2026-09-27: the "Next steps (up to 4)" chip picker was
+// retired for every typed schema — Recommendations is the single
+// tech-advice field now.
+describe('TypedFindingsSection — next-step chip picker retired (owner ruling 2026-09-27)', () => {
+  it('renders no "Next steps" picker for a derive-mapped schema', () => {
+    const { container } = renderSection(DERIVED_SCHEMA, { species: 'German', activity_level: 'Low' });
+    expect(container.textContent).not.toContain('Next steps');
+  });
+
+  it('renders no "Next steps" picker for a tech-set-only schema', () => {
+    const { container } = renderSection(TECH_SET_SCHEMA, { species: 'Roof rat' });
+    expect(container.textContent).not.toContain('Next steps');
   });
 });
 

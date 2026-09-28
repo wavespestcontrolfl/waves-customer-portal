@@ -1,7 +1,7 @@
 /**
  * Test-only fixture "species catalog" for `pest-engine.test.js`. Mirrors the
  * REAL `../../services/species-catalog.js` API surface (getEntry, getGroup,
- * getSubgroup, getCategory, getNode, listEntries, lineage, genericGuidance, nextPhoto,
+ * getSubgroup, getCategory, getNode, listEntries, lineage,
  * lookAlikes, _index, CATALOG_VERSION) over small, hand-built data instead
  * of the live `species-catalog-v1` data files — per the 2026-09-26 contract
  * delta note, the live entry files are being revised in parallel by content
@@ -35,11 +35,33 @@ function buildFixtureCatalog({
   const getCategory = (id) => categoryMap.get(id) || null;
   const getNode = (id) => getGroup(id) || getSubgroup(id) || getEntry(id) || getCategory(id) || null;
 
+  // Mirrors the real loader's sectionOf: accepts a node object (category,
+  // group, subgroup, or entry — anything with a `level`) or a bare id/slug,
+  // and climbs entry/subgroup -> group -> category -> section, defaulting a
+  // category with no declared `section` to `'pest'` (every fixture catalog
+  // built before the plant/condition sections existed never sets one).
+  // Codex #5143 r1 P2 (pre-push audit on this fixture): the first version of
+  // this helper only accepted an ENTRY, so `candidateNodeId`'s new
+  // `sectionOf(group)` call on an off-catalog group id always fell through
+  // to null against every fixture catalog — silently rejecting every
+  // off-catalog candidate, pest groups included.
+  function sectionOf(nodeOrSlug) {
+    const node = (nodeOrSlug && typeof nodeOrSlug === 'object' && nodeOrSlug.level)
+      ? nodeOrSlug
+      : getNode(nodeOrSlug);
+    if (!node) return null;
+    if (node.level === 'category') return node.section || 'pest';
+    const group = node.level === 'group' ? node : getGroup(node.group);
+    const category = group ? getCategory(group.category) : null;
+    return category ? (category.section || 'pest') : null;
+  }
+
   function listEntries(filter = {}) {
-    const { group, subgroup, kind } = filter || {};
+    const { group, subgroup, kind, section } = filter || {};
     let list = group ? (entriesByGroup.get(group) || []) : [...entryMap.values()];
     if (subgroup) list = list.filter((e) => e.subgroup === subgroup);
     if (kind) list = list.filter((e) => e.kind === kind);
+    if (section) list = list.filter((e) => sectionOf(e) === section);
     return list;
   }
 
@@ -62,36 +84,6 @@ function buildFixtureCatalog({
     return rungs;
   }
 
-  function nextPhoto(id) {
-    const node = getNode(id);
-    if (!node) return null;
-    if (node.next_photo) return node.next_photo;
-    if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-      return { ask: node.look_alikes[0].next_photo, why: node.look_alikes[0].difference || null };
-    }
-    return null;
-  }
-
-  function genericGuidance(id) {
-    let merged = null;
-    for (const rung of lineage(id)) {
-      if (rung.level === 'entry') continue;
-      const guidance = getNode(rung.id)?.generic_guidance;
-      if (!guidance) continue;
-      const inheritedCompatibility = merged?.compatibility;
-      merged = { ...(merged || {}), ...guidance };
-      if (guidance.compatibility) {
-        merged.compatibility = { ...(inheritedCompatibility || {}), ...guidance.compatibility };
-        if (guidance.compatibility.safety) {
-          merged.compatibility.safety = {
-            ...(inheritedCompatibility?.safety || {}), ...guidance.compatibility.safety,
-          };
-        }
-      }
-    }
-    return merged;
-  }
-
   function lookAlikes(slug) {
     const entry = getEntry(slug);
     if (!entry) return [];
@@ -108,9 +100,8 @@ function buildFixtureCatalog({
     getCategory,
     getNode,
     listEntries,
+    sectionOf,
     lineage,
-    genericGuidance,
-    nextPhoto,
     lookAlikes,
     _index: () => ({ legacy_slug_map: legacySlugMap }),
   };
@@ -133,17 +124,17 @@ const FIXTURE = buildFixtureCatalog({
   categories: {
     insect: { label: 'Insect', generic: 'an insect' },
     wildlife: { label: 'Wildlife', generic: 'a wildlife visitor' },
-    other: { label: 'Other', generic: 'something else', next_photo: { ask: 'Other retake photo', why: 'Other retake why' } },
+    other: { label: 'Other', generic: 'something else' },
   },
   groups: [
-    { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant', next_photo: { ask: 'Ant group node photo', why: 'Ant group why' } },
+    { id: 'ants', label: 'Ants', category: 'insect', generic: 'an ant' },
     { id: 'termites', label: 'Termites', category: 'insect', generic: 'termite activity' },
     { id: 'wasps-bees', label: 'Wasps, bees & hornets', category: 'insect', generic: 'a stinging insect' },
     { id: 'rodents', label: 'Rats & mice', category: 'insect', generic: 'a rat, mouse, or other rodent' },
     { id: 'turtles', label: 'Turtles & tortoises', category: 'wildlife', generic: 'a turtle or tortoise' },
   ],
   subgroups: [
-    { id: 'fire-ants', group: 'ants', label: 'Fire Ants', generic: 'a fire ant', scientific: 'Solenopsis', next_photo: { ask: 'Fire ant subgroup photo', why: 'Fire ant subgroup why' } },
+    { id: 'fire-ants', group: 'ants', label: 'Fire Ants', generic: 'a fire ant', scientific: 'Solenopsis' },
   ],
   entries: [
     ownerApproved({

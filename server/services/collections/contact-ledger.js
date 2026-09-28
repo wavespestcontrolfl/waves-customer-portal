@@ -58,19 +58,22 @@ async function recordContact({
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
   const existing = await db('collections_contact_ledger')
     .where({ idempotency_key: idempotencyKey })
-    .first('id', 'metadata');
+    .first('id', 'metadata', 'occurred_at');
   if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
-  // A reused reservation is being re-attempted NOW (codex r5): refresh
-  // occurred_at so the 24h frequency window starts at the actual delivery
-  // attempt, not the first failed one. Later timestamp = longer window —
-  // the safe direction; a refresh failure propagates (caller holds).
-  await db('collections_contact_ledger')
-    .where({ id: existing.id })
-    .update({ occurred_at: occurredAt });
   const existingMeta = typeof existing.metadata === 'string'
-    ? JSON.parse(existing.metadata)
-    : (existing.metadata || {});
-  return { id: existing.id, metadata: existingMeta, reused: true };
+    ? JSON.parse(existing.metadata) : (existing.metadata || {});
+  // Preserve settled event windows, including a concurrent stamp. Unsettled
+  // reservations still refresh for legacy deferred callers before dispatch.
+  let contactAt = existing.occurred_at;
+  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
+    const changed = await db('collections_contact_ledger').where({ id: existing.id })
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ]).update({ occurred_at: occurredAt });
+    if (Number(changed) === 1) contactAt = occurredAt;
+  }
+  return { id: existing.id, metadata: existingMeta, reused: true,
+    ...(contactAt ? { occurred_at: contactAt } : {}) };
 }
 
 /**
@@ -93,7 +96,7 @@ function applyReservationMatch(query, match = {}) {
   return query;
 }
 
-async function markDelivered(target, { database = db, match = {} } = {}) {
+async function markDelivered(target, { database = db, match = {}, occurredAt } = {}) {
   if (!target) return false;
   try {
     const stamp = async (conn) => {
@@ -104,6 +107,8 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
       applyReservationMatch(query, match);
       const changed = await query.update({
         metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
+        // A repaired App event restores its original contact window.
+        ...(occurredAt ? { occurred_at: occurredAt } : {}),
       });
       return Number(changed) === 1;
     };

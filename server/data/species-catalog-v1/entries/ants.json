@@ -132,8 +132,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "250b440b9e3719200d54f48f0afa0de1d4cd6cd180a722bd4d1bfccc3d38f983"
     },
     "slug": "bigheaded-ant",
     "common_name": "Bigheaded Ant",
@@ -245,8 +246,9 @@
     "safety_line": "Stings burn immediately and can trigger allergic reactions. Keep kids and pets away from mounds, and do not kick or disturb one. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "5eda3d6b842262c75d06c24eb936e4b11f69f8709621be14f7a2e4125fd43efb"
     },
     "slug": "fire-ant",
     "common_name": "Red Imported Fire Ant",
@@ -357,8 +359,9 @@
     "safety_line": "Not considered medically dangerous, but it can pinch/bite if handled. Leave it undisturbed and let a technician check the wood it came from.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural."
+      "status": "owner_approved",
+      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "762a016d2c84d4fc17529304f8812f511d33983368dcd264be41cc4dfb1096fa"
     },
     "slug": "carpenter-ant",
     "common_name": "Florida Carpenter Ant",
@@ -471,8 +474,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "bdf74d178f14a7d07e39b8ec14d69ddb93e35453addce1902e9f65788a6aef2e"
     },
     "slug": "tawny-crazy-ant",
     "common_name": "Tawny Crazy Ant",
@@ -788,8 +792,9 @@
       "https://entnemdept.ufl.edu/creatures/urban/ants/tropical_fire_ant.htm"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "79a2a23dcbc2ddcc7e49b8b6bce2df180bcfc1c5a37f630fed098ac5a9c4aa3f"
     }
   },
   {
@@ -908,8 +913,9 @@
       "https://pmc.ncbi.nlm.nih.gov/articles/PMC12754576/"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven."
+      "status": "owner_approved",
+      "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "01f514e635e99afa414879d1b54ccfc2058e4f898e2fdf9fffe6b4c43edb984d"
     }
   },
   {
@@ -1146,8 +1152,9 @@
       "https://journals.flvc.org/edis/article/download/108996/104134"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises)."
+      "status": "owner_approved",
+      "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "44ccea12ab74200c2b5d9d87eded4bbbcf0e1a9adc8e20457383eac3382eca58"
     }
   },
   {
@@ -1168,7 +1175,7 @@
     "scientific_name": "Crematogaster spp.",
     "rank": "genus",
     "group": "ants",
-    "subgroup": "defensive-stinging-ants",
+    "subgroup": null,
     "site_category": "Ants",
     "stages": [
       "worker"
@@ -1256,8 +1263,9 @@
       "https://ask.ifas.ufl.edu/in610"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging)."
+      "status": "owner_approved",
+      "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "c404c5a9312b090516f63a83c81ce74431299864353e2df406af0fd6c58777ca"
     }
   },
   {
@@ -1483,8 +1491,9 @@
       "https://journals.flvc.org/edis/article/download/116996/115141"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "9a4fdbc0ed8c253bd0483ce3804bd1e3421d07b2d62b760fc5c6311082bd60a9"
     }
   },
   {
@@ -1505,7 +1514,7 @@
     "scientific_name": "Odontomachus spp.",
     "rank": "genus",
     "group": "ants",
-    "subgroup": "defensive-stinging-ants",
+    "subgroup": null,
     "site_category": "Ants",
     "stages": [
       "worker"
@@ -1593,8 +1602,9 @@
       "https://repository.lib.fsu.edu/islandora/object/fsu:182392/datastream/PDF/view"
     ],
     "review": {
-      "status": "draft",
-      "notes": "Genus-level entry (several Odontomachus species occur in Florida). A directly-read FSU thesis on O. brunneus (citing Deyrup & Cover 2004) confirms it 'inhabits a variety of terrestrial habitats throughout Florida'; no source gives SWFL-county-level frequency data, so range stays 'occasional', this catalog's cautious default, rather than asserted as settled."
+      "status": "owner_approved",
+      "notes": "Genus-level entry (several Odontomachus species occur in Florida). A directly-read FSU thesis on O. brunneus (citing Deyrup & Cover 2004) confirms it 'inhabits a variety of terrestrial habitats throughout Florida'; no source gives SWFL-county-level frequency data, so range stays 'occasional', this catalog's cautious default, rather than asserted as settled. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "b209c86e986d3206d498874ef2ac51191d836632741995157d47853cc60c8692"
     }
   },
   {
@@ -1701,8 +1711,9 @@
       "https://ask.ifas.ufl.edu/in536"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "92ad3a27a8be0c336686129aaaf4a59d90d0cb39544a622a7f06d13d4b4f4883"
     }
   },
   {
@@ -1922,8 +1933,9 @@
       "https://blogs.ifas.ufl.edu/charlotteco/2026/04/26/a-good-ant/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "d921624ec26059ed859ddde716142331546782180db391608d85adf5eed1c60c"
     }
   },
   {
@@ -2154,8 +2166,9 @@
       "https://entnemdept.ufl.edu/creatures/urban/ants/"
     ],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "e63e1e87743feb5cfe6871eafe6288216c3e1cf09e0facc946afe4c9e023cebf"
     }
   }
 ]

@@ -469,7 +469,13 @@ class AutonomousRunner {
         return finalize(run, t0, { outcome: 'failed', failure_message: `internal_links:${err.message}` });
       }
       const finalized = await finalize(run, t0, result.patch);
-      if (result.patch.outcome === 'skipped_shadow_mode') {
+      if (result.claim === 'complete') {
+        await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
+      } else if (result.claim === 'release') {
+        await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
+      } else if (result.claim === 'skip') {
+        await this._skipClaimOrThrow(queue, opp.id, result.patch.skip_reason, { claimToken });
+      } else if (result.patch.outcome === 'skipped_shadow_mode') {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken }, run.action_type);
       } else {
         await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken }, run.action_type);
@@ -1976,6 +1982,13 @@ class AutonomousRunner {
   }
 
   async _checkProtectedPage(opp = {}, brief = null) {
+    // add_internal_links never edits its target: the planner edits OTHER
+    // pages to point at it. Refusing a protected money page here meant the
+    // city hubs — the pages that most need inbound links — never got any
+    // (10 of 18 live runs through 2026-09-27). The executor still revalidates
+    // every source page it edits.
+    const actionType = (brief && brief.action_type) || opp.effective_action_type || opp.action_type;
+    if (actionType === 'add_internal_links') return null;
     const protectedPages = getProtectedPages();
     if (!protectedPages?.isProtected) return null;
     const target = protectedPageCandidateUrl(opp, brief);
@@ -2476,10 +2489,13 @@ class AutonomousRunner {
     }
 
     const t = Date.now();
-    const corpus = await this._loadAstroCorpus({ required: false });
+    // Live runs need the real corpus: a GitHub outage must throw (the action
+    // catch releases the claim for retry), not look like "no candidates".
+    const corpus = await this._loadAstroCorpus({ required: !run.shadow_mode });
+    const excludeSource = await getProtectedPages()?.protectedSourcePredicate?.({ db });
     const tasks = planner.planForTarget(
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
-      { corpus, opportunityId: run.opportunity_id }
+      { corpus, opportunityId: run.opportunity_id, excludeSource }
     );
     if (!tasks.length) {
       // No keyword in the log line — brief.target_keyword can carry the
@@ -2497,40 +2513,71 @@ class AutonomousRunner {
     let dryRunResult = null;
     if (executor?.runDryRun && taskIds.length) {
       const t2 = Date.now();
-      dryRunResult = await executor.runDryRun({
-        taskIds,
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_DRY_RUN_LIMIT', taskIds.length),
-      });
+      // Every planned task is dry-run before the claim completes: the sweep
+      // ships only patch_candidate rows, so a task left queued here would
+      // never be evaluated again.
+      dryRunResult = await executor.runDryRun({ taskIds, limit: taskIds.length });
       run.link_execute_ms = Date.now() - t2;
     }
     const candidates = Number((dryRunResult?.results || []).filter((result) => result.status === 'patch_candidate').length);
     const skipped = Number((dryRunResult?.results || []).filter((result) => result.status === 'skipped').length);
     const failed = Number((dryRunResult?.results || []).filter((result) => result.status === 'failed').length);
-    let prResult = null;
-    if (!run.shadow_mode && candidates > 0 && executor?.runPrBatch) {
-      const t3 = Date.now();
-      prResult = await executor.runPrBatch({
-        taskIds,
-        limit: envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3),
-      });
-      run.publish_ms = Date.now() - t3;
-    }
-    const reason = run.shadow_mode ? 'internal_links_dry_run_shadow' : 'internal_links_dry_run';
-    if (prResult?.status === 'pr_open') {
+    const summary = `queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`;
+    // No candidate because GitHub/network was down (not because the links
+    // don't fit): release the claim so the opportunity is retried, rather
+    // than closing it as having no candidates. The failed rows are
+    // retryable and get re-queued when it is planned again.
+    const transient = (dryRunResult?.results || []).some((r) => r.status === 'failed' && executor?.isTransientLoadFailure?.(r.failure_reason));
+    if (!run.shadow_mode && candidates === 0 && transient) {
       return {
-        notes: `internal_links_pr_pending_merge:queued=${taskIds.length}:pr_links=${prResult.count}`,
+        claim: 'release',
+        notes: `internal_links_transient_failure:${summary}`,
         patch: {
-          outcome: 'completed_pending_review',
-          skip_reason: 'internal_links_pr_pending_merge',
+          outcome: 'deferred_gate_retry',
+          skip_reason: 'internal_links_transient_failure',
           link_tasks_queued: taskIds.length,
-          publish_status: 'pr_open',
-          astro_pr_url: prResult.pr_url || null,
-          reviewer_notes: `Astro internal-link PR opened with ${prResult.count} link(s): ${prResult.pr_url}. Merge only after Codex, editorial review, and preview verification.`,
+          reviewer_notes: `Dry-run hit a transient load failure; opportunity released for retry (${summary}).`,
         },
       };
     }
+    // Live mode: the run's job ends at planning. Shipping belongs to ONE
+    // path — the daily candidate sweep opens the PR and the autonomous PR
+    // poller merges it (InternalLinkPrExecutor) — so a run never waits on a
+    // PR and nothing has to tie a run to the PR that ships its links.
+    if (!run.shadow_mode) {
+      // Mixed results: tasks that failed only on a transient load error go
+      // back to the pool before the claim completes (the sweep revalidates).
+      if (candidates > 0 && executor?.requeueTransientDryRunFailures) {
+        await executor.requeueTransientDryRunFailures(dryRunResult?.results);
+      }
+      if (candidates > 0) {
+        return {
+          claim: 'complete',
+          notes: `internal_links_planned:${summary}`,
+          patch: {
+            // Planned, not published: publication accounting (digest, caps,
+            // visibility, rankings) counts only completed_published, and the
+            // links ship later only if every auto-merge gate passes.
+            outcome: 'completed_planned',
+            link_tasks_queued: taskIds.length,
+            reviewer_notes: `Planned ${candidates} internal-link candidate(s); the daily sweep ships them through the auto-merge checks.`,
+          },
+        };
+      }
+      return {
+        claim: 'skip',
+        notes: `internal_links_no_candidates:${summary}`,
+        patch: {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'internal_links_no_candidates',
+          link_tasks_queued: taskIds.length,
+          reviewer_notes: `No shippable internal-link candidate: ${summary}.`,
+        },
+      };
+    }
+    const reason = 'internal_links_dry_run_shadow';
     return {
-      notes: `${reason}:queued=${taskIds.length}:candidates=${candidates}:skipped=${skipped}:failed=${failed}`,
+      notes: `${reason}:${summary}`,
       patch: {
         outcome: 'completed_pending_review',
         skip_reason: reason,
@@ -3596,9 +3643,10 @@ class AutonomousRunner {
       const t3 = Date.now();
       try {
         const corpus = await this._loadAstroCorpus({ required: false });
+        const excludeSource = await getProtectedPages()?.protectedSourcePredicate?.({ db });
         const tasks = planner.planForTarget(
           { url: out.published_url, keyword: brief.target_keyword, city: brief.city, service: brief.service },
-          { corpus, opportunityId: run.opportunity_id }
+          { corpus, opportunityId: run.opportunity_id, excludeSource }
         );
         if (!tasks.length) {
           // No keyword in the log line — brief.target_keyword can carry the
@@ -4373,6 +4421,12 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
   const insertedId = firstReturnedId(inserted);
   if (insertedId) return { id: insertedId, inserted: true };
 
+  // Reviewer verdicts (LLM reader check, Codex findings) stay terminal: a
+  // replan never re-queues them (see REVIEWER_REJECTION_PREFIXES).
+  const { REVIEWER_REJECTION_PREFIXES = [] } = getInternalLinkExecutor() || {};
+  const notReviewerRejected = (q) => q.whereNull('skip_reason').orWhere((inner) => {
+    for (const prefix of REVIEWER_REJECTION_PREFIXES) inner.andWhere('skip_reason', 'not like', `${prefix}%`);
+  });
   const existing = await db('content_internal_link_tasks')
     .select('id', 'status')
     .where({
@@ -4381,12 +4435,14 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
       anchor_text: task.anchor_text,
     })
     .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
+    .where(notReviewerRejected)
     .first();
   if (!existing?.id) return null;
 
   const refreshed = await db('content_internal_link_tasks')
     .where({ id: existing.id })
     .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
+    .where(notReviewerRejected)
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,

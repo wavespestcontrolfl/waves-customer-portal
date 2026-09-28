@@ -426,12 +426,28 @@ function isCompetitorGapBrief(brief) {
     && !!s.competitor_domain;
 }
 
+// aeo_question_gap briefs (gsc-opportunity-miner) can be admitted on
+// answer-engine evidence alone: a benchmark question whose target page
+// several engines don't cite, where that page has no GSC impressions (or
+// doesn't exist yet). That evidence rides the persisted gsc_signal — same
+// keying and presence rule as isCompetitorGapBrief, so a row that lost its
+// provenance still hard-fails.
+function isAeoQuestionGapBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'aeo_question_gap'
+    && !!s.aeo_benchmark_id
+    && Array.isArray(s.aeo_engines_missing) && s.aeo_engines_missing.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
   }
   if (isCompetitorGapBrief(brief)) {
     return { ok: true, reason: 'competitor_gap_evidence' };
+  }
+  if (isAeoQuestionGapBrief(brief)) {
+    return { ok: true, reason: 'aeo_question_gap_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -1231,7 +1247,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isAeoQuestionGapBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
