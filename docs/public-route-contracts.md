@@ -135,7 +135,9 @@ every render, live included), so the caveat is its own standalone line
 rather than a clause appended to a sentence that, on that render, never
 exists; when a settled trailing-week fact IS present, the caveat still
 appends to that sentence exactly as before, so there is never a redundant
-second line for the same signal. A PDF/static
+second line for the same signal. Either way the caveat is a treatment claim,
+so it appears only when the visit recorded at least one application; an
+inspection- or sweep-only visit gets no caveat (codex r2 on #5265). A PDF/static
 render carries the trailing-week fact
 ONLY once that 7-day window has closed (`application-conditions.js` stamps
 each result with `windowClosed`; `reports-public.js`

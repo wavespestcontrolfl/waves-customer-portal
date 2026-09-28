@@ -111,9 +111,15 @@ describe('buildRainExpectation', () => {
 
   it('adds the forecast heavy-rain caveat only when forecastHeavyRain is true (caller\'s job to gate LIVE-only)', () => {
     const live = buildRainExpectation({
-      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true,
     });
     expect(live.lines[0]).toMatch(/Heavy rain right after a treatment/);
+
+    // No recorded application (inspection / sweep only): no treatment caveat.
+    const untreated = buildRainExpectation({
+      weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: true,
+    });
+    expect(untreated.lines.join(' ')).not.toMatch(/Heavy rain right after a treatment/);
 
     const notLive = buildRainExpectation({
       weekWeather: { rainInches: 0.2, rainConfidence: null }, serviceMonth: 2, forecastHeavyRain: false,
@@ -167,10 +173,17 @@ describe('buildRainExpectation', () => {
   // forecast warning must still reach the customer as its OWN line rather
   // than being silently swallowed by the (unrelated) missing settled total.
   it('the LIVE-only forecast heavy-rain signal alone adds BOTH its own warning line and the ants line, even with no rain data', () => {
-    const out = buildRainExpectation({ weekWeather: null, serviceMonth: 2, forecastHeavyRain: true });
+    const out = buildRainExpectation({ weekWeather: null, products: [{ rainfastMinutes: null }], serviceMonth: 2, forecastHeavyRain: true });
     expect(out.lines).toHaveLength(2);
     expect(out.lines[0]).toMatch(/Heavy rain right after a treatment/);
     expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+  });
+
+  it('an inspection- or sweep-only visit gets no treatment caveat from the forecast alone — only the neutral ants line', () => {
+    const out = buildRainExpectation({ weekWeather: null, products: [], serviceMonth: 2, forecastHeavyRain: true });
+    expect(out.lines).toHaveLength(1);
+    expect(out.lines[0]).not.toMatch(/treatment/);
+    expect(out.lines[0]).toMatch(/Heavy rain pushes ants indoors for a few days/);
   });
 
   it('with no rain data and NO forecast signal, no heavy-rain warning line is invented', () => {
@@ -913,7 +926,7 @@ describe('buildPestExpectations — composition', () => {
   it('surfaces the rain key from the live forecast signal alone, with no settled weekly total', () => {
     const out = buildPestExpectations({
       weekWeather: null,
-      applications: [],
+      applications: [{ product: { name: 'Demand CS' }, targets: [] }],
       actionLabels: [],
       serviceMonth: 2,
       forecastHeavyRain: true,

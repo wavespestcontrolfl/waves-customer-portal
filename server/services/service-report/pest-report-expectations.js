@@ -164,7 +164,11 @@ const HEAVY_RAIN_FORECAST_CAVEAT = 'Heavy rain right after a treatment can reduc
 function buildTrailingWeekRainLine({
   rainInches, rainConfidence, products, forecastHeavyRain,
 }) {
-  if (rainInches == null) return forecastHeavyRain ? HEAVY_RAIN_FORECAST_CAVEAT : null;
+  // The caveat is a treatment claim: an inspection- or sweep-only visit (no
+  // recorded application) never gets it, attached or standalone (codex r2
+  // on #5265).
+  const treatmentCaveat = forecastHeavyRain && (products || []).length > 0;
+  if (rainInches == null) return treatmentCaveat ? HEAVY_RAIN_FORECAST_CAVEAT : null;
   const inchesText = formatInches(rainInches);
   let sentence = rainConfidence === 'low'
     // Low-confidence (city-collective fallback) hedges the number rather
@@ -175,7 +179,7 @@ function buildTrailingWeekRainLine({
   // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
   // Never a claim that rain can't otherwise affect the treatment beyond the
   // label facts above.
-  if (forecastHeavyRain) sentence += ` ${HEAVY_RAIN_FORECAST_CAVEAT}`;
+  if (treatmentCaveat) sentence += ` ${HEAVY_RAIN_FORECAST_CAVEAT}`;
   return sentence;
 }
 
