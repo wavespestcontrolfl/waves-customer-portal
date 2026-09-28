@@ -1660,3 +1660,27 @@ describe('internal-link verification vs pending advanced-head cleanup', () => {
     expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
   });
 });
+
+describe('internal-link recycle intent survives a failed branch retirement', () => {
+  test('close records the recycle marker first; both settle paths return links to the pool', async () => {
+    const instance = new InternalLinkPrExecutor();
+    const updates = [];
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+    db.mockImplementation(() => q);
+    GitHubClient.closePr = jest.fn();
+    GitHubClient.retireBranch = jest.fn(async () => false);
+    expect(await instance._closeLinkPr({ number: 77, state: 'open', head: { ref: 'b' } }, [{ id: 't1' }], { status: 'patch_candidate', note: 'n' })).toBe(false);
+    expect(updates).toEqual([expect.objectContaining({ skip_reason: 'internal_link_recycle_pending' })]);
+
+    // Verification settles it back to patch_candidate, not failed.
+    updates.length = 0;
+    GitHubClient.getPr.mockResolvedValue({ number: 77, merged: false, state: 'closed', head: { ref: 'b' } });
+    GitHubClient.retireBranch = jest.fn(async () => true);
+    instance._failAbandonedPrTask = jest.fn();
+    const result = await instance.verifyMergedTask({ id: 't1', status: 'pr_open', skip_reason: 'internal_link_recycle_pending', astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77' });
+    expect(result).toMatchObject({ status: 'patch_candidate' });
+    expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
+    expect(updates).toEqual([expect.objectContaining({ status: 'patch_candidate', skip_reason: null })]);
+    db.mockImplementation(() => undefined);
+  });
+});

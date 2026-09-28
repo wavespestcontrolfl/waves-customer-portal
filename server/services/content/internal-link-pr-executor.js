@@ -57,6 +57,9 @@ const MISSING_FILE_RE = /^(source_file_not_found|target_file_not_found|target_fi
 // queueInternalLinkTaskForDryRun honors these prefixes; a human requeue
 // from the review queue still can.
 const REVIEWER_REJECTION_PREFIXES = ['llm_judge_rejected', 'codex_findings'];
+// Marker for a PR closed so its links return to the pool (moved main,
+// canceled preview), recorded before the branch retirement that may fail.
+const RECYCLE_PENDING = 'internal_link_recycle_pending';
 
 function terminalVerdict(task, fields) {
   return { persist: { task_id: task.id, executor_version: EXECUTOR_VERSION, ...fields } };
@@ -189,12 +192,13 @@ function prStateGate(ctx) {
     // rejection recorded before the failed retirement is carried through.
     const rejection = ctx.prTasks.map((t) => t.skip_reason)
       .find((r) => REVIEWER_REJECTION_PREFIXES.some((prefix) => String(r || '').startsWith(prefix)));
-    return {
-      reason: 'pr_closed_unmerged',
-      close: rejection
-        ? { status: 'skipped', skipReason: rejection, note: 'Link PR closed after a reviewer rejection; branch retired.' }
-        : { status: 'failed', failureReason: 'internal_link_pr_closed_unmerged', note: 'Link PR closed without merging; branch retired.' },
-    };
+    const recycle = ctx.prTasks.some((t) => t.skip_reason === RECYCLE_PENDING);
+    const close = rejection
+      ? { status: 'skipped', skipReason: rejection, note: 'Link PR closed after a reviewer rejection; branch retired.' }
+      : recycle
+        ? { status: 'patch_candidate', note: 'Link PR closed for a retry; branch retired, links returned to the candidate pool.' }
+        : { status: 'failed', failureReason: 'internal_link_pr_closed_unmerged', note: 'Link PR closed without merging; branch retired.' };
+    return { reason: 'pr_closed_unmerged', close };
   }
   // Merged PRs are settled by runPostMergeVerification.
   return state === 'open' ? null : { result: { status: 'pr_not_open' } };
@@ -715,8 +719,12 @@ class InternalLinkPrExecutor {
     // retirement below fails, every later path that settles this PR
     // (prStateGate's closed branch, verification) reads it back from
     // skip_reason, so the rejection stays terminal (never re-queued).
-    if (skipReason) {
-      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open').update({ skip_reason: skipReason, updated_at: new Date() });
+    // The same holds for a recycle (tasks back to patch_candidate): the
+    // RECYCLE_PENDING marker survives a failed retirement so both settle
+    // paths return the links to the pool instead of failing them.
+    const intent = skipReason || (status === 'patch_candidate' ? RECYCLE_PENDING : null);
+    if (intent) {
+      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open').update({ skip_reason: intent, updated_at: new Date() });
     }
     if (String(pr.state).toLowerCase() !== 'closed') {
       try {
@@ -897,6 +905,12 @@ class InternalLinkPrExecutor {
         }
         if (!retired) return { task_id: task.id, status: task.status, transient: true, skipped: 'branch_retire_pending', pr_number: resolvedPrNumber };
         const reason = 'internal_link_pr_closed_unmerged';
+        if (task.skip_reason === RECYCLE_PENDING) {
+          // Closed for a retry (moved main / canceled preview): back to the pool.
+          await db(TABLE).where({ id: task.id }).whereIn('status', ['pr_open', 'pr_reserved'])
+            .update({ status: 'patch_candidate', skip_reason: null, astro_pr_url: null, pr_branch: null, pr_commit_sha: null, updated_at: new Date() });
+          return { task_id: task.id, status: 'patch_candidate', pr_number: resolvedPrNumber };
+        }
         // _failAbandonedPrTask keeps skip_reason, so a recorded reviewer
         // rejection (codex_findings) stays terminal through this path.
         await this._failAbandonedPrTask(task.id, reason);
