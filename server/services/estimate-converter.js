@@ -6826,6 +6826,26 @@ const EstimateConverter = {
                   }
                 }
               }
+              // Visit groups (visit-group-scope.md §2): the reserved start
+              // had no usable catalog identity at ITS OWN insert time (the
+              // reservation resolver only stamps service_id on engine-keyed
+              // ONE-TIME rows), so the promoted same-trip row's own
+              // maybeGroupRow call above found no groupable partner and the
+              // pair never joined — the only gap: their later-quarter seeded
+              // children DO group, because the seeder's own maybeGroupRow
+              // calls run after this relink stamps the family identity.
+              // Re-run it now, for the reserved row itself, right after that
+              // relink and before the duplicate-series guard below (which
+              // only decides whether a follow-up SERIES seeds — it has no
+              // bearing on whether this trip's rows share a visit). Same
+              // null-property rule as the promoted call: a null-property
+              // reservation groups later at post-commit property linkage.
+              // Gate-checked, savepoint-wrapped and idempotent — a no-op
+              // when nothing relinked (no groupable family) or the row
+              // already carries a visit_id.
+              if (reservedStart.property_id) {
+                await VisitGroups.maybeGroupRow(reservedStart.id, { database: trx, createdBy: 'converter' });
+              }
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
                 serviceId: reservedStart.service_id || null,

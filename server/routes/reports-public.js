@@ -1411,18 +1411,6 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
             // service_date/created_at feed the historical-report recency
             // gate (PR r9) — the click path must classify identically.
             'sr.service_date', 'sr.created_at',
-            // GATE_REPORT_CROSS_SELL_V2's findings priority reads the
-            // visit's typed companion identity off service_data (roach
-            // COMPANION vs a cockroach-PRIMARY report) — without it here
-            // the click path always resolved roachesIndoors === false via
-            // that leg (the service_findings-text leg still worked, since
-            // it queries by sr.id independently), silently re-deriving a
-            // DIFFERENT V2 offer than what the render path showed, on top
-            // of which the click/accept flow's own drift check would then
-            // 409 a fingerprint the customer actually saw. The click path
-            // must classify identically to the read path (same doctrine as
-            // scheduled_service_id/service_date above).
-            'sr.service_data',
             db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
             db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
             db.raw('COALESCE(ss.service_address_city, c.city) as city'),

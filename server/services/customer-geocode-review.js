@@ -8,7 +8,9 @@ const ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', ...ADDRESS_FIELDS, 'latitude', 'longitude'];
 const reviewEnabled = () => gateEnvValue('GATE_GEOCODE_REVIEW');
 const addressSnapshot = customer => ADDRESS_FIELDS.map(field => customer[field] ?? null);
-const sameAddress = (customer, review) => JSON.stringify(addressSnapshot(customer)) === JSON.stringify(review?.address_snapshot);
+const normalizedAddress = values => (values || []).map(value => value || null);
+const sameAddress = (customer, review) => JSON.stringify(normalizedAddress(addressSnapshot(customer)))
+  === JSON.stringify(normalizedAddress(review?.address_snapshot));
 const hasPin = customer => ['latitude', 'longitude'].every(field => customer[field] != null && Number.isFinite(Number(customer[field])) && Number(customer[field]) !== 0);
 const samePin = (customer, review) => hasPin(customer) && ['latitude', 'longitude'].every(field => Number(customer[field]) === Number(review[field]));
 const completeAddress = customer => ['address_line1', 'city', 'state', 'zip'].every(field => String(customer[field] || '').trim())
@@ -65,7 +67,8 @@ async function getReviewDetail(customerId, conn = db) {
   return detail(customer, review, next?.date, primary);
 }
 
-const ADDRESS_MATCH_SQL = 'r.address_snapshot = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
+const NORMALIZED_REVIEW_ADDRESS_SQL = "jsonb_build_array(COALESCE(NULLIF(r.address_snapshot->>0, ''), ''), COALESCE(NULLIF(r.address_snapshot->>1, ''), ''), COALESCE(NULLIF(r.address_snapshot->>2, ''), ''), COALESCE(NULLIF(r.address_snapshot->>3, ''), ''), COALESCE(NULLIF(r.address_snapshot->>4, ''), ''))";
+const ADDRESS_MATCH_SQL = `${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(c.address_line1, ''), ''), COALESCE(NULLIF(c.address_line2, ''), ''), COALESCE(NULLIF(c.city, ''), ''), COALESCE(NULLIF(c.state, ''), ''), COALESCE(NULLIF(c.zip, ''), ''))`;
 const PRIMARY_ADDRESS_MATCH_SQL = "jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(c.address_line1, ''), COALESCE(c.address_line2, ''), COALESCE(c.city, ''), COALESCE(c.state, ''), COALESCE(c.zip, ''))";
 const PRIMARY_HAS_PIN_SQL = `((${PRIMARY_ADDRESS_MATCH_SQL}) AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND p.latitude <> 0 AND p.longitude <> 0)`;
 const EFFECTIVE_LAT_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.latitude ELSE c.latitude END)`;
@@ -112,7 +115,7 @@ function excludeReviewedAddresses(query, alias = 'customers') {
       .where(function () {
         this.where('r.status', 'verified').orWhere(function () {
           this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
-            .whereRaw('r.address_snapshot = jsonb_build_array(??.address_line1, ??.address_line2, ??.city, ??.state, ??.zip)', Array(5).fill(alias));
+            .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(??.address_line1, ''), ''), COALESCE(NULLIF(??.address_line2, ''), ''), COALESCE(NULLIF(??.city, ''), ''), COALESCE(NULLIF(??.state, ''), ''), COALESCE(NULLIF(??.zip, ''), ''))`, Array(5).fill(alias));
         });
       });
   });
@@ -134,7 +137,7 @@ function excludeMatchingPrimaryPins(query, customerAlias = 'customers') {
 function blockingPropertyReview(builder, propertyAlias) {
   builder.where('r.status', 'verified').orWhere(function () {
     this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
-      .whereRaw('r.address_snapshot = jsonb_build_array(??.address_line1, ??.address_line2, ??.city, ??.state, ??.zip)',
+      .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(??.address_line1, ''), ''), COALESCE(NULLIF(??.address_line2, ''), ''), COALESCE(NULLIF(??.city, ''), ''), COALESCE(NULLIF(??.state, ''), ''), COALESCE(NULLIF(??.zip, ''), ''))`,
         Array(5).fill(propertyAlias));
   });
 }
