@@ -2639,6 +2639,46 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
+// "Your plan" section (owner ask 2026-09-28): this year's visit + re-service
+// COUNTS — never a price, owner rule that prices only ever appear on
+// estimate pages — plus any upcoming scheduled visits. Live view only; the
+// payload field itself is stripped from pdf/static/sms_preview renders
+// server-side (stripLiveOnlyScheduleFields), so `mode` is a belt-and-braces
+// check here, same as the other live-only cards on this page.
+function PlanSummaryCard({ data, mode }) {
+  const plan = data.planSummary;
+  if (mode !== 'live' || !plan) return null;
+  const visits = Number(plan.visitsThisYear) || 0;
+  const reservices = Number(plan.reservicesThisYear) || 0;
+  const upcoming = Array.isArray(plan.upcoming) ? plan.upcoming : [];
+  const visitWord = visits === 1 ? 'visit' : 'visits';
+  const reserviceWord = reservices === 1 ? 're-service' : 're-services';
+  const yearLine = reservices > 0
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord} at no charge`
+    : `This year: ${visits} ${visitWord}`;
+  return (
+    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+      <div className="section-eyebrow">Your plan</div>
+      {visits > 0 && <p className="map-context-copy">{yearLine}</p>}
+      {upcoming.length > 0 && (
+        <div className="sr-cell">
+          <div className="sr-cell-label">Coming up</div>
+          {upcoming.map((visit, index) => (
+            <div className="sr-cell-value" key={`${index}-${visit.scheduledDate}`}>
+              {formatNextAppointmentLabel({
+                serviceType: visit.serviceName,
+                scheduledDate: visit.scheduledDate,
+                windowStart: visit.windowStart,
+              })}
+            </div>
+          ))}
+          <div className="sr-cell-note">Subject to change</div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Shown to staff viewing an internal-only (shadow) report in place of the
 // download/share bar: no PDF is rendered for these records and the public
 // link 404s for customers, so every control there would dead-end. Customers
@@ -8886,6 +8926,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+
+        <PlanSummaryCard data={data} mode={mode} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on

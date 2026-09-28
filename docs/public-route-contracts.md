@@ -69,6 +69,24 @@ five-component blend. Customer-visible pressure numbers no longer floor at
 0.3 — a rating of 0 reads 0.0. Auth, gates, headers and the rating POST are
 unchanged.
 
+Report plan summary (owner ask 2026-09-28): `GATE_REPORT_PLAN_SUMMARY` (off
+unless exactly `true`, read at startup). On, the LIVE service-report payload
+(`/api/reports/:token/data`) carries an optional `planSummary: { year,
+visitsThisYear, reservicesThisYear, upcoming: [{ serviceName, scheduledDate,
+windowStart, windowEnd }] }` for the token's own customer and no one else:
+completed visits in the current ET calendar year; how many of those were the
+plan's free re-services (`service_key_snapshot` `pest_re_service` /
+`lawn_re_service`, or a "Re-Service" service name when no key was stamped;
+included trapping follow-ups never count); and at most 4 upcoming scheduled
+visits across every service line within the next 120 days, drawn from the same
+customer-scoped, disclosable-status candidate pool as `nextAppointment` (the
+report's own visit excluded). Counts and dates only: no price, address,
+technician, or token. `stripLiveOnlyScheduleFields` deletes it from every
+non-live render (PDF, static, sms_preview), the same staleness rule as
+`nextAppointment`. Omitted when the gate is off, the visit has no customer, or
+there is nothing to show. No new route and no write; auth, headers and rate
+limits are unchanged.
+
 Invoice line-item ownership metadata: `/api/pay/:token` and
 `/api/receipt/:token` return the invoice's persisted `line_items` as `lineItems`.
 On itemized accepted-plan invoices, each base-application row intentionally may

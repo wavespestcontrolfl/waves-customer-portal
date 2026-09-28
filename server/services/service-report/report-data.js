@@ -59,6 +59,12 @@ const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-id
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
+// The plan's free callbacks, as a customer knows them ("re-service"). Not
+// re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
+// rodent_trapping_followup, an included trapping-program visit that no
+// customer would call a re-service.
+const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
+const { isReService } = require('../re-service');
 
 let PhotoService = null;
 try {
@@ -1869,6 +1875,7 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.nextAppointment;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
+  delete data.planSummary;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4780,6 +4787,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachUpcomingRoachVisits;
   let cockroachProgramPosition;
   let cockroachRenderedSignature;
+  // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
+  // this year's completed-visit + re-service COUNTS — never a price, owner
+  // rule that prices live on estimate pages only — plus up to 4 upcoming
+  // scheduled visits across every service line. Live-view only
+  // (stripLiveOnlyScheduleFields), like nextAppointment.
+  let planSummary = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4977,6 +4990,54 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // The signature of the program state THIS payload carries — the PDF
       // store key reads it from the render, never from a second lookup.
       cockroachRenderedSignature = cockroachProgramSignature(program);
+    }
+
+    // Placed last in this try so a failure here can never disturb the
+    // next-appointment picks already resolved above — this whole block is
+    // best-effort under the shared outer catch.
+    if (featureGates.isEnabled('reportPlanSummary') && service.customer_id) {
+      const yearEt = Number(reportTodayIso.slice(0, 4));
+      const completedRows = await knex('scheduled_services')
+        .where({ customer_id: service.customer_id, status: 'completed' })
+        .andWhere('scheduled_date', '>=', `${yearEt}-01-01`)
+        .andWhere('scheduled_date', '<', `${yearEt + 1}-01-01`)
+        .select('service_key_snapshot', 'service_type')
+        .catch(() => null);
+      if (Array.isArray(completedRows)) {
+        const visitsThisYear = completedRows.length;
+        const reservicesThisYear = completedRows
+          // A stamped key decides (the two callback keys only). A free-text
+          // booking with no key falls back to the canonical "Re-Service" name
+          // match, which a trapping follow-up's name never meets.
+          .filter((row) => (row?.service_key_snapshot
+            ? PLAN_CALLBACK_RESERVICE_KEYS.has(row.service_key_snapshot)
+            : isReService({ serviceType: row?.service_type })))
+          .length;
+        // Same candidate pool as the next-appointment pick above (already
+        // customer-scoped, disclosable-status-filtered, excludes this
+        // report's own visit, and sorted date/window ascending) — just
+        // capped to the next 120 days, ANY service line, at most 4.
+        const horizonDate = new Date(`${reportTodayIso}T00:00:00Z`);
+        horizonDate.setUTCDate(horizonDate.getUTCDate() + 120);
+        const horizonIso = horizonDate.toISOString().slice(0, 10);
+        const upcoming = (Array.isArray(upcomingRows) ? upcomingRows : [])
+          .filter((row) => row && row.scheduled_date)
+          .map((row) => {
+            const rawDate = row.scheduled_date;
+            const scheduledDate = rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10);
+            return {
+              serviceName: row.service_type || null,
+              scheduledDate,
+              windowStart: row.window_start || null,
+              windowEnd: row.window_end || null,
+            };
+          })
+          .filter((row) => row.scheduledDate <= horizonIso)
+          .slice(0, 4);
+        if (visitsThisYear > 0 || upcoming.length) {
+          planSummary = { year: yearEt, visitsThisYear, reservicesThisYear, upcoming };
+        }
+      }
     }
   } catch { /* best-effort */ }
 
@@ -5597,6 +5658,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    // "Your plan" section data (owner ask 2026-09-28): omitted entirely when
+    // the gate is off, there's no customer, or there's nothing to show —
+    // stripLiveOnlyScheduleFields deletes it for every non-live render, same
+    // staleness rule as nextAppointment.
+    ...(planSummary ? { planSummary } : {}),
     termiteNextMonitoringVisit,
     // Present (possibly null) ONLY when the live cockroach pick ran — the
     // attach composer reads presence as "schedule resolved" (pdf/static
