@@ -2755,7 +2755,7 @@
       {
         "slug": "pygmy-date-palm",
         "difference": "Sago palm has stiff, glossy leaflets on a shaggy trunk; pygmy date palm has drooping, spiny fronds on a slender trunk (cardboard palm looks similar, no trunk).",
-        "next_photo": "From a safe distance (zoom in rather than reaching toward any spines), the leaflet texture plus a wide shot of the base: a trunk (sago) or none (cardboard palm).",
+        "next_photo": "From a safe distance (zoom in, don't reach toward spines), a photo of the leaflets: stiff and glossy with rolled-under edges (sago) or soft and drooping (pygmy date palm).",
         "photo_can_confirm": true
       }
     ],
@@ -2820,7 +2820,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "845a5972ab04451ea91bed9ae7980f852c82b8b8b73ef79f2dde060cb1573ba8"
+      "approval_hash": "0140a1b685744603510e82a3c54019840af856aed34e59250b0a59dc3d802b21"
     },
     "role": "landscape_plant",
     "risk": "medical",

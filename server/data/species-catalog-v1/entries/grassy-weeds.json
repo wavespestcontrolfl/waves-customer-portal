@@ -404,7 +404,7 @@
       {
         "slug": "tropical-signalgrass",
         "difference": "Alexandergrass has broader, hairier, yellow-green blades; tropical signalgrass has narrower blades and low, mat-forming stems rooting densely at every node.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       }
     ],
@@ -470,7 +470,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "81e6a63b85937f387ac527c9f9fcef083da37281c09a9c4088ac57259aeced5f"
+      "approval_hash": "d84ff7fbd6ab23cf48241eedd973ca2485fbf9eebc0422ec4b3fa88399e28f45"
     },
     "role": "weed",
     "risk": "low",
@@ -888,7 +888,7 @@
       {
         "slug": "alexandergrass",
         "difference": "Tropical signalgrass has narrow blades and low, densely rooting, mat-forming stems; alexandergrass has broader, hairier, yellow-green blades, a looser habit.",
-        "next_photo": "A close-up of leaf width and hairiness, and how densely the stems root along the ground.",
+        "next_photo": "Not reliably separable from a photo alone — a technician checks leaf hairiness and how densely the stems root along the ground.",
         "photo_can_confirm": false
       },
       {
@@ -960,7 +960,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "e7e179f8020c91568b372a32feb71eb89daade2039bd2b77614ec9f0a7bc2e06"
+      "approval_hash": "f584084083e5c8c24634a0f6ebbb4465fee50807ac823cfbb9e2cd79c6427f6a"
     },
     "role": "weed",
     "risk": "low",

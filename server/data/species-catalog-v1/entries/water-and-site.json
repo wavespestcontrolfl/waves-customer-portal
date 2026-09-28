@@ -790,7 +790,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "e1dc487e2e12848f26e8c1d236e19675bee3e81650b16d567d8c2d2c7c4db030"
+      "approval_hash": "a9bc29d0f30c428c7d47089a9d5663a9740695805ffccbda8fec1ea6103dbba1"
     },
     "condition": {
       "hosts": [
@@ -822,7 +822,7 @@
         {
           "slug": "potassium-deficiency-palm",
           "difference": "Cold damage appears within days of a cold snap and can affect many fronds at once; potassium deficiency develops gradually and stays on the oldest fronds only.",
-          "next_observation": "A wider photo checking how many fronds are affected and whether a recent cold snap occurred.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
           "photo_can_confirm": false
         }
       ],

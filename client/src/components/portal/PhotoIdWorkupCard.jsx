@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { FONTS } from '../../theme-brand';
+import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE as SHELL } from '../../theme-customer';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
@@ -26,6 +26,16 @@ import {
 // settle it -> next step.
 // =========================================================================
 
+// The catalog's own warning for anything the card names (a possibility, a
+// weed chip) — the same bold red line the identity card shows for a named
+// entry, so a poison / sap / sting warning is never dropped just because the
+// answer came back as a workup (Codex #5250 r3 P2: fairy ring's poisonous
+// mushrooms).
+function SafetyLine({ text }) {
+  if (!text) return null;
+  return <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{text}</div>;
+}
+
 function SectionHeading({ children }) {
   return (
     <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 8 }}>
@@ -36,17 +46,21 @@ function SectionHeading({ children }) {
 
 function WeedChips({ weeds }) {
   if (!Array.isArray(weeds) || weeds.length === 0) return null;
+  const warnings = [...new Set(weeds.map((w) => w.safety_line).filter(Boolean))];
   return (
-    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-      {weeds.map((w, i) => {
-        const phrase = WEED_WORDING_PHRASE[w.wording];
-        return (
-          <Chip key={w.slug || i}>
-            {`Also spotted: ${w.common_name}${phrase ? ` — ${phrase}` : ''}`}
-          </Chip>
-        );
-      })}
-    </div>
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {weeds.map((w, i) => {
+          const phrase = WEED_WORDING_PHRASE[w.wording];
+          return (
+            <Chip key={w.slug || i}>
+              {`Also spotted: ${w.common_name}${phrase ? ` — ${phrase}` : ''}`}
+            </Chip>
+          );
+        })}
+      </div>
+      {warnings.map((text) => <SafetyLine key={text} text={text} />)}
+    </>
   );
 }
 
@@ -111,6 +125,7 @@ function PossibilitySheet({ possibility, onClose }) {
             <Icon name="x" size={18} strokeWidth={2} />
           </button>
         </div>
+        <SafetyLine text={possibility.safety_line} />
         {possibility.what_it_means && (
           <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{possibility.what_it_means}</div>
         )}
@@ -138,6 +153,7 @@ function PossibilityRow({ possibility, isLast, onOpen }) {
         {outcomeLabel && <Chip tone="alert">{outcomeLabel}</Chip>}
         {localTags.map((tag) => (LOCAL_FIT_LABELS[tag] ? <Chip key={tag}>{LOCAL_FIT_LABELS[tag]}</Chip> : null))}
       </div>
+      <SafetyLine text={possibility.safety_line} />
       {Array.isArray(possibility.fits) && possibility.fits.length > 0 && (
         <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.4 }}>
           <span style={{ fontWeight: 700 }}>What fits: </span>{possibility.fits.join('; ')}

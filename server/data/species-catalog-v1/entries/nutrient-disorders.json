@@ -220,7 +220,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "410d85e2f231ab624c32acdfc2daf78091f74ecce8fc88a5aecd7b75a653df8a"
+      "approval_hash": "b748f8a0ce418c1f22c42035a611e541b1e1235136eecbb527b63214df0b7649"
     },
     "condition": {
       "hosts": [
@@ -256,7 +256,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Iron deficiency stripes new blades lawn-wide; herbicide injury matches where and when something was applied, whether a small area or the whole lawn.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or a mowing/edging path.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
           "photo_can_confirm": false
         }
       ],
@@ -359,7 +359,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "a463819fc8f9fb17212adab56591644e2bfe4c0ffa857857501a6f4d6fe043b3"
+      "approval_hash": "fa17834264065c3f8bbf5d5c9203a11ea30c9b129524aa54bb62bfe7870f0d4a"
     },
     "condition": {
       "hosts": [
@@ -395,7 +395,7 @@
         {
           "slug": "herbicide-injury",
           "difference": "Magnesium deficiency shows blotchy, interveinal yellowing lawn-wide; herbicide injury matches where and when something was applied, spot or lawn-wide.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or spreads evenly.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
           "photo_can_confirm": false
         }
       ],
@@ -498,7 +498,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "170b8dbdd1f35c8c80e04d8525b51c92dae2276634242030ba4a04183c527640"
+      "approval_hash": "c6b6b95487f644f007336487dbb0075fdd937534f2ec61dd0bed4009c2e4b6fe"
     },
     "condition": {
       "hosts": [
@@ -534,7 +534,7 @@
         {
           "slug": "cold-damage",
           "difference": "Potassium deficiency develops gradually and stays on the oldest fronds; cold damage appears within days of a cold snap and can affect many fronds at once.",
-          "next_observation": "A wider photo checking how many fronds are affected and whether a recent cold snap occurred.",
+          "next_observation": "A technician checks how many fronds are affected and whether the damage lines up with a recent cold snap.",
           "photo_can_confirm": false
         }
       ],

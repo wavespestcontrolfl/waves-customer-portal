@@ -1431,6 +1431,22 @@ describe('lawn/tree_shrub/palm workup card (renders only when data.v2.kind === "
     expect(screen.queryByRole('button', { name: 'Request service' })).not.toBeInTheDocument();
   });
 
+  it('a possibility or weed carrying a catalog safety line shows it in the row, the sheet and under the weed chips (Codex #5250 r3)', async () => {
+    const poison = 'Some fairy-ring mushrooms are poisonous; keep children and pets away from them.';
+    const sap = 'The milky sap can irritate skin and eyes.';
+    const withWarnings = {
+      ...workupNamed,
+      subject: { ...workupNamed.subject, weeds: [{ slug: 'spotted-spurge', common_name: 'Spotted Spurge', wording: 'likely', safety_line: sap }] },
+      possibilities: [{ ...workupNamed.possibilities[1], slug: 'fairy-ring', common_name: 'Fairy Ring', safety_line: poison }],
+    };
+    await openLawnResultWith(withWarnings);
+    expect(screen.getByText(sap)).toBeInTheDocument();
+    expect(screen.getByText(poison)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Fairy Ring'));
+    const sheet = await screen.findByRole('dialog', { name: 'Fairy Ring' });
+    expect(within(sheet).getByText(poison)).toBeInTheDocument();
+  });
+
   it('tapping a possibility opens a sheet with its what_it_means', async () => {
     await openLawnResultWith(workupNamed);
     fireEvent.click(screen.getByText('Lethal Bronzing'));

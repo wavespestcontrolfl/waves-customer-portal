@@ -379,7 +379,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "e49de9ee0656c671f4869b432dc0dc7537df9cc857a377aa0338e9461b33b377"
+      "approval_hash": "2360527f5db4ad37d6d2f5ad11803ef05b3cb00c8bb02064c767b3d34da0c4eb"
     },
     "condition": {
       "hosts": [
@@ -404,13 +404,13 @@
         {
           "slug": "iron-deficiency-turf",
           "difference": "Herbicide injury matches where and when something was applied, spot or lawn-wide; iron deficiency stripes the newest blades regardless of any application.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or a mowing/edging path.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or a mowing/edging path.",
           "photo_can_confirm": false
         },
         {
           "slug": "magnesium-deficiency-turf",
           "difference": "Herbicide injury matches where and when something was applied, spot or lawn-wide; magnesium deficiency shows blotchy, interveinal yellowing regardless.",
-          "next_observation": "A wider photo checking whether the discoloration follows a treated area or spreads evenly.",
+          "next_observation": "A technician checks what was applied nearby and when, and whether the discoloration follows a treated area or spreads evenly.",
           "photo_can_confirm": false
         },
         {
