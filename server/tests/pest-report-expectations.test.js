@@ -8,6 +8,7 @@ const {
   buildSpiderExpectation,
   buildWhatToExpect,
   buildPestExpectations,
+  toExpectationProduct,
   formatRainfastMinutes,
 } = require('../services/service-report/pest-report-expectations');
 
@@ -179,6 +180,53 @@ describe('classifyProductExpectation', () => {
   ];
   it.each(cases)('%j → %s', (product, expected) => {
     expect(classifyProductExpectation(product)).toBe(expected);
+  });
+});
+
+// Owner-flagged P1 (2026-09-28): the AI-grounding path (report-copy-context.js)
+// used to build its own product list WITHOUT `name`, so a name-dependent
+// classification (e.g. roach gel bait, which needs the name to distinguish
+// it from other bait) could come out different for the grounded AI copy
+// than for the customer-facing render block. toExpectationProduct is the
+// ONE shared normalizer both paths now funnel through.
+describe('toExpectationProduct — shared normalizer (grounding/render can\'t drift)', () => {
+  const GEL_BAIT = { name: 'Advion Cockroach Gel', activeIngredient: 'Indoxacarb', category: 'bait' };
+
+  it('reads the same fields from the render (applications) shape and the grounding (productSafety) shape', () => {
+    const renderShape = { product: { name: GEL_BAIT.name, active_ingredient: GEL_BAIT.activeIngredient, category: GEL_BAIT.category, moa_group: null, rainfast_minutes: null } };
+    const groundingShape = { ...GEL_BAIT, moaGroup: null, rainfastMinutes: null };
+    expect(toExpectationProduct(renderShape)).toEqual(toExpectationProduct(groundingShape));
+  });
+
+  it('classification of a gel-bait product (name-dependent) is IDENTICAL whichever shape it came from', () => {
+    const fromRender = toExpectationProduct({ product: { name: GEL_BAIT.name, active_ingredient: GEL_BAIT.activeIngredient, category: GEL_BAIT.category } });
+    const fromGrounding = toExpectationProduct(GEL_BAIT);
+    expect(classifyProductExpectation(fromRender)).toBe('roach_gel_bait');
+    expect(classifyProductExpectation(fromGrounding)).toBe('roach_gel_bait');
+    expect(classifyProductExpectation(fromRender)).toBe(classifyProductExpectation(fromGrounding));
+  });
+
+  it('regression: WITHOUT the shared normalizer preserving name, the same bait-category product would fail to classify as roach gel bait', () => {
+    // Simulates the pre-fix bug directly: a product object missing `name`
+    // (category alone is not enough — 'bait' also covers ant/roach baits
+    // that are not gel, so the classifier requires the name; no other
+    // classifying signal is present here, unlike a non-repellent active
+    // ingredient which would independently trigger a different class).
+    const missingName = classifyProductExpectation({ category: 'bait' });
+    expect(missingName).not.toBe('roach_gel_bait');
+    expect(missingName).toBeNull();
+  });
+
+  it('end-to-end: buildPestExpectations (render path, applications shape) and buildWhatToExpect fed via the grounding path (productSafety shape) produce IDENTICAL what-to-expect lines for the same visit', () => {
+    const renderExpectations = buildPestExpectations({
+      applications: [{ product: { name: GEL_BAIT.name, active_ingredient: GEL_BAIT.activeIngredient, category: GEL_BAIT.category }, targets: [] }],
+    });
+    // Mirrors exactly what report-copy-context.js does: productSafety
+    // entries (camelCase, name included) mapped through the same normalizer.
+    const groundingProducts = [GEL_BAIT].map(toExpectationProduct);
+    const groundingWhatToExpect = buildWhatToExpect({ products: groundingProducts });
+    expect(renderExpectations.whatToExpect).toEqual(groundingWhatToExpect);
+    expect(renderExpectations.whatToExpect.lines[0]).toMatch(/gel bait/);
   });
 });
 

@@ -66,6 +66,16 @@ const FIPRONIL_PRODUCT = {
   active_ingredient: 'Fipronil', epa_reg_number: '432-1348', approved_for_service_report: true,
   moa_group: null, rainfast_minutes: null,
 };
+// category alone ('bait') is not enough to classify as roach gel bait — the
+// classifier needs the NAME too (owner-flagged P1 2026-09-28: this grounding
+// path used to build its product list without `name`, so this exact product
+// would have silently failed to classify here while still classifying
+// correctly on the customer-facing render path).
+const ROACH_GEL_PRODUCT = {
+  id: 'p2', name: 'Advion Cockroach Gel', category: 'bait', product_type: 'bait',
+  active_ingredient: 'Indoxacarb', epa_reg_number: '352-687', approved_for_service_report: true,
+  moa_group: null, rainfast_minutes: null,
+};
 
 describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
@@ -94,6 +104,22 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
     // No rain reading (no geocode in this stub) — a null rainInches must
     // never render as "0 inches" (Number(null) === 0 footgun).
     expect(contextText).not.toMatch(/rained about/);
+  });
+
+  it('classifies a name-dependent product (roach gel bait) correctly — same as the render path (owner-flagged P1 regression)', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const knex = makeKnexStub({ customers: [CUSTOMER], catalogProducts: [ROACH_GEL_PRODUCT] });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-02-15', // outside rainy season — isolates the product-class line
+      products: [{ productId: 'p2', name: 'Advion Cockroach Gel' }],
+      knex,
+    });
+    expect(contextText).toMatch(/EXPECTATIONS/);
+    expect(contextText).toMatch(/gel bait/);
+    expect(contextText).not.toMatch(/Non-repellent products/);
   });
 
   it('rainy season + a real >= 0.5" rain reading adds the ants line', async () => {

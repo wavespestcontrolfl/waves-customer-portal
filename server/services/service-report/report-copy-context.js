@@ -21,7 +21,7 @@ const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-sc
 const { loadLinkedLawnAssessment } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
 const {
-  pestReportExpectationsGateOn, buildRainExpectation, buildWhatToExpect,
+  pestReportExpectationsGateOn, buildRainExpectation, buildWhatToExpect, toExpectationProduct,
 } = require('./pest-report-expectations');
 
 function cleanText(value) {
@@ -696,17 +696,19 @@ async function buildReportCopyContext({
     if (wx) sections.push(`WEATHER: ${wx}`);
   }
 
-  // Same facts, same classifier as the customer-facing Pest Report V2
-  // "expectations" blocks (pest-report-expectations.js) — dark behind the
+  // Same facts, SAME classifier, SAME normalized product shape as the
+  // customer-facing Pest Report V2 "expectations" blocks
+  // (pest-report-expectations.js's toExpectationProduct — owner-flagged P1
+  // 2026-09-28: this used to build its own ad-hoc product list without
+  // `name`, so a name-dependent classification, e.g. roach gel bait, could
+  // come out different here than on the render path) — dark behind the
   // same gate, so generated copy never diverges from what the dashboard
   // itself says once both are live. Live-forecast heavy-rain phrasing is
   // deliberately NOT re-derived here (a second live NWS fetch just for
   // grounding); the deterministic weekly-rain + rainy-season facts still
   // ground the model honestly.
   if (line === 'pest' && pestReportExpectationsGateOn()) {
-    const expectationProducts = productSafety.map((p) => ({
-      activeIngredient: p.activeIngredient, category: p.category, moaGroup: p.moaGroup, rainfastMinutes: p.rainfastMinutes,
-    }));
+    const expectationProducts = productSafety.map(toExpectationProduct);
     const rainExpectation = buildRainExpectation({ weekWeather, products: expectationProducts, serviceMonth: monthNum });
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
     const expectationLines = [...(rainExpectation?.lines || []), ...(whatToExpect?.lines || [])];

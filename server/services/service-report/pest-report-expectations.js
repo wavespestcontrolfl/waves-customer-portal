@@ -286,6 +286,40 @@ function buildWhatToExpect({ products = [] } = {}) {
   return lines.length ? { lines } : null;
 }
 
+// Canonical product shape for expectations classification
+// ({ name, activeIngredient, category, moaGroup, rainfastMinutes }) — the
+// ONE normalizer SHARED by every caller (owner-flagged P1 2026-09-28: the
+// AI-grounding path in report-copy-context.js was building its own product
+// list without `name`, so a name-dependent classification — e.g. roach gel
+// bait, which needs the name to tell it apart from other bait — could come
+// out different for the grounded AI copy than for the customer-facing
+// block). Accepts either the pest-report-v2.js applications shape
+// (`{ product: { name, active_ingredient, category, moa_group,
+// rainfast_minutes } }`, snake_case DB-ish keys) or an already-flat/camelCase
+// object (report-copy-context.js's `productSafety` entries) — reads
+// whichever keys are present so both call sites funnel through the exact
+// same fields the classifier reads, and can't silently drift apart again.
+function isPlainObject(value) {
+  return !!value && typeof value === 'object';
+}
+
+// camelCase key, else its snake_case twin, else null.
+function pickEither(source, camelKey, snakeKey) {
+  if (!isPlainObject(source)) return null;
+  return source[camelKey] ?? source[snakeKey] ?? null;
+}
+
+function toExpectationProduct(raw = {}) {
+  const product = isPlainObject(raw?.product) ? raw.product : raw;
+  return {
+    name: isPlainObject(product) ? (product.name ?? null) : null,
+    activeIngredient: pickEither(product, 'activeIngredient', 'active_ingredient'),
+    category: isPlainObject(product) ? (product.category ?? null) : null,
+    moaGroup: pickEither(product, 'moaGroup', 'moa_group'),
+    rainfastMinutes: pickEither(product, 'rainfastMinutes', 'rainfast_minutes'),
+  };
+}
+
 // ── Compose all three blocks ─────────────────────────────────────────────
 function buildPestExpectations({
   weekWeather = null,
@@ -294,13 +328,7 @@ function buildPestExpectations({
   serviceMonth = null,
   forecastHeavyRain = false,
 } = {}) {
-  const flatProducts = (applications || []).map((app) => ({
-    name: app?.product?.name,
-    activeIngredient: app?.product?.active_ingredient,
-    category: app?.product?.category,
-    moaGroup: app?.product?.moa_group,
-    rainfastMinutes: app?.product?.rainfast_minutes,
-  }));
+  const flatProducts = (applications || []).map(toExpectationProduct);
   const rain = buildRainExpectation({
     weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain,
   });
@@ -318,6 +346,7 @@ module.exports = {
   buildSpiderExpectation,
   buildWhatToExpect,
   buildPestExpectations,
+  toExpectationProduct,
   formatRainfastMinutes,
   formatInches,
 };
