@@ -7413,14 +7413,17 @@ const InvoiceService = {
   // recorded on the payment row, otherwise the amount due. Shared by the
   // receipt SMS and the IB closeout repair card (which must not mint the
   // short link receiptSmsFacts does).
-  async receiptAmountFor(invoice) {
-    const receiptPayment = await db("payments")
+  // failClosed: an unreadable payments row throws instead of falling back to
+  // the amount due (which would drop a recorded refund) — for callers that
+  // show and pin the amount (the IB card).
+  async receiptAmountFor(invoice, { failClosed = false } = {}) {
+    const paymentQuery = db("payments")
       .where({ customer_id: invoice.customer_id })
       .whereIn("status", ["paid", "refunded"])
       .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
       .orderBy("created_at", "desc")
-      .first()
-      .catch(() => null);
+      .first();
+    const receiptPayment = failClosed ? await paymentQuery : await paymentQuery.catch(() => null);
     const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
     const receiptAmount = receiptRefunded > 0
       ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)

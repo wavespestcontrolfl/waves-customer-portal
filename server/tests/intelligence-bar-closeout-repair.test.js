@@ -409,6 +409,8 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
     resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     enqueueReceiptDelivery.mockResolvedValue({ enqueued: true, job: { id: 'job-9' } });
+    const txDb = fakeDb({ service_records: [RECORD], invoices: [PAID] });
+    db.transaction = jest.fn(async (fn) => fn((table) => { const q = txDb(table); q.forUpdate = () => q; return q; }));
     const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
     expect(run.success).toBe(true);
     expect(enqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({ invoiceId: 'inv-1', source: 'ib_closeout_repair', customerInitiated: false }));
@@ -419,4 +421,31 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
     expect(drift.preview_changed).toBe(true);
     expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
   });
+});
+
+test('queue_receipt: an unreadable payment amount blocks the plan; a receipt sent by hand in between refuses the enqueue', async () => {
+  const UNSENT = { invoiceDelivery: { state: 'pending', reason: 'paid_receipt_not_sent', invoiceId: 'inv-1' } };
+  const PAID = { id: 'inv-1', invoice_number: 'INV-00042', status: 'paid', receipt_sent_at: null, customer_id: 'cust-1', payer_id: null };
+  getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+  db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+  resolveReceiptEmailRecipient.mockResolvedValue({ ok: true, recipient: { email: 'billing@example.com' }, customer: { phone: '9415550100' } });
+  const Invoice = require('../services/invoice');
+  Invoice.receiptAmountFor.mockRejectedValueOnce(new Error('payments read failed'));
+  const blocked = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(blocked.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/amount could not be verified/) })]);
+  expect(Invoice.receiptAmountFor).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-1' }), { failClosed: true });
+
+  const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  // The locked re-read inside the enqueue transaction sees the hand-sent stamp.
+  const plain = fakeDb({ service_records: [RECORD], invoices: [PAID] });
+  const trxDb = fakeDb({ invoices: [{ ...PAID, receipt_sent_at: '2026-09-28T10:00:00Z' }] });
+  db.mockImplementation(plain);
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => { const q = trxDb(table); q.forUpdate = () => q; return q; };
+    return fn(trx);
+  });
+  enqueueReceiptDelivery.mockClear();
+  const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+  expect(run.receipt).toEqual([expect.objectContaining({ step: 'queue_receipt', status: 'failed', detail: expect.stringMatching(/sent in the meantime/) })]);
+  expect(enqueueReceiptDelivery).not.toHaveBeenCalled();
 });

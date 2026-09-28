@@ -187,7 +187,12 @@ async function receiptRecipients(invoiceId, knex) {
   const app = !payerBilled && await require('../invoice').explicitBillingAppSelected(invoice.customer_id, 'payment_receipt');
   if (!emailLeg.email && !phone && !app) return { blocker: emailLeg.skipReason || 'no receipt recipient on file' };
   // Which receipt, for how much — the amount the receipt itself states.
-  const amount = await require('../invoice').receiptAmountFor(invoice);
+  let amount;
+  try {
+    amount = await require('../invoice').receiptAmountFor(invoice, { failClosed: true });
+  } catch {
+    return { blocker: 'the receipt amount could not be verified (payment lookup failed)' };
+  }
   return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount };
 }
 
@@ -363,9 +368,19 @@ const STEP_RUNNERS = {
     return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
   },
   async queue_receipt(step, knex) {
-    // A machine-queued receipt (customerInitiated false): its text waits
-    // for the 8 AM–8 PM window, exactly like an autopay receipt.
-    const queued = await enqueueReceiptDelivery({ invoiceId: step.invoice_id, source: 'ib_closeout_repair', customerInitiated: false, database: knex });
+    // The unsent check and the enqueue are one transaction on the LOCKED
+    // invoice row: a receipt sent by hand in between (receipt_sent_at
+    // stamped) refuses instead of queueing a duplicate. A machine-queued
+    // receipt (customerInitiated false): its text waits for the 8 AM–8 PM
+    // window, exactly like an autopay receipt.
+    const queued = await knex.transaction(async (trx) => {
+      const inv = await trx('invoices').where({ id: step.invoice_id }).forUpdate().first('id', 'status', 'receipt_sent_at');
+      if (!inv || String(inv.status || '').toLowerCase() !== 'paid' || inv.receipt_sent_at) {
+        return { refused: inv?.receipt_sent_at ? 'the receipt was sent in the meantime — nothing queued' : 'the invoice is no longer paid — nothing queued' };
+      }
+      return enqueueReceiptDelivery({ invoiceId: step.invoice_id, source: 'ib_closeout_repair', customerInitiated: false, database: trx });
+    });
+    if (queued?.refused) return { status: 'failed', detail: queued.refused };
     if (queued?.enqueued) return { status: 'completed', detail: 'receipt queued', receipt_job_id: queued.job?.id || null };
     if (queued?.deduped) return { status: 'completed', detail: 'a receipt job already existed — nothing new queued' };
     return { status: 'failed', detail: queued?.reason || 'receipt could not be queued' };
