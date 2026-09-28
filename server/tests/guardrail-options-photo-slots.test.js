@@ -4,9 +4,13 @@
  * writer instruction requires hard-fails content-guardrails'
  * DISALLOWED_EXTERNAL_LINK P0 — upload.wikimedia.org, commons.wikimedia.org
  * and creativecommons.org are not on the trusted-citation-host allowlist.
- * deriveSyncGuardrailOptions must thread the brief's photo_slots URLs into
- * requiredSourceUrls, the same exact-URL allowance operator citations use,
- * so the gate accepts exactly the licensed URLs the brief supplied.
+ * deriveSyncGuardrailOptions threads the brief's photo_slots URLs into
+ * photoAllowedUrls, an outbound-link-only exact-URL allowance
+ * (content-guardrails.evaluate() feeds it to externalLinkFinding alone,
+ * NEVER to priceFinding/findHardcodedPrice — see
+ * content-guardrails-photo-allowed-urls.test.js for that separation; it
+ * used to ride requiredSourceUrls itself, which also authorizes a
+ * competitor-price citation, a real Codex P1 on 2026-09-28).
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -33,17 +37,18 @@ const PHOTO_SLOTS = [
   { slot: 'look_alike', caption: 'A look-alike.', flagged_for_human: true, photo: null },
 ];
 
-describe('deriveSyncGuardrailOptions — photo_slots requiredSourceUrls allowance', () => {
-  test('carries every populated slot photo URL (url + source_page + license_url) into requiredSourceUrls', () => {
+describe('deriveSyncGuardrailOptions — photo_slots photoAllowedUrls allowance', () => {
+  test('carries every populated slot photo URL (url + source_page + license_url) into photoAllowedUrls, and NEVER into requiredSourceUrls', () => {
     const opts = deriveSyncGuardrailOptions(
       { id: 'opp-1', bucket: 'customer_need' },
       { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: { photo_slots: PHOTO_SLOTS } },
     );
-    expect(opts.requiredSourceUrls).toEqual(expect.arrayContaining([
+    expect(opts.photoAllowedUrls).toEqual(expect.arrayContaining([
       'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg',
       'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant.jpg',
       'https://creativecommons.org/licenses/by/2.0',
     ]));
+    expect(opts.requiredSourceUrls).toEqual([]);
   });
 
   test('a flagged (photo: null) slot contributes nothing — no undefined/null entries', () => {
@@ -51,15 +56,15 @@ describe('deriveSyncGuardrailOptions — photo_slots requiredSourceUrls allowanc
       { id: 'opp-1', bucket: 'customer_need' },
       { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: { photo_slots: PHOTO_SLOTS } },
     );
-    expect(opts.requiredSourceUrls.every((u) => typeof u === 'string' && u.length > 0)).toBe(true);
+    expect(opts.photoAllowedUrls.every((u) => typeof u === 'string' && u.length > 0)).toBe(true);
   });
 
-  test('no photo_slots on the brief leaves requiredSourceUrls unaffected', () => {
+  test('no photo_slots on the brief leaves photoAllowedUrls empty', () => {
     const opts = deriveSyncGuardrailOptions(
       { id: 'opp-1', bucket: 'customer_need' },
       { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: {} },
     );
-    expect(opts.requiredSourceUrls).toEqual([]);
+    expect(opts.photoAllowedUrls).toEqual([]);
   });
 
   test('end-to-end: a diagnostic draft embedding the licensed photo + attribution links clears content-guardrails.evaluate (no DISALLOWED_EXTERNAL_LINK)', () => {
@@ -112,7 +117,7 @@ describe('deriveSyncGuardrailOptions — photo_slots requiredSourceUrls allowanc
     }
   });
 
-  test('requiredSourceUrls is allowance-only: a draft that never embeds any photo_slots photo is never penalized for skipping them (Codex P1 double-check)', () => {
+  test('photoAllowedUrls is allowance-only: a draft that never embeds any photo_slots photo is never penalized for skipping them (Codex P1 double-check)', () => {
     // Photo slots ride on EVERY supporting-blog/customer-question brief
     // unconditionally (the writer decides post_type, not the composer) — a
     // non-diagnostic draft, or one where every slot came back flagged, must

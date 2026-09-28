@@ -342,6 +342,36 @@ function normalizeArray(v) {
   return Array.isArray(arr) ? arr.filter((item) => item != null && String(item).trim() !== '') : [];
 }
 
+// Codex P2 (2026-09-28): normalizeAutonomousBlogFrontmatter below rebuilds
+// frontmatter from an explicit field list — without these, a writer draft
+// carrying a valid, gate-approved frontmatter.next_steps /
+// .related_posts (packages/blog-schema/schema.json's own field names) was
+// silently dropped before the Astro file was ever committed, so the
+// next-step row and hand-picked related-post rail never shipped even
+// though content-quality-gate approved them. Defensive shape validation
+// here too (belt-and-suspenders on top of the gate, which already ran):
+// related_posts keeps only non-empty STRING entries; next_steps keeps
+// only well-shaped {label, href} entries and caps at 4, matching the
+// vendored schema's own z.array(...).max(4). Return undefined (never []),
+// consistent with this function's other optional fields (`tracking`) —
+// the JSON.parse(JSON.stringify(data)) below drops an undefined key
+// entirely rather than emitting an empty array/field.
+function normalizeRelatedPostsFrontmatter(v) {
+  const arr = safeJson(v, []);
+  if (!Array.isArray(arr)) return undefined;
+  const out = arr.filter((item) => typeof item === 'string' && item.trim() !== '');
+  return out.length ? out : undefined;
+}
+function normalizeNextStepsFrontmatter(v) {
+  const arr = safeJson(v, []);
+  if (!Array.isArray(arr)) return undefined;
+  const out = arr
+    .filter((s) => s && typeof s === 'object' && typeof s.label === 'string' && s.label.trim() && typeof s.href === 'string' && s.href.trim())
+    .map((s) => ({ label: String(s.label).trim(), href: String(s.href).trim() }))
+    .slice(0, 4);
+  return out.length ? out : undefined;
+}
+
 function normalizeCategory(category, tag) {
   const raw = String(category || '').trim();
   if (POST_CATEGORIES.has(raw)) return raw;
@@ -673,6 +703,8 @@ function normalizeAutonomousBlogFrontmatter(frontmatter = {}, brief = {}, body =
     tracking: frontmatter.tracking && typeof frontmatter.tracking === 'object' && !Array.isArray(frontmatter.tracking)
       ? { ...frontmatter.tracking }
       : undefined,
+    next_steps: normalizeNextStepsFrontmatter(frontmatter.next_steps),
+    related_posts: normalizeRelatedPostsFrontmatter(frontmatter.related_posts),
   };
 
   return JSON.parse(JSON.stringify(data));
@@ -2854,9 +2886,117 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 // `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
 // and a legacy `.md` refresh written back in place) — decides whether raw
 // HTML blocks hide the Markdown inside them (renderedBodyView).
+// Licensed identification photos (C2/C3 follow-up, Codex P1 2026-09-28).
+// content-quality-gate's photo_slots_licensed_only already restricts a
+// diagnostic draft's pest/sign/look-alike images to EXACT licensed-catalog
+// URLs — but validateBodyImageRefs below rejects ANY body image that is not
+// already committed in the Astro repo, so a compliant draft embedding one
+// of those remote Wikimedia URLs would hard-fail BLOG_BODY_IMAGES_FAILED,
+// and (with generation still enabled) a draft that instead omitted the
+// slots could get the shortfall filled with AI art — exactly the case the
+// owner rule forbids. This pass fetches, verifies (exact catalog URL only,
+// real image content-type, size cap) and re-hosts each one under the SAME
+// public/images/blog/{slug}/body-N.webp convention every other body image
+// uses, BEFORE validateBodyImageRefs ever sees the body — it strips the
+// remote ref out (it can never pass "already committed", same as an
+// AI-generated image never appears in the draft body either) and remembers
+// its exact line position to splice the new local ref back in once the
+// rest of resolveBodyImages has run. AI generation is disabled entirely
+// for a diagnostic draft (see `need` below) so it can never compete for,
+// or silently fill, an identification slot a licensed photo left empty —
+// the safety rule applies to the whole body, not just the missing slot,
+// since this pipeline has no concept of "this prose section is the
+// identification slot" to exempt the rest.
+const LICENSED_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+// Only a bare `![alt](url)` alone on its own line is recognized — exactly
+// how the writer prompt instructs it to be embedded, and how every other
+// body image in this file is placed. An inline or otherwise-decorated
+// occurrence is left for validateBodyImageRefs to reject normally
+// (fail-closed: parked for human review, never silently mishandled).
+const LICENSED_PHOTO_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
+function licensedPhotoError(slug, url, detail) {
+  const err = new Error(`autonomous blog body images: licensed identification photo for ${slug} (${url}) ${detail}`);
+  err.code = 'BLOG_BODY_IMAGES_FAILED';
+  return err;
+}
+
+// NOT the existing fetchImageBuffer(): its `ext` always falls back to a
+// guessed value (never null) even for a non-image response, so it cannot
+// actually verify content-type — this is the real verification a
+// licensed-catalog fetch needs (same exact URL as the brief's own catalog
+// entry, a real image response, a byte cap).
+async function fetchAndVerifyLicensedPhoto(url, slug) {
+  let res;
+  try {
+    res = await fetch(url, { redirect: 'follow' });
+  } catch (fetchErr) {
+    throw licensedPhotoError(slug, url, `could not be fetched: ${fetchErr.message}`);
+  }
+  if (!res.ok) throw licensedPhotoError(slug, url, `fetch failed (HTTP ${res.status})`);
+  const contentType = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!/^image\//.test(contentType)) throw licensedPhotoError(slug, url, `is not an image (content-type: ${contentType || 'none'})`);
+  const declaredLength = Number(res.headers.get('content-length') || 0);
+  if (declaredLength > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${declaredLength} declared bytes)`);
+  const rawBuffer = Buffer.from(await res.arrayBuffer());
+  if (!rawBuffer.length) throw licensedPhotoError(slug, url, 'fetched 0 bytes');
+  if (rawBuffer.length > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${rawBuffer.length} bytes)`);
+  return compressToWebp(rawBuffer, { width: BODY_IMAGE_WIDTH });
+}
+
+// Same free-name convention the generation loop below uses (body-N.webp,
+// first name absent both from the repo and from this run's own takenNames).
+async function allocateLicensedPhotoName(slug, takenNames, counter) {
+  for (;;) {
+    counter.n += 1;
+    if (counter.n > BODY_IMAGE_NAME_SCAN_MAX) {
+      throw licensedPhotoError(slug, '(name allocation)', `— no free body-N name within ${BODY_IMAGE_NAME_SCAN_MAX}`);
+    }
+    const src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${counter.n}.webp`;
+    const repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${counter.n}.webp`;
+    if (takenNames.has(src)) continue;
+    const onMain = await gh.getFile(repoPath);
+    if (!onMain) return { src, repoPath };
+  }
+}
+
+async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
+  const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
+  const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
+  const none = { body, files: [], images: [], newAlts: [], placements: [] };
+  if (!byUrl.size) return none;
+
+  const lines = String(body || '').split('\n');
+  const files = [];
+  const images = [];
+  const placements = [];
+  const counter = { n: 0 };
+  const takenNames = new Set();
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = LICENSED_PHOTO_LINE_RE.exec(lines[i]);
+    const photo = m ? byUrl.get(String(m[2]).trim()) : null;
+    if (!photo) { out.push(lines[i]); continue; }
+    const buffer = await fetchAndVerifyLicensedPhoto(photo.url, slug);
+    const { src, repoPath } = await allocateLicensedPhotoName(slug, takenNames, counter);
+    takenNames.add(src);
+    // The draft's own alt (the writer copied photo.alt verbatim per the
+    // prompt) wins when present; the catalog alt is the fallback.
+    const alt = String(m[1] || '').trim() || String(photo.alt || '').trim();
+    files.push({ path: repoPath, buffer });
+    images.push({ src, alt, reused: false, licensed: true, sourceUrl: photo.url });
+    placements.push({ insertAt: out.length, src, alt });
+  }
+  return { body: out.join('\n'), files, images, newAlts: [], placements };
+}
+
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
   if (!bodyImagesEnabled()) return none;
+  const isDiagnostic = frontmatter?.post_type === 'diagnostic';
+  const licensed = isDiagnostic
+    ? await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx })
+    : { body, files: [], images: [], newAlts: [], placements: [] };
+  body = licensed.body;
   // A refresh draft may RETAIN a publisher-managed reference while
   // rewriting its section: the picture then ships under prose it may no
   // longer describe, bypassing the reuse context check (GH r28). Managed
@@ -2935,12 +3075,32 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   }
 
   const have = valid.distinct;
-  const need = BODY_IMAGE_MIN - have;
+  // Diagnostic drafts NEVER get an AI/generated body image — a shortfall
+  // below BODY_IMAGE_MIN is expected and correct when a slot has no
+  // licensed photo (owner rule): publish with no image there, never a
+  // generated one. Forcing need to 0 also means a diagnostic draft always
+  // takes THIS early-return path, never the generation loop below.
+  const need = isDiagnostic ? 0 : (BODY_IMAGE_MIN - have);
   // Nothing to generate — but the draft may have DROPPED references to
   // publisher-managed pictures (a refresh that replaces body-1/body-2 with
   // two authored images): those files are still publicly addressable and
   // hold managed names, so the sweep runs here too (GH r24).
-  if (need <= 0) return { ...none, body, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
+  if (need <= 0) {
+    // Byte-identical to before when there is nothing to splice back in —
+    // insertBodyImages() also .trim()s, which every non-diagnostic /
+    // no-licensed-photo draft taking this path must NOT pick up as a side
+    // effect.
+    const finalBody = licensed.placements.length ? insertBodyImages(body, licensed.placements) : body;
+    return {
+      ...none,
+      body: finalBody,
+      files: licensed.files,
+      images: licensed.images,
+      newAlts: licensed.newAlts,
+      pinned,
+      ...(await supersededBodyImages({ slug, kept: new Set([...draftSrcs, ...licensed.images.map((img) => img.src)]), superseded: [] })),
+    };
+  }
 
   const slots = bodyImageSlots(body, need, { title: frontmatter?.title, mdx });
   if (slots.length < need) {
@@ -5252,6 +5412,7 @@ module.exports = {
     compressToWebp,
     resolveAutonomousHero,
     resolveBodyImages,
+    rehostLicensedIdentificationPhotos,
     bodyImageSlots,
     insertBodyImages,
     countBodyImages,

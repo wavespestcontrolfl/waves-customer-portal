@@ -1114,16 +1114,29 @@ function checkVerdictBoxFirst(draft, brief) {
 // judges relative order once a box is present, so the two never double-
 // report the same root cause.
 const EARLY_CTA_ANCHOR_RE = /\[[^\]]*\b(?:estimate|estimates|quote|quotes)\b[^\]]*\]\(([^)]+)\)/gi;
+// Codex P2: the estimate/quote-labelled check above only ever scanned for
+// a CTA-shaped link, so a non-CTA markdown-link-shaped string INSIDE the
+// box's own props (e.g. recommendation="See our [guide](/pest-control-
+// services/)") was invisible to it — verdict_box_first and
+// source_internal_link both passed, so a page whose only "internal link"
+// is text that can never render as a clickable anchor (BottomLineBox's
+// props are literal strings, not parsed Markdown) could auto-publish.
+// ANY markdown-link-shaped substring inside the box's own tag span is a
+// hard failure here, regardless of its wording — a link belongs in the
+// prose AFTER the verdict box, never inside a component prop.
+const ANY_MD_LINK_RE = /\[[^\]]*\]\([^)]+\)/g;
 function checkCtaAfterVerdictBox(draft, brief) {
   if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
   const body = String(draft.body || '');
   const boxMatch = body.match(/<BottomLineBox\b[^>]*\/?>/);
   if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
-  const boxEnd = boxMatch.index + boxMatch[0].length;
+  const boxStart = boxMatch.index;
+  ANY_MD_LINK_RE.lastIndex = 0;
+  if (ANY_MD_LINK_RE.test(boxMatch[0])) return { ok: false, reason: 'link_inside_verdict_box' };
   EARLY_CTA_ANCHOR_RE.lastIndex = 0;
   let m;
   while ((m = EARLY_CTA_ANCHOR_RE.exec(body))) {
-    if (m.index < boxEnd) return { ok: false, reason: 'cta_before_verdict_box' };
+    if (m.index < boxStart) return { ok: false, reason: 'cta_before_verdict_box' };
   }
   return { ok: true };
 }
@@ -1161,6 +1174,60 @@ function validateSlotPhotoAttribution(photo, alt, url, body) {
   }
   return null;
 }
+// Codex P1: the inline-only regex saw NOTHING for a raw <img> (explicitly
+// accepted by content-guardrails as passive markup) or a reference-style
+// image (`![alt][ref]` / `![alt][]` + a `[ref]: url` definition elsewhere)
+// — either form slipped an unlicensed/AI photo past this hard gate on an
+// otherwise-empty allowlist. Every rendered image FORM the writer's MDX
+// subset can produce is collected here; an MDX component is deliberately
+// NOT a source of images today — SAFE_MDX_COMPONENTS (the closed component
+// vocabulary uncatalogedComponentFinding enforces) carries no component
+// with an image/src-shaped prop, so there is nothing to scan there unless
+// one is added later, at which point this function needs a matching entry.
+const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
+// Full (`![alt][ref]`) and collapsed (`![alt][]`) reference forms; the
+// shortcut form (`![alt]` with no second bracket) is not an image
+// reference in this writer's plain-Markdown subset and is left to the
+// general unsupported-body-syntax gate.
+const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
+const RAW_IMG_TAG_RE = /<img\b([^>]*)>/gi;
+function attrValue(attrs, name) {
+  const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
+  const m = re.exec(attrs);
+  return m ? (m[2] ?? m[3] ?? '') : null;
+}
+function collectBodyImageOccurrences(body) {
+  const out = [];
+  let m;
+  INLINE_IMAGE_RE.lastIndex = 0;
+  while ((m = INLINE_IMAGE_RE.exec(body))) out.push({ alt: String(m[1] || ''), url: String(m[2] || '').trim() });
+
+  const refDefs = require('./content-guardrails').markdownReferenceDefinitions(body);
+  REFERENCE_IMAGE_RE.lastIndex = 0;
+  while ((m = REFERENCE_IMAGE_RE.exec(body))) {
+    const alt = String(m[1] || '');
+    const label = String(m[2] || '').trim() || alt; // collapsed `![alt][]` resolves via alt
+    const dest = refDefs.get(label.trim().toLowerCase());
+    if (dest) out.push({ alt, url: String(dest).trim() });
+  }
+
+  RAW_IMG_TAG_RE.lastIndex = 0;
+  while ((m = RAW_IMG_TAG_RE.exec(body))) {
+    const attrs = m[1] || '';
+    const alt = attrValue(attrs, 'alt') || '';
+    const src = attrValue(attrs, 'src');
+    if (src) out.push({ alt, url: src.trim() });
+    const srcset = attrValue(attrs, 'srcset');
+    if (srcset) {
+      for (const entry of srcset.split(',')) {
+        const url = entry.trim().split(/\s+/)[0];
+        if (url) out.push({ alt, url });
+      }
+    }
+  }
+  return out;
+}
+
 function checkPhotoSlotsLicensedOnly(draft, brief) {
   if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
   // Codex P1: an EMPTY or missing photo_slots list must NEVER fail open — a
@@ -1171,11 +1238,7 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
   const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
   const body = String(draft.body || '');
-  const imgRe = /!\[([^\]]*)\]\(([^)]+)\)/g;
-  let m;
-  while ((m = imgRe.exec(body))) {
-    const alt = String(m[1] || '');
-    const url = String(m[2] || '').trim();
+  for (const { alt, url } of collectBodyImageOccurrences(body)) {
     const failure = validateSlotPhotoAttribution(byUrl.get(url), alt, url, body);
     if (failure) return failure;
   }
@@ -1194,15 +1257,24 @@ function checkPhotoSlotsLicensedOnly(draft, brief) {
 // must name one of OUR OWN hub/spoke hosts (hubHostSet — the same allowance
 // internalRouteFinding/isKnownGoodInternalRoute apply to body links) or it
 // is rejected outright, never silently reduced to its pathname.
+// Codex P2: this used to be its OWN, weaker origin check (hostname-only —
+// ftp://, a non-standard port, or embedded credentials all still reduced to
+// an allowlisted pathname). It now defers to content-guardrails'
+// safeFleetUrlPath, the SAME fleet-origin contract (HTTP(S) only, a
+// standard port, no credentials, an explicitly allowed fleet host) every
+// other absolute-URL check in this codebase already uses, instead of a
+// second, parallel normalizer that could silently drift from it.
 function normalizeFrontmatterPath(value) {
   if (!value) return null;
-  const { hubHostSet } = require('./content-guardrails');
+  const { hubHostSet, safeFleetUrlPath } = require('./content-guardrails');
   let candidate = String(value);
-  try {
-    const u = new URL(candidate);
-    if (!hubHostSet().has(u.hostname.toLowerCase())) return null; // off-site: never a match
-    candidate = u.pathname || '/';
-  } catch { /* not absolute — use as-is */ }
+  let isAbsolute = true;
+  try { new URL(candidate); } catch { isAbsolute = false; }
+  if (isAbsolute) {
+    const path = safeFleetUrlPath(candidate, hubHostSet());
+    if (!path) return null; // off-site, non-standard port, credentials, or a non-http(s) scheme
+    candidate = path;
+  }
   if (!candidate.startsWith('/')) candidate = `/${candidate}`;
   candidate = candidate.toLowerCase();
   if (!candidate.endsWith('/')) candidate += '/';
@@ -1229,10 +1301,27 @@ function buildFrontmatterRouteVerifier(brief) {
   };
 }
 
-function firstUnverifiedRelatedPost(relatedPosts, isVerified) {
+// Codex P2: related_posts is NOT a general internal-route field — the
+// Astro contract (rankRelatedPosts) reads it as the brief's own hand-
+// picked blog id/slug list and silently drops anything it doesn't
+// recognize (never a build failure there), so a value this gate accepted
+// only via the broader route verifier (a generic allowlisted route like
+// /contact/, or a case-changed related-post path) would pass HERE but
+// render as nothing there — the hand-picked rail the writer thought it
+// set never ships. related_posts is validated against ONLY the brief's
+// own voice_constraints.related_posts values, exact string match
+// (case-preserving, no normalization) — never internal_links_to_add,
+// never isKnownGoodInternalRoute. next_steps keeps the broader verifier
+// (buildFrontmatterRouteVerifier) — it points at a real, arbitrary Waves
+// page, not a blog-id lookup.
+function isVerifiedRelatedPost(value, brief) {
+  const briefRelated = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
+  return briefRelated.some((r) => (typeof r === 'string' ? r : r?.path) === value);
+}
+function firstUnverifiedRelatedPost(relatedPosts, brief) {
   for (const value of relatedPosts) {
     if (typeof value !== 'string' || !value.trim()) return { ok: false, reason: 'related_posts_entry_not_a_string' };
-    if (!isVerified(value)) return { ok: false, reason: `related_posts_entry_not_verified:${value}` };
+    if (!isVerifiedRelatedPost(value, brief)) return { ok: false, reason: `related_posts_entry_not_verified:${value}` };
   }
   return null;
 }
@@ -1261,9 +1350,9 @@ function checkNextStepsRelatedPostsClosedSet(draft, brief) {
   if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
   if (nextSteps.length > 4) return { ok: false, reason: 'next_steps_exceeds_max_4' };
 
-  const isVerified = buildFrontmatterRouteVerifier(brief);
-  const badRelatedPost = firstUnverifiedRelatedPost(relatedPosts, isVerified);
+  const badRelatedPost = firstUnverifiedRelatedPost(relatedPosts, brief);
   if (badRelatedPost) return badRelatedPost;
+  const isVerified = buildFrontmatterRouteVerifier(brief);
   const badNextStep = firstUnverifiedNextStep(nextSteps, isVerified);
   if (badNextStep) return badNextStep;
   return { ok: true };
@@ -1464,4 +1553,5 @@ module.exports._internals = {
   checkBodySyntaxSupported,
   checkVerdictBoxFirst, checkCtaAfterVerdictBox,
   checkPhotoSlotsLicensedOnly, checkNextStepsRelatedPostsClosedSet,
+  collectBodyImageOccurrences,
 };

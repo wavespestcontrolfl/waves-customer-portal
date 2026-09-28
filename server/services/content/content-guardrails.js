@@ -3170,7 +3170,15 @@ function isLiteralExpression(expr) {
   return true;
 }
 
-function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
+// photoAllowedUrls (Codex P1, 2026-09-28): licensed identification-photo /
+// source-page / license URLs are a SEPARATE exact-URL allowance from
+// requiredSourceUrls — they may only ever exempt a link from
+// DISALLOWED_EXTERNAL_LINK, never stand in as sourcing evidence for a
+// factual or price claim. Kept as its own parameter (merged into the SAME
+// exactUrls set used below) rather than folded into requiredSourceUrls, so
+// callers outside this function (priceFinding, findHardcodedPrice) can
+// never receive them by accident.
+function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [], photoAllowedUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
   // MDX ESM: an "import"/"export" statement at the start of a line is
@@ -3295,7 +3303,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations });
-  const exactUrls = allowedExactSourceUrls(requiredSourceUrls);
+  const exactUrls = allowedExactSourceUrls([...requiredSourceUrls, ...photoAllowedUrls]);
   // Host trust never bypasses the executable-markup checks above or the
   // affiliate check below. A URL in an MDX expression still needs an exact
   // brief source even when its domain is a trusted citation source.
@@ -6556,7 +6564,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], photoAllowedUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6624,7 +6632,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls }),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,

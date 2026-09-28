@@ -18,6 +18,7 @@ const {
   checkCtaAfterVerdictBox,
   checkPhotoSlotsLicensedOnly,
   checkNextStepsRelatedPostsClosedSet,
+  collectBodyImageOccurrences,
 } = require('../services/content/content-quality-gate')._internals;
 
 function brief(overrides = {}) {
@@ -134,6 +135,43 @@ describe('checkCtaAfterVerdictBox', () => {
       {
         frontmatter: { post_type: 'diagnostic' },
         body: '<BottomLineBox verdict="Yes." recommendation="Call a pro." />\n\nFire ants sting.',
+      },
+      brief(),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  // Codex P2 (2026-09-28): a NON-CTA link (no estimate/quote wording)
+  // inside the box's own props was previously invisible to this check.
+  test('fails when a non-CTA link (no estimate/quote wording) sits inside the box recommendation prop', () => {
+    const r = checkCtaAfterVerdictBox(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '<BottomLineBox verdict="Yes." recommendation="See our [pest control guide](/pest-control-services/) for more." />\n\nFire ants sting.',
+      },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('link_inside_verdict_box');
+  });
+
+  test('fails when a non-CTA link sits inside the box verdict prop', () => {
+    const r = checkCtaAfterVerdictBox(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '<BottomLineBox verdict="Read [our guide](/pest-control-services/) first." recommendation="Call a pro." />',
+      },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('link_inside_verdict_box');
+  });
+
+  test('passes when the same link is moved OUTSIDE the box, after it', () => {
+    const r = checkCtaAfterVerdictBox(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '<BottomLineBox verdict="Yes." recommendation="Call a pro." />\n\nSee our [pest control guide](/pest-control-services/) for more.',
       },
       brief(),
     );
@@ -322,6 +360,104 @@ describe('checkPhotoSlotsLicensedOnly', () => {
     );
     expect(r.ok).toBe(true);
   });
+
+  // Codex P1 (2026-09-28): the check must see every rendered image form,
+  // not just an inline Markdown image.
+  test('a raw <img> tag with an unlicensed src fails the gate (Codex P1 — raw <img> is explicitly accepted by content-guardrails)', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '<img src="https://ai-art.example.com/fake-fire-ant.png" alt="fire ant">' },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  });
+
+  test('a raw <img> tag whose src IS a licensed URL passes when alt/attribution match', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '<img src="https://upload.wikimedia.org/real-fire-ant.jpg" alt="fire ant">' },
+      b,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('a raw <img> srcset entry with an unlicensed URL fails the gate even when src is licensed', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      {
+        frontmatter: { post_type: 'diagnostic' },
+        body: '<img src="https://upload.wikimedia.org/real-fire-ant.jpg" srcset="https://ai-art.example.com/fake-2x.png 2x" alt="fire ant">',
+      },
+      b,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  });
+
+  test('a reference-style image (![alt][ref] + [ref]: url) with an unlicensed URL fails the gate', () => {
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][pic]\n\n[pic]: https://ai-art.example.com/fake-fire-ant.png' },
+      brief(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  });
+
+  test('a reference-style image resolving to a licensed URL passes when alt/attribution match', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][pic]\n\n[pic]: https://upload.wikimedia.org/real-fire-ant.jpg' },
+      b,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  test('collapsed reference form (![alt][]) resolves via the alt text as the label', () => {
+    const b = brief({
+      voice_constraints: {
+        photo_slots: [{ slot: 'pest', photo: { url: 'https://upload.wikimedia.org/real-fire-ant.jpg', alt: 'fire ant' }, flagged_for_human: false }],
+      },
+    });
+    const r = checkPhotoSlotsLicensedOnly(
+      { frontmatter: { post_type: 'diagnostic' }, body: '![fire ant][]\n\n[fire ant]: https://upload.wikimedia.org/real-fire-ant.jpg' },
+      b,
+    );
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('collectBodyImageOccurrences', () => {
+  test('collects inline, reference-style, and raw <img> (incl. srcset) occurrences together', () => {
+    const body = [
+      '![inline alt](https://example.com/inline.jpg)',
+      '',
+      '![ref alt][myref]',
+      '',
+      '<img src="https://example.com/raw.jpg" srcset="https://example.com/raw-2x.jpg 2x" alt="raw alt">',
+      '',
+      '[myref]: https://example.com/ref.jpg',
+    ].join('\n');
+    const occurrences = collectBodyImageOccurrences(body);
+    const urls = occurrences.map((o) => o.url).sort();
+    expect(urls).toEqual([
+      'https://example.com/inline.jpg',
+      'https://example.com/raw-2x.jpg',
+      'https://example.com/raw.jpg',
+      'https://example.com/ref.jpg',
+    ].sort());
+  });
 });
 
 // ── next_steps_related_posts_closed_set ─────────────────────────────
@@ -379,6 +515,36 @@ describe('checkNextStepsRelatedPostsClosedSet', () => {
     expect(r.ok).toBe(true);
   });
 
+  // Codex P2 (2026-09-28): the normalizer now defers to content-guardrails'
+  // safeFleetUrlPath (the shared fleet-origin contract) instead of a
+  // parallel, weaker hostname-only check.
+  test('rejects a non-http(s) scheme (ftp://) even on the real hub host', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'ftp://www.wavespestcontrol.com/contact/' }] } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
+  });
+
+  test('rejects a non-standard port even on the real hub host', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://www.wavespestcontrol.com:444/contact/' }] } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
+  });
+
+  test('rejects embedded credentials even on the real hub host', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: 'https://attacker:pw@www.wavespestcontrol.com/contact/' }] } },
+      brief({ internal_links_to_add: ['/contact/'] }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^next_steps_entry_not_verified:/);
+  });
+
   test('fails when a related_posts entry is not on the brief-verified list', () => {
     const r = checkNextStepsRelatedPostsClosedSet(
       { frontmatter: { related_posts: ['/pest-control/made-up-post/'] } },
@@ -392,6 +558,44 @@ describe('checkNextStepsRelatedPostsClosedSet', () => {
     const r = checkNextStepsRelatedPostsClosedSet(
       { frontmatter: { related_posts: ['/pest-control/real-post/'] } },
       brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  // Codex P2 (2026-09-28): related_posts is the Astro hand-picked blog-id
+  // rail (rankRelatedPosts) — it must match the brief's OWN verified list
+  // EXACTLY, never the broader route verifier next_steps uses.
+  test('fails when a related_posts entry only differs by CASE from the brief-verified path (silently drops on the Astro side otherwise)', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { related_posts: ['/Pest-Control/Real-Post/'] } },
+      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
+  });
+
+  test('fails when a related_posts entry is a generic allowlisted route (e.g. /contact/) rather than a real related post', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { related_posts: ['/contact/'] } },
+      brief({ voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
+  });
+
+  test('fails when a related_posts entry is only in internal_links_to_add, not the brief-verified related-post list', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { related_posts: ['/pest-control-calculator/'] } },
+      brief({ internal_links_to_add: ['/pest-control-calculator/'], voice_constraints: { related_posts: [{ path: '/pest-control/real-post/' }] } }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^related_posts_entry_not_verified:/);
+  });
+
+  test('next_steps keeps the broader verifier — the SAME generic allowlisted route that fails for related_posts still passes for next_steps', () => {
+    const r = checkNextStepsRelatedPostsClosedSet(
+      { frontmatter: { next_steps: [{ label: 'Contact us', href: '/contact/' }] } },
+      brief(),
     );
     expect(r.ok).toBe(true);
   });
