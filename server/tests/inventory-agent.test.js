@@ -372,6 +372,16 @@ describe('categoriesStatedBy — the wording that counts as stating each canonic
     }
   });
 
+  test('"micronutrient fertilizer" states only micronutrient fertilizer, never also fertilizer', () => {
+    expect([...categoriesStatedBy('Acme Micronutrient Fertilizer 20 lb')]).toEqual(['micronutrient fertilizer']);
+  });
+
+  test('a trap, glue board or monitor never states insecticide through a plain-language phrase', () => {
+    expect(categoriesStatedBy('Catchmaster Insect Control Glue Traps 12 Count').has('insecticide')).toBe(false);
+    expect(categoriesStatedBy('Acme Ant Control Monitor Stations').has('insecticide')).toBe(false);
+    expect(categoriesStatedBy('Acme Ant Control Granules 10 lb').has('insecticide')).toBe(true);
+  });
+
   test('an N-P-K grade keeps its hyphens through separator folding', () => {
     expect(categoriesStatedBy('LESCO 0-0-62').has('fertilizer')).toBe(true);
   });
@@ -810,6 +820,7 @@ describe('classifyDecision — existing, on an UNMATCHED title, needs independen
     }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
     expect(decision.reason).toMatch(/more than one product/);
+    expect(decision).not.toHaveProperty('suggestion');
   });
 
   test('the matched-product path (matchedProductId set) needs no independent evidence — the deterministic match already is one', () => {

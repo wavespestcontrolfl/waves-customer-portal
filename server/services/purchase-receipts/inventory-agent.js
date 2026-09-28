@@ -568,10 +568,14 @@ function existingGuess(candidate, ctx) {
     const matched = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].find((p) => p.id === matchedProductId);
     return matched ? { type: 'existing', productId: matched.id, productName: matched.name } : null;
   }
+  // …and only when it is the ONLY product the title names: a title naming
+  // two stays ambiguous for a person, never steered toward one of them.
   const titleWords = normalizeForMatch(ctx.rawTitle).split(' ').filter(Boolean);
-  return productNamedByTitle(titleWords, candidate, ctx.aliasesByProduct || {})
-    ? { type: 'existing', productId: candidate.id, productName: candidate.name }
-    : null;
+  const aliases = ctx.aliasesByProduct || {};
+  if (!productNamedByTitle(titleWords, candidate, aliases)) return null;
+  const others = [...(ctx.candidates || []), ...(ctx.allActiveProducts || [])].filter((p) => p.id !== candidate.id);
+  if (others.some((p) => productNamedByTitle(titleWords, p, aliases))) return null;
+  return { type: 'existing', productId: candidate.id, productName: candidate.name };
 }
 
 function validateExistingCandidate(raw, ctx, candidate) {
@@ -649,7 +653,11 @@ function validateExistingCandidate(raw, ctx, candidate) {
 const CANONICAL_CATEGORIES = [
   {
     name: 'insecticide',
-    statedBy: /\binsecticides?\b|\binsect killers?\b|\bbug killers?\b|\b(?:ant|roach|cockroach|flea|tick|flea and tick|flea & tick|spider|scorpion|wasp|hornet) killers?\b|\b(?:ant|roach|cockroach|flea|tick|caterpillar|grub|worm|armyworm|chinch bug|insect|bug|mite|spider|scorpion) control\b/i,
+    statedBy: /\binsecticides?\b/i,
+    // Plain-language phrases never count on a trap/board/monitor listing
+    // ("Insect Control Glue Traps" is a supply, not an insecticide) —
+    // PHYSICAL_DEVICE_WORDS below.
+    plainPhrase: /\binsect killers?\b|\bbug killers?\b|\b(?:ant|roach|cockroach|flea|tick|flea and tick|flea & tick|spider|scorpion|wasp|hornet) killers?\b|\b(?:ant|roach|cockroach|flea|tick|caterpillar|grub|worm|armyworm|chinch bug|insect|bug|mite|spider|scorpion) control\b/i,
   },
   { name: 'termiticide', statedBy: /\btermiticides?\b/i },
   {
@@ -662,7 +670,7 @@ const CANONICAL_CATEGORIES = [
   },
   {
     name: 'fertilizer',
-    statedBy: /\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
+    statedBy: /(?<!\bmicronutrients? )\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
   },
   { name: 'micronutrient fertilizer', statedBy: /\bmicronutrients?\b/i },
   { name: 'igr', statedBy: /\binsect growth regulators?\b|\bIGR\b/i },
@@ -694,9 +702,17 @@ function statingText(rawTitle) {
     .trim();
 }
 
+// A trap, glue board, sticky card or monitor is a physical device: a
+// plain-language pest phrase on its listing ("Insect Control Glue Traps")
+// never states a pesticide category — only the category's own word would.
+const PHYSICAL_DEVICE_WORDS = /\b(?:traps?|boards?|glue|sticky|monitors?|monitoring)\b/i;
+
 function categoriesStatedBy(rawTitle) {
   const title = statingText(rawTitle);
-  return new Set(CANONICAL_CATEGORIES.filter((c) => c.statedBy.test(title)).map((c) => c.name));
+  const device = PHYSICAL_DEVICE_WORDS.test(title);
+  return new Set(CANONICAL_CATEGORIES
+    .filter((c) => c.statedBy.test(title) || (!device && c.plainPhrase && c.plainPhrase.test(title)))
+    .map((c) => c.name));
 }
 
 // The proposal's category, validated against the canonical list and the
