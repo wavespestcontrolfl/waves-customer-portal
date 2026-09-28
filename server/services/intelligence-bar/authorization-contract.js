@@ -596,7 +596,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const credit of c.inspection_credit_reversal || []) {
       const amt = `$${Number(credit.amount).toFixed(2)}`;
       if (credit.deferred) {
-        push('billing', `A ${amt} inspection credit tied to this booking is NOT reversed at cancel (an invoice for this visit still holds money, or the check could not run) — the office is alerted or the hourly sweep retries it`);
+        push('billing', `A ${amt} inspection credit tied to this booking is NOT reversed at cancel — an invoice for this visit still holds money, so the office is alerted`);
       } else if (credit.would_reverse) {
         push('billing', `The ${amt} inspection credit this booking earned is taken back out of the customer's account balance (if it was already spent, the office is alerted to collect or write it off)`);
       }

@@ -53,6 +53,7 @@ jest.mock('../services/inspection-credit', () => ({
 const {
   computeCancelAppointmentImpact,
   cancelImpactsMatch,
+  cancelFeesMatch,
 } = require('../services/appointment-cancel-impact');
 
 beforeEach(() => {
@@ -197,6 +198,32 @@ test('an invoice still holding money after the void blocks the fee step (rail ve
   const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
 
   expect(impact.fee).toEqual({ applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null, blocked_by_invoice: true });
+});
+
+test.each([
+  ['the invoice-void preview', () => mockInvoicePreview.mockRejectedValue(new Error('invoice read failed'))],
+  ['the post-void invoice gate', () => mockUnresolvedAfterVoid.mockRejectedValue(new Error('gate read failed'))],
+  ['the credit-reversal preview', () => mockCreditPreview.mockRejectedValue(new Error('offer read failed'))],
+  ['the card-hold preview', () => mockCardHoldPreview.mockRejectedValue(new Error('hold read failed'))],
+])('a failed read in %s makes the whole impact undeterminable (throws), never "no effect"', async (_label, arrange) => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  arrange();
+  await expect(computeCancelAppointmentImpact('svc-synthetic-1')).rejects.toThrow();
+});
+
+describe('cancelFeesMatch (the follow-through re-check before any card rail)', () => {
+  const fee = { applies: true, amount: 49, unresolved: false, rail: 'card_hold', hold_disposition: null };
+  test('same verdict matches; blocked_by_invoice is not part of the rail verdict', () => {
+    expect(cancelFeesMatch({ ...fee }, { ...fee, blocked_by_invoice: false })).toBe(true);
+  });
+  test.each(['applies', 'amount', 'unresolved', 'rail', 'hold_disposition'])('a changed %s does not match', (k) => {
+    const moved = { ...fee, [k]: k === 'amount' ? 99 : (k === 'rail' ? 'appointment_card' : (k === 'hold_disposition' ? 'released' : !fee[k])) };
+    expect(cancelFeesMatch(moved, fee)).toBe(false);
+  });
+  test('a missing side never matches', () => {
+    expect(cancelFeesMatch(null, fee)).toBe(false);
+  });
 });
 
 describe('cancelImpactsMatch (the commit-time drift check)', () => {

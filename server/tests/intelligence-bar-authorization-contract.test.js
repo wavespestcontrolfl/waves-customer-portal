@@ -491,7 +491,7 @@ test('cancel_appointment: inspection-credit reversal — reverses vs deferred to
     preview: { cancellation: { ...synthCancellationBase(), inspection_credit_reversal: [{ id: 'offer-1', amount: 75, would_reverse: false, deferred: true }] } },
   });
   expect(reversed.effects).toContainEqual({ kind: 'billing', label: "The $75.00 inspection credit this booking earned is taken back out of the customer's account balance (if it was already spent, the office is alerted to collect or write it off)" });
-  expect(deferred.effects).toContainEqual({ kind: 'billing', label: 'A $75.00 inspection credit tied to this booking is NOT reversed at cancel (an invoice for this visit still holds money, or the check could not run) — the office is alerted or the hourly sweep retries it' });
+  expect(deferred.effects).toContainEqual({ kind: 'billing', label: 'A $75.00 inspection credit tied to this booking is NOT reversed at cancel — an invoice for this visit still holds money, so the office is alerted' });
   expect(contractHash(reversed)).not.toBe(contractHash(deferred));
 });
 

@@ -49,6 +49,13 @@ const {
  * @param {Date} [opts.now] Explicit cancellation instant for callers that
  *   already retain it. Otherwise read the latest real cancellation transition;
  *   same-status retries must never evaluate fees against the retry clock.
+ * @param {object} [opts.pinnedEffects] Per-target effects a confirmation
+ *   card showed, keyed by target id: `{ invoiceIds, fee }` (the shape
+ *   appointment-cancel-impact.js computes). A pinned target voids ONLY
+ *   `invoiceIds`, and its fee step runs only if the fee verdict re-derived
+ *   at the cancellation instant still equals `fee`; otherwise no card rail
+ *   runs and the office gets the unresolved-fee alert. Unpinned targets
+ *   are unchanged.
  */
 async function runVisitCancellationFollowThrough({
   targetIds = [],
@@ -57,6 +64,7 @@ async function runVisitCancellationFollowThrough({
   reason = null,
   source = 'cancellation',
   now,
+  pinnedEffects = null,
 } = {}) {
   const ids = targetIds.filter(Boolean);
   const CardHolds = require('./estimate-card-holds');
@@ -65,11 +73,16 @@ async function runVisitCancellationFollowThrough({
 
   for (const id of ids) {
     let feeOutcome;
+    const pinned = pinnedEffects?.[id] || null;
     try {
       // Close service-invoice collection before starting a Stripe fee call.
       // A failed cleanup skips the fee and alerts, but tracker cleanup and
       // the other cancelled visits still proceed.
-      await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      if (pinned) {
+        await InvoiceService.voidOpenInvoicesForCancelledService(id, { onlyInvoiceIds: pinned.invoiceIds || [] });
+      } else {
+        await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      }
       // The void sweep deliberately skips unsafe invoices without throwing.
       // Reuse its callers' resolved-status contract: paid/processing money,
       // an unverifiable PI, and still-collectible invoices all need review.
@@ -102,6 +115,20 @@ async function runVisitCancellationFollowThrough({
         waiveFee: waiveFee || Date.now() - feeTime.getTime() > CardHolds.NO_SHOW_FEE_MAX_AGE_MS,
         now: feeTime,
       };
+      // A pinned card promised one fee verdict. Re-derive it with the rails'
+      // own previews at the cancellation instant the rails will judge, and
+      // run no rail when it moved (or when the card promised the fee step
+      // would not run at all) — never charge, release or park a card
+      // differently from what was approved.
+      if (pinned && !feeOptions.waiveFee) {
+        if (pinned.fee?.blocked_by_invoice) {
+          throw new Error('Pinned card showed the fee step blocked by an invoice; fee requires review');
+        }
+        const { previewCancelFee, cancelFeesMatch } = require('./appointment-cancel-impact');
+        if (!cancelFeesMatch(await previewCancelFee(id, feeTime), pinned.fee)) {
+          throw new Error('Late-cancel fee no longer matches the confirmed card; fee requires review');
+        }
+      }
       const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
       feeOutcome = holdReason === 'no_hold'
         ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)

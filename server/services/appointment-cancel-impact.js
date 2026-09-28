@@ -37,7 +37,6 @@
  */
 
 const db = require('../models/db');
-const logger = require('./logger');
 
 async function loadAppointmentFacts(scheduledServiceId) {
   const row = await db('scheduled_services as s')
@@ -68,20 +67,12 @@ async function previewCancelFee(scheduledServiceId, now) {
   // a top-level require here would risk a load-order cycle.
   const { mergeCardHoldPreviews } = require('../routes/admin-dispatch');
 
-  let holdPreview;
-  try {
-    holdPreview = await CardHolds.cardHoldCancelPreview(scheduledServiceId, now);
-  } catch (err) {
-    logger.warn(`[appointment-cancel-impact] card-hold preview failed for ${scheduledServiceId}: ${err.message}`);
-    holdPreview = { held: true, feeApplies: true, feeAmount: null, unresolved: true };
-  }
-  let merged;
-  try {
-    merged = await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(scheduledServiceId, now));
-  } catch (err) {
-    logger.warn(`[appointment-cancel-impact] fee merge failed for ${scheduledServiceId}: ${err.message}`);
-    merged = { held: true, feeApplies: true, feeAmount: null, unresolved: true };
-  }
+  // The rail previews report their own unverifiable lane state as
+  // `unresolved` (kept, and stated on the card). A THROW is different: the
+  // verdict is unknown, so it propagates and the whole impact is
+  // undeterminable.
+  const holdPreview = await CardHolds.cardHoldCancelPreview(scheduledServiceId, now);
+  const merged = await mergeCardHoldPreviews(holdPreview, () => ApptCardRequests.appointmentCardCancelPreview(scheduledServiceId, now));
 
   // mergeCardHoldPreviews returns EITHER the exact holdPreview object it was
   // given, or a freshly-built apptShape(...) object — reference equality is
@@ -103,11 +94,21 @@ async function previewCancelFee(scheduledServiceId, now) {
   };
 }
 
+// The fee fields the follow-through re-derives at the cancellation instant
+// and compares against the pinned card before any card rail runs.
+function cancelFeesMatch(a, b) {
+  if (!a || !b) return false;
+  return ['applies', 'amount', 'unresolved', 'rail', 'hold_disposition']
+    .every((k) => (a[k] ?? null) === (b[k] ?? null));
+}
+
 /**
  * The exact effect set cancelling `scheduledServiceId` would produce right
  * now: the appointment identity, the late-cancel fee decision, the
  * invoices that would be voided, and any inspection-credit reversal.
- * Read-only — never charges, voids, or reverses anything.
+ * Read-only — never charges, voids, or reverses anything. Throws when any
+ * part cannot be read: a failed read must never pass for "no effect", so
+ * callers refuse to propose or confirm a pinned cancel on a throw.
  */
 async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Date() } = {}) {
   const appointment = await loadAppointmentFacts(scheduledServiceId);
@@ -171,5 +172,7 @@ function cancelImpactsMatch(a, b) {
 module.exports = {
   computeCancelAppointmentImpact,
   cancelImpactsMatch,
+  previewCancelFee,
+  cancelFeesMatch,
   _stableStringify: stableStringify,
 };

@@ -1576,9 +1576,11 @@ async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, bod
 // The series-child rebind probe of reverseInspectionCreditForBooking,
 // shared with previewInspectionCreditReversalForBooking so the preview the
 // Intelligence Bar card pins and the real reversal can never disagree about
-// whether a live series child still earns a redeemed offer. Returns the
-// earliest live child row ({ id }) or null; a probe failure is logged and
-// reads as null (never fail-closed), exactly as it always has.
+// whether a live series child still earns a redeemed offer. Returns
+// { seriesChild, probeFailed }: the earliest live child row ({ id }) or null,
+// and whether the probe errored. The reversal logs a failure and reads it as
+// "no child" (never fail-closed), exactly as it always has; the preview
+// cannot, because a probe that fails now may succeed at commit.
 // A recurring anchor's seeded children carry no events of their own
 // — only the anchor was BOOKED, and the children were seeded inside
 // that same proven transaction. Cancelling just the anchor while
@@ -1588,6 +1590,7 @@ async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, bod
 // still never qualifies.
 async function findLiveSeriesChildForReversal(offer, scheduledServiceId) {
   let seriesChild = null;
+  let probeFailed = false;
   try {
     // The proven anchor is either the cancelled booking itself, or —
     // when the cancelled booking is a seeded child the offer was
@@ -1659,9 +1662,10 @@ async function findLiveSeriesChildForReversal(offer, scheduledServiceId) {
       }
     }
   } catch (childErr) {
+    probeFailed = true;
     logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
   }
-  return seriesChild;
+  return { seriesChild, probeFailed };
 }
 
 async function reverseInspectionCreditForBooking({
@@ -1728,7 +1732,7 @@ async function reverseInspectionCreditForBooking({
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
           continue;
         }
-        const seriesChild = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
+        const { seriesChild } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
         if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
           continue;
@@ -1825,72 +1829,64 @@ async function reverseInspectionCreditForBooking({
  * see the same verdict reverseInspectionCreditForBooking would reach.
  * Returns null when there is nothing redeemed against this booking (the
  * dominant case — most cancels never touch inspection credit at all).
- * Never throws.
+ * Throws when any read fails: "the lookup failed" must never read as "no
+ * credit", or a failure at both proposal and confirm would match and a
+ * recovered lookup at commit would reverse a credit the card never showed.
  */
 async function previewInspectionCreditReversalForBooking(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
   if (!scheduledServiceId) return null;
-  try {
-    const redeemedOffers = await db('inspection_credit_offers')
-      .where({ redeemed_scheduled_service_id: scheduledServiceId, status: 'redeemed' })
-      .orderBy('id')
-      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
-    if (!redeemedOffers.length) return null;
+  const redeemedOffers = await db('inspection_credit_offers')
+    .where({ redeemed_scheduled_service_id: scheduledServiceId, status: 'redeemed' })
+    .orderBy('id')
+    .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
+  if (!redeemedOffers.length) return null;
 
-    // Same posture as the real reversal's invoice-state guard: an
-    // unresolved invoice (still holding money, not yet void/refunded/
-    // cancelled) means neither reversing nor rebinding is safe — flag for
-    // office review. A failed check is the SAME fail-closed posture (the
-    // real function `continue`s past the offer on a check failure, i.e.
-    // does nothing this pass) — "deferred" covers both. The real guard runs
-    // AFTER the void (reverseInspectionCreditForBooking is called from
-    // voidOpenInvoicesForCancelledService's `finally`), so the invoices the
-    // void preview says it would void count as resolved here — otherwise an
-    // open invoice the cancel is about to void would show "deferred" while
-    // the real cancel reverses the credit. The guard does not depend on the
-    // offer, so it is read once.
-    const invoiceUnresolved = await require('./invoice')
-      .previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds });
+  // Same posture as the real reversal's invoice-state guard: an
+  // unresolved invoice (still holding money, not yet void/refunded/
+  // cancelled) means neither reversing nor rebinding is safe — flag for
+  // office review. The real guard runs AFTER the void
+  // (reverseInspectionCreditForBooking is called from
+  // voidOpenInvoicesForCancelledService's `finally`), so the invoices the
+  // void preview says it would void count as resolved here — otherwise an
+  // open invoice the cancel is about to void would show "deferred" while
+  // the real cancel reverses the credit. The guard does not depend on the
+  // offer, so it is read once.
+  const invoiceUnresolved = await require('./invoice')
+    .previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds });
 
-    const offers = [];
-    for (const offer of redeemedOffers) {
-      let deferred = invoiceUnresolved;
+  const offers = [];
+  for (const offer of redeemedOffers) {
+    const deferred = invoiceUnresolved;
 
-      // A live alternate booking (or, for a proven anchor, a live series
-      // child) in the offer's window still earns the credit — the real
-      // reversal REBINDS rather than reverses. Same two probes, same order.
-      let rebindCandidate = false;
-      if (!deferred) {
-        try {
-          const alternate = await provenBookingInWindow({
-            customerId: offer.customer_id,
-            from: offer.created_at,
-            to: offer.expires_at,
-            excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
-          });
-          rebindCandidate = !!alternate;
-        } catch (err) {
-          logger.warn(`[inspection-credit] reversal-preview alternate-booking check failed for offer ${offer.id}: ${err.message}`);
-          deferred = true;
-        }
-      }
-      // The SAME series-child probe the real reversal runs (shared helper,
-      // so the two cannot drift); a probe failure reads as "no child" there
-      // and here alike.
-      if (!deferred && !rebindCandidate) {
-        rebindCandidate = !!(await findLiveSeriesChildForReversal(offer, scheduledServiceId));
-      }
-      offers.push({
-        id: offer.id,
-        amount: round2(offer.amount),
-        would_reverse: !deferred && !rebindCandidate,
-        deferred,
+    // A live alternate booking (or, for a proven anchor, a live series
+    // child) in the offer's window still earns the credit — the real
+    // reversal REBINDS rather than reverses. Same two probes, same order.
+    let rebindCandidate = false;
+    if (!deferred) {
+      const alternate = await provenBookingInWindow({
+        customerId: offer.customer_id,
+        from: offer.created_at,
+        to: offer.expires_at,
+        excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
       });
+      rebindCandidate = !!alternate;
     }
-    return offers.length ? offers : null;
-  } catch (err) {
-    logger.error(`[inspection-credit] reversal preview FAILED for booking ${scheduledServiceId}: ${err.message}`);
-    return null;
+    // The SAME series-child probe the real reversal runs (shared helper,
+    // so the two cannot drift). The reversal reads a failed probe as "no
+    // child"; the preview refuses to guess.
+    if (!deferred && !rebindCandidate) {
+      const { seriesChild, probeFailed } = await findLiveSeriesChildForReversal(offer, scheduledServiceId);
+      if (probeFailed) throw new Error(`series-child probe failed for offer ${offer.id}`);
+      rebindCandidate = !!seriesChild;
+    }
+    offers.push({
+      id: offer.id,
+      amount: round2(offer.amount),
+      would_reverse: !deferred && !rebindCandidate,
+      deferred,
+    });
   }
+  return offers.length ? offers : null;
 }
 
 /**

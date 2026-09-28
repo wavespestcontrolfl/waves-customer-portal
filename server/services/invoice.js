@@ -10927,7 +10927,7 @@ const InvoiceService = {
    */
   async voidOpenInvoicesForCancelledService(
     scheduledServiceId,
-    { invoiceId = null, refusedClaimToken = null } = {},
+    { invoiceId = null, refusedClaimToken = null, onlyInvoiceIds = null } = {},
   ) {
     const voided = [];
     if (!scheduledServiceId) return voided;
@@ -10952,6 +10952,12 @@ const InvoiceService = {
               );
           })
           .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES);
+        // A cancel confirmed from a card that listed the invoices it voids
+        // (Intelligence Bar cancel_appointment, via the follow-through's
+        // pinned effects) voids ONLY those; an invoice created after the
+        // card is left open, and the follow-through's post-void gate then
+        // sends the fee to office review.
+        if (Array.isArray(onlyInvoiceIds)) candidateQuery.whereIn("id", onlyInvoiceIds);
       }
       const candidates = await candidateQuery
         .select("id", "invoice_number", "stripe_payment_intent_id", "payer_statement_id");
@@ -11199,59 +11205,48 @@ const InvoiceService = {
    * preview can freeze the exact invoice set the confirmation card shows,
    * and the commit path can recompute this same preview immediately before
    * voiding and refuse on drift instead of settling a different set.
-   * Fail-closed like the real sweep: anything unverifiable is left OUT of
-   * the returned list (matches "needs manual review" there), never guessed
-   * into "would void". Never throws.
+   * Throws when any read fails (the candidate scan, a statement or payment
+   * check, a PaymentIntent retrieve): a read that fails now may succeed at
+   * commit and void an invoice the card never showed, so the caller treats
+   * the whole effect set as undeterminable. A PaymentIntent that Stripe
+   * cannot verify without an error (`!pi`) is skipped, as the sweep does.
    */
   async previewInvoiceVoidForCancelledService(scheduledServiceId) {
     const would = [];
     if (!scheduledServiceId) return would;
-    try {
-      const candidates = await db("invoices")
-        .where((q) => {
-          q.where({ scheduled_service_id: scheduledServiceId })
-            .orWhereIn(
-              "service_record_id",
-              db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
-            );
-        })
-        .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
-        .orderBy("id")
-        .select("id", "invoice_number", "status", "total", "credit_applied",
-          "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
-      for (const candidate of candidates) {
-        try {
-          if (candidate.payer_statement_id) {
-            const stmt = await db("payer_statements").where({ id: candidate.payer_statement_id }).first("status");
-            if (stmt && stmt.status !== "open") continue; // finalized statement — needs a credit on the next statement
-          }
-          const appliedPayment = await db("payments")
-            .whereIn("status", ["paid", "processing"])
-            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [candidate.id])
-            .first("id");
-          if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
-          if (candidate.stripe_payment_intent_id) {
-            let pi;
-            try {
-              pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
-            } catch (e) {
-              continue; // unverifiable — fail closed, same as the real sweep
-            }
-            if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
-          }
-          would.push({
-            id: candidate.id,
-            invoice_number: candidate.invoice_number,
-            status: candidate.status,
-            total: candidate.total != null ? Number(candidate.total) : null,
-            credit_applied: candidate.credit_applied != null ? Number(candidate.credit_applied) : 0,
-          });
-        } catch (e) {
-          logger.warn(`[invoice] void preview check failed for invoice ${candidate.id}: ${e.message}`);
-        }
+    const candidates = await db("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            db("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      })
+      .whereIn("status", CANCELLED_SERVICE_VOIDABLE_STATUSES)
+      .orderBy("id")
+      .select("id", "invoice_number", "status", "total", "credit_applied",
+        "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+    for (const candidate of candidates) {
+      if (candidate.payer_statement_id) {
+        const stmt = await db("payer_statements").where({ id: candidate.payer_statement_id }).first("status");
+        if (stmt && stmt.status !== "open") continue; // finalized statement — needs a credit on the next statement
       }
-    } catch (e) {
-      logger.warn(`[invoice] void preview failed for cancelled service ${scheduledServiceId}: ${e.message}`);
+      const appliedPayment = await db("payments")
+        .whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [candidate.id])
+        .first("id");
+      if (candidate.payment_recorded_at || appliedPayment) continue; // money already applied — needs manual refund/credit review
+      if (candidate.stripe_payment_intent_id) {
+        const pi = await require("./stripe").retrievePaymentIntent(candidate.stripe_payment_intent_id);
+        if (!pi || PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) continue;
+      }
+      would.push({
+        id: candidate.id,
+        invoice_number: candidate.invoice_number,
+        status: candidate.status,
+        total: candidate.total != null ? Number(candidate.total) : null,
+        credit_applied: candidate.credit_applied != null ? Number(candidate.credit_applied) : 0,
+      });
     }
     return would;
   },
@@ -11266,21 +11261,16 @@ const InvoiceService = {
    * runs AFTER the void, so the invoices the void preview says it would void
    * (`voidedInvoiceIds`) are treated as resolved here. Same query as both
    * gates (scheduled_service_id only). Returns true when an invoice would
-   * still be unresolved, or when the check itself fails (both gates fail
-   * closed on an error too). Never throws.
+   * still be unresolved. Throws when the read fails: the caller treats the
+   * effect set as undeterminable rather than guessing either way.
    */
   async previewUnresolvedInvoiceAfterCancelVoid(scheduledServiceId, { voidedInvoiceIds = [] } = {}) {
     if (!scheduledServiceId) return false;
-    try {
-      const query = db("invoices")
-        .where({ scheduled_service_id: scheduledServiceId })
-        .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-      if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
-      return Boolean(await query.first("id"));
-    } catch (e) {
-      logger.warn(`[invoice] post-void unresolved preview failed for cancelled service ${scheduledServiceId}: ${e.message}`);
-      return true;
-    }
+    const query = db("invoices")
+      .where({ scheduled_service_id: scheduledServiceId })
+      .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    if (voidedInvoiceIds.length) query.whereNotIn("id", voidedInvoiceIds);
+    return Boolean(await query.first("id"));
   },
 
   async getStats() {

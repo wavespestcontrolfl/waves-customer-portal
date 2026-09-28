@@ -20,6 +20,13 @@ jest.mock('../models/db', () => {
     if (table === 'scheduled_services') {
       return { where: () => ({ first: async () => mockApptRow }) };
     }
+    if (table === 'job_status_history') {
+      const chain = { where: () => chain, whereNot: () => chain, orderBy: () => chain, first: async () => ({ transitioned_at: new Date(Date.now() - 60 * 1000) }) };
+      return chain;
+    }
+    if (table === 'customers') {
+      return { where: () => ({ first: async () => ({ first_name: 'Synthia', last_name: 'Tester' }) }) };
+    }
     throw new Error(`unexpected table in this suite: ${table}`);
   });
   db.transaction = (cb) => cb(db);
@@ -32,6 +39,13 @@ jest.mock('../services/appointment-cancel-impact', () => {
   const actual = jest.requireActual('../services/appointment-cancel-impact');
   return { computeCancelAppointmentImpact: (...a) => mockComputeImpact(...a), cancelImpactsMatch: actual.cancelImpactsMatch };
 });
+
+const mockFollowThrough = jest.fn(async () => ({ settled: 1 }));
+jest.mock('../services/visit-cancellation-followthrough', () => ({
+  runVisitCancellationFollowThrough: (...a) => mockFollowThrough(...a),
+}));
+jest.mock('../services/recurring-series-cancel-reseed', () => ({ runPostCancelSeriesReseed: jest.fn(async () => {}) }));
+jest.mock('../services/typed-followup-obligation', () => ({ handleFollowupChildCancellation: jest.fn(async () => {}) }));
 
 const mockTransitionJobStatus = jest.fn();
 jest.mock('../services/job-status', () => ({
@@ -124,4 +138,51 @@ test('an inspection-credit reversal appearing where the frozen preview had none 
 
   expect(result.error).toMatch(/changed since this was proposed/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+test('an impact that cannot be read is REFUSED, never treated as "no effect"', async () => {
+  mockComputeImpact.mockRejectedValue(new Error('credit lookup unavailable'));
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+
+  expect(result).toEqual({
+    error: 'The cancellation effects (late-cancel fee, invoices, or inspection credit) could not be verified right now — nothing was changed. Try again in a moment.',
+  });
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  expect(mockFollowThrough).not.toHaveBeenCalled();
+});
+
+const PINNED = { 'svc-synthetic-1': { invoiceIds: ['inv-1'], fee: FROZEN.fee } };
+
+test('a matched confirm carries the pin into the follow-through (only the listed invoices, the shown fee)', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+
+  expect(result.success).toBe(true);
+  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({
+    targetIds: ['svc-synthetic-1'], pinnedEffects: PINNED,
+  }));
+});
+
+test('a replay of a pinned confirm (visit already cancelled) keeps the pin', async () => {
+  mockApptRow = { ...mockApptRow, status: 'cancelled' };
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+
+  expect(result.already_cancelled).toBe(true);
+  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ pinnedEffects: PINNED }));
+});
+
+test('no frozen pin: the follow-through runs unpinned, as before', async () => {
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
+  expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({ pinnedEffects: null }));
 });

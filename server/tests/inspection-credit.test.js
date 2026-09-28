@@ -805,6 +805,12 @@ describe('previewInspectionCreditReversalForBooking — the read-only mirror the
     expect(unresolvedSpy).toHaveBeenCalledWith('svc-2', { voidedInvoiceIds: ['inv-1'] });
   });
 
+  it('a failed read throws instead of reading as "no credit"', async () => {
+    unresolvedSpy.mockRejectedValue(new Error('invoice gate unavailable'));
+    mockOffers = redeemed();
+    await expect(previewInspectionCreditReversalForBooking('svc-2')).rejects.toThrow('invoice gate unavailable');
+  });
+
   it('an invoice still holding money after the void defers the offer (the real reversal alerts the office instead)', async () => {
     mockOffers = redeemed();
     unresolvedSpy.mockResolvedValue(true);
