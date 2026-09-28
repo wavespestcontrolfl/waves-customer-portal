@@ -175,3 +175,14 @@ describe('code-point-safe name cap', () => {
     expect(sanitizeContactLastName('Sam\uD800ple').error.code).toBe('CONTACT_LAST_NAME_INVALID');
   });
 });
+
+describe('minted artifacts still count as missing (codex r13)', () => {
+  test('"Pat Customer" beside a linked Customer surname reopens the surname gap', () => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Pat Customer', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Pat', last_name: 'Customer', email: 'x@example.com' } });
+    expect(gaps.lastName).toBe(true);
+  });
+  test.each(['undefined', 'NULL'])('a linked %p surname counts as missing', (last) => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' }, linkedCustomer: { first_name: 'Pat', last_name: last, email: 'x@example.com' } });
+    expect(gaps.lastName).toBe(true);
+  });
+});

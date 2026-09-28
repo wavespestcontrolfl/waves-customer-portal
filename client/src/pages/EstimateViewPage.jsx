@@ -3759,7 +3759,7 @@ export function ContactGapFields({
             style={{ ...softExitInputStyle, ...(firstNameMissing ? { borderColor: W.red } : {}) }}
           />
           {firstNameMissing ? (
-            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please enter your first name.</span>
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please enter your first name.</span>
           ) : null}
         </label>
       ) : null}
@@ -3780,7 +3780,7 @@ export function ContactGapFields({
             style={{ ...softExitInputStyle, ...(lastNameMissing ? { borderColor: W.red } : {}) }}
           />
           {lastNameMissing ? (
-            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please enter your last name.</span>
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please enter your last name.</span>
           ) : null}
         </label>
       ) : null}
@@ -3801,7 +3801,7 @@ export function ContactGapFields({
             style={{ ...softExitInputStyle, ...(emailInvalid ? { borderColor: W.red } : {}) }}
           />
           {emailInvalid ? (
-            <span role="alert" style={{ fontSize: 13, color: W.red }}>Please check your email address, or leave it blank.</span>
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>Please check your email address, or leave it blank.</span>
           ) : null}
         </label>
       ) : null}

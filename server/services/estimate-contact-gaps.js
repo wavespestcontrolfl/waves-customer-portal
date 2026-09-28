@@ -41,16 +41,21 @@ function cleanedNameTokens(value) {
     .replace(/\s{2,}/g, ' ')
     .trim()
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    // The generated 'Customer' surname suffix ("Pat Customer") is the same
+    // minted artifact as the linked 'Customer' surname — not a real name.
+    .filter((token, i, all) => !(i > 0 && i === all.length - 1 && token.toLowerCase() === 'customer'));
 }
 
 function nameKey(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+// The minted artifacts again: the 'Customer' surname the accept stamped and
+// the 'undefined' / 'null' concatenation tokens (codex #5102 r13).
 function hasRealLastName(value) {
   const key = nameKey(value);
-  return !!key && key !== 'customer';
+  return !!key && !['customer', 'undefined', 'null'].includes(key);
 }
 
 function hasRealFirstName(value) {
