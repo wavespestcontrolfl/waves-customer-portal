@@ -108,7 +108,7 @@ function eligibleExtraction() {
     property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
     service_request: { service_intent: 'inspection_only' },
     scheduling: {},
-    consent: {},
+    consent: { sms_declined: false },
     sentiment_and_lead: {},
   };
 }
@@ -574,7 +574,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       ai_extraction_enriched: {
         ...eligibleExtraction(),
         caller: { phone_e164: SPOKEN_DESTINATION },
-        consent: { sms_consent_given: true },
+        consent: { sms_consent_given: true, sms_declined: false },
       },
       metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
     });
@@ -584,7 +584,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
       // (stale) consent check and this handoff's own reload — withdrawn
       // to null — staging never judges the destination number itself.
       await mockPg('call_log').where({ id: callId }).update({
-        ai_extraction_enriched: JSON.stringify({ ...eligibleExtraction(), caller: { phone_e164: SPOKEN_DESTINATION }, consent: {} }),
+        ai_extraction_enriched: JSON.stringify({ ...eligibleExtraction(), caller: { phone_e164: SPOKEN_DESTINATION }, consent: { sms_declined: false } }),
       });
       const verdict = await withSmsHandoff((trx) => providerPreSendCheck({ dbi: trx }));
       return verdict.ok ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000008' } : { sent: false, ...verdict };

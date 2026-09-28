@@ -339,7 +339,7 @@ describe('stagingIneligibleReason', () => {
     property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
     service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
     scheduling: { status: 'requested' },
-    consent: { do_not_contact_request: false, sms_consent_given: true },
+    consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
     sentiment_and_lead: { lead_quality: 'warm' },
   });
   const leadId = 'lead-1';
@@ -410,6 +410,15 @@ describe('stagingIneligibleReason', () => {
     ['disposition already booked', { recommended_disposition: 'booked' }, 'disposition_booked'],
     ['disposition no action needed', { recommended_disposition: 'no_action_needed' }, 'disposition_no_action_needed'],
     ['explicit do-not-contact', { consent: { do_not_contact_request: true } }, 'do_not_contact'],
+    // schema 1.18.0, codex P1 on #5292: sms_consent_given=false also covered
+    // an explicit "no" to "may I text you?", so the dry-run removal above
+    // stopped catching that refusal along with the "never asked" majority
+    // it was meant to unblock. sms_declined is the dedicated field.
+    ['the caller explicitly declined texting', { consent: { sms_declined: true } }, 'sms_declined'],
+    // A pre-1.18 extraction never has sms_declined at all (not null —
+    // simply absent, since the persisted schema doesn't require it) and
+    // must fail CLOSED rather than assume no refusal was made.
+    ['a pre-1.18 extraction with no sms_declined field at all', { consent: { sms_declined: undefined } }, 'sms_refusal_unrecorded'],
     ['caller prefers a phone call', { caller: { preferred_contact_method: 'phone' } }, 'prefers_phone_contact'],
     ['wrong-number lead quality', { sentiment_and_lead: { lead_quality: 'wrong_number' } }, 'lead_quality_wrong_number'],
     ['spam/solicitation lead quality', { sentiment_and_lead: { lead_quality: 'spam_or_solicitation' } }, 'lead_quality_spam_or_solicitation'],
@@ -734,7 +743,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -770,7 +779,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -806,7 +815,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -859,7 +868,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -903,7 +912,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -933,7 +942,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -957,7 +966,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -986,7 +995,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -1013,7 +1022,7 @@ describe('stage', () => {
         caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
         property: { property_type: 'single_family' },
         service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
         sentiment_and_lead: { lead_quality: 'warm' },
       },
       ai_address_validation: { status: 'validated_accept', inServiceArea: true },
@@ -1381,7 +1390,7 @@ describe('neverSendRecheck', () => {
       caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
       property: { property_type: 'single_family', service_address: { street_line_1: '123 Main St', city: 'Bradenton', postal_code: '34205' } },
       service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
       sentiment_and_lead: { lead_quality: 'warm' },
     },
   };
@@ -1752,7 +1761,7 @@ describe('dispatchClaimedCall', () => {
       caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
       property: { property_type: 'single_family' },
       service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
-      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+      scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true, sms_declined: false },
       sentiment_and_lead: { lead_quality: 'warm' },
     },
     ai_address_validation: { status: 'validated_accept', inServiceArea: true } };

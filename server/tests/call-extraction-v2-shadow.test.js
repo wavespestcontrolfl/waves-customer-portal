@@ -102,8 +102,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v15');
-    expect(PROMPT_HASH).toMatch(/^v15-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v16');
+    expect(PROMPT_HASH).toMatch(/^v16-[a-f0-9]{12}$/);
   });
 
   test('includes the reschedule agreement and moved-appointment rules (schema 1.16.0)', () => {
@@ -126,6 +126,15 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('moved_appointment_words: for reschedule_requested only');
     expect(prompt).toContain('null whenever moved_appointment_date is null');
     expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
+  });
+
+  test('includes the sms_declined consent rule (schema 1.18.0, codex P1 on #5292)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    expect(prompt).toContain('sms_declined: true only if the caller explicitly declines text messages');
+    expect(prompt).toContain('even if calls are fine');
+    expect(prompt).toContain('false otherwise, including when texting never came up');
+    // sms_consent_given's own wording is unchanged by this addition.
+    expect(prompt).toContain('sms_consent_given: true only if the caller explicitly agrees to receive text messages. Implied consent (giving a phone number) does NOT count.');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -285,7 +294,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.17.0');
+    expect(SCHEMA_VERSION).toBe('1.18.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

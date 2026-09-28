@@ -361,7 +361,8 @@
       "required": [
         "sms_consent_given",
         "call_recording_disclosed",
-        "do_not_contact_request"
+        "do_not_contact_request",
+        "sms_declined"
       ],
       "properties": {
         "sms_consent_given": {
@@ -380,6 +381,10 @@
         "do_not_contact_request": {
           "type": "boolean",
           "description": "Caller explicitly asked not to be contacted further."
+        },
+        "sms_declined": {
+          "type": "boolean",
+          "description": "true ONLY if the caller explicitly declines text messages (says no when asked to be texted, or asks not to be texted / to be called instead of texted), even if calls are fine. false otherwise, including when texting never came up. Distinct from sms_consent_given=false, which merely means consent was never asked."
         }
       }
     },

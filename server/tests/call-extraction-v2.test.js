@@ -32,6 +32,7 @@ function validModelOutput() {
       sms_consent_quote: 'Yes, you can text me at this number.',
       call_recording_disclosed: true,
       do_not_contact_request: false,
+      sms_declined: false,
     },
     property: {
       service_address: {
@@ -137,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.17.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.17.0');
+  test('schema version is 1.18.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.18.0');
   });
 
   describe('model-output schema', () => {
@@ -287,6 +288,33 @@ describe('schema validation', () => {
       const out = validModelOutput();
       out.scheduling.moved_appointment_words = '';
       expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    // consent.sms_declined (schema 1.18.0, codex P1 on #5292): the
+    // booking-link dry run's removal of the sms_consent_given===false
+    // staging check also stopped catching an explicit refusal, which the
+    // model recorded the same way. sms_declined is required in the model
+    // output going forward (the extraction always judges it), but
+    // deliberately NOT required in the persisted schema, so a pre-1.18 row
+    // — which never has the field at all — still validates.
+    test('1.18.0: sms_declined is required in the model output', () => {
+      const out = validModelOutput();
+      delete out.consent.sms_declined;
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.consent.sms_declined = false;
+      expect(validateModelOutput(out).valid).toBe(true);
+      out.consent.sms_declined = true;
+      expect(validateModelOutput(out).valid).toBe(true);
+    });
+
+    test('1.18.0: sms_declined must be a boolean, and a pre-1.18 persisted row without it still validates', () => {
+      const out = validModelOutput();
+      out.consent.sms_declined = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.17.0';
+      delete old.consent.sms_declined;
+      expect(validatePersisted(old).valid).toBe(true);
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {

@@ -277,8 +277,12 @@ const WANTS_ONSITE_INTENTS = new Set([
 // no_sms_consent_captured deliberately excluded: OWNER RULING 2026-09-28 —
 // this transactional follow-up may go to a caller who never explicitly
 // opted in, as long as it rides the consented destination (consentedDestination's
-// ANI/dialed-number path, implied consent); explicit refusals (do_not_contact,
-// STOP suppression) and destination_not_consented still block it.
+// ANI/dialed-number path, implied consent); explicit refusals still block it,
+// through do_not_contact_requested above, STOP suppression at send, and the
+// dedicated consent.sms_declined / sms_refusal_unrecorded check in
+// STAGING_CHECKS (schema 1.18.0) — sms_declined is a raw consent field, not
+// a triage_flags enum value, so it is never one of the flags excluded here.
+// destination_not_consented still blocks it too.
 const EXCLUDED_TRIAGE_FLAGS = new Set([
   'out_of_service_area', 'hoa_common_area_requires_approval', 'commercial_requires_quote',
   'caller_not_authorized', 'do_not_contact_requested',
@@ -697,7 +701,23 @@ const STAGING_CHECKS = [
   // required boolean the prompt sets true ONLY on an explicit yes, so false
   // means "never asked", not "refused" — it blocked 151 of 159 real new-lead
   // calls, the exact opt-in requirement the owner ruling removed. Refusals
-  // still block through do_not_contact above and STOP suppression at send.
+  // still block, but through the dedicated field below (and STOP suppression
+  // at send) rather than sms_consent_given, which cannot tell "never asked"
+  // from "said no".
+  // sms_declined (schema 1.18.0, codex P1 on #5292): sms_consent_given=false
+  // ALSO covers an explicit "no" to "may I text you?" — the dry-run removal
+  // above stopped catching that refusal along with the "never asked"
+  // majority it was meant to unblock. sms_declined is the model's
+  // separately-judged field, true ONLY on an explicit decline. A pre-1.18
+  // extraction has no sms_declined field at all (never null — the field is
+  // simply absent, since the persisted schema doesn't require it so older
+  // rows keep validating) and fails CLOSED here rather than assume no
+  // refusal was made.
+  (call, extraction) => {
+    const declined = extraction.consent?.sms_declined;
+    if (typeof declined !== 'boolean') return 'sms_refusal_unrecorded';
+    return declined === true ? 'sms_declined' : null;
+  },
   // Owner rule: never text someone who said the number isn't theirs (codex
   // pre-push P1). Read straight off the extraction: callback_number_needed
   // is derived into the processor's final flags, and the canonical sender
