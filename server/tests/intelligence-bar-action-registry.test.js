@@ -86,22 +86,10 @@ test('technicians cannot discover admin tools or forge a tool scope', async () =
   expect(registry.initialTools('tech', { role: 'admin', context: 'tech' }).some(t => t.name === 'discover_capabilities')).toBe(false);
 });
 
-test('report_gap is offered beside discovery to admins only, validated like it, and withdrawn by the kill switch', () => {
-  const admin = { role: 'admin', context: 'dashboard' };
-  const offered = (context, scope) => registry.initialTools(context, scope).map(t => t.name);
-  expect(offered('dashboard', admin)).toEqual(expect.arrayContaining(['discover_capabilities', 'report_gap', 'list_gap_reports']));
-  expect(offered('tech', { role: 'admin', context: 'tech' })).not.toContain('report_gap');
-  expect(offered('agent_estimate', { role: 'admin', context: 'agent_estimate' })).not.toContain('report_gap');
-  expect(registry.validateInput('report_gap', { kind: 'missing_capability', wanted: 'add a second service address' }, admin)).toBeNull();
-  expect(registry.validateInput('report_gap', { kind: 'made_up', wanted: 'add a second service address' }, admin).code).toBe('invalid_input');
-  expect(registry.validateInput('report_gap', { kind: 'blocked', wanted: 'refund a card payment' }, { role: 'technician', context: 'tech' }).code).toBe('permission_denied');
-  process.env.AGENT_GAP_REPORTS = 'off';
-  try {
-    expect(offered('dashboard', admin)).not.toContain('report_gap');
-    expect(offered('dashboard', admin)).toContain('discover_capabilities');
-  } finally {
-    delete process.env.AGENT_GAP_REPORTS;
-  }
+test('list_gap_reports is offered to admins on every page and never to technicians', () => {
+  expect(registry.initialTools('dashboard', { role: 'admin', context: 'dashboard' }).map(t => t.name)).toContain('list_gap_reports');
+  expect(registry.initialTools('schedule', { role: 'admin', context: 'schedule' }).map(t => t.name)).toContain('list_gap_reports');
+  expect(registry.initialTools('tech', { role: 'technician', context: 'tech' }).map(t => t.name)).not.toContain('list_gap_reports');
 });
 
 test('execute validates raw model arguments before a two-step executor can see approval fields', async () => {

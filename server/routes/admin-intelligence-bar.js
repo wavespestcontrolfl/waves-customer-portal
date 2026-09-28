@@ -2586,8 +2586,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           for (const tool of discovered.definitions) byName.set(tool.name, apiToolDefinition(tool));
           tools = [...byName.values()];
           gapCollector.discovery(toolUse.input, result);
-        } else if (platformEnabled && toolUse.name === ActionRegistry.GAP_REPORT_TOOL.name) {
-          result = await gapCollector.fileReport(toolUse.input);
         } else if (platformEnabled && !tools.some(tool => tool.name === toolUse.name)) {
           result = { error: 'Discover this capability before using it', code: 'capability_not_loaded' };
           failed = true;
@@ -2723,17 +2721,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       ];
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
-    // Awaited, not fire-and-forget: flush() never rejects, writes nothing on
-    // the usual request (no signals), and a row that lands before the reply
-    // is one the operator can already see in list_gap_reports.
-    await gapCollector?.flush();
-
     // finalResponse is still null only when every round was tool_use and the
     // loop ran out — fail the round that ended it (Codex r12 on #4884).
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }
+    // Gap reports: records only when this reply says the bar could not do
+    // something. Awaited — flush() never rejects and writes nothing on an
+    // ordinary request; the task context supplies customer names to redact.
+    await gapCollector?.flush({ reply: finalResponse, taskContext });
 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool

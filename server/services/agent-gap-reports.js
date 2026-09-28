@@ -1,20 +1,22 @@
 'use strict';
 
 /**
- * Intelligence Bar gap reports — recorder + per-request collector.
+ * Intelligence Bar gap reports — server-owned recorder + per-request collector.
  *
  * Prod data shows the bar tells the operator "I can't / no tool for that"
  * in roughly half its replies, and about half of those are a real missing
- * feature or bug. Nothing captured them, and the query log is redacted
- * whenever customer data is touched (most of the time). This module writes
- * a structured, PII-scrubbed record the moment the bar hits one — either
- * because the model called `report_gap` itself, or because the collector
- * below noticed a discovery miss or a repeatedly-failing tool the model
- * never reported.
+ * feature or bug. The query log is redacted whenever customer data is
+ * touched, so none of that could be mined afterwards.
  *
- * `recordGapReport()` is the only write path (server/models/migrations/
- * 20260928160000_agent_gap_reports.js) and NEVER throws — a broken gap
- * report must never break the request that surfaced it.
+ * The model is given NO tool that writes here (the #1568 trust boundary:
+ * a model-facing write goes through the confirmation card). Instead the
+ * route feeds the collector what the server itself observed in the tool
+ * loop — its own capability-search results, a tool name that does not
+ * exist, a tool that genuinely broke — and at the end of the request the
+ * collector records those signals only when the reply told the operator
+ * the bar could not do something. `writeGapRows()` is the only write path
+ * (server/models/migrations/20260928160000_agent_gap_reports.js) and never
+ * throws: a broken gap report must never break the request that surfaced it.
  */
 const crypto = require('crypto');
 const db = require('../models/db');
@@ -22,18 +24,17 @@ const logger = require('./logger');
 const { redactText } = require('./agent-decision-training');
 const policy = require('./intelligence-bar/action-policy.json');
 
-const KINDS = new Set(['missing_capability', 'tool_failure', 'blocked']);
-
-// Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the bar
-// offering report_gap, the per-request collector, every write here and the
-// Monday digest. Read at call time, so a flip needs no redeploy. Default on.
-function gapReportsEnabled() {
-  return String(process.env.AGENT_GAP_REPORTS || '').trim().toLowerCase() !== 'off';
-}
+// The table also allows 'blocked' (migration CHECK) for a later
+// refusal signal; nothing produces it yet.
+const KINDS = new Set(['missing_capability', 'tool_failure']);
 const MAX_TEXT = 300;
 const TOOL_NAME_RE = /^[a-z0-9_]{1,64}$/;
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+// Record numbers (invoice, property, account) left after redactText's
+// phone pass. Four digits or more, so "2 times" and short counts survive.
+const LONG_NUMBER_RE = /\b\d{4,}\b/g;
 const KNOWN_DOMAINS = new Set(Object.values(policy).map((entry) => entry?.domain).filter(Boolean));
+const DISCOVERY_TOOL_NAME = 'discover_capabilities';
 
 // Same stopword list as the discovery ranker (action-registry.js
 // DISCOVERY_STOPWORDS) — kept local so this module has no load-order
@@ -42,13 +43,43 @@ const STOPWORDS = new Set(('a an the i me my we our you your it this that these 
   + 'will would should please like want need to for from of on in with is are be have has and or what how '
   + 'get find show search list').split(' '));
 
-function cleanText(value) {
+// The reply told the operator the bar could not do something. Nothing is
+// recorded without it: an exploratory search or a retried tool that ended
+// in a real answer is not a gap.
+const DECLINE_RE = /\b(?:can(?:not|'t|’t)|could(?: not|n't|n’t)|unable to|not able to|no tool|don(?:'t|’t) have (?:a|any) (?:tool|way))\b|\b(?:isn(?:'t|’t)|not) (?:available|supported|possible)\b/i;
+
+// Tool results carrying a code are the loop's structured outcomes —
+// target clarification, permission, invalid input, a pending dependency,
+// a stale target. Only an uncoded error (an unexpected failure) or one of
+// these execution failures counts toward a tool_failure gap.
+const GENUINE_FAILURE_CODES = new Set(['execution_interrupted', 'verify_failed']);
+const TOOL_FAILURE_THRESHOLD = 2;
+
+// Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
+// line, the collector's writes and the Monday digest. Read at call time, so
+// a flip needs no redeploy. Default on.
+function gapReportsEnabled() {
+  return String(process.env.AGENT_GAP_REPORTS || '').trim().toLowerCase() !== 'off';
+}
+
+const PROMPT_LINE = '\nBefore you tell the operator that something they asked for cannot be done from the bar, '
+  + 'call discover_capabilities with a short, general description of it (no names, phone numbers, emails, '
+  + 'street addresses or record ids).';
+
+// Appended to the platform prompt; empty while the kill switch is off.
+function gapReportPromptLine() {
+  return gapReportsEnabled() ? PROMPT_LINE : '';
+}
+
+function cleanText(value, names) {
   if (!value) return null;
   // Strip UUIDs BEFORE redactText: its phone regex has no leading word
-  // boundary and can otherwise eat into a UUID's digit runs before the
-  // dedicated UUID pass ever sees a clean 8-4-4-4-12 shape to match.
+  // boundary and can otherwise eat into a UUID's digit runs first.
   const withoutIds = String(value).replace(UUID_RE, '[id]');
-  const redacted = redactText(withoutIds);
+  // Contact patterns first, then the request's names: redactText replaces
+  // names before emails, so a name inside an address would otherwise break
+  // the email match and leave "[name]@domain" behind.
+  const redacted = redactText(redactText(withoutIds), { names }).replace(LONG_NUMBER_RE, '[number]');
   const text = redacted.replace(/\s+/g, ' ').trim().slice(0, MAX_TEXT);
   return text || null;
 }
@@ -71,171 +102,181 @@ function wordKeyOf(summary) {
   return words.length ? words.join(' ') : String(summary || '').toLowerCase();
 }
 
-function fingerprintFor({ source, kind, closestTool, summary }) {
-  const key = `${source}|${kind}|${closestTool || ''}|${wordKeyOf(summary)}`;
+// The tool is part of a tool_failure's identity. For a missing capability it
+// is only the search's best guess, which varies between requests for the
+// same ask, so it stays out of the key (and is enriched on merge instead).
+function fingerprintFor({ source, kind, tool, summary }) {
+  const key = `${source}|${kind}|${kind === 'tool_failure' ? tool || '' : ''}|${wordKeyOf(summary)}`;
   return crypto.createHash('sha256').update(key).digest('hex');
 }
 
+// Pure: a cleaned, fingerprinted row for one signal, or null if it carries
+// nothing recordable. `names` are the request's customer names to redact.
+function prepareGapRow({ source, kind, summary, attempted, closestTool, domain } = {}, names = []) {
+  if (!KINDS.has(kind)) return null;
+  const cleanSummary = cleanText(summary, names);
+  if (!cleanSummary) return null;
+  const tool = cleanTool(closestTool);
+  const src = String(source || 'unknown').slice(0, 32);
+  return {
+    source: src,
+    kind,
+    domain: cleanDomain(domain),
+    summary: cleanSummary,
+    attempted: cleanText(attempted, names),
+    closest_tool: tool,
+    fingerprint: fingerprintFor({ source: src, kind, tool, summary: cleanSummary }),
+  };
+}
+
+// Insert-or-bump. A recurrence counts, refreshes last_seen_at, reopens a
+// `fixed` gap as `new` (building / by_design / dismissed stay), and fills in
+// detail the first sighting lacked rather than discarding it.
+async function upsertGapRow(row) {
+  const now = new Date();
+  const rows = await db('agent_gap_reports')
+    .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now })
+    .onConflict('fingerprint')
+    .merge({
+      occurrences: db.raw('agent_gap_reports.occurrences + 1'),
+      last_seen_at: now,
+      status: db.raw("CASE WHEN agent_gap_reports.status = 'fixed' THEN 'new' ELSE agent_gap_reports.status END"),
+      domain: db.raw('COALESCE(agent_gap_reports.domain, EXCLUDED.domain)'),
+      closest_tool: db.raw('COALESCE(agent_gap_reports.closest_tool, EXCLUDED.closest_tool)'),
+      attempted: db.raw('COALESCE(EXCLUDED.attempted, agent_gap_reports.attempted)'),
+    })
+    .returning(['id', 'occurrences', 'status']);
+  const saved = rows && rows[0];
+  // bigint ids come back from pg as strings; "gap #<id>" wants a number.
+  return saved ? { id: Number(saved.id), occurrences: Number(saved.occurrences), status: saved.status } : null;
+}
+
 /**
- * Insert-or-bump a gap report. Returns { id, occurrences, status } or null
- * (rejected input, or a DB failure — logged with the error code only, never
- * the error text, which can carry a compiled query with model-supplied
- * strings). A recurrence on a row the owner already marked `fixed` reopens
- * it as `new`; `building` / `by_design` / `dismissed` are left alone.
+ * Records each distinct signal once (deduped by fingerprint, so a search the
+ * model retried in several rounds counts one occurrence for the request).
+ * Returns the saved { id, occurrences, status } per written row. Never
+ * throws; a failed write is logged with the error code only — the error text
+ * can carry a compiled query with the summary in it.
  */
-async function recordGapReport({ source, kind, summary, attempted, closestTool, domain } = {}) {
-  try {
-    if (!gapReportsEnabled() || !KINDS.has(kind)) return null;
-    const cleanSummary = cleanText(summary);
-    if (!cleanSummary) return null;
-    const tool = cleanTool(closestTool);
-    const now = new Date();
-    const fingerprint = fingerprintFor({ source, kind, closestTool: tool, summary: cleanSummary });
-    const rows = await db('agent_gap_reports')
-      .insert({
-        source: String(source || 'unknown').slice(0, 32),
-        kind,
-        domain: cleanDomain(domain),
-        summary: cleanSummary,
-        attempted: cleanText(attempted),
-        closest_tool: tool,
-        fingerprint,
-        occurrences: 1,
-        status: 'new',
-        first_seen_at: now,
-        last_seen_at: now,
-      })
-      .onConflict('fingerprint')
-      .merge({
-        occurrences: db.raw('agent_gap_reports.occurrences + 1'),
-        last_seen_at: now,
-        status: db.raw("CASE WHEN agent_gap_reports.status = 'fixed' THEN 'new' ELSE agent_gap_reports.status END"),
-      })
-      .returning(['id', 'occurrences', 'status']);
-    const row = rows && rows[0];
-    // bigint columns come back from pg as strings; coerce for a caller that
-    // renders "gap #<id>" or compares occurrences numerically.
-    return row ? { id: Number(row.id), occurrences: Number(row.occurrences), status: row.status } : null;
-  } catch (err) {
-    logger.warn(`[agent-gap-reports] record failed (${err.code || err.name || 'error'})`);
-    return null;
+async function writeGapRows(signals, { names = [] } = {}) {
+  if (!gapReportsEnabled()) return [];
+  const seen = new Set();
+  const saved = [];
+  for (const signal of signals || []) {
+    try {
+      const row = prepareGapRow(signal, names);
+      if (!row || seen.has(row.fingerprint)) continue;
+      seen.add(row.fingerprint);
+      const result = await upsertGapRow(row);
+      if (result) saved.push(result);
+    } catch (err) {
+      logger.warn(`[agent-gap-reports] record failed (${err.code || err.name || 'error'})`);
+    }
   }
+  return saved;
 }
 
-// report_gap calls one request may record; later ones answer limit_reached.
-const REPORT_CALL_LIMIT = 3;
-const PROMPT_LINE = '\nWhen you tell the operator you cannot do something they asked because a capability is missing, '
-  + 'a tool failed or misbehaved, or a rule blocks it, call report_gap once for that gap before your final answer. '
-  + 'Do not report missing information, pending approvals, or requests you completed.';
-
-// The platform prompt's report_gap instruction — empty while the kill switch
-// is off, so the prompt never names a tool the bar is not offering.
-function gapReportPromptLine() {
-  return gapReportsEnabled() ? PROMPT_LINE : '';
+// Customer names (and street addresses) the request resolved — the most
+// likely identifying text in a model-written search description.
+function namesFromTaskContext(taskContext) {
+  const names = new Set();
+  for (const target of [...(taskContext?.targets || []), ...(taskContext?.candidates || [])]) {
+    const label = String(target?.label || '').trim();
+    if (label) {
+      names.add(label);
+      for (const part of label.split(/\s+/)) names.add(part);
+    }
+    if (target?.address) names.add(String(target.address).trim());
+  }
+  return [...names];
 }
 
-const IGNORED_TOOL_NAMES = new Set(['discover_capabilities', 'report_gap']);
-// A tool that failed only because it was never discover_capabilities-loaded
-// yet is a routing artifact of the loop, not a real capability gap.
-const IGNORED_FAILURE_CODE = 'capability_not_loaded';
-const TOOL_FAILURE_THRESHOLD = 2;
+function isGenuineFailure(result) {
+  return !result?.code || GENUINE_FAILURE_CODES.has(result.code);
+}
+
+function searchAttempt(search) {
+  return search.surfaced.size
+    ? `Searched the bar; ${search.surfaced.size} related tool(s) found, none completed the request`
+    : 'Searched the bar; no matching tool';
+}
 
 /**
- * Per-request signal collector. Queues candidate gaps while the tool loop
- * runs and writes them once, at flush(), so a discovery that later succeeds
- * or a gap the model already reported itself never also produces a noisier
- * automatic duplicate.
+ * Per-request collector. The route reports what the server observed; flush()
+ * decides, once the reply is known, what to record.
  */
 function createGapCollector({ source }) {
-  let discoverySignals = [];
-  const toolFailures = new Map(); // toolName -> { count, lastCode }
-  const reportedTools = new Set();
-  let anyReported = false;
-  let reportCalls = 0;
+  const searches = []; // { query, domain, closestTool, surfaced:Set, resolved }
+  const unknownTools = new Set();
+  const failures = new Map(); // toolName -> { count, code }
 
   function discovery(input, result) {
-    if (result?.status === 'capability_unimplemented') {
-      discoverySignals.push({
-        kind: 'missing_capability',
-        summary: input?.query,
-        attempted: 'Searched the bar for a matching tool; none found',
-        domain: input?.domain,
-      });
-    } else if (result?.status === 'capabilities_found') {
-      // The model recovered — whatever it does next, this was not a gap.
-      discoverySignals = [];
-    }
+    const status = result?.status;
+    if (status !== 'capability_unimplemented' && status !== 'capabilities_found') return;
+    const capabilities = Array.isArray(result.capabilities) ? result.capabilities : [];
+    searches.push({
+      query: input?.query,
+      domain: input?.domain || capabilities[0]?.domain,
+      closestTool: capabilities[0]?.id || null,
+      surfaced: new Set(capabilities.map((capability) => capability.id)),
+      resolved: false,
+    });
   }
 
   function toolResult(name, result, failed) {
-    if (IGNORED_TOOL_NAMES.has(name)) return;
-    if (result?.code === 'capability_unimplemented') {
-      discoverySignals.push({
-        kind: 'missing_capability',
-        summary: `Asked for a tool that does not exist: ${name}`,
-        closestTool: name,
-      });
+    if (name === DISCOVERY_TOOL_NAME) return;
+    if (!failed) {
+      // A tool an earlier search surfaced did its job: that search found
+      // the capability, whatever the model says afterwards.
+      for (const search of searches) if (search.surfaced.has(name)) search.resolved = true;
       return;
     }
-    if (failed && result?.code !== IGNORED_FAILURE_CODE) {
-      const entry = toolFailures.get(name) || { count: 0, lastCode: null };
-      entry.count += 1;
-      if (result?.code) entry.lastCode = result.code;
-      toolFailures.set(name, entry);
+    if (result?.code === 'capability_unimplemented') {
+      unknownTools.add(name);
+      return;
     }
+    if (!isGenuineFailure(result)) return;
+    const entry = failures.get(name) || { count: 0, code: null };
+    entry.count += 1;
+    if (result?.code) entry.code = result.code;
+    failures.set(name, entry);
   }
 
-  // The model's own report_gap call. Its intent to report suppresses the
-  // automatic discovery signal for this request even when the call is capped
-  // or the write fails. Returns the model-facing tool result (never an error).
-  async function fileReport(input) {
-    anyReported = true;
-    if (input?.tool) reportedTools.add(String(input.tool));
-    if (reportCalls >= REPORT_CALL_LIMIT) return { status: 'limit_reached' };
-    reportCalls += 1;
-    const recorded = await recordGapReport({
-      source,
-      kind: input?.kind,
-      summary: input?.wanted,
-      attempted: input?.tried,
-      closestTool: input?.tool,
-      domain: input?.domain,
-    });
-    if (!recorded) return { status: 'not_recorded', note: 'Tell the operator plainly what you could not do.' };
-    return {
-      status: 'recorded',
-      gap_id: recorded.id,
-      times_seen: recorded.occurrences,
-      note: `Recorded for the owner's weekly review. Tell the operator plainly what you could not do and mention gap #${recorded.id} in one short clause. Do not promise it will be built.`,
-    };
+  function pendingSignals() {
+    const signals = searches.filter((search) => !search.resolved).map((search) => ({
+      source, kind: 'missing_capability', summary: search.query, domain: search.domain,
+      closestTool: search.closestTool, attempted: searchAttempt(search),
+    }));
+    for (const name of unknownTools) {
+      signals.push({ source, kind: 'missing_capability', summary: `Asked for a tool that does not exist: ${name}`, closestTool: name });
+    }
+    for (const [name, entry] of failures) {
+      if (entry.count < TOOL_FAILURE_THRESHOLD) continue;
+      // No count in the text: "failed 2 times" and "failed 3 times" must
+      // fingerprint as the same gap; occurrences counts the requests.
+      signals.push({ source, kind: 'tool_failure', summary: `${name} kept failing in one request${entry.code ? ` (${entry.code})` : ''}`, closestTool: name });
+    }
+    return signals;
   }
 
-  async function flush() {
+  async function flush({ reply, taskContext } = {}) {
     try {
-      const signals = [];
-      // The model already told us about this request's gap(s) — an automatic
-      // discovery signal alongside it would just be noisy duplication.
-      if (!anyReported) {
-        for (const signal of discoverySignals) signals.push(signal);
-      }
-      for (const [tool, entry] of toolFailures) {
-        if (entry.count < TOOL_FAILURE_THRESHOLD || reportedTools.has(tool)) continue;
-        signals.push({
-          kind: 'tool_failure',
-          summary: `${tool} failed ${entry.count} times in one request${entry.lastCode ? ` (${entry.lastCode})` : ''}`,
-          closestTool: tool,
-        });
-      }
-      for (const signal of signals) {
-        await recordGapReport({ source, ...signal });
-      }
+      if (!gapReportsEnabled() || !DECLINE_RE.test(String(reply || ''))) return;
+      const signals = pendingSignals();
+      if (!signals.length) return;
+      await writeGapRows(signals, { names: namesFromTaskContext(taskContext) });
     } catch (err) {
-      // recordGapReport itself never throws, but this guards the loop above too.
       logger.warn(`[agent-gap-reports] collector flush failed (${err.code || err.name || 'error'})`);
     }
   }
 
-  return { discovery, toolResult, fileReport, flush };
+  return { discovery, toolResult, flush };
 }
 
-module.exports = { gapReportsEnabled, gapReportPromptLine, recordGapReport, createGapCollector };
+module.exports = {
+  gapReportsEnabled,
+  gapReportPromptLine,
+  writeGapRows,
+  createGapCollector,
+  _private: { prepareGapRow, DECLINE_RE },
+};

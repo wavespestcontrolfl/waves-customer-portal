@@ -12,7 +12,6 @@ const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
-const { gapReportsEnabled } = require('../agent-gap-reports');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -109,29 +108,6 @@ const DISCOVERY_TOOL = {
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
 const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
-// Domains offered on report_gap's picker — the same reviewed set every other
-// tool declares in action-policy.json, plus a catch-all for anything else.
-const GAP_REPORT_DOMAINS = [...new Set(Object.values(policy).map(p => p.domain).filter(Boolean))].sort();
-
-const GAP_REPORT_TOOL = {
-  name: 'report_gap',
-  description: "Record something the operator asked for that you could not do, for the owner's weekly review. Use once per distinct gap, only when the cause is a missing capability, a tool that failed or returned something wrong, or a rule that blocks the action. Never for missing information, a pending approval, or a request you completed. Write in general terms: no customer names, phone numbers, emails, street addresses, amounts tied to a person, or record ids.",
-  strict: true,
-  input_schema: {
-    type: 'object', additionalProperties: false,
-    properties: {
-      kind: { type: 'string', enum: ['missing_capability', 'tool_failure', 'blocked'] },
-      wanted: { type: 'string', minLength: 3, maxLength: 300, description: 'What the operator wanted, in general terms, e.g. add a second service address to a customer' },
-      tried: { type: 'string', maxLength: 300 },
-      tool: { type: 'string', maxLength: 64, description: 'The closest existing tool, or the tool that failed' },
-      domain: { type: 'string', enum: [...GAP_REPORT_DOMAINS, 'other'] },
-    },
-    required: ['kind', 'wanted'],
-  },
-};
-const validateGapReport = ajv.compile(GAP_REPORT_TOOL.input_schema);
-const SYSTEM_TOOL_NAMES = new Set([DISCOVERY_TOOL.name, GAP_REPORT_TOOL.name]);
-
 function allowed(action, { role, context } = {}) {
   if (!action) return false;
   if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
@@ -147,12 +123,11 @@ function allowed(action, { role, context } = {}) {
 
 function validateInput(name, input, scope) {
   const action = actions.get(name);
-  const isSystemTool = SYSTEM_TOOL_NAMES.has(name);
-  if (!isSystemTool && !action) return { error: 'Capability is not implemented or has no reviewed action policy', code: 'capability_unimplemented' };
-  if (isSystemTool ? (scope?.role !== 'admin' || ['tech', 'agent_estimate'].includes(scope?.context)) : !allowed(action, scope)) {
+  if (name !== DISCOVERY_TOOL.name && !action) return { error: 'Capability is not implemented or has no reviewed action policy', code: 'capability_unimplemented' };
+  if (name === DISCOVERY_TOOL.name ? (scope?.role !== 'admin' || ['tech', 'agent_estimate'].includes(scope?.context)) : !allowed(action, scope)) {
     return { error: 'Your current role or feature access does not permit this capability', code: 'permission_denied' };
   }
-  const validate = name === DISCOVERY_TOOL.name ? validateDiscovery : name === GAP_REPORT_TOOL.name ? validateGapReport : action.validate;
+  const validate = name === DISCOVERY_TOOL.name ? validateDiscovery : action.validate;
   if (!validate(input)) return {
     error: 'Tool arguments do not match the required inputs', code: 'invalid_input',
     fields: (validate.errors || []).map(e => ({ path: e.instancePath, rule: e.keyword })),
@@ -187,8 +162,7 @@ function discover(input, scope) {
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads', 'list_gap_reports']);
-  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context)
-    ? [DISCOVERY_TOOL, ...(gapReportsEnabled() ? [GAP_REPORT_TOOL] : [])] : [];
+  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];
@@ -217,4 +191,4 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
-module.exports = { actions, policyErrors, DISCOVERY_TOOL, GAP_REPORT_TOOL, initialTools, discover, validateInput, allowed, execute };
+module.exports = { actions, policyErrors, DISCOVERY_TOOL, initialTools, discover, validateInput, allowed, execute };

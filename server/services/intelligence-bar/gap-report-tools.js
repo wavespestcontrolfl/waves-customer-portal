@@ -5,8 +5,8 @@
  * One read tool over agent_gap_reports (server/models/migrations/
  * 20260928160000_agent_gap_reports.js): gap reports — what the bar could
  * not do this week, grouped by domain, for deciding what to build next.
- * Writing a gap report is the `report_gap` system tool in action-registry.js,
- * not a module here — it only writes the bar's own telemetry table.
+ * The rows are written by the server, never by a model tool: the route's
+ * per-request collector (server/services/agent-gap-reports.js).
  */
 
 const db = require('../../models/db');
@@ -21,7 +21,7 @@ const CLOSED_STATUSES = ['fixed', 'by_design', 'dismissed'];
 const GAP_REPORT_TOOLS = [
   {
     name: 'list_gap_reports',
-    description: `Gap reports: things the Intelligence Bar could not do (a missing capability, a tool that failed, or a blocked action), recorded automatically and by the report_gap tool. Grouped by domain, most-hit first — use this to see what to build next.
+    description: `Gap reports: things the Intelligence Bar could not do (a missing capability, a tool that failed, or a blocked action), recorded automatically when the bar told the operator it could not do something. Grouped by domain, most-hit first — use this to see what to build next.
 Use for: "show gap reports", "what has the bar not been able to do?", "what should we build next?"`,
     input_schema: {
       type: 'object',

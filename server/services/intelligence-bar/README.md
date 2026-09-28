@@ -34,34 +34,39 @@ new platform-only tools do not need another branch in that legacy dispatcher.
 
 ## Gap reports
 
-`report_gap` is a system tool declared in `action-registry.js` next to
-`discover_capabilities` — not a registry write, because it only writes the
-bar's own telemetry table (`agent_gap_reports`), never a business record.
-The model calls it once per distinct gap when it tells the operator it
-cannot do something because a capability is missing, a tool failed or
-misbehaved, or a rule blocks the action (never for missing information, a
-pending approval, or a completed request). `server/services/agent-gap-reports.js`
-cleans and redacts the free text, dedupes by a fingerprint of the source,
-kind, closest tool and cleaned-summary word set (so word-order variants of
-the same ask collapse into one row with a bumped `occurrences`), and writes
-through `recordGapReport()`, which never throws. The same module's
-`createGapCollector()` runs alongside the tool loop in
-`admin-intelligence-bar.js`, handles the model's `report_gap` calls
-(`fileReport`, capped at 3 per request), and files its own `missing_capability` /
-`tool_failure` signals for gaps the model noticed (a `discover_capabilities`
-miss that never recovered, a tool that failed repeatedly) but never reported
-itself — so an operator-visible "I can't do that" leaves a record even when
-the model forgets to call `report_gap`. `list_gap_reports`
-(`gap-report-tools.js`) is the read side: gap reports grouped by domain,
-most-hit first, for "what has the bar not been able to do" and "what should
-we build next". `server/services/agent-gap-digest.js` sends the owner a
-short weekly reminder (Monday 8:15am ET, `scheduler.js`) when the last 7
-days recorded anything open; a quiet week sends nothing. The bell carries a
-fixed two-line instruction; the full list is in the bar and in the email
-fallback (`AGENT_GAP_DIGEST_EMAIL`, internal recipients only, default
-contact@). Kill switch: `AGENT_GAP_REPORTS=off` (read at call time) stops
-offering `report_gap`, drops its prompt line, stops every write, and skips the
-digest; `list_gap_reports` keeps reading what was already recorded.
+What the bar could not do, recorded for the owner's weekly review. The model
+has no tool that writes here: a model-facing write goes through the
+confirmation card (#1568), so collection is server-owned. The route feeds
+`createGapCollector()` (`server/services/agent-gap-reports.js`) what the
+server itself observed in the tool loop:
+
+- its own `discover_capabilities` results, where a search counts as resolved
+  once any tool it surfaced later succeeds;
+- a tool name that does not exist (`capability_unimplemented`);
+- the same tool failing twice with a genuine execution failure. Coded
+  control-flow outcomes (target clarification, permission, invalid input,
+  pending dependency) do not count.
+
+At the end of the request, `flush()` records the unresolved signals only when
+the reply told the operator the bar could not do something. The platform
+prompt asks the model to search with a short, general description before
+declining, so that search becomes the gap's summary. Text is cleaned with the
+shared `redactText` plus the request's resolved customer names and
+addresses; UUIDs and record numbers are stripped. Rows dedupe by a
+fingerprint of source, kind, tool (tool failures only) and the summary's
+word set: a recurrence bumps `occurrences`, reopens a `fixed` gap as `new`,
+and fills in a domain or tool the first sighting lacked.
+
+`list_gap_reports` (`gap-report-tools.js`) is the read side, grouped by domain
+and most-hit first, for "show gap reports" and "what should we build next".
+`server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
+8:15am ET, `scheduler.js`) when the last 7 days recorded anything open; a quiet
+week sends nothing. The bell carries a fixed two-line instruction, and the
+full list is in the bar and in the email fallback (`AGENT_GAP_DIGEST_EMAIL`,
+internal recipients only, default contact@). Kill switch:
+`AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops
+every write and skips the digest; `list_gap_reports` keeps reading what was
+already recorded.
 
 ## Retained context modules
 

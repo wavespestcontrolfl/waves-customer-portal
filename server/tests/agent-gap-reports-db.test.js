@@ -1,4 +1,4 @@
-// recordGapReport()'s upsert and list_gap_reports' grouping/ordering against
+// writeGapRows()'s upsert and list_gap_reports' grouping/ordering against
 // real PostgreSQL (server/models/migrations/20260928160000_agent_gap_reports.js
 // must be applied to DATABASE_URL first).
 const SKIP = !process.env.DATABASE_URL;
@@ -8,7 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 postgres('agent-gap-reports against PostgreSQL', () => {
   let db;
-  let recordGapReport;
+  let writeGapRows;
   let listGapReports;
   const source = `test-source-${Date.now()}`;
   const insertedIds = [];
@@ -20,7 +20,7 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     if (!(await db.schema.hasTable('agent_gap_reports'))) {
       throw new Error('Apply migration 20260928160000_agent_gap_reports to this database first');
     }
-    ({ recordGapReport } = require('../services/agent-gap-reports'));
+    ({ writeGapRows } = require('../services/agent-gap-reports'));
     // list_gap_reports is a plain function inside gap-report-tools.js's TOOLS
     // dispatcher; exercise it through executeGapReportTool exactly as the
     // route does.
@@ -38,10 +38,21 @@ postgres('agent-gap-reports against PostgreSQL', () => {
   afterAll(async () => { await db?.destroy(); });
 
   async function record(overrides = {}) {
-    const result = await recordGapReport({ source, kind: 'missing_capability', summary: 'Synthetic gap for db test', ...overrides });
-    if (result?.id) insertedIds.push(result.id);
+    const [result] = await writeGapRows([{ source, kind: 'missing_capability', summary: 'Synthetic gap for db test', ...overrides }]);
+    if (result?.id && !insertedIds.includes(result.id)) insertedIds.push(result.id);
     return result;
   }
+
+  test('a recurrence fills in the domain and tool the first sighting lacked and keeps the latest attempt', async () => {
+    const first = await record({ summary: 'Synthetic enrichment gap', attempted: 'first try' });
+    const second = await record({ summary: 'Synthetic enrichment gap', domain: 'customers', closestTool: 'update_customer', attempted: 'second try' });
+    expect(second.id).toBe(first.id);
+    const row = await db('agent_gap_reports').where('id', first.id).first();
+    expect(row).toMatchObject({ domain: 'customers', closest_tool: 'update_customer', attempted: 'second try', occurrences: 2 });
+    const third = await record({ summary: 'Synthetic enrichment gap', domain: 'schedule' });
+    const after = await db('agent_gap_reports').where('id', third.id).first();
+    expect(after).toMatchObject({ domain: 'customers', attempted: 'second try', occurrences: 3 });
+  });
 
   test('a recurrence of the same gap increments occurrences and bumps last_seen_at', async () => {
     const first = await record({ summary: 'Add a second service address to a customer' });

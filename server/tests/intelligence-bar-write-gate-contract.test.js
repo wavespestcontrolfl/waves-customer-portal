@@ -277,8 +277,8 @@ const READ_ONLY = [
   'search_call_research',
   // closeout-tools.js (#3647 follow-up): read-only surface over closeout-status.
   'get_closeout_status', 'list_open_closeouts',
-  // gap-report-tools.js: read-only list over agent_gap_reports. Filing a gap
-  // is report_gap, a system tool in action-registry.js, not a module tool.
+  // gap-report-tools.js: read-only list over agent_gap_reports (rows are
+  // written server-side by agent-gap-reports.js, never by a model tool).
   'list_gap_reports',
 ];
 

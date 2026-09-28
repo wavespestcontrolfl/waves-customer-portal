@@ -9,9 +9,10 @@ describe('agent-gap-reports', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    delete process.env.AGENT_GAP_REPORTS;
     insertedRows = [];
     mergedCalls = [];
-    returningRows = [{ id: 7, occurrences: 1, status: 'new' }];
+    returningRows = [{ id: '7', occurrences: 1, status: 'new' }];
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
     dbMock = jest.fn((table) => {
@@ -38,257 +39,238 @@ describe('agent-gap-reports', () => {
     jest.doMock('../services/logger', () => loggerMock);
   });
 
+  afterEach(() => {
+    delete process.env.AGENT_GAP_REPORTS;
+  });
+
   function load() {
     return require('../services/agent-gap-reports');
   }
 
-  describe('recordGapReport', () => {
-    test('rejects an unknown kind without touching the database', async () => {
-      const { recordGapReport } = load();
-      const result = await recordGapReport({ source: 'intelligence-bar', kind: 'made_up', summary: 'Add a thing' });
-      expect(result).toBeNull();
-      expect(dbMock).not.toHaveBeenCalled();
+  const DECLINE = "I can't do that from the bar.";
+
+  describe('prepareGapRow', () => {
+    test('rejects an unknown kind', () => {
+      const { _private: { prepareGapRow } } = load();
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'made_up', summary: 'Add a thing' })).toBeNull();
     });
 
-    test('the AGENT_GAP_REPORTS=off kill switch records nothing and never touches the database', async () => {
-      process.env.AGENT_GAP_REPORTS = 'off';
-      try {
-        const { recordGapReport, gapReportsEnabled } = load();
-        expect(gapReportsEnabled()).toBe(false);
-        const result = await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'Add a second service address' });
-        expect(result).toBeNull();
-        expect(dbMock).not.toHaveBeenCalled();
-      } finally {
-        delete process.env.AGENT_GAP_REPORTS;
-      }
+    test('word-order variants of the same ask share a fingerprint', () => {
+      const { _private: { prepareGapRow } } = load();
+      const a = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add property to customer' });
+      const b = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'customer property add' });
+      expect(a.fingerprint).toBe(b.fingerprint);
     });
 
-    test('the platform prompt line names report_gap only while the kill switch is on', () => {
-      const { gapReportPromptLine } = load();
-      expect(gapReportPromptLine()).toContain('report_gap');
-      process.env.AGENT_GAP_REPORTS = 'off';
-      try {
-        expect(gapReportPromptLine()).toBe('');
-      } finally {
-        delete process.env.AGENT_GAP_REPORTS;
-      }
+    test('a missing capability keeps one fingerprint whatever tool the search ranked first', () => {
+      const { _private: { prepareGapRow } } = load();
+      const a = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'refund a card payment', closestTool: 'get_refunds' });
+      const b = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'refund a card payment', closestTool: 'list_payouts' });
+      expect(a.fingerprint).toBe(b.fingerprint);
+      expect(a.closest_tool).toBe('get_refunds');
     });
 
-    test('two summaries that differ only in word order dedupe to the same fingerprint', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add property to customer' });
-      await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'customer property add' });
-      expect(insertedRows).toHaveLength(2);
-      expect(insertedRows[0].fingerprint).toBe(insertedRows[1].fingerprint);
+    test('a tool failure is identified by its tool', () => {
+      const { _private: { prepareGapRow } } = load();
+      const a = prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'kept failing in one request', closestTool: 'send_sms' });
+      const b = prepareGapRow({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'kept failing in one request', closestTool: 'adjust_stock' });
+      expect(a.fingerprint).not.toBe(b.fingerprint);
     });
 
-    test('a different closest_tool changes the fingerprint even with the same words', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'send a text message', closestTool: 'send_sms' });
-      await recordGapReport({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'send a text message', closestTool: 'reply_via_sms' });
-      expect(insertedRows[0].fingerprint).not.toBe(insertedRows[1].fingerprint);
-    });
-
-    test('redacts an email, a phone number, and a UUID out of the summary and attempted text', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({
+    test('redacts contact details, UUIDs, record numbers and the request customer names', () => {
+      const { _private: { prepareGapRow } } = load();
+      const row = prepareGapRow({
         source: 'intelligence-bar',
-        kind: 'blocked',
-        summary: 'Could not text jane.doe@example.com about record 10000000-0000-4000-8000-000000000001',
-        attempted: 'Called 555-123-4567 to confirm',
-      });
-      const row = insertedRows[0];
-      expect(row.summary).not.toMatch(/jane\.doe@example\.com/);
+        kind: 'missing_capability',
+        summary: 'Add property 61760 for Dana Synthwell, dana@example.com, 941-555-0100, id 3f6012af-0fff-4b41-865a-76061b85818d',
+        attempted: 'Tried update_customer for Synthwell',
+      }, ['Dana Synthwell', 'Dana', 'Synthwell']);
+      expect(row.summary).not.toMatch(/Dana|Synthwell|dana@example\.com|941-555-0100|61760|3f6012af/);
+      expect(row.summary).toContain('[name]');
       expect(row.summary).toContain('[email]');
-      expect(row.summary).not.toMatch(/10000000-0000-4000-8000-000000000001/);
+      expect(row.summary).toContain('[phone]');
+      expect(row.summary).toContain('[number]');
       expect(row.summary).toContain('[id]');
-      expect(row.attempted).not.toMatch(/555-123-4567/);
-      expect(row.attempted).toContain('[phone]');
+      expect(row.attempted).not.toContain('Synthwell');
     });
 
-    test('an empty summary after redaction records nothing', async () => {
-      const { recordGapReport } = load();
-      const result = await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: '   ' });
-      expect(result).toBeNull();
+    test('an empty summary after cleaning records nothing', () => {
+      const { _private: { prepareGapRow } } = load();
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: '   ' })).toBeNull();
+    });
+
+    test('a tool name that is not a bare identifier is dropped, and a domain outside the policy list is null', () => {
+      const { _private: { prepareGapRow } } = load();
+      const row = prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'a thing', closestTool: 'drop table; --', domain: 'not-a-domain' });
+      expect(row.closest_tool).toBeNull();
+      expect(row.domain).toBeNull();
+      expect(prepareGapRow({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'a thing', domain: 'customers' }).domain).toBe('customers');
+    });
+  });
+
+  describe('writeGapRows', () => {
+    test('a recurrence bumps occurrences, reopens a fixed gap, and enriches rather than drops detail', async () => {
+      const { writeGapRows } = load();
+      const saved = await writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address' }]);
+      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new' }]);
+      const merge = mergedCalls[0];
+      expect(merge.occurrences.__raw).toMatch(/occurrences \+ 1/);
+      expect(merge.status.__raw).toMatch(/WHEN agent_gap_reports.status = 'fixed' THEN 'new'/);
+      expect(merge.domain.__raw).toMatch(/COALESCE\(agent_gap_reports.domain, EXCLUDED.domain\)/);
+      expect(merge.closest_tool.__raw).toMatch(/COALESCE\(agent_gap_reports.closest_tool, EXCLUDED.closest_tool\)/);
+      expect(merge.attempted.__raw).toMatch(/COALESCE\(EXCLUDED.attempted, agent_gap_reports.attempted\)/);
+    });
+
+    test('the same gap twice in one batch is written once', async () => {
+      const { writeGapRows } = load();
+      await writeGapRows([
+        { source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address' },
+        { source: 'intelligence-bar', kind: 'missing_capability', summary: 'second service address add' },
+      ]);
+      expect(insertedRows).toHaveLength(1);
+    });
+
+    test('never throws when the insert rejects, and logs only the error code', async () => {
+      dbMock.mockImplementation(() => { throw Object.assign(new Error('insert into agent_gap_reports ... dana@example.com'), { code: '23505' }); });
+      const { writeGapRows } = load();
+      await expect(writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'x y z' }])).resolves.toEqual([]);
+      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] record failed (23505)');
+    });
+
+    test('the AGENT_GAP_REPORTS=off kill switch writes nothing and drops the prompt line', async () => {
+      process.env.AGENT_GAP_REPORTS = 'off';
+      const { writeGapRows, gapReportsEnabled, gapReportPromptLine } = load();
+      expect(gapReportsEnabled()).toBe(false);
+      expect(gapReportPromptLine()).toBe('');
+      await expect(writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address' }])).resolves.toEqual([]);
       expect(dbMock).not.toHaveBeenCalled();
     });
 
-    test('a closest_tool that is not a bare snake_case identifier is dropped, not stored raw', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'tool_failure', summary: 'do a thing', closestTool: 'Not Valid!' });
-      expect(insertedRows[0].closest_tool).toBeNull();
-    });
-
-    test('a domain outside the reviewed policy list is dropped to null', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'do a thing', domain: 'not_a_real_domain' });
-      expect(insertedRows[0].domain).toBeNull();
-    });
-
-    test('a real policy domain is kept', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'do a thing', domain: 'ops' });
-      expect(insertedRows[0].domain).toBe('ops');
-    });
-
-    test('a recurrence bumps occurrences, refreshes last_seen_at, and reopens a fixed gap to new', async () => {
-      const { recordGapReport } = load();
-      await recordGapReport({ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second address' });
-      expect(mergedCalls[0]).toHaveProperty('occurrences');
-      expect(mergedCalls[0]).toHaveProperty('last_seen_at');
-      expect(mergedCalls[0].status.__raw).toMatch(/CASE WHEN/i);
-      expect(mergedCalls[0].status.__raw).toMatch(/'fixed'/);
-      expect(mergedCalls[0].status.__raw).toMatch(/'new'/);
-    });
-
-    test('returns the upserted id, occurrences, and status', async () => {
-      returningRows = [{ id: 42, occurrences: 3, status: 'building' }];
-      const { recordGapReport } = load();
-      const result = await recordGapReport({ source: 'intelligence-bar', kind: 'blocked', summary: 'do a thing' });
-      expect(result).toEqual({ id: 42, occurrences: 3, status: 'building' });
-    });
-
-    test('never throws when the database insert rejects, and logs only the error code', async () => {
-      dbMock = jest.fn(() => ({
-        insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(() => ({ returning: jest.fn().mockRejectedValue(Object.assign(new Error('customer jane@example.com failed'), { code: '23505' })) })) })) })),
-      }));
-      dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
-      jest.doMock('../models/db', () => dbMock);
-      const { recordGapReport } = load();
-      const result = await recordGapReport({ source: 'intelligence-bar', kind: 'blocked', summary: 'do a thing' });
-      expect(result).toBeNull();
-      expect(loggerMock.warn).toHaveBeenCalledWith(expect.stringContaining('23505'));
-      expect(loggerMock.warn).not.toHaveBeenCalledWith(expect.stringContaining('jane@example.com'));
+    test('with the switch on, the prompt line asks for a general search before declining', () => {
+      const { gapReportPromptLine } = load();
+      expect(gapReportPromptLine()).toMatch(/discover_capabilities with a short, general description/);
     });
   });
 
   describe('createGapCollector', () => {
-    test('fileReport returns the recorded gap number and answers limit_reached after three calls without writing', async () => {
+    const MISS = { status: 'capability_unimplemented', capabilities: [] };
+    const found = (...ids) => ({ status: 'capabilities_found', capabilities: ids.map((id) => ({ id, domain: 'customers' })) });
+
+    test('records nothing unless the reply declined', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      const first = await collector.fileReport({ kind: 'blocked', wanted: 'refund a card payment' });
-      expect(first).toMatchObject({ status: 'recorded', gap_id: 7, times_seen: 1 });
-      expect(first.note).toContain('gap #7');
-      await collector.fileReport({ kind: 'blocked', wanted: 'refund an ACH payment' });
-      await collector.fileReport({ kind: 'blocked', wanted: 'void a paid invoice' });
-      expect(await collector.fileReport({ kind: 'blocked', wanted: 'charge a stored card' })).toEqual({ status: 'limit_reached' });
-      expect(insertedRows).toHaveLength(3);
+      collector.discovery({ query: 'add a second service address' }, MISS);
+      await collector.flush({ reply: 'Here are the three customers you asked about.' });
+      expect(dbMock).not.toHaveBeenCalled();
     });
 
-    test('fileReport answers not_recorded (never an error) when the write fails', async () => {
+    test('an unresolved search is recorded with the search as its summary', async () => {
       const { createGapCollector } = load();
-      dbMock.mockImplementation(() => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); });
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      const result = await collector.fileReport({ kind: 'missing_capability', wanted: 'add a second service address' });
-      expect(result.status).toBe('not_recorded');
-      expect(result).not.toHaveProperty('error');
+      collector.discovery({ query: 'add a second service address', domain: 'customers' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows).toHaveLength(1);
+      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', summary: 'add a second service address', domain: 'customers', attempted: 'Searched the bar; no matching tool' });
     });
 
-    test('a recovered discovery (capabilities_found) drops the earlier missing_capability signal', async () => {
+    test('a search whose surfaced tools were never used keeps the top tool and its domain', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add second address' }, { status: 'capability_unimplemented' });
-      collector.discovery({ query: 'add second address' }, { status: 'capabilities_found' });
-      await collector.flush();
+      collector.discovery({ query: 'refund a card payment' }, found('get_refunds', 'list_payouts'));
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows[0]).toMatchObject({ closest_tool: 'get_refunds', domain: 'customers' });
+      expect(insertedRows[0].attempted).toMatch(/2 related tool\(s\) found, none completed the request/);
+    });
+
+    test('a later success of a surfaced tool resolves the search', async () => {
+      const { createGapCollector } = load();
+      const collector = createGapCollector({ source: 'intelligence-bar' });
+      collector.discovery({ query: 'update customer fields' }, found('update_customer'));
+      collector.toolResult('update_customer', { status: 'proposed' }, false);
+      await collector.flush({ reply: "I can't change the billing address, but the other fields are ready to confirm." });
       expect(insertedRows).toHaveLength(0);
     });
 
-    test('an unresolved discovery miss records a missing_capability gap on flush', async () => {
+    test('a success before the search does not resolve it', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add second address', domain: 'customers' }, { status: 'capability_unimplemented' });
-      await collector.flush();
+      collector.toolResult('query_customers', { customers: [] }, false);
+      collector.discovery({ query: 'merge two customer records' }, found('query_customers'));
+      await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0].kind).toBe('missing_capability');
-      expect(insertedRows[0].summary).toContain('add second address');
     });
 
-    test('the model filing report_gap itself drops the automatic discovery signal', async () => {
+    test('distinct unresolved searches are each recorded; a repeated search counts once for the request', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.discovery({ query: 'add second address' }, { status: 'capability_unimplemented' });
-      await collector.fileReport({ kind: 'missing_capability', wanted: 'add a second service address to a customer' });
-      await collector.flush();
-      // Only the model's own report was written; the automatic signal was dropped.
-      expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0].summary).toBe('add a second service address to a customer');
+      collector.discovery({ query: 'add a second service address' }, MISS);
+      collector.discovery({ query: 'add a second service address' }, MISS);
+      collector.discovery({ query: 'refund a card payment' }, MISS);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows.map((row) => row.summary)).toEqual(['add a second service address', 'refund a card payment']);
     });
 
-    test('a tool that fails twice in one request records one tool_failure gap with the error code, never the raw message', async () => {
+    test('control-flow outcomes never count as tool failures', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'customer jane@example.com not found', code: 'not_found' }, true);
-      collector.toolResult('send_sms', { error: 'customer jane@example.com not found', code: 'not_found' }, true);
-      await collector.flush();
-      expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0].kind).toBe('tool_failure');
-      expect(insertedRows[0].closest_tool).toBe('send_sms');
-      expect(insertedRows[0].summary).toContain('send_sms failed 2 times');
-      expect(insertedRows[0].summary).toContain('not_found');
-      expect(insertedRows[0].summary).not.toContain('jane@example.com');
-    });
-
-    test('a single tool failure never crosses the threshold', async () => {
-      const { createGapCollector } = load();
-      const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      await collector.flush();
+      for (const code of ['target_clarification_required', 'permission_denied', 'invalid_input', 'dependency_unresolved', 'capability_not_loaded']) {
+        collector.toolResult('adjust_stock', { error: 'x', code }, true);
+        collector.toolResult('adjust_stock', { error: 'x', code }, true);
+      }
+      await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(0);
     });
 
-    test('a tool the model already named in report_gap is not double-reported for its own failures', async () => {
+    test('a tool that genuinely fails twice records one tool_failure without the raw error text or the count', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      await collector.fileReport({ kind: 'tool_failure', wanted: 'send a text to a customer', tool: 'send_sms' });
-      await collector.flush();
+      collector.toolResult('send_sms', { error: 'customer dana@example.com not found' }, true);
+      collector.toolResult('send_sms', { error: 'customer dana@example.com not found', code: 'execution_interrupted' }, true);
+      collector.toolResult('send_sms', { error: 'customer dana@example.com not found' }, true);
+      await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0].kind).toBe('tool_failure');
-      expect(insertedRows[0].summary).toBe('send a text to a customer');
+      expect(insertedRows[0]).toMatchObject({ kind: 'tool_failure', closest_tool: 'send_sms', summary: 'send_sms kept failing in one request (execution_interrupted)' });
     });
 
-    test('capability_not_loaded failures are ignored — a routing artifact, not a real gap', async () => {
+    test('a single genuine failure stays under the threshold', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('some_tool', { error: 'Discover this capability before using it', code: 'capability_not_loaded' }, true);
-      collector.toolResult('some_tool', { error: 'Discover this capability before using it', code: 'capability_not_loaded' }, true);
-      await collector.flush();
+      collector.toolResult('send_sms', { error: 'boom' }, true);
+      await collector.flush({ reply: DECLINE });
       expect(insertedRows).toHaveLength(0);
     });
 
-    test('a tool result carrying capability_unimplemented queues a missing_capability signal keyed by tool name', async () => {
+    test('a tool name that does not exist is recorded as a missing capability', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('made_up_tool', { error: 'no such tool', code: 'capability_unimplemented' }, true);
-      await collector.flush();
-      expect(insertedRows).toHaveLength(1);
-      expect(insertedRows[0].closest_tool).toBe('made_up_tool');
-      expect(insertedRows[0].summary).toContain('made_up_tool');
+      collector.toolResult('create_property', { error: 'no such tool', code: 'capability_unimplemented' }, true);
+      await collector.flush({ reply: DECLINE });
+      expect(insertedRows[0]).toMatchObject({ kind: 'missing_capability', closest_tool: 'create_property', summary: 'Asked for a tool that does not exist: create_property' });
     });
 
-    test('flush never rejects even when the database throws', async () => {
-      dbMock = jest.fn(() => ({
-        insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ merge: jest.fn(() => ({ returning: jest.fn().mockRejectedValue(new Error('db down')) })) })) })),
-      }));
-      dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
-      jest.doMock('../models/db', () => dbMock);
+    test('the request customer names are redacted from a model-written search', async () => {
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      collector.toolResult('send_sms', { error: 'oops', code: 'oops' }, true);
-      await expect(collector.flush()).resolves.toBeUndefined();
+      collector.discovery({ query: 'add a rental property for Dana Synthwell at 12 Palm Row' }, MISS);
+      await collector.flush({ reply: DECLINE, taskContext: { targets: [{ label: 'Dana Synthwell', address: '12 Palm Row' }] } });
+      expect(insertedRows[0].summary).not.toMatch(/Dana|Synthwell|Palm Row/);
     });
 
-    test('discover_capabilities and report_gap tool results are never treated as tool failures', async () => {
+    test('flush never rejects, even when the database throws', async () => {
+      dbMock.mockImplementation(() => { throw new Error('down'); });
       const { createGapCollector } = load();
       const collector = createGapCollector({ source: 'intelligence-bar' });
-      collector.toolResult('discover_capabilities', { error: 'x', code: 'x' }, true);
-      collector.toolResult('discover_capabilities', { error: 'x', code: 'x' }, true);
-      collector.toolResult('report_gap', { error: 'x', code: 'x' }, true);
-      collector.toolResult('report_gap', { error: 'x', code: 'x' }, true);
-      await collector.flush();
-      expect(insertedRows).toHaveLength(0);
+      collector.discovery({ query: 'add a second service address' }, MISS);
+      await expect(collector.flush({ reply: DECLINE })).resolves.toBeUndefined();
+    });
+
+    test('the decline check recognizes the phrasings the bar uses', () => {
+      const { _private: { DECLINE_RE } } = load();
+      for (const reply of ["I can't merge records directly", 'I cannot deactivate it from the bar', 'I could not find a way to do that.',
+        "There's no tool in this bar that adds a property", "I don't have a tool for refunds", 'That isn’t available from here']) {
+        expect(DECLINE_RE.test(reply)).toBe(true);
+      }
+      expect(DECLINE_RE.test('Done — the visit moved to Thursday at 9 AM.')).toBe(false);
     });
   });
 });

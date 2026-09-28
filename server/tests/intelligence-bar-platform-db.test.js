@@ -1241,74 +1241,50 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     } finally { process.env.GATE_IB_THREADS = 'false'; }
   }, 30000);
 
-  // Gap reports (server/services/agent-gap-reports.js): what the bar could
-  // not do, recorded for the owner's weekly review.
+  // Gap reports (server/services/agent-gap-reports.js): recorded server-side
+  // from the tool loop, only when the reply says the bar could not do it.
   describe('gap reports', () => {
-    // NOT crypto.randomUUID(): recordGapReport() scrubs UUID-shaped text out
-    // of the summary before storing it, so a uniqueness token used in
+    // NOT crypto.randomUUID(): the recorder scrubs UUID-shaped text out of
+    // the summary before storing it, so a uniqueness token used in the
     // assertions below must not look like one.
     const uniqueToken = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const missQuery = () => `zzqx${uniqueToken()} wwzy${uniqueToken()}`; // no real word: discovery truly finds nothing
 
-    test('report_gap records a row and returns its gap_id to the model', async () => {
-      const wanted = `Synthetic gap ${uniqueToken()}: add a second service address to a customer`;
-      mockModel.mockResolvedValueOnce(tools('report_gap', {
-        kind: 'missing_capability', wanted, tried: 'Searched for an add-property tool', tool: 'add_customer_property',
-      }, 'gap'))
-        .mockResolvedValueOnce(answer('I could not do that; I filed gap #1 for the owner.'));
-      const result = await api('/query', request('Add a third service address for this customer'));
-      expect(result.status).toBe(200);
-      const toolResult = JSON.parse(mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find((block) => block.tool_use_id === 'gap').content);
-      expect(toolResult.status).toBe('recorded');
-      expect(typeof toolResult.gap_id).toBe('number');
-      expect(toolResult.times_seen).toBe(1);
-      const row = await db('agent_gap_reports').where('id', toolResult.gap_id).first();
-      expect(row).toMatchObject({ source: 'intelligence-bar', kind: 'missing_capability', summary: wanted, closest_tool: 'add_customer_property', occurrences: 1 });
-      await db('agent_gap_reports').where('id', toolResult.gap_id).del();
-    }, 30000);
-
-    test('a report_gap call past the per-request cap is not recorded', async () => {
-      const base = `Synthetic capped gap ${uniqueToken()}`;
-      mockModel.mockResolvedValueOnce({ content: [
-        { type: 'tool_use', name: 'report_gap', input: { kind: 'blocked', wanted: `${base} 1` }, id: 'gap-1' },
-        { type: 'tool_use', name: 'report_gap', input: { kind: 'blocked', wanted: `${base} 2` }, id: 'gap-2' },
-        { type: 'tool_use', name: 'report_gap', input: { kind: 'blocked', wanted: `${base} 3` }, id: 'gap-3' },
-        { type: 'tool_use', name: 'report_gap', input: { kind: 'blocked', wanted: `${base} 4` }, id: 'gap-4' },
-      ], usage: {} })
-        .mockResolvedValueOnce(answer('Filed what I could.'));
-      const result = await api('/query', request('Four separate things I cannot do'));
-      expect(result.status).toBe(200);
-      const blocks = mockModel.mock.calls.at(-1)[0].messages.at(-1).content;
-      const fourth = JSON.parse(blocks.find((block) => block.tool_use_id === 'gap-4').content);
-      expect(fourth).toEqual({ status: 'limit_reached' });
-      const rows = await db('agent_gap_reports').where('summary', 'like', `${base}%`);
-      expect(rows).toHaveLength(3);
-      await db('agent_gap_reports').whereIn('id', rows.map((r) => r.id)).del();
-    }, 30000);
-
-    test('a discovery miss with no later recovery leaves a missing_capability gap after the request', async () => {
-      const query = `zzqx${uniqueToken()} wwzy${uniqueToken()}`; // no real word, so discovery truly finds nothing
+    test('a search that finds nothing, then a reply that declines, leaves a missing_capability gap', async () => {
+      const query = missQuery();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover'))
-        .mockResolvedValueOnce(answer('I could not find a way to do that.'));
+        .mockResolvedValueOnce(answer('I could not find a way to do that from the bar.'));
       const result = await api('/query', request('Do something that does not exist'));
       expect(result.status).toBe(200);
       // flush() is awaited before the reply, so the row exists once the request returns.
       const row = await db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first();
-      expect(row.occurrences).toBe(1);
+      expect(row).toMatchObject({ occurrences: 1, attempted: 'Searched the bar; no matching tool' });
       await db('agent_gap_reports').where('id', row.id).del();
     }, 30000);
 
-    test('a discovery miss followed by a successful discovery leaves no gap report', async () => {
-      const query = `zzqx${uniqueToken()} wwzy${uniqueToken()}`; // no real word, so this first discovery truly finds nothing
+    test('the same miss with a reply that does not decline records nothing', async () => {
+      const query = missQuery();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover'))
+        .mockResolvedValueOnce(answer('Here is the summary you asked for.'));
+      const result = await api('/query', request('Summarize today'));
+      expect(result.status).toBe(200);
+      expect(await db('agent_gap_reports').where({ summary: query }).first()).toBeUndefined();
+    }, 30000);
+
+    test('a search whose surfaced tool then succeeds is not a gap, even when the reply declines part of the ask', async () => {
+      const query = missQuery();
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query }, 'discover-miss'))
         .mockResolvedValueOnce(tools('discover_capabilities', { query: 'update customer fields' }, 'discover-hit'))
         .mockResolvedValueOnce(tools('update_customer', { customer_id: customerB, updates: { notes: 'Synthetic recovered note' } }, 'update'))
-        .mockResolvedValueOnce(answer('Found a way after all — awaiting confirmation.'));
+        .mockResolvedValueOnce(answer("I can't do the first part, but the note update is awaiting confirmation."));
       const result = await api('/query', request('First try something odd, then update this customer'));
       expect(result.status).toBe(200);
-      // The miss's signal was cleared inside the tool loop when the second
-      // discovery found capabilities, so the awaited flush wrote nothing.
-      const row = await db('agent_gap_reports').where({ source: 'intelligence-bar', kind: 'missing_capability', summary: query }).first();
-      expect(row).toBeUndefined();
+      // The miss stays unresolved (nothing it surfaced was used) and is recorded;
+      // the second search surfaced update_customer, which then proposed, so it is not.
+      const miss = await db('agent_gap_reports').where({ summary: query }).first();
+      expect(miss).toBeTruthy();
+      expect(await db('agent_gap_reports').where({ source: 'intelligence-bar', summary: 'update customer fields' }).first()).toBeUndefined();
+      await db('agent_gap_reports').where('id', miss.id).del();
     }, 30000);
   });
 });

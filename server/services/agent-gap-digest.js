@@ -1,7 +1,7 @@
 'use strict';
 
-// Weekly owner reminder: gaps the Intelligence Bar recorded (report_gap +
-// the automatic per-request collector, agent-gap-reports.js) in the last 7
+// Weekly owner reminder: gaps the Intelligence Bar recorded (the route's
+// per-request collector, agent-gap-reports.js) in the last 7
 // days — things it told the operator it could not do. Exception-based per
 // the hands-off rule (CLAUDE.md rule 14): a quiet week sends nothing.
 //
