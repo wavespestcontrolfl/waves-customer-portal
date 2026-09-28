@@ -139,7 +139,8 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
   const { pickOfferTarget, startFamilyForIdentity, OFFER_LADDER } = _private;
 
   test('offer vocabulary is unchanged', () => {
-    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub', 'termite']);
+    // owner 2026-09-28: the three pillars only — termite left the ladder
+    expect(OFFER_LADDER).toEqual(['pest_control', 'lawn_care', 'tree_shrub']);
   });
 
   // Every ownership combination of {pest, lawn, T&S, termite}, exactly as
@@ -157,7 +158,7 @@ describe('offer target matrix (owner ruling 2026-08-13, one test per approved ce
     [[L, T], P, 'lawn+T&S → pest (lawn owned, so the T&S rule is inert)'],
     [[L, X], P, 'lawn+termite → pest'],
     [[T, X], L, 'T&S+termite → lawn (approved: the T&S rule beats termite→pest)'],
-    [[P, L, T], X, 'pest+lawn+T&S → termite (08-11 ruling, kept)'],
+    [[P, L, T], null, 'pest+lawn+T&S → NO card (owner 2026-09-28: termite is no longer a rung)'],
     [[P, L, X], T, 'pest+lawn+termite → T&S'],
     [[P, T, X], L, 'pest+T&S+termite → lawn'],
     [[L, T, X], P, 'lawn+T&S+termite → pest'],
@@ -617,11 +618,10 @@ describe('buildReportCrossSell', () => {
     expect(result.serviceKey).toBe('tree_shrub');
   });
 
-  test('pest + lawn + tree & shrub customer is offered termite (owner ruling: not mosquito)', async () => {
+  test('pest + lawn + tree & shrub customer gets no card (owner 2026-09-28: termite is not pitched from a report)', async () => {
     const db = dbFor({ serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'] });
     const result = await buildReportCrossSell(SERVICE(), db, { propertyLookup: missLookup });
-    expect(result).not.toBeNull();
-    expect(result.serviceKey).toBe('termite');
+    expect(result).toBeNull();
   });
 
   test('customer owning the whole ladder gets no card (referral only)', async () => {

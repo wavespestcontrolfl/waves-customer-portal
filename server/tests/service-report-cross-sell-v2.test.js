@@ -347,7 +347,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
     expect(result).toBeNull();
   });
 
-  test('termite activity wins over mosquito when not already owned', async () => {
+  test('termite activity never produces an offer (owner 2026-09-28: three pillars only)', async () => {
     etDateString.mockReturnValue('2026-11-01');
     const result = await resolveReportCrossSellV2({
       service: withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'Active termites present' } } }),
@@ -355,7 +355,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
       ladderEvidence: [],
       planRateFamilies: [],
     });
-    expect(result).toEqual({ targetKey: 'termite', reason: expect.stringMatching(/termite/i) });
+    expect(result).toBeNull();
   });
 
   test('termite activity is skipped when already owned (termite_bait maps to termite ownership)', async () => {
@@ -396,8 +396,6 @@ describe('resolveReportCrossSellV2 priority order', () => {
       ['2026-05-01', 'mosquito', 'May 1 → mosquito (checked first)'],
       ['2026-06-15', 'mosquito', 'June → mosquito'],
       ['2026-10-31', 'mosquito', 'Oct 31 → mosquito'],
-      ['2026-02-01', 'termite', 'Feb 1 → termite swarm season'],
-      ['2026-04-15', 'termite', 'April → termite swarm season'],
     ])('%s → %s (%s)', async (etDate, expectedKey) => {
       etDateString.mockReturnValue(etDate);
       const result = await resolveReportCrossSellV2({
@@ -409,8 +407,8 @@ describe('resolveReportCrossSellV2 priority order', () => {
       expect(result.targetKey).toBe(expectedKey);
     });
 
-    test('November and December: neither season window — null', async () => {
-      for (const etDate of ['2026-11-01', '2026-12-15']) {
+    test('outside mosquito season (Feb, April, November, December): null — termite swarm season is no longer an offer (owner 2026-09-28)', async () => {
+      for (const etDate of ['2026-02-01', '2026-04-15', '2026-11-01', '2026-12-15']) {
         etDateString.mockReturnValue(etDate);
         const result = await resolveReportCrossSellV2({
           service: { id: 'sr-1', service_data: '{}' },
@@ -422,7 +420,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
       }
     });
 
-    test('May, already owning mosquito: falls through to termite swarm season', async () => {
+    test('May, already owning mosquito: nothing else to offer — null (termite left the offers, owner 2026-09-28)', async () => {
       etDateString.mockReturnValue('2026-05-10');
       const result = await resolveReportCrossSellV2({
         service: { id: 'sr-1', service_data: '{}' },
@@ -430,7 +428,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
         ladderEvidence: ['mosquito'],
         planRateFamilies: [],
       });
-      expect(result.targetKey).toBe('termite');
+      expect(result).toBeNull();
     });
 
     test('a live plan-rate row on the target (never property-scoped, suppress/demote only) also excludes it', async () => {
@@ -709,7 +707,6 @@ describe('findings reason copy never claims "today" on a reopened OLD report', (
   test.each([
     ['roach', { primary: { type: 'pest' }, companions: [{ type: 'cockroach', values: { activity_level: 'Moderate' } }] }],
     ['rodent', { primary: { type: 'rodent_trapping', values: { captures: 3 } } }],
-    ['termite', { primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } }],
   ])('%s finding reason omits "today" (and any other same-day claim) even when the visit is long past', async (label, snapshot) => {
     process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
     etDateString.mockReturnValue('2026-11-01'); // outside every season window — isolates the findings branch

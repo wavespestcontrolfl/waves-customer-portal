@@ -29,7 +29,10 @@ const logger = require('../logger');
 // assessment-first by catalog design (booking_enabled false), never offered.
 // The full 16-row ownership matrix + identity-start rules live in
 // pickOfferTarget/startFamilyForIdentity below; the test file pins every row.
-const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub', 'termite'];
+// Owner ruling 2026-09-28: report offers push the three pillars only — pest,
+// lawn, tree & shrub. Termite left the ladder (it was the fourth rung, offered
+// once a customer owned all three).
+const OFFER_LADDER = ['pest_control', 'lawn_care', 'tree_shrub'];
 
 // Prompts routed through customer-pricing-ai's own SERVICE_MATCHERS so the
 // offer prices exactly what the portal pricing panel would price for the same
@@ -88,9 +91,9 @@ function offerVocabulary(ownedKeys = []) {
 }
 
 // Ownership matrix (owner ruling 2026-08-13, every cell approved):
-//   everything (pest+lawn+T&S+termite)     → NO card (referral fills the slot)
+//   all three pillars (pest+lawn+T&S)      → NO card (owner 2026-09-28: termite
+//                                            left the ladder; referral fills it)
 //   T&S without lawn (incl. T&S+termite)   → lawn
-//   pest+lawn+T&S                          → termite   (08-11 ruling, kept)
 //   pest+lawn                              → tree & shrub
 //   has pest                               → lawn
 //   has lawn                               → pest
@@ -102,10 +105,10 @@ function pickOfferTarget(ownedKeys) {
   const pest = owned.has('pest_control');
   const lawn = owned.has('lawn_care');
   const tree = owned.has('tree_shrub');
-  const termite = owned.has('termite');
-  if (pest && lawn && tree && termite) return null;
+  // Owns all three pillars → nothing to offer (owner 2026-09-28: termite is
+  // no longer a rung; `termite` ownership still counts as "has a plan" below).
+  if (pest && lawn && tree) return null;
   if (tree && !lawn) return 'lawn_care';
-  if (pest && lawn && tree) return 'termite';
   if (pest && lawn) return 'tree_shrub';
   if (pest) return 'lawn_care';
   if (lawn) return 'pest_control';
@@ -686,14 +689,8 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
         reason: 'We noted signs of rodent activity during this visit — our rodent bait monitoring program keeps stations checked and baited year-round.',
       };
     }
-    if (signal.termiteActivity && notOwned('termite')) {
-      // "During this visit", never "today" — same reopened-report doctrine
-      // as the cockroach reason above (codex pre-push P1).
-      return {
-        targetKey: 'termite',
-        reason: 'We noted possible termite activity during this visit — a termite inspection can confirm what’s there and get monitoring in place.',
-      };
-    }
+    // No termite findings branch (owner ruling 2026-09-28: offers are the
+    // three pillars only; termite is not pitched from a report).
     // No findings-based mosquito branch (removed 2026-09-28): a mention
     // count in short structured findings text can't be tied reliably to
     // genuine severity. Mosquito is offered by SEASON only, below.
@@ -709,9 +706,8 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
   if (etMonth >= 5 && etMonth <= 10 && notOwned('mosquito')) {
     return { targetKey: 'mosquito', reason: 'Mosquito season is here in SW Florida — ask about our seasonal mosquito program.' };
   }
-  if (etMonth >= 2 && etMonth <= 5 && notOwned('termite')) {
-    return { targetKey: 'termite', reason: 'It’s termite swarm season in SW Florida — a termite inspection is a smart yearly check.' };
-  }
+  // No termite swarm-season branch (owner ruling 2026-09-28: three pillars
+  // only — termite is never pitched from a report, in any month).
   return null;
 }
 

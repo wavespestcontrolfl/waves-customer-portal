@@ -995,9 +995,12 @@ value is NOT current activity and is not a signal). Mosquito has NO
 findings branch at all (removed 2026-09-28, a prior round: a mention count
 in short structured text could not be tied reliably to genuine severity)
 — it is offered ONLY by season (America/New_York May–Oct) or the
-unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
-runs only when no findings branch fired; May favors mosquito when neither
-is already owned. Never offers a family the customer already owns —
+unchanged ladder. Season (May–Oct mosquito) runs only when no findings
+branch fired. Termite is never offered from a report (owner ruling
+2026-09-28: report offers push the three pillars — pest, lawn, tree &
+shrub — so the ladder is `pest_control → lawn_care → tree_shrub`, a
+customer owning all three gets no card, and the former termite findings
+and swarm-season branches are gone). Never offers a family the customer already owns —
 reuses the ladder's own property-scoped ownership + plan-rate evidence,
 including the `termite_bait` → `termite` ownership mapping (this also
 covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
