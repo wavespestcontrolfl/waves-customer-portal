@@ -1301,19 +1301,45 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       expect(arrivalRoute.persistArrivalOrder).not.toHaveBeenCalled();
     });
 
-    test('gate reads off at commit time (flipped after the offer) → refuses to insert unverified, same as a stale offer', async () => {
-      // The offer and recheck read a LIVE gate too, but a test can still
-      // simulate the flip landing exactly at commit: prepareArrivalCapacity
-      // itself reads capacityEnabled() again and returns null when the
-      // gate is no longer live — the real function's own behavior, mocked
-      // here to prove commitVoiceBooking treats that null exactly like "no
-      // insertion was ever prepared" rather than crashing on it.
+    test('offer/commit parity: gate reads off at commit time (flipped after the offer used insertion) → refused, NO WRITE (Codex P1)', async () => {
+      // The recheck (revalidateSlot) offered THIS slot — technician + pin
+      // both present — with the gate live, so offeredWithInsertion is true
+      // by the time commitVoiceBooking runs. Simulate the flip landing
+      // exactly at commit: prepareArrivalCapacity itself reads
+      // capacityEnabled() again and returns null when the gate is no
+      // longer live — the real function's own behavior, mocked here.
+      // Falling back to an unverified APPENDED insert here would silently
+      // give the caller a slot that was just offered (and engine-confirmed)
+      // as a certified mid-route one — refused instead, same as any other
+      // stale offer, no write either way.
       arrivalRoute.prepareArrivalCapacity.mockResolvedValue(null);
       const out = await executeTool('request_booking', GOOD_INPUT, CTX);
-      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(out).toMatch(/just taken/i);
+      expect(out).toMatch(/NOTHING was booked/i);
       expect(arrivalRoute.verifyArrivalCapacity).not.toHaveBeenCalled();
       expect(arrivalRoute.persistArrivalOrder).not.toHaveBeenCalled();
       expect(lockTechDays).not.toHaveBeenCalled();
+      // Refused BEFORE the transaction even opens — cheaper than the
+      // verify-failure refusal above, and no locks are ever taken.
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(trxBuilders.scheduled_services.insert).not.toHaveBeenCalled();
+    });
+
+    test('offer/commit parity: recheck ran append-only (gate off), gate now ON at commit → still books, insertion engages (Codex P1 reverse case)', async () => {
+      // The FIRST read of bookInsertionOffersLive() is revalidateSlot's own
+      // (the recheck); the SECOND is commitVoiceBooking's engage check.
+      // Simulating the gate flipping ON in between is the mirror image of
+      // the race above — and it is NOT a hazard: offeredWithInsertion is
+      // false (the recheck never promised insertion), so there is no
+      // parity mismatch to refuse, and the commit's OWN live read still
+      // independently prepares/verifies/persists a real, freshly-certified
+      // placement — strictly better than what was promised, never unsafe.
+      booking.bookInsertionOffersLive.mockReturnValueOnce(false).mockReturnValue(true);
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(arrivalRoute.prepareArrivalCapacity).toHaveBeenCalledTimes(1);
+      expect(arrivalRoute.verifyArrivalCapacity).toHaveBeenCalledTimes(1);
+      expect(arrivalRoute.persistArrivalOrder).toHaveBeenCalledWith(trx, fitSentinel, 'ss-501');
       expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledTimes(1);
     });
 
@@ -1328,6 +1354,50 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       expect(lockTechDays).not.toHaveBeenCalled();
       const insert = trxBuilders.scheduled_services.insert;
       expect(insert.mock.calls[0][0].technician_id).toBeNull();
+    });
+
+    // LOCATION STAMP (Codex P1): a legacy account (no customer_properties
+    // rows) never gets a propertyLinkage pin, so insertData/insertRow
+    // carries no lat/lng of its own — dispatch/geo's resolveGeo would fall
+    // back to the customer's own MUTABLE latitude/longitude at read time,
+    // which can drift from the exact point-in-time `coords` the capacity
+    // proof (and any persisted route_order) was actually verified against.
+    test('legacy account, placement persisted → the row carries the CERTIFIED coords, not the mutable customer row', async () => {
+      primeDb({ propertyCount: 0 });
+      resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
+      // Deliberately DIFFERENT from CUSTOMER's own (unset) latitude/longitude
+      // and from any other fixture value, so a stamp reading the wrong
+      // source would show up as a mismatch rather than an accidental match.
+      booking.resolveBookingCoords.mockResolvedValue({ lat: 28.11, lng: -82.33 });
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+
+      // The SAME point prepareArrivalCapacity certified the placement with…
+      expect(arrivalRoute.prepareArrivalCapacity).toHaveBeenCalledWith(expect.objectContaining({
+        prospective: expect.objectContaining({ lat: 28.11, lng: -82.33 }),
+      }));
+      // …is exactly what lands on the written row (mirrors the
+      // propertyLinkage branch's own lat/lng columns — no new column).
+      const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+      expect(row.lat).toBe(28.11);
+      expect(row.lng).toBe(-82.33);
+      expect(row.property_id).toBeNull();
+    });
+
+    test('legacy account, insertion NOT engaged (no technician) → row shape unchanged, no lat/lng stamped', async () => {
+      primeDb({ propertyCount: 0 });
+      resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
+      booking.resolveBookingCoords.mockResolvedValue({ lat: 28.11, lng: -82.33 });
+      const unassignedSlot = { ...SLOT, technician_id: null };
+      booking.buildBookingAvailability.mockResolvedValue({
+        slots: [unassignedSlot], days: [{ date: BOOK_DATE, slots: [unassignedSlot] }],
+      });
+      const out = await executeTool('request_booking', GOOD_INPUT, CTX);
+      expect(out).toMatch(/Booking REQUEST submitted/i);
+      expect(arrivalRoute.prepareArrivalCapacity).not.toHaveBeenCalled();
+      const row = trxBuilders.scheduled_services.insert.mock.calls[0][0];
+      expect(row).not.toHaveProperty('lat');
+      expect(row).not.toHaveProperty('lng');
     });
 
     test('gate OFF → byte-identical to before: no prepare, no lock swap, no verify, no persist', async () => {

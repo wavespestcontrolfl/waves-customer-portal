@@ -182,6 +182,10 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     if (offer.startMinutes <= nowEt.hour * 60 + nowEt.minute) return { status: 'in_the_past' };
   }
 
+  // Read ONCE and reused for both the build and the returned result below —
+  // never re-read after the build, so what this function reports it offered
+  // WITH is exactly what buildBookingAvailability actually built with.
+  const capacityPlacement = booking.bookInsertionOffersLive();
   const availability = await booking.buildBookingAvailability({
     lat: offer.lat,
     lng: offer.lng,
@@ -201,11 +205,17 @@ async function revalidateSlot({ offer, durationMinutes = null }) {
     // actually decides whether an inserted slot is safe to persist, so a
     // gate flip between here and the commit cannot itself corrupt the
     // route (owner 2026-09-28).
-    capacityPlacement: booking.bookInsertionOffersLive(),
+    capacityPlacement,
   });
   const day = (availability.days || []).find((d) => d && d.date === offer.date);
   const slot = ((day && day.slots) || []).find((s) => s && slotStartMinutes(s) === offer.startMinutes);
-  return slot ? { status: 'ok', slot } : { status: 'slot_gone' };
+  // capacityPlacement rides on the result (Codex P1, owner 2026-09-28): the
+  // commit needs to know whether THIS recheck offered a mid-route insertion
+  // — if the gate flips off (or the technician/pin vanishes) in the moment
+  // between this call and commitVoiceBooking, the commit must refuse rather
+  // than silently insert what was just offered as a certified mid-route
+  // slot as an unverified appended one instead.
+  return slot ? { status: 'ok', slot, capacityPlacement } : { status: 'slot_gone' };
 }
 
 // The window the booked row will OCCUPY, resolved from the admin-portal
@@ -305,7 +315,10 @@ const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../call-booking-source-ac
  * request — the whole call turn is synchronous), there is nothing to sign:
  * the live read at commit time is what decides, so a gate flip between the
  * offer and this commit can only ever refuse a stale insertion, never
- * persist one unverified.
+ * persist one unverified — see `offeredWithInsertion` below for the other
+ * half of that: the gate flipping the OTHER way (or the technician/pin
+ * this offer carried no longer resolving) between revalidateSlot's recheck
+ * and this commit.
  */
 async function commitVoiceBooking({
   db, customerId, dateStr, windowStart, windowEnd, insertData, callLogId,
@@ -314,6 +327,14 @@ async function commitVoiceBooking({
   // The visit's own pin (property linkage geocode, else the customer's) for
   // the travel-gap probe; null → buffer-only.
   coords = null,
+  // Whether revalidateSlot's recheck (relay-booking.js, moments before this
+  // call) offered THIS slot with capacityPlacement live — i.e. told the
+  // caller/engine it could be a mid-route insertion. Codex P1 (owner
+  // 2026-09-28): a gate flip, or this offer's technician/pin no longer
+  // resolving, in the window between that recheck and this commit must not
+  // silently fall back to an unverified APPENDED insert of a slot that was
+  // just offered as a certified mid-route one — see the refusal below.
+  offeredWithInsertion = false,
 }) {
   const { acquireOccupancyLock, findConflictingVisits } = require('../scheduling/occupancy');
   const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../availability');
@@ -356,6 +377,36 @@ async function commitVoiceBooking({
       windowEnd: endTime,
       durationMinutes: insertData.estimated_duration_minutes,
     });
+    if (preparedCapacity) {
+      // Stamp the CERTIFIED point onto the row itself (Codex P1): a legacy
+      // account with no resolved propertyLinkage leaves insertData (and so
+      // insertRow) with no lat/lng, so auto-dispatch/geo's resolveGeo falls
+      // back to the customer's own — MUTABLE — latitude/longitude at read
+      // time, which can drift from the point-in-time `coords` the capacity
+      // proof (and any persisted route_order below) was actually verified
+      // against. The propertyLinkage branch above (requestBookingText)
+      // already stamps these same two columns; this mirrors it rather than
+      // inventing a new one — resolveGeo (services/auto-dispatch/geo.js)
+      // reads row.lat/row.lng first, before any customer-address fallback.
+      // A propertyLinkage pin already stamped here is identical to `coords`
+      // by construction (bookingCoords prefers it over the resolved
+      // fallback), so this is a no-op overwrite in that case.
+      insertRow.lat = coords.lat;
+      insertRow.lng = coords.lng;
+    }
+  }
+
+  // Offer/commit parity (Codex P1): revalidateSlot's recheck may have
+  // offered THIS slot as a mid-route insertion (capacityPlacement was live
+  // when it ran) even though preparedCapacity just came back null — the
+  // gate flipped off in the moment since, or this offer's technician/pin no
+  // longer resolves. Inserting now would land the row appended after the
+  // route, though the caller was just told (and the engine agreed) it only
+  // fit mid-route. Refused before the transaction even opens — exactly the
+  // same stale-offer outcome every other recheck mismatch here already
+  // returns, no write either way.
+  if (offeredWithInsertion && !preparedCapacity) {
+    return { status: 'slot_taken' };
   }
 
   try {
@@ -1065,6 +1116,14 @@ async function requestBookingText(input = {}, ctx = {}) {
     leadId: leadIdAtCommit,
     callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null,
     coords: (bookingCoords && bookingCoords.lat && bookingCoords.lng) ? bookingCoords : null,
+    // Offer/commit parity (Codex P1): whether THIS recheck (above) offered
+    // THIS slot as a possible mid-route insertion — capacityPlacement was
+    // live for the build AND the offered slot actually carries a
+    // technician (an unassigned slot has no route to insert into, so
+    // capacityPlacement being on for the build says nothing about it). See
+    // revalidateSlot's own comment on capacityPlacement and
+    // commitVoiceBooking's header.
+    offeredWithInsertion: recheck.capacityPlacement === true && Boolean(slot.technician_id),
   });
   if (commit.status === 'error') ctx.toolFailed = true;
   if (commit.status === 'superseded') {

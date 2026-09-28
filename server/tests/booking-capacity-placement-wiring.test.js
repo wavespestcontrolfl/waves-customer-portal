@@ -121,10 +121,14 @@ describe('reschedule-public.js — commits through SmartRebooker, which clears r
 });
 
 describe('voice agent — commitVoiceBooking now persists a certified route order too (owner 2026-09-28)', () => {
-  test('relay-booking.js revalidateSlot passes capacityPlacement: bookInsertionOffersLive()', () => {
+  test('relay-booking.js revalidateSlot passes capacityPlacement: bookInsertionOffersLive() (read once, reused on its own returned result — Codex P1 offer/commit parity)', () => {
     const src = read('../services/voice-agent/relay-booking.js');
+    // Read once into a local (not inlined) so revalidateSlot's OWN
+    // returned result (capacityPlacement below) reports exactly what the
+    // build actually used — see commitVoiceBooking's offeredWithInsertion.
+    expect(src).toContain('const capacityPlacement = booking.bookInsertionOffersLive();');
     const call = callAfter(src, 'booking.buildBookingAvailability({');
-    expect(call).toContain('capacityPlacement: booking.bookInsertionOffersLive()');
+    expect(call).toContain('capacityPlacement,');
   });
 
   test('relay-tools.js passes capacityPlacement: bookInsertionOffersLive() at both call sites', () => {
