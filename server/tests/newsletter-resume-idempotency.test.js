@@ -576,6 +576,37 @@ describe('resumeCampaign — preconditions', () => {
     expect(q.whereNotExists).toHaveBeenCalledTimes(2); // global suppression + archived customer
   });
 
+  test('the correction-eligibility read and the resume precheck relink archived links BEFORE judging outstanding rows (codex round 18 P2)', async () => {
+    const order = [];
+    db.transaction.mockImplementation(async (cb) => { order.push('relink'); return cb({ raw: db.raw }); });
+    const eligibility = chain({ first: { id: 'd-1' } });
+    eligibility.first = jest.fn(async () => { order.push('eligibility'); return { id: 'd-1' }; });
+    db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return eligibility; });
+    await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
+    expect(order).toEqual(['relink', 'eligibility']);
+
+    // The resume precheck: the ledger count, then the relink, then the
+    // outstanding-eligible count — a row relinked to a live twin counts.
+    order.length = 0;
+    const failedSend = {
+      id: 's', status: 'failed', newsletter_type: null, updated_at: new Date('2026-09-28T12:00:00Z'),
+      subject: 'Hello', html_body: '<p>Body</p>', text_body: 'Body', event_ids: [],
+    };
+    const outstanding = chain();
+    outstanding.count = jest.fn(() => ({ first: jest.fn(async () => { order.push('outstanding'); return { c: 0 }; }) }));
+    const queues = {
+      newsletter_sends: [chain({ first: failedSend }), chain({ first: null })],
+      newsletter_send_deliveries: [chain({ count: 3 }), outstanding, chain({ updated: 0 })],
+    };
+    db.mockImplementation((table) => {
+      const queue = queues[table];
+      return queue && queue.length ? queue.shift() : chain();
+    });
+    await prepareResumeCampaign('s').catch(() => {});
+    expect(order.slice(0, 2)).toEqual(['relink', 'outstanding']);
+    db.transaction.mockImplementation(async (cb) => cb({ raw: db.raw }));
+  });
+
   test('a correction saved between validation and the claim makes the claim miss: VERSION_CHANGED, nothing is sent (codex round 13 P1)', async () => {
     const failedSend = {
       id: 's', status: 'failed', newsletter_type: 'pest-insider-monthly', updated_at: new Date('2026-09-28T12:00:00Z'),

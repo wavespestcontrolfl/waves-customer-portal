@@ -843,7 +843,12 @@ const SAFE_COMPOUND = /\b(?:bee|pet|family|kid|child|children|baby|dog|cat|peopl
 // dry"), and the bare adjective on a product or service ("our safe lawn
 // treatment", "a safe, effective spray", "the safe choice"). Not: "safe
 // from" (protection), "safe to say", "a safe distance / place / bet".
-const SAFE_PRODUCT_NOUN = '(?:lawn|pest|termite|mosquito|rodent|ant|flea|indoor|outdoor|home|yard|residential|commercial)?\\s*(?:treatments?|products?|sprays?|formulas?|formulations?|applications?|options?|choices?|ways?|solutions?|pesticides?|insecticides?|herbicides?|chemicals?|services?|barriers?|alternatives?|approach(?:es)?|methods?|programs?|plans?|ingredients?|materials?)';
+// ONE product vocabulary (codex round 18 P1): the nouns this predicate reads
+// as a pesticide product or service are the same nouns TREATMENT_CONTEXT
+// (below) reads as treatment talk, so the scope that decides whether the
+// safety rule runs can never miss a noun the rule itself recognises.
+const PRODUCT_NOUNS = 'treatments?|products?|sprays?|formulas?|formulations?|applications?|options?|choices?|ways?|solutions?|pesticides?|insecticides?|herbicides?|chemicals?|services?|barriers?|alternatives?|approach(?:es)?|methods?|programs?|plans?|ingredients?|materials?';
+const SAFE_PRODUCT_NOUN = `(?:lawn|pest|termite|mosquito|rodent|ant|flea|indoor|outdoor|home|yard|residential|commercial)?\\s*(?:${PRODUCT_NOUNS})`;
 const SAFE_IDIOM_NOUN = '(?:from|to\\s+say|bet|distance|place|space|side|harbou?r|haven|spot|room|hands|travels?|trip|journey|holiday|weekend|season|drive|passage)';
 // "safe", "safer" and "safest" are the same claim; so is "used safely
 // around pets" (codex round 7 P1).
@@ -964,18 +969,36 @@ function reentryTimeInSentence(sentence) {
 // treatment is safe once dry" is caught, "a family-safe fun run" is not
 // (codex round 15 P1). The pest-fact rules need no such scope: a false
 // termite or large-patch claim is false in any newsletter.
-// …and the SERVICE wording the safety predicate recognises (codex round 16
-// P1): "our pest-control service is safe", "the WaveGuard plan", "our
-// program" — a service, plan or program is treatment context when it is
-// Waves' own ("our …") or pest/lawn-qualified; an event "program" is not.
+// A product or service noun is treatment talk when Waves owns it ("our
+// lawn solution", "the Waves approach", "Waves' service"; codex rounds 16–18)
+// or a pest/lawn word qualifies it ("the pest-control method", "a lawn
+// option") — every noun of the safety predicate's own PRODUCT_NOUNS, never a
+// second list. Nouns that only ever name a product ("formula", "solution",
+// "ingredients") count on their own. A bare generic noun ("a family-safe
+// program of concerts", "the safest way to the fireworks") stays event copy.
+const PEST_QUALIFIER = '(?:pest|lawn|mosquito|termite|rodent|ants?|fleas?|roach|bug|weed|fertiliz\\w*|irrigation|yard|turf|indoor|outdoor|perimeter)';
 const TREATMENT_CONTEXT = new RegExp(
   '\\b(?:treat\\w*|spray\\w*|pesticides?|insecticides?|herbicides?|chemicals?|products?|applications?|applied|appl(?:y|ies|ying)'
+  + '|formulas?|formulations?|solutions?|ingredients?|repellents?'
   + '|technicians?|barriers?|baits?|granul\\w*|dusts?|fogg\\w*|misting|exterminat\\w*|fumigat\\w*|waveguard'
   + '|re-?ent(?:ry|er)\\w*|(?:once|until|when|after)\\s+(?:it\\s+(?:is|has)\\s+)?dr(?:y|ied|ies)'
-  + '|(?:pest|lawn|mosquito|termite|rodent|ants?|fleas?|roach|bug|weed|fertiliz\\w*|irrigation)[-\\s]+(?:control|care|services?|programs?|plans?|treatments?|barriers?|defense)'
-  + '|(?:our|waves[\'’]?s?|the\\s+waves|waves\\s+pest\\s+control(?:[\'’]s)?)\\s+(?:services?|programs?|plans?|visits?|crew|team\\b))\\b',
+  + `|${PEST_QUALIFIER}[-\\s]+(?:control[-\\s]+)?(?:control|care|defense|${PRODUCT_NOUNS})`
+  + `|(?:our|waves[\'’]?s?|the\\s+waves|waves\\s+pest\\s+control(?:[\'’]s)?)\\s+(?:[\\w-]+\\s+){0,2}?(?:${PRODUCT_NOUNS}|visits?|crew|team))\\b`,
   'i',
 );
+// A sentence whose subject is a pronoun or demonstrative ("It is safe for
+// pets.", "These are safe once dry.") refers back to the sentence before it:
+// when that one is about a treatment, so is this one — the same carry-over
+// the termite and lawn-disease rules give a pronoun subject.
+const REFERRING_WORD = /\b(?:it|its|it's|they|them|their|this|these|those|both)\b/i;
+function treatmentContextFlags(sentences) {
+  const flags = [];
+  for (let i = 0; i < sentences.length; i += 1) {
+    flags.push(TREATMENT_CONTEXT.test(sentences[i])
+      || (i > 0 && flags[i - 1] && REFERRING_WORD.test(sentences[i])));
+  }
+  return flags;
+}
 const CLAIM_RULES = [
   { rule: 'termite_second_swarm', find: (sentence, previous) => termiteClaimInSentence(sentence, previous) },
   { rule: 'large_patch_summer_disease', find: (sentence, previous) => patchClaimInSentence(sentence, previous) },
@@ -991,16 +1014,18 @@ const CLAIM_RULES = [
  * the excerpt is the offending clause. Every sentence is checked — one
  * exempt mention does not clear a LATER, non-exempt occurrence of the same
  * shape. `treatmentContextOnly` confines the treatment-scoped rules to
- * sentences that talk about a treatment (see TREATMENT_CONTEXT).
+ * sentences that talk about a treatment (see TREATMENT_CONTEXT), directly or
+ * through a pronoun that refers back to one.
  */
 function findUnverifiedClaims(text, { treatmentContextOnly = false } = {}) {
   const body = normaliseText(text);
   if (!body) return [];
   const sentences = splitSentences(body);
+  const inTreatmentContext = treatmentContextOnly ? treatmentContextFlags(sentences) : null;
   const results = [];
   for (const { rule, find, treatmentScoped } of CLAIM_RULES) {
     for (let i = 0; i < sentences.length; i += 1) {
-      if (treatmentContextOnly && treatmentScoped && !TREATMENT_CONTEXT.test(sentences[i])) continue;
+      if (treatmentContextOnly && treatmentScoped && !inTreatmentContext[i]) continue;
       const hit = find(sentences[i], i > 0 ? sentences[i - 1] : '');
       if (hit) {
         results.push({ rule, excerpt: hit.trim().slice(0, 160) });

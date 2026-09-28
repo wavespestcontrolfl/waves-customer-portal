@@ -2553,6 +2553,10 @@ export function HistoryView() {
       load();
     } catch (e) {
       alert(`${recovery ? "Recovery" : "Resume"} failed: ${e.message}`);
+      // A refused resume can still change the row (a zero-ledger campaign
+      // returns to draft, a stale claim is released): reload so the row
+      // shows its real state and next action.
+      load();
     }
   };
 

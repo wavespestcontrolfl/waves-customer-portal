@@ -390,6 +390,9 @@ function outstandingEligibleDeliveries(sendId, { database = db, correlate = fals
 // rows whose recipients Resume would exclude and terminalize anyway
 // (unsubscribed, globally suppressed, archived; codex round 17 P2).
 async function hasOutstandingDeliveries(sendId, database = db) {
+  // Relinked first, like the resume precheck (codex round 18 P2): a row whose
+  // archived link has a live twin is outstanding, not excluded.
+  await NewsletterSubscribers.relinkArchivedLinkedSubscribers(database);
   const row = await outstandingEligibleDeliveries(sendId, { database }).first('newsletter_send_deliveries.id');
   return Boolean(row);
 }
@@ -486,6 +489,24 @@ async function sendCampaign(sendId, opts = {}) {
 
   const send = await db('newsletter_sends').where({ id: sendId }).first();
   if (!send) throw new Error('not found');
+  // A version-bound caller (the scheduler tick, the manual send) learns that
+  // the row changed BEFORE any pre-claim gate reads it (codex round 18 P2): a
+  // draft edited after the caller validated it (bodies cleared, segment
+  // emptied) reports VERSION_CHANGED and stays an editable draft, instead of
+  // failing a body or segment gate the caller records as a dispatch failure.
+  // The atomic claim below re-checks the same version.
+  if (opts.expect && !opts.preclaimed) {
+    const changed = send.status !== (opts.expect.status || 'scheduled')
+      || (opts.expect.updatedAt && !(new Date(send.updated_at) < noLaterThan(opts.expect.updatedAt)))
+      || (opts.expect.proofApprovedAt
+        && !(send.proof_approved_at && new Date(send.proof_approved_at) < noLaterThan(opts.expect.proofApprovedAt)));
+    if (changed) {
+      const claimedElsewhere = !['draft', 'scheduled'].includes(send.status);
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
+      throw err;
+    }
+  }
   if (!send.html_body && !send.text_body) throw new Error('body required');
 
   // Editorial + cadence pre-flight applies to the ORIGINAL dispatch only.
@@ -1244,6 +1265,12 @@ async function prepareResumeCampaign(sendId) {
     throw err;
   }
   if (totalDeliveries > 0) {
+    // Repair stale archived links first, as every audience read does: a
+    // retryable row whose subscriber still points at an archived profile
+    // with a live same-email twin is outstanding once relinked, and must not
+    // be counted out (and terminalized below) before sendCampaign's own
+    // sweep would have relinked it (codex round 18 P2).
+    await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
     // Mirror the retry refetch's suppression + archived-customer exclusions so
     // the "anything left to resume?" count matches what sendCampaign will
     // actually send — otherwise a campaign whose only outstanding rows are

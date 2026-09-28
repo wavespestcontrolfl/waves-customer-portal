@@ -125,3 +125,24 @@ test.each([
   await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
     .rejects.toMatchObject({ code });
 });
+
+test.each([
+  ['its bodies cleared', 'VERSION_CHANGED', { status: 'draft', html_body: null, text_body: null }],
+  ['its segment emptied', 'VERSION_CHANGED', { segment_filter: { service_line: 'nobody' } }],
+  ['a newer proof approval', 'VERSION_CHANGED', { proof_approved_at: new Date(APPROVED_AT.getTime() + 60_000) }],
+  ['another worker already sending it', 'ALREADY_CLAIMED', { status: 'sending' }],
+])('a row edited after validation (%s) reports %s before any pre-claim gate runs (codex round 18 P2)', async (_label, code, edit) => {
+  const edited = { ...SEND, ...edit, updated_at: new Date(READ_AT.getTime() + 60_000) };
+  const claim = chain({ returning: [{ id: SEND.id }] });
+  wire({
+    newsletter_sends: [chain({ first: edited }), claim],
+    newsletter_subscribers: [chain()],
+  });
+
+  await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
+    .rejects.toMatchObject({ code });
+  // Nothing past the version check ran: no event gate, no relink sweep, no claim.
+  expect(mockValidateEventSelection).not.toHaveBeenCalled();
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(claim.update).not.toHaveBeenCalled();
+});

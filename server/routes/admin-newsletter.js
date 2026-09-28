@@ -18,6 +18,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const NewsletterSender = require('../services/newsletter-sender');
 const crypto = require('crypto');
 const { linkToCustomer, linkManyToCustomers, subscribeOrResubscribe, EMAIL_RE } = require('../services/newsletter-subscribers');
+const NewsletterSubscribers = require('../services/newsletter-subscribers');
 const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 const { wrapNewsletter } = require('../services/email-template');
 const MODELS = require('../config/models');
@@ -393,6 +394,15 @@ router.get('/sends/latest-autopilot', async (req, res, next) => {
 // GET /api/admin/newsletter/sends
 router.get('/sends', async (req, res, next) => {
   try {
+    // `correctable` below reads archived-customer links: repair stale ones
+    // first, as every audience read does, so a row whose archived link has a
+    // live twin counts as outstanding (codex round 18 P2). Best effort — a
+    // failed sweep must not blank the History list.
+    try {
+      await NewsletterSubscribers.relinkArchivedLinkedSubscribers(db);
+    } catch (err) {
+      logger.warn(`[newsletter] relink before /sends failed: ${err.message}`);
+    }
     // Order by effective send date (sent_at for sent rows, otherwise created_at)
     // so Beehiiv-imported historical posts slot into chronological order
     // instead of bunching at "now" by import time.

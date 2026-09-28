@@ -297,7 +297,13 @@ describe('pest-insider claim validation at the send gates', () => {
     for (const service of ['Our pest-control service is safe.', 'The WaveGuard plan is safe for the whole family.', 'Our program is completely safe around kids.', "Waves' service is safe.", 'The Waves program is safe for pets.', "Waves Pest Control's treatment is safe once dry."]) {
       expect(validate(flagship(service), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
     }
-    for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.', 'A family-safe program of concerts all weekend.']) {
+    // …and every product noun the safety predicate itself reads, when Waves
+    // owns it or a pest/lawn word qualifies it; product-only nouns on their
+    // own; a pronoun subject after a treatment sentence (codex round 18 P1)
+    for (const product of ['Our lawn solution is safe.', 'Our formula is safe for pets.', 'The Waves approach is safe around kids.', 'Our pest-control method is safe.', 'The lawn option is completely safe.', 'This solution is safe for the whole family.', 'Our new mosquito treatment starts Monday. It is safe for pets.']) {
+      expect(validate(flagship(product), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
+    }
+    for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.', 'A family-safe program of concerts all weekend.', 'The safest way to see the fireworks is by boat.', 'Parking options are safe and well lit.', 'Join the fun run Saturday. It is safe for the whole family.']) {
       expect(validate(flagship(benign), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim'))).toBe(false);
     }
     // the Pest Insider is all treatment copy: the same phrase stays a claim there
