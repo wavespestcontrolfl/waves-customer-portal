@@ -1990,6 +1990,18 @@ function typedDwellingUnit(address) {
   };
 }
 
+// Could this address name a condo unit? A labeled Apt/Unit/#, or a bare
+// number right after the street suffix ("1555 Tarpon Center Dr 201"; a
+// numbered route like "123 US 41" has no suffix before its number). The
+// route reads it to decide which addresses carry the `_unitFolio` stamp and
+// which cached rows predate it — the same predicate for both, so a bare-unit
+// address misses once and is then stamped.
+function addressMayNameUnit(address) {
+  const target = typedDwellingUnit(address);
+  if (!target) return false;
+  return Boolean(target.unit) || BARE_TRAILING_UNIT_RE.test(target.line);
+}
+
 // A typed dwelling unit against the aggregate's own unit rows. Resolves
 // ONLY on a unique exact match — same "NUMBER STREET", same normalized unit
 // id, the building agreeing when both sides name one, and a row that is
@@ -2025,7 +2037,9 @@ function aggregateUnitDesignatorMatch(parcel, searchAddress, typedAddress) {
     && (!target.building || !entry.building || entry.building === target.building));
   if (candidates.length > 1) return { status: 'multiple_unit_matches', candidates: candidates.length };
   const row = candidates[0]?.row;
-  if (!row || !row.parcelId || !(Number(row.livingAreaSqft) > 0) || Number(row.residentialUnits) > 1) {
+  // Positively ONE dwelling (the soleUnitRows bar): a missing unit count is
+  // not evidence the row is a single unit.
+  if (!row || !row.parcelId || !(Number(row.livingAreaSqft) > 0) || row.residentialUnits !== 1) {
     return { status: 'unit_not_matched' };
   }
   return { status: 'resolved', row };
@@ -2890,6 +2904,7 @@ const COUNTY_STREET_SUFFIXES = 'AVE|BLVD|BND|CIR|CT|CV|DR|GLN|HWY|LN|LOOP|PASS|P
 const PRE_DIRECTION_STREET_SUFFIX_RE = new RegExp(
   `\\b(?:${COUNTY_STREET_SUFFIXES}|AVENUE|BEND|BOULEVARD|CIRCLE|COURT|COVE|CROSSING|DRIVE|GLEN|HIGHWAY|LANE|PARKWAY|PLACE|PLAZA|POINT|POINTE|ROAD|SQUARE|STREET|TERRACE|TRACE|TRAIL)$`,
 );
+const BARE_TRAILING_UNIT_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?\\s+\\d[A-Z0-9-]*$`);
 const REMOVE_SUFFIX_RE = new RegExp(`\\s+(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const EXTRACT_SUFFIX_RE = new RegExp(`\\b(${COUNTY_STREET_SUFFIXES})(?:\\s+[NSEW])?$`, 'i');
 const POST_SUFFIX_DIRECTION_RE = new RegExp(`\\b(?:${COUNTY_STREET_SUFFIXES})\\s+([NSEW])\\b`, 'i');
@@ -5411,7 +5426,7 @@ module.exports = {
   lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
   condoUnitFolioEnabled,
-  typedDwellingUnit,
+  addressMayNameUnit,
   lookupPropertyFromCountyByParcel,
   searchCountyParcelByAddress,
   _private: {

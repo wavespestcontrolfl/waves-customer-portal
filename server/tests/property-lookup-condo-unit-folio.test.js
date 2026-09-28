@@ -193,6 +193,11 @@ describe('aggregateUnitDesignatorMatch', () => {
     expect(aggregateUnitDesignatorMatch(parcel, TARPON('Apt 302'), TARPON('Apt 302')).status).toBe('unit_not_matched');
   });
 
+  test('a row with living area but no unit count is not positively one dwelling', async () => {
+    const parcel = await sarasotaBuilding([sarasotaUnit(303, { livunits: null })]);
+    expect(aggregateUnitDesignatorMatch(parcel, TARPON('Apt 303'), TARPON('Apt 303')).status).toBe('unit_not_matched');
+  });
+
   test('the same unit number in two buildings is ambiguous unless the building is typed', async () => {
     mockArcgis([1, 2, 3].flatMap((n) => [
       manateeUnit(`8100 SAMPLE HARBOR WAY BLDG A UNIT 30${n}`, `A30${n}`),
@@ -320,6 +325,13 @@ describe('cached unit addresses vs the unit folio', () => {
     expect(cachedUnitAddressPredatesUnitFolio({ _unitFolio: { status: 'no_stacked_building' } }, ADDR)).toBe(false);
     expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 1800 }, '1555 Tarpon Center Dr, Venice, FL 34285')).toBe(false);
     expect(cachedUnitAddressPredatesUnitFolio(null, ADDR)).toBe(false);
+  });
+
+  test('gate ON: a bare trailing unit number misses once too; a numbered route does not', () => {
+    process.env.GATE_CONDO_UNIT_FOLIO = 'true';
+    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 122696 }, TARPON('201'))).toBe(true);
+    expect(cachedUnitAddressPredatesUnitFolio({ _unitFolio: { status: 'no_stacked_building' } }, TARPON('201'))).toBe(false);
+    expect(cachedUnitAddressPredatesUnitFolio({ squareFootage: 1800 }, '123 US 41, Venice, FL 34285')).toBe(false);
   });
 
   test('gate OFF: never', () => {

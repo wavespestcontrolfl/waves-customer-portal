@@ -17,7 +17,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, typedDwellingUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
@@ -305,7 +305,7 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
 function cachedUnitAddressPredatesUnitFolio(record, address) {
   if (typeof condoUnitFolioEnabled !== 'function' || !condoUnitFolioEnabled()) return false;
   if (!record || record._unitFolio) return false;
-  return Boolean(typedDwellingUnit(address)?.unit);
+  return addressMayNameUnit(address);
 }
 
 async function performPropertyLookupCore(address, options = {}) {
@@ -561,7 +561,7 @@ async function performPropertyLookupCore(address, options = {}) {
     // record like _floodZone: the profile flags an ambiguous unit match, and
     // its presence marks the row as checked (cachedUnitAddressPredatesUnitFolio).
     if (typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled()
-      && (lookupDiag.unitFolio || typedDwellingUnit(address)?.unit)) {
+      && (lookupDiag.unitFolio || addressMayNameUnit(address))) {
       result.propertyRecord._unitFolio = lookupDiag.unitFolio
         ? { status: lookupDiag.unitFolio.status, candidates: lookupDiag.unitFolio.candidates ?? null }
         : { status: 'no_stacked_building', candidates: null };
