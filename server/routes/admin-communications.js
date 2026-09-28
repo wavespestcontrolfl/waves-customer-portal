@@ -123,6 +123,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         'ad.sms_log_id',
         'ad.suggested_message',
         'ad.input_snapshot',
+        'ad.prompt_version',
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
@@ -232,7 +233,7 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     // Scoped to drafts that recorded an escalation (Codex r5): the phrases
     // are ordinary English, so wording alone never refuses a send.
     const { followupPromiseIsStale } = require('../services/sms-followup-sla');
-    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, body: outgoingBody })) {
+    if (followupPromiseIsStale({ inputSnapshot: decision.input_snapshot, promptVersion: decision.prompt_version, body: outgoingBody })) {
       logger.info(`[agent-review] decision ${decision.id} SLA phrase stale for the current window — refusing send`);
       await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
       return null;

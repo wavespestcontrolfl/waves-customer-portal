@@ -1591,9 +1591,14 @@ describe('follow-up promise staleness is scoped to drafts that recorded an escal
     expect(draftPromisedFollowup(promised)).toBe(true);
     expect(draftPromisedFollowup(JSON.stringify(promised))).toBe(true);
     expect(draftPromisedFollowup({ intended_actions: [{ type: 'send_payment_link' }] })).toBe(false);
-    // an escalation WITHOUT the real-answers marker (an older-prompt draft) is never touched
+    // an escalation WITHOUT the real-answers marker on an older-prompt draft is never touched
     expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate' }] })).toBe(false);
-    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate', note: 'cancel_request' }] })).toBe(false);
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate', note: 'cancel_request' }] }, 'house_voice_v11')).toBe(false);
+    // …but ANY escalation on a draft the real-answers prompt wrote counts: held
+    // categories and cancellations promise the same timing under their own notes
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate' }] }, 'house_voice_v12_real_answers')).toBe(true);
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'escalate', note: 'cancel_request' }] }, 'house_voice_v12_real_answers+bc')).toBe(true);
+    expect(draftPromisedFollowup({ intended_actions: [{ type: 'send_payment_link' }] }, 'house_voice_v12_real_answers')).toBe(false);
     expect(draftPromisedFollowup({})).toBe(false);
     expect(draftPromisedFollowup(null)).toBe(false);
     expect(draftPromisedFollowup('not json')).toBe(false);
@@ -1604,6 +1609,11 @@ describe('follow-up promise staleness is scoped to drafts that recorded an escal
     expect(followupPromiseIsStale({ inputSnapshot: promised, body, now: NIGHT })).toBe(true);
     expect(followupPromiseIsStale({ inputSnapshot: promised, body, now: DAY })).toBe(false);
     expect(followupPromiseIsStale({ inputSnapshot: { intended_actions: [] }, body: 'Your technician should arrive within the hour.', now: NIGHT })).toBe(false);
+    // a held-category draft from the real-answers prompt: bare escalate, morning phrase, sent that evening
+    expect(followupPromiseIsStale({
+      inputSnapshot: { intended_actions: [{ type: 'escalate' }] }, promptVersion: 'house_voice_v12_real_answers',
+      body: 'A manager will reach out by 9 AM this morning.', now: NIGHT,
+    })).toBe(true);
   });
 });
 
