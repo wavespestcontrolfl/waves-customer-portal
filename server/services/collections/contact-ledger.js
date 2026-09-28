@@ -29,7 +29,8 @@
  * this send for now". A message's legs on several channels pass a shared
  * spacingEpisode unless their keys already name it (dunning-spacing.js).
  * enforceSpacing:false is only for recording a message that already went
- * out. A provider retry re-arms its reservation through rearmForRetry.
+ * out. A provider retry checks through retryHeldBySpacing, and a delivered
+ * stamp moves the row's time to the delivery (markDelivered).
  */
 
 const db = require('../../models/db');
@@ -131,6 +132,7 @@ function applyReservationMatch(query, match = {}) {
 
 async function markDelivered(target, { database = db, match = {}, deliveredAt = null } = {}) {
   if (!target) return false;
+  const stampAt = deliveredAt ? new Date(deliveredAt) : (DunningSpacing.spacingEnforced() ? new Date() : null);
   try {
     const stamp = async (conn) => {
       const query = conn('collections_contact_ledger');
@@ -140,11 +142,12 @@ async function markDelivered(target, { database = db, match = {}, deliveredAt = 
       applyReservationMatch(query, match);
       const changed = await query.update({
         metadata: conn.raw(`COALESCE(metadata, '{}'::jsonb) || '{"delivered": true}'::jsonb`),
-        // A message accepted after its reservation (a provider retry) holds
-        // the next one from when it actually went out (codex #5108 r1).
-        // Later only: never shortens a window the reservation already holds.
-        ...(deliveredAt ? {
-          occurred_at: conn.raw('GREATEST(occurred_at, ?::timestamptz)', [new Date(deliveredAt)]),
+        // A delivered message holds the next one from when it actually went
+        // out, not from its pre-send reservation (codex #5108 r1/r4): the
+        // caller's acceptance time, else (under the spacing gate) this stamp,
+        // which follows the acceptance. Later only: never shortens a window.
+        ...(stampAt ? {
+          occurred_at: conn.raw('GREATEST(occurred_at, ?::timestamptz)', [stampAt]),
         } : {}),
       });
       return Number(changed) === 1;
@@ -216,32 +219,21 @@ async function lockedReservationRow(trx, id, now = new Date()) {
 }
 
 /**
- * A provider retry re-sends a reserved message, possibly after its
- * reservation was released as send_failed (codex #5108 r3). Under the
- * spacing gate, re-check and re-arm it in one locked step before the retry
- * reaches the provider: { held: true } when another message holds it back;
- * otherwise the row holds again from now. Gates off: no read, no write.
- * Throws on a database failure; the caller holds the retry.
+ * A provider retry re-sends a reserved message whose reservation may have
+ * been released as send_failed (codex #5108 r3). Under the spacing gate,
+ * take the customer's spacing lock on the caller's transaction (the billing
+ * email authority, which keeps it through the provider request and the
+ * delivered stamp it writes on acceptance) and return a message that holds
+ * this one back, or null. Nothing is written before the send, so a retry
+ * that never reaches the provider leaves the ledger as it was (r4). The
+ * read runs in a savepoint: a failure throws without aborting the caller's
+ * transaction. Gates off: no read.
  */
-async function rearmForRetry(ledgerId) {
-  if (!ledgerId || !DunningSpacing.spacingEnforced()) return { ok: true };
-  return db.transaction(async (trx) => {
-    const now = new Date();
-    const row = await lockedReservationRow(trx, ledgerId, now);
-    if (!row || !DunningSpacing.reservationGuarded(row)) return { ok: true };
-    if (row.holding) {
-      return { ok: false, held: true, nextEligibleAt: DunningSpacing.spacingHeldUntil(row.holding.occurred_at) };
-    }
-    await trx('collections_contact_ledger').where({ id: row.id })
-      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
-        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
-      ])
-      .update({
-        metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ send_failed: false })]),
-        occurred_at: trx.raw('GREATEST(occurred_at, ?::timestamptz)', [now]),
-      });
-    return { ok: true };
-  });
+async function retryHeldBySpacing(ledgerId, database = db) {
+  if (!ledgerId || !DunningSpacing.spacingEnforced()) return null;
+  const read = (trx) => lockedReservationRow(trx, ledgerId);
+  const row = database.isTransaction ? await database.transaction(read) : await db.transaction(read);
+  return row?.holding || null;
 }
 
 /**
@@ -276,4 +268,4 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
   }
 }
 
-module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, rearmForRetry };
+module.exports = { recordContact, markSendFailed, markDelivered, claimAttempt, retryHeldBySpacing };

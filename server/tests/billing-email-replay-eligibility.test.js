@@ -249,40 +249,41 @@ describe('collections-policy replay eligibility', () => {
       .resolves.toEqual({ eligible: false, reason: 'collections-policy-denied', retryable: true });
   });
 
-  // codex #5108 r3: the provider retry re-arms its own reservation under the
-  // seven-day spacing lock before it may reach the provider.
-  describe('seven-day spacing re-arm', () => {
+  // codex #5108 r3/r4: the provider retry checks seven-day spacing under the
+  // customer's lock on the authority transaction, writing nothing before
+  // the provider request.
+  describe('seven-day spacing check', () => {
     const ContactLedger = require('../services/collections/contact-ledger');
-    let rearm;
+    let check;
     beforeEach(() => {
       process.env.GATE_COLLECTIONS_POLICY = 'true';
-      rearm = jest.spyOn(ContactLedger, 'rearmForRetry');
+      check = jest.spyOn(ContactLedger, 'retryHeldBySpacing');
     });
-    afterEach(() => rearm.mockRestore());
+    afterEach(() => check.mockRestore());
 
-    test('an allowed retry re-arms its own reservation and proceeds', async () => {
-      rearm.mockResolvedValueOnce({ ok: true });
-      await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
-        .resolves.toEqual({ eligible: true });
-      expect(rearm).toHaveBeenCalledWith('own-email');
+    test('a clear retry proceeds, checked on the authority transaction', async () => {
+      check.mockResolvedValueOnce(null);
+      const database = databaseWith({ collections_contact_ledger: ledger });
+      await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
+      expect(check).toHaveBeenCalledWith('own-email', database);
     });
 
     test('another message inside the window holds the retry, retryable', async () => {
-      rearm.mockResolvedValueOnce({ ok: false, held: true });
+      check.mockResolvedValueOnce({ id: 'other-rail', occurred_at: new Date().toISOString() });
       await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
         .resolves.toEqual({ eligible: false, reason: 'dunning-spacing-held', retryable: true });
     });
 
-    test('a failed re-check holds the retry rather than sending', async () => {
-      rearm.mockRejectedValueOnce(new Error('database unavailable'));
+    test('a failed check holds the retry rather than sending', async () => {
+      check.mockRejectedValueOnce(new Error('database unavailable'));
       await expect(billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger })))
         .resolves.toEqual({ eligible: false, reason: 'dunning-spacing-check-failed', retryable: true });
     });
 
-    test('a policy denial never re-arms', async () => {
+    test('a policy denial never reaches the spacing check', async () => {
       collectionsChannelPermitted.mockResolvedValueOnce({ allowed: false, durable: false });
       await billingEmailReplayEligible(meta, databaseWith({ collections_contact_ledger: ledger }));
-      expect(rearm).not.toHaveBeenCalled();
+      expect(check).not.toHaveBeenCalled();
     });
   });
 });

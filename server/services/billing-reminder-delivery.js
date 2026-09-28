@@ -201,10 +201,21 @@ async function sendReminderChannels({
       metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
         ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
     };
-    const entry = await ContactLedger.recordContact({
-      customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
-    });
+    let entry;
+    try {
+      entry = await ContactLedger.recordContact({
+        customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
+        idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
+      });
+    } catch (err) {
+      // Another overdue message reserved inside the seven-day window after
+      // the policy read (codex #5108 r4): hold this leg for a later run, as
+      // the policy's own spacing denial does, rather than abort the caller's
+      // sweep. Any other ledger failure still propagates.
+      if (err?.code !== 'DUNNING_SPACING_HELD') throw err;
+      results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'DUNNING_SPACING_HELD' };
+      continue;
+    }
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
     const claim = await ContactLedger.claimAttempt(entry, reservation);

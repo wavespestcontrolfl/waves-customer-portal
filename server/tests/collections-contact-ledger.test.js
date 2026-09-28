@@ -309,3 +309,23 @@ test('markDelivered with a delivery time moves occurred_at later, never earlier'
   await markDelivered({ id: 'led-1' });
   expect(q.update.mock.calls[1][0]).not.toHaveProperty('occurred_at');
 });
+
+// codex #5108 r4: under the spacing gate every delivered stamp moves the
+// row's time to the delivery, so the next message waits a full week from it.
+test('under the spacing gate a delivered stamp without a time uses the stamp time', async () => {
+  process.env.GATE_COLLECTIONS_POLICY = 'true';
+  process.env.GATE_DUNNING_SPACING = 'true';
+  try {
+    const q = insertChain();
+    db.mockReturnValue(q);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const before = Date.now();
+    await expect(markDelivered({ id: 'led-1' })).resolves.toBe(true);
+    const { occurred_at: stamp } = q.update.mock.calls[0][0];
+    expect(stamp.sql).toBe('GREATEST(occurred_at, ?::timestamptz)');
+    expect(stamp.bindings[0].getTime()).toBeGreaterThanOrEqual(before);
+  } finally {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    delete process.env.GATE_DUNNING_SPACING;
+  }
+});

@@ -95,6 +95,26 @@ describe('billing reminder per-channel delivery progress', () => {
     }
   });
 
+  // codex #5108 r4: a spacing hold at reservation time is a per-leg,
+  // retryable hold like the policy's own denial, never a thrown sweep abort.
+  test('a seven-day spacing hold at reservation holds only that leg; other ledger failures still throw', async () => {
+    const held = Object.assign(new Error('overdue message held'), { code: 'DUNNING_SPACING_HELD' });
+    const recordLeg = ContactLedger.recordContact.getMockImplementation();
+    ContactLedger.recordContact.mockImplementation(async (input) => {
+      if (input.channel === 'email') throw held;
+      return recordLeg(input);
+    });
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    const result = await deliver(['email', 'sms'], send);
+    expect(result.results.email).toEqual({ sent: false, deliveryHeld: true, retryable: true, code: 'DUNNING_SPACING_HELD' });
+    expect(result.complete).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('sms', expect.anything());
+
+    ContactLedger.recordContact.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(deliver(['email'], send, 'invoice-1:firm')).rejects.toThrow('connection lost');
+  });
+
   test('without an allowance the recheck counts no off-ledger balance', async () => {
     await deliver(['sms'], jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
     // Left undefined, so rail-guard's own default (0) applies.

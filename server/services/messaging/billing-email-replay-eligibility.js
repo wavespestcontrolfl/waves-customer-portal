@@ -180,13 +180,15 @@ async function collectionsPolicyRefusal(meta, database) {
     database,
   });
   if (permitted?.allowed !== true) return refused('collections-policy-denied', permitted?.durable !== true);
-  // Seven-day overdue-message spacing (codex #5108 r3): this retry re-sends
-  // a reserved message whose reservation may have been released as
-  // send_failed. Re-check and re-arm it in one locked step, so no other
-  // rail's message can slip in before the provider request.
+  // Seven-day overdue-message spacing (codex #5108 r3/r4): this retry
+  // re-sends a reserved message whose reservation may have been released as
+  // send_failed. The check takes the customer's spacing lock on this
+  // authority transaction, which keeps it through the provider request and
+  // the in-transaction delivered stamp, so no other rail's message can slip
+  // in; nothing is written before the send.
   try {
-    const rearm = await require('../collections/contact-ledger').rearmForRetry(meta.collections_ledger_id);
-    return rearm?.held ? refused('dunning-spacing-held', true) : null;
+    const holding = await require('../collections/contact-ledger').retryHeldBySpacing(meta.collections_ledger_id, database);
+    return holding ? refused('dunning-spacing-held', true) : null;
   } catch {
     return refused('dunning-spacing-check-failed', true);
   }

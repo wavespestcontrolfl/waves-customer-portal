@@ -153,7 +153,7 @@ postgres('seven-day spacing at reservation time', () => {
     await expect(Ledger.claimAttempt(retry)).resolves.toEqual({ allowed: true });
   });
 
-  describe('a provider retry re-arms its reservation (codex #5108 r3)', () => {
+  describe('a provider retry checks under the lock and writes nothing first (codex #5108 r3/r4)', () => {
     const failedReservation = async (customerId) => {
       const entry = await reserve(customerId, 'late_payment_checker', 'email', {
         idempotencyKey: `late_payment_checker:inv-1:14:email`,
@@ -161,43 +161,65 @@ postgres('seven-day spacing at reservation time', () => {
       await Ledger.markSendFailed(entry, { code: 'provider_refused' });
       return entry;
     };
+    const stored = (id) => mockPg('collections_contact_ledger').where({ id }).first('metadata', 'occurred_at');
 
-    test('nothing else holds: the released reservation holds again from now', async () => {
+    test('nothing else holds: clear, and the released reservation is left as it was', async () => {
       const customerId = randomUUID();
       const entry = await failedReservation(customerId);
-      const before = Date.now();
-      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
-      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('occurred_at', 'metadata');
-      expect(stored.metadata.send_failed).toBe(false);
-      expect(new Date(stored.occurred_at).getTime()).toBeGreaterThanOrEqual(before - 1000);
-      // Another rail now waits for it.
-      await expect(reserve(customerId, 'invoice_followups', 'sms')).rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
+      const trx = await mockPg.transaction();
+      await expect(Ledger.retryHeldBySpacing(entry.id, trx)).resolves.toBeNull();
+      await trx.rollback();
+      expect((await stored(entry.id)).metadata.send_failed).toBe(true);
     });
 
-    test('another rail sent while it was released: the retry is held and nothing changes', async () => {
+    test('another rail sent while it was released: the retry is held', async () => {
       const customerId = randomUUID();
       const entry = await failedReservation(customerId);
       await reserve(customerId, 'invoice_followups', 'sms');
-      await expect(Ledger.rearmForRetry(entry.id)).resolves.toMatchObject({ ok: false, held: true });
-      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('metadata');
-      expect(stored.metadata.send_failed).toBe(true);
+      const trx = await mockPg.transaction();
+      await expect(Ledger.retryHeldBySpacing(entry.id, trx)).resolves.toMatchObject({ source: 'invoice_followups' });
+      await trx.rollback();
     });
 
     test('its own sibling leg does not hold it', async () => {
       const customerId = randomUUID();
       const entry = await failedReservation(customerId);
       await reserve(customerId, 'late_payment_checker', 'sms', { idempotencyKey: 'late_payment_checker:inv-1:14:sms' });
-      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
+      await expect(Ledger.retryHeldBySpacing(entry.id)).resolves.toBeNull();
     });
 
-    test('gates off: no read, no write', async () => {
+    test('the lock lasts the caller\'s transaction: another rail waits, then meets the delivered stamp', async () => {
       const customerId = randomUUID();
       const entry = await failedReservation(customerId);
-      delete process.env.GATE_DUNNING_SPACING;
-      await expect(Ledger.rearmForRetry(entry.id)).resolves.toEqual({ ok: true });
-      const stored = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('metadata');
-      expect(stored.metadata.send_failed).toBe(true);
+      const authority = await mockPg.transaction();
+      await expect(Ledger.retryHeldBySpacing(entry.id, authority)).resolves.toBeNull();
+      let settled = false;
+      const other = reserve(customerId, 'invoice_followups', 'sms').finally(() => { settled = true; });
+      await new Promise((resolve) => { setTimeout(resolve, 250); });
+      expect(settled).toBe(false);
+      // The provider accepted: the authority stamps delivery before it commits.
+      await expect(Ledger.markDelivered({ id: entry.id }, { database: authority, deliveredAt: new Date() })).resolves.toBe(true);
+      await authority.commit();
+      await expect(other).rejects.toMatchObject({ code: 'DUNNING_SPACING_HELD' });
     });
+
+    test('gates off: no read, no lock', async () => {
+      const customerId = randomUUID();
+      const entry = await failedReservation(customerId);
+      await reserve(customerId, 'invoice_followups', 'sms');
+      delete process.env.GATE_DUNNING_SPACING;
+      await expect(Ledger.retryHeldBySpacing(entry.id)).resolves.toBeNull();
+    });
+  });
+
+  test('under the gate, a delivered stamp moves the time to the delivery', async () => {
+    const customerId = randomUUID();
+    const reservedAt = new Date(Date.now() - 5 * 60 * 1000);
+    const entry = await reserve(customerId, 'invoice_followups', 'sms', { occurredAt: reservedAt });
+    const before = Date.now();
+    await expect(Ledger.markDelivered(entry)).resolves.toBe(true);
+    const row = await mockPg('collections_contact_ledger').where({ id: entry.id }).first('occurred_at');
+    expect(new Date(row.occurred_at).getTime()).toBeGreaterThanOrEqual(before - 1000);
   });
 
   test('a late acceptance moves the row\'s time forward, never back', async () => {

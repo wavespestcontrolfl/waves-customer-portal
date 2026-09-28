@@ -124,6 +124,29 @@ test('replays a no-phone billing Email only after locked eligibility and reuses 
   expect(reservation.markBillingEmailReservationDelivered).toHaveBeenCalledWith(result.message);
 });
 
+// codex #5108 r4: under the seven-day spacing gate, the accepted retry
+// stamps its reservation delivered on the held authority transaction (while
+// the pre-send check's spacing lock is still held), then again post-commit.
+test('under the spacing gate the accepted retry stamps its reservation inside the authority transaction', async () => {
+  process.env.GATE_COLLECTIONS_POLICY = 'true';
+  process.env.GATE_DUNNING_SPACING = 'true';
+  try {
+    const result = await retryOne(storedMessage());
+    expect(result).toMatchObject({ sent: true });
+    const calls = reservation.markBillingEmailReservationDelivered.mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][1]).toBe(heldDatabase);
+    expect(calls[1]).toEqual([result.message]);
+  } finally {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    delete process.env.GATE_DUNNING_SPACING;
+  }
+  // Gates off: only the post-commit reconciliation, as before.
+  reservation.markBillingEmailReservationDelivered.mockClear();
+  await retryOne(storedMessage());
+  expect(reservation.markBillingEmailReservationDelivered).toHaveBeenCalledTimes(1);
+});
+
 test.each([
   { payload_snapshot: '{"__billing_replay_context":null}' },
   { recipient_id: 'another-customer' },

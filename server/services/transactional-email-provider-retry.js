@@ -6,6 +6,7 @@ const emailTemplates = require('./email-template-library');
 const NotificationService = require('./notification-service');
 const billingReplay = require('./billing-email-provider-replay');
 const billingReservation = require('./billing-email-reservation');
+const { spacingEnforced } = require('./collections/dunning-spacing');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -580,6 +581,15 @@ async function retryOne(message) {
           message, state.result, database, { requireQueued: true },
         );
         if (!state.acceptedMessage) throw new Error('Billing retry claim was lost after provider acceptance');
+        // Seven-day overdue-message spacing (codex #5108 r4): stamp the
+        // reservation delivered inside this authority transaction, while the
+        // spacing lock its pre-send check took is still held, so a
+        // reservation released as send_failed holds again before any other
+        // rail can reserve. Best-effort and savepointed; the post-commit
+        // reconciliation repeats it.
+        if (spacingEnforced() && billingReplay.isBillingEmailProviderReplay(state.acceptedMessage)) {
+          await billingReservation.markBillingEmailReservationDelivered(state.acceptedMessage, database);
+        }
       }
     } catch (err) {
       // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE
