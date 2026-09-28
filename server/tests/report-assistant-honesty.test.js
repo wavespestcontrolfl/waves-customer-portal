@@ -242,6 +242,8 @@ describe('watering questions answer with the weekly plan when the report carries
       'I spotted fungus; do we need to run the sprinklers?',
       'I observed dry spots; do I still need to water?',
       'I found mushrooms; is it still okay to water?',
+      'I found mushrooms; is it fine to water?',
+      'I spotted fungus; am I allowed to water?',
     ]) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(expected);
@@ -251,6 +253,9 @@ describe('watering questions answer with the weekly plan when the report carries
       'What did you observe in the dry spots?',
       'Did you find mushrooms by the sprinkler?',
       'What fungus did you spot near the irrigation zone?',
+      'What did you find by the sprinkler?',
+      'How much fungus did you find by the sprinkler?',
+      'I observed mushrooms by the sprinkler, do you know what they are?',
     ]) {
       const findingsAnswer = answerServiceReportQuestion({ question, data });
       expect(findingsAnswer).toMatch(/Sprinkler area checked/);
@@ -291,7 +296,7 @@ describe('watering questions answer with the weekly plan when the report carries
       findings: [{ title: 'Mushrooms observed' }],
       reportV2: { aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' } },
     };
-    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?', 'What do I do about the mushrooms I observed?', 'I observed mushrooms. What can I do about them?', 'What could we do about the areas you spotted?']) {
+    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?', 'What do I do about the mushrooms I observed?', 'I observed mushrooms. What can I do about them?', 'What could we do about the areas you spotted?', 'What do I need to do about the mushrooms I observed?', 'Is there anything I should do about what you observed?', 'Any action needed for what you spotted?', 'What are the next steps for the mushrooms you found?', 'How do I handle the fungus you spotted?']) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(/^Confirm the product watering directions/);
       if (source !== 'fallback') expect(answer).toContain(mowing);

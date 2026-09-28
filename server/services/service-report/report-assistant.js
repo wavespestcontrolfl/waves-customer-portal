@@ -1,5 +1,7 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
+const {
+  hasCreditableWaterIn, normalizeLawnAftercare, wateringPlanCondition, wateringRestrictionAction,
+} = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
@@ -35,7 +37,13 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
-const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could)\s+(?:i|we)\s+|do\s+(?:i|we)\s+(?:(?:still\s+)?(?:need|have)\s+to\s+)?|is\s+it\s+(?:still\s+)?(?:okay|ok|safe)\s+to\s+)(?:still\s+)?(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
+const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could)\s+(?:i|we)\s+|do\s+(?:i|we)\s+(?:(?:still\s+)?(?:need|have)\s+to\s+)?|is\s+it\s+(?:still\s+)?(?:okay|ok|fine|alright|all\s+right|safe)\s+to\s+|(?:am\s+i|are\s+we)\s+(?:still\s+)?allowed\s+to\s+)(?:still\s+)?(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
+// A request for the customer's own next move ("What do I need to do about
+// the mushrooms I observed?", "Anything we should do…", "Any action needed…",
+// "How do I handle…"). Observation words inside it qualify the request; they
+// do not turn it into a findings recap. "…, do you know what they are?" asks
+// Waves, not the customer.
+const CUSTOMER_ACTION_RE = /\b(?:i|we)\b[^?.!]{0,24}\b(?:do|handle)\b(?!\s+you\b)|\b(?:action|next\s+steps?)\b/;
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -569,19 +577,8 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
 }
 
 function answerConditionalWateringPlan({ weekPlan, aftercare }) {
-  if (!weekPlan?.title) return aftercare.watering;
-  const plan = [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ');
-  // An explicitly historical visit cannot qualify today's plan with that
-  // visit's restriction. Keep the recorded note visible, but do not present
-  // it as a prerequisite for a later week's plan. Older payloads without the
-  // membership field keep the conservative current-week behavior.
-  if (weekPlan.visitInPlanWeek === false) {
-    return [aftercare.watering, plan].filter(Boolean).join(' ');
-  }
-  const condition = aftercare.needsReview === true
-    ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
-    : 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.';
-  return [aftercare.watering, condition, plan].filter(Boolean).join(' ');
+  const plan = weekPlan?.title ? [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ') : '';
+  return [aftercare.watering, wateringPlanCondition(aftercare, weekPlan), plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
@@ -597,12 +594,12 @@ function questionRoutingRules({
     // Explicit observation intent outranks incidental watering vocabulary:
     // "What did you find by the sprinkler?" still asks about findings.
     { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q)
-      && !ADVICE_RE.test(q) && !WATERING_ADVICE_QUESTION_RE.test(q), answer: () => answerFindings({ data }) },
+      && !ADVICE_RE.test(q) && !CUSTOMER_ACTION_RE.test(q) && !WATERING_ADVICE_QUESTION_RE.test(q), answer: () => answerFindings({ data }) },
     // Preserve unverified or restricted aftercare before any watering plan.
     {
       test: () => wateringIntent
         && Boolean(aftercare?.watering)
-        && (aftercare.wateringHold === true || aftercare.needsReview === true),
+        && Boolean(wateringRestrictionAction(aftercare)),
       answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
     },
     {
@@ -612,6 +609,13 @@ function questionRoutingRules({
     {
       test: () => Boolean(weekPlan?.title) && wateringIntent,
       answer: () => [weekPlan.title, weekPlan.detail].filter(Boolean).join(' '),
+    },
+    // An observation-qualified action request is a next-step question, ahead
+    // of the findings wording below ("What are the next steps for the
+    // mushrooms you found?"), so it carries any mandatory aftercare task.
+    {
+      test: (q) => OBSERVATION_QUESTION_RE.test(q) && CUSTOMER_ACTION_RE.test(q) && !APPOINTMENT_RE.test(q),
+      answer: () => answerNextSteps({ data, nextAppointment }),
     },
     { test: (q) => /\b(irrigation)\b/.test(q), answer: () => answerReentry({ data }) },
     // AW-06: exact-word matching missed inflections ("treated", "applying",

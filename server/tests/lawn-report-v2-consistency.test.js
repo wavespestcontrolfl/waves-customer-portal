@@ -98,6 +98,62 @@ describe('unconfirmed product directions take precedence throughout the report',
   });
 });
 
+// PR #5033: each review finding, one row. Every surface reads the verdict
+// lawn-aftercare.js resolves, so a row failing names the surface that drifted.
+describe('aftercare verdict fixture table (PR #5033 findings)', () => {
+  const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
+  const { buildAftercare } = require('../services/service-report/lawn-report-v2');
+  const CONFIRM = /Confirm the product watering directions/;
+  const PLAN_CONDITION = /before applying the plan below/;
+  const RUN_PLAN = { title: 'This week: run once', detail: 'One turf cycle before Friday.', action: 'run' };
+  const reviewAftercare = () => buildAftercare([{ product: { irrigation_required: true } }]);
+  const render = (scenario, weekPlan = null) => buildLawnReportV2({
+    lawnAssessment: { ...CASES[scenario], waterContext: { ...CASES[scenario].waterContext, weekPlan } },
+    applications: [{ product: { irrigation_required: true } }],
+  });
+  const ask = (question, water = { weekPlan: null }) => answerServiceReportQuestion({
+    question,
+    data: {
+      pressureIndex: null,
+      dynamicContext: {},
+      findings: [{ title: 'Mushrooms observed', detail: 'Near the sprinkler heads.' }],
+      reportV2: { aftercare: reviewAftercare(), water },
+    },
+  });
+
+  test.each([
+    ['P1 hero watering advice waits on aftercare review', () => render('deficit', RUN_PLAN), (report) => {
+      expect(report.snapshot.rootCause).toBeNull();
+      expect(report.water.explanation).toMatch(CONFIRM);
+    }],
+    ['P1 no-action claim is suppressed while water-in needs review', () => render('healthy'), (report) => {
+      expect(report.snapshot.noActionNeeded).toBe(false);
+      expect(report.snapshot.customerAction).toMatch(CONFIRM);
+    }],
+    ['P1 generic next-step answer includes the confirmation', () => ask('What should I do next?'), (answer) => {
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+    }],
+    ['P2 observation-qualified action request routes to next steps', () => ask('What are the next steps for the mushrooms you found?'), (answer) => {
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+      expect(answer).not.toMatch(/Mushrooms observed/);
+    }],
+    ['P2 need-to-water question outranks findings wording', () => ask('I observed dry spots; do I need to water?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: true } }), (answer) => {
+      expect(answer).toMatch(PLAN_CONDITION);
+      expect(answer).toContain(RUN_PLAN.title);
+      expect(answer).not.toMatch(/Mushrooms observed/);
+    }],
+    ['P2 past-visit aftercare does not gate the current plan', () => ask('Should I water this week?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: false } }), (answer) => {
+      expect(answer).toContain(RUN_PLAN.title);
+      expect(answer).not.toMatch(PLAN_CONDITION);
+    }],
+    ['P2 a recorded amount or timing is never denied', () => buildAftercare([{ product: { irrigation_required: true, irrigation_notes: 'Apply 0.25 inches within 24 hours.' } }]), (aftercare) => {
+      expect(aftercare.watering).toContain('Apply 0.25 inches within 24 hours.');
+      expect(aftercare.watering).not.toMatch(/not recorded/);
+      expect(aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
+    }],
+  ])('%s', (_finding, run, check) => check(run()));
+});
+
 describe('structured moisture evidence owns sprinkler advice', () => {
   const render = (overrides = {}) => buildLawnReportV2({
     lawnAssessment: baseAssessment({ ...CASES.healthy, ...overrides }),
