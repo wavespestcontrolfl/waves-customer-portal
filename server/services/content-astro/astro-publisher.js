@@ -50,11 +50,14 @@ const ASTRO_BLOG_DIR = 'src/content/blog';
 // publishOrUpdatePage, publishRefresh, publishMetadataRewrite): each link to
 // a competitor host becomes its anchor text, in body and frontmatter —
 // deterministic, no LLM. A competitor URL that somehow survives refuses the
-// publish.
-function competitorFreeMarkdown(frontmatter, body) {
+// publish. `validate` is the frontmatter check the lane already ran (blog
+// schema for blog targets): unlinking a frontmatter URL shortens the string,
+// so the transformed frontmatter is re-validated before it is committed.
+function competitorFreeMarkdown(frontmatter, body, { validate = null } = {}) {
   const hosts = competitorLinks.competitorHosts();
   const b = competitorLinks.unlinkCompetitorLinks(body, hosts);
   const f = competitorLinks.unlinkCompetitorLinksDeep(frontmatter, hosts);
+  if (f.unlinked.length && validate) validate(f.value);
   const markdown = fm.stringify(f.value, b.text);
   const left = competitorLinks.competitorLinkUrls(markdown, hosts);
   if (left.length) {
@@ -1410,6 +1413,7 @@ async function publishAstro(postId) {
     const earlyUnlink = competitorLinks.unlinkCompetitorLinks(String(prepared.body || '').trim());
     const earlyMetaUnlink = competitorLinks.unlinkCompetitorLinksDeep(data);
     Object.assign(data, earlyMetaUnlink.value);
+    if (earlyMetaUnlink.unlinked.length) assertValidBlogFrontmatter(data);
     const earlyUnlinked = [...earlyUnlink.unlinked, ...earlyMetaUnlink.unlinked];
     const body = earlyUnlink.text;
     if (!post.reading_time_min) data.reading_time_min = estimateReadingTime(body);
@@ -1557,7 +1561,7 @@ async function publishAstro(postId) {
       await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
     }
     const finalBody = bodyImages.body;
-    const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n');
+    const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
     const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
 
     await gh.createBranch(branch);
@@ -3406,7 +3410,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`);
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(frontmatter, `${finalBody}\n`, { validate: assertValidBlogFrontmatter });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   await gh.createBranch(branch);
@@ -3584,7 +3588,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '');
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, parsed.content || '', { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
   if (markdown === existing.content) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
@@ -3880,7 +3884,7 @@ async function publishRefresh(draft, brief = {}) {
     }
   }
   const finalBody = refreshImages.body;
-  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`);
+  const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
   const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
@@ -5255,6 +5259,7 @@ module.exports = {
   clampTitle,
   clampMetaDescription,
   _internals: {
+    competitorFreeMarkdown,
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,

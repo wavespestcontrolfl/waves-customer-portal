@@ -20,6 +20,7 @@
  * Hub and spoke hosts are never competitors.
  */
 
+const { decodeHTML } = require('entities');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 const OWN_HOSTS = new Set(['wavespestcontrol.com', ...SPOKE_SITE_KEYS].map((h) => normalizeHost(h)));
@@ -28,11 +29,14 @@ function normalizeHost(host) {
   return String(host || '').trim().toLowerCase().replace(/\.$/, '').replace(/^(?:www|m)\./, '');
 }
 
+// Destinations are compared as a browser reads them: HTML entities decoded
+// ("orkin&#46;com"), protocol-relative ("//orkin.com/x") resolved to https.
 function hostOf(url) {
-  const raw = String(url || '').trim();
+  const raw = decodeHTML(String(url || '')).trim();
   if (!raw) return null;
+  const absolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw.replace(/^\/\//, '')}`;
   try {
-    return normalizeHost(new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).hostname);
+    return normalizeHost(new URL(absolute).hostname);
   } catch {
     return null;
   }
@@ -78,18 +82,20 @@ function isCompetitorUrl(url, hosts) {
   return !!h && isCompetitorHost(h, hosts);
 }
 
-// Absolute http(s) URLs and GFM "www." autolinks, anywhere in the text.
-const ANY_URL_RE = /(?:\bhttps?:\/\/|\bwww\.)[^\s<>()[\]"'`]+/gi;
+// Absolute http(s) URLs, protocol-relative "//host.tld" destinations and GFM
+// "www." autolinks, anywhere in the text.
+const ANY_URL_RE = /(?:\bhttps?:\/\/|(?<![:\w/])\/\/(?=[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})|\bwww\.)[^\s<>()[\]"'`]+/gi;
 // A bare URL in prose: not glued to a preceding path/word (so the embedded
 // URL inside an archive.org link is left alone — its host is archive.org).
 const BARE_URL_RE = /(?<![\w/@.=:])(?:https?:\/\/|www\.)[^\s<>()[\]"'`]+/gi;
 const TRAILING_PUNCT_RE = /[.,;:!?]+$/;
 
-// Every competitor URL still present in `text` (any context). Used by the
-// guardrail and the publisher's post-unlink assertion.
+// Every competitor URL still present in `text` (any context), read with HTML
+// entities decoded. Used by the guardrail and the publisher's post-unlink
+// assertion.
 function competitorLinkUrls(text, hosts = competitorHosts()) {
   const out = [];
-  for (const m of String(text || '').matchAll(ANY_URL_RE)) {
+  for (const m of decodeHTML(String(text || '')).matchAll(ANY_URL_RE)) {
     const url = m[0].replace(TRAILING_PUNCT_RE, '');
     if (isCompetitorUrl(url, hosts)) out.push(url);
   }
@@ -97,11 +103,11 @@ function competitorLinkUrls(text, hosts = competitorHosts()) {
 }
 
 const INLINE_LINK_RE = /(!?)\[((?:\\.|[^[\]\\]|\[(?:\\.|[^[\]\\])*\])*)\]\(\s*(<[^>\n]*>|[^\s()]*(?:\([^\s()]*\)[^\s()]*)*)(?:\s+(?:"[^"]*"|'[^']*'|\([^()]*\)))?\s*\)/g;
-const REF_DEF_RE = /^ {0,3}\[([^\]\n]+)\]:[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*(?:\n|$)/gm;
+const REF_DEF_RE = /^ {0,3}\[([^\]\n]+)\]:[ \t]*\n?[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*(?:\n|$)/gm;
 const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
 const HREF_ATTR_RE = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i;
 const COMPONENT_TAG_RE = /<([A-Z][\w.]*)\b([^<>]*?)(\/?)>/g;
-const URL_ATTR_RE = /\s+([A-Za-z_][\w-]*)\s*=\s*(["'])((?:https?:)?\/\/[^"']*|www\.[^"']*)\2/g;
+const URL_ATTR_RE = /\s+([A-Za-z_][\w-]*)\s*=\s*(["'])([^"']*)\2/g;
 const AUTOLINK_RE = /<((?:https?:\/\/|www\.)[^<>\s]+)>/gi;
 
 const normLabel = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -162,7 +168,9 @@ function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
   text = text.replace(COMPONENT_TAG_RE, (whole, name, attrs, selfClose) => {
     let changed = false;
     const nextAttrs = attrs.replace(URL_ATTR_RE, (attr, key, q, url) => {
-      if (!isCompetitorUrl(url, hosts)) return attr;
+      // URL-valued props only (entities decoded) — a plain-text prop that
+      // merely names a domain is wording, not a link.
+      if (!/^(?:https?:)?\/\/|^www\./i.test(decodeHTML(url).trim()) || !isCompetitorUrl(url, hosts)) return attr;
       changed = true;
       record(url, `${name} ${key}`);
       return '';

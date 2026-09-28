@@ -82,6 +82,17 @@ describe('unlinkCompetitorLinks', () => {
     expect(r.text).toBe('Massey\'s site and <InlineCTA headline="Compare" ctaLabel="Go" />');
   });
 
+  test('entity-encoded hrefs, next-line reference destinations and protocol-relative links are caught (pre-push audit)', () => {
+    expect(un('<a href="https://orkin&#46;com/">Orkin</a>').text).toBe('Orkin');
+    expect(un('See [their terms][t].\n\n[t]:\n  //orkin.com/terms\n').text).toBe('See their terms.\n\n');
+    expect(un('[plans](//www.orkin.com/a) and <a href="//terminix.com">Terminix</a>').text).toBe('plans and Terminix');
+    expect(un('<Cta ctaHref="https://orkin&#46;com/q" caption="Source: orkin.com" />').text).toBe('<Cta caption="Source: orkin.com" />');
+    // Detection reads decoded text, so an encoded survivor is still caught.
+    expect(competitorLinkUrls('raw https://orkin&#46;com/x')).toEqual(['https://orkin.com/x']);
+    expect(competitorLinkUrls('[x](//orkin.com/a)')).toEqual(['//orkin.com/a']);
+    expect(competitorLinkUrls('a//b and see https://edis.ifas.ufl.edu//x')).toEqual([]);
+  });
+
   test('a competitor-hosted image becomes its alt text (no request to their site)', () => {
     expect(un('![Orkin logo](https://www.orkin.com/logo.png)').text).toBe('Orkin logo');
   });
@@ -115,6 +126,21 @@ describe('unlinkCompetitorLinks', () => {
       reading_time_min: 6,
     });
     expect(unlinked).toHaveLength(3);
+  });
+});
+
+describe('publisher commit helper', () => {
+  const { competitorFreeMarkdown } = require('../services/content-astro/astro-publisher')._internals;
+  test('re-validates frontmatter the unlinking changed (pre-push audit), and refuses a surviving competitor URL', () => {
+    const validate = jest.fn(() => { throw new Error('meta_description too short'); });
+    expect(() => competitorFreeMarkdown({ meta_description: 'Plans at https://www.orkin.com/plans compared.' }, 'Body.', { validate }))
+      .toThrow('meta_description too short');
+    // Untouched frontmatter is not re-validated (the lane already did).
+    const untouched = jest.fn();
+    const r = competitorFreeMarkdown({ title: 'Ants' }, 'Per [Orkin](https://www.orkin.com/x).', { validate: untouched });
+    expect(untouched).not.toHaveBeenCalled();
+    expect(r.markdown).toContain('Per Orkin.');
+    expect(r.unlinked).toHaveLength(1);
   });
 });
 
