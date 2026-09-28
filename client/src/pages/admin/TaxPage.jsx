@@ -4850,7 +4850,10 @@ function nextDay(dateStr) {
 function syncSummary(sync) {
   if (!sync) return "";
   if (sync.error) return `Sync failed: ${sync.error}`;
-  if (sync.skipped) return `Sync skipped (${sync.skipped})`;
+  // a string = the whole run was skipped; per-transaction reasons
+  // (pending, before start date…) ride separately in sync.skips
+  if (typeof sync.skipped === "string")
+    return `Sync skipped (${sync.skipped})`;
   const parts = [`${sync.inserted || 0} new`];
   if (sync.updated) parts.push(`${sync.updated} updated`);
   if (sync.deleted) parts.push(`${sync.deleted} withdrawn by the bank`);
@@ -5259,6 +5262,7 @@ function BankImportTab() {
   const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [counts, setCounts] = useState({});
   const [plaidEnabled, setPlaidEnabled] = useState(false);
+  const [bankChanges, setBankChanges] = useState(0);
   const [rows, setRows] = useState([]);
   const [coverage, setCoverage] = useState([]);
   const [filter, setFilter] = useState("");
@@ -5347,6 +5351,7 @@ function BankImportTab() {
       .then((s) => {
         setCounts(s?.counts || {});
         setPlaidEnabled(!!s?.plaidEnabled);
+        setBankChanges(s?.bankChanges || 0);
         setCountsReady(true);
         setReadErrors((prev) => ({
           ...prev,
@@ -5594,6 +5599,13 @@ function BankImportTab() {
           label="Ignored"
           value={countsReady ? counts.ignored || 0 : "\u2014"}
         />
+        {bankChanges > 0 && (
+          <StatCard
+            label="Changed by bank"
+            value={bankChanges}
+            onClick={() => setFilter("bank_change")}
+          />
+        )}
       </div>
 
       {plaidEnabled && <PlaidFeedsPanel onSynced={load} />}
@@ -5716,6 +5728,9 @@ function BankImportTab() {
             <option value="created_expense">Created expense</option>
             <option value="refund_applied">Refund applied</option>
             <option value="ignored">Ignored</option>
+            {(plaidEnabled || bankChanges > 0) && (
+              <option value="bank_change">Changed by bank</option>
+            )}
           </Select>
         </Field>
         <Field label="Coverage year" className="min-w-0">
@@ -5987,6 +6002,53 @@ function BankImportTab() {
                     whiteSpace: "nowrap",
                   }}
                 >
+                  {(r.suggestion?.plaidModified ||
+                    r.suggestion?.plaidRemoved) && (
+                    <div
+                      className="mb-1 text-14 text-ink-primary"
+                      style={{ whiteSpace: "normal" }}
+                    >
+                      {r.suggestion.plaidRemoved
+                        ? "The bank withdrew this transaction."
+                        : `The bank changed this to $${Number(r.suggestion.plaidModified.amount).toFixed(2)} ${r.suggestion.plaidModified.direction} on ${r.suggestion.plaidModified.txn_date}${r.status === "unmatched" ? "." : " — unlink to apply it."}`}
+                      {plaidEnabled && (
+                        <span className="ml-2 inline-flex gap-2">
+                          {r.suggestion.plaidModified &&
+                            !r.suggestion.plaidRemoved &&
+                            r.status === "unmatched" && (
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                disabled={!!busy}
+                                onClick={() =>
+                                  act(
+                                    "bank-change",
+                                    `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                                    { action: "apply" },
+                                  )
+                                }
+                              >
+                                Apply bank's change
+                              </Button>
+                            )}
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={!!busy}
+                            onClick={() =>
+                              act(
+                                "bank-change",
+                                `/admin/tax/bank-import/plaid/rows/${r.id}/bank-change`,
+                                { action: "dismiss" },
+                              )
+                            }
+                          >
+                            Dismiss
+                          </Button>
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {/* a transfer-flagged CREDIT with candidates falls through
                       to the select — a vendor refund whose descriptor says
                       "transfer" still needs its Apply refund action (the

@@ -7,6 +7,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 const mockDb = jest.fn(() => {
   const b = {
     select: jest.fn(() => b), count: jest.fn(() => b), groupBy: jest.fn(() => Promise.resolve([])),
+    whereRaw: jest.fn(() => b), first: jest.fn(() => Promise.resolve({ n: '0' })),
   };
   return b;
 });

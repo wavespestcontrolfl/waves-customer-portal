@@ -446,7 +446,7 @@ describe("Finance workflow preservation", () => {
       }],
     }));
     overrides.set("POST /api/admin/tax/bank-import/plaid/items/item-1/setup", () =>
-      response({ success: true, sync: { inserted: 3, complete: true } }));
+      response({ success: true, sync: { inserted: 3, updated: 0, deleted: 0, flagged: 0, skips: { pending: 2 }, complete: true, matching: null, matchingError: null } }));
     open(TaxPage);
     await taxSection("Expenses", "Import");
     const label = await screen.findByDisplayValue("synthetic-bank-checking-0001");
@@ -458,6 +458,34 @@ describe("Finance workflow preservation", () => {
     expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/items/item-1/setup").body).toEqual({
       accounts: [{ id: "acct-1", accountLabel: "capone-checking", accountType: "bank", syncFrom: "2026-09-11", enabled: true }],
     });
+  });
+  it("shows a bank correction on a reviewed row and applies it only once the row is unlinked", async () => {
+    overrides.set("GET /api/admin/tax/bank-import/status", () =>
+      response({ enabled: true, plaidEnabled: true, bankChanges: 2, counts: {} }));
+    overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () =>
+      response({ configured: true, tokenKey: true, env: "sandbox", existingLabels: [], items: [] }));
+    const base = { txn_date: "2026-09-05", account_label: "card", account_type: "card", direction: "debit", amount: 10 };
+    overrides.set("GET /api/admin/tax/bank-import/transactions", () => response({
+      hasMore: false,
+      transactions: [
+        { ...base, id: "row-linked", description: "Linked purchase", status: "matched_expense",
+          suggestion: { plaidModified: { amount: 12.34, direction: "debit", txn_date: "2026-09-06", description: "FIXED" } } },
+        { ...base, id: "row-open", description: "Open purchase", status: "unmatched",
+          suggestion: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" } } },
+      ],
+    }));
+    overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change", () => response({ success: true }));
+    open(TaxPage);
+    await taxSection("Expenses", "Import");
+    expect(await screen.findByText(/The bank changed this to \$12\.34 debit on 2026-09-06 — unlink to apply it\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Changed by bank 2" })).toBeInTheDocument();
+    const apply = screen.getAllByRole("button", { name: "Apply bank's change" });
+    expect(apply).toHaveLength(1); // only the unlinked row
+    fireEvent.click(apply[0]);
+    await waitFor(() =>
+      expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
+        .toEqual({ action: "apply" }));
   });
   it("keeps the bank-import gate closed on a failed status read", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>

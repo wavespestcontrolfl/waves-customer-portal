@@ -12,7 +12,21 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/bank-import', () => ({
+  ...jest.requireActual('../services/bank-import'),
   runDeterministicMatching: jest.fn(async () => ({ payoutsLinked: 0, expensesLinked: 0, ambiguous: 0 })),
+  // the list route heals first; those passes have their own suites
+  resetDanglingLinks: jest.fn(async () => 0),
+  healEditedExpenseLinks: jest.fn(async () => 0),
+  healUnreconciledLinks: jest.fn(async () => ({})),
+  healOrphanRefunds: jest.fn(async () => 0),
+  verifyPendingExpenseClaims: jest.fn(async () => ({})),
+  verifyPendingPayoutClaims: jest.fn(async () => ({})),
+  retryPendingEchoes: jest.fn(async () => ({})),
+}));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => { req.technicianId = 'tech-1'; next(); },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/plaid-client', () => {
   const actual = jest.requireActual('../services/plaid-client');
@@ -181,7 +195,8 @@ async function activate(itemId, overrides = {}) {
     plaid.transactionsSync.mockResolvedValueOnce(page(added, [], [], 'cursor-1'));
     const out = await plaidSync.syncItem(itemId);
     expect(out).toMatchObject({ inserted: 3, complete: true });
-    expect(out.skipped).toEqual({ pending: 1, before_sync_from: 1, account_disabled: 1, currency: 1 });
+    expect(out.skipped).toBeUndefined(); // a whole-run skip only
+    expect(out.skips).toEqual({ pending: 1, before_sync_from: 1, account_disabled: 1, currency: 1 });
     // the token handed to Plaid is the decrypted one
     expect(plaid.transactionsSync).toHaveBeenCalledWith('access-sandbox-secret', null);
 
@@ -245,6 +260,74 @@ async function activate(itemId, overrides = {}) {
     expect(await plaidSync.syncItem(itemId)).toMatchObject({ skipped: 'concurrent' });
     expect((await mockPg('plaid_items').where({ id: itemId }).first()).sync_cursor).toBe('someone-else');
     expect(await mockPg('bank_transactions').count('* as n').first()).toEqual({ n: '0' });
+  });
+
+  test('a mapping edit that commits while Plaid is answering governs the batch', async () => {
+    const itemId = await connect();
+    await activate(itemId);
+    plaid.transactionsSync.mockImplementationOnce(async () => {
+      // operator turns the card feed off mid-request (cursor unchanged)
+      await activate(itemId, { 'acc-card': { enabled: false } });
+      return page([txn('t-card', 'acc-card', 5, '2026-09-05'), txn('t-chk', 'acc-chk', 7, '2026-09-05')], [], [], 'cursor-1');
+    });
+    const out = await plaidSync.syncItem(itemId);
+    expect(out).toMatchObject({ inserted: 1, skips: { account_disabled: 1 } });
+    expect((await mockPg('bank_transactions').select('plaid_transaction_id')).map(r => r.plaid_transaction_id)).toEqual(['t-chk']);
+  });
+
+  test('bank-change routes: list filter, dismiss, and apply only on an unlinked row', async () => {
+    process.env.GATE_BANK_IMPORT = 'true';
+    process.env.GATE_PLAID_SYNC = 'true';
+    const express = require('express');
+    const app = express();
+    app.use(express.json());
+    app.use('/admin/tax', require('../routes/admin-tax'));
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    const server = await new Promise(r => { const s = app.listen(0, () => r(s)); });
+    const base = `http://127.0.0.1:${server.address().port}/admin/tax/bank-import`;
+    const post = (path, body) => fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    try {
+      const itemId = await connect();
+      await activate(itemId);
+      plaid.transactionsSync.mockResolvedValueOnce(page([
+        txn('t-m', 'acc-card', 10, '2026-09-05'), txn('t-r', 'acc-card', 20, '2026-09-05'), txn('t-plain', 'acc-card', 30, '2026-09-05'),
+      ], [], [], 'cursor-1'));
+      await plaidSync.syncItem(itemId);
+      const [e1] = await mockPg('expenses').insert({}).returning(['id']);
+      const [e2] = await mockPg('expenses').insert({}).returning(['id']);
+      await mockPg('bank_transactions').where({ plaid_transaction_id: 't-m' }).update({ status: 'matched_expense', matched_expense_id: e1.id });
+      await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).update({ status: 'matched_expense', matched_expense_id: e2.id });
+      plaid.transactionsSync.mockResolvedValueOnce(page([], [txn('t-m', 'acc-card', 12.34, '2026-09-06', { name: 'FIXED' })], [{ transaction_id: 't-r' }], 'cursor-2'));
+      await plaidSync.syncItem(itemId);
+
+      const status = await (await fetch(`${base}/status`)).json();
+      expect(status.bankChanges).toBe(2);
+      const listed = await (await fetch(`${base}/transactions?status=bank_change`)).json();
+      expect(listed.transactions.map(r => r.plaid_transaction_id).sort()).toEqual(['t-m', 't-r']);
+
+      const mRow = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-m' }).first();
+      const rRow = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-r' }).first();
+      const plain = await mockPg('bank_transactions').where({ plaid_transaction_id: 't-plain' }).first();
+      expect((await post(`/plaid/rows/${plain.id}/bank-change`, { action: 'dismiss' })).status).toBe(404);
+      expect((await post(`/plaid/rows/${mRow.id}/bank-change`, { action: 'apply' })).status).toBe(409); // still linked
+      expect((await post(`/plaid/rows/${rRow.id}/bank-change`, { action: 'apply' })).status).toBe(409); // withdrawn
+
+      await mockPg('bank_transactions').where({ id: mRow.id }).update({ status: 'unmatched', matched_expense_id: null });
+      expect((await post(`/plaid/rows/${mRow.id}/bank-change`, { action: 'apply' })).status).toBe(200);
+      const applied = await mockPg('bank_transactions').where({ id: mRow.id }).first();
+      expect([Number(applied.amount), plaidSync.toDateOnly(applied.txn_date), applied.description]).toEqual([12.34, '2026-09-06', 'FIXED']);
+      expect(applied.suggestion.plaidModified).toBeUndefined();
+
+      expect((await post(`/plaid/rows/${rRow.id}/bank-change`, { action: 'dismiss' })).status).toBe(200);
+      const dismissed = await mockPg('bank_transactions').where({ id: rRow.id }).first();
+      expect(dismissed).toMatchObject({ status: 'matched_expense', matched_expense_id: e2.id });
+      expect(dismissed.suggestion.plaidRemoved).toBeUndefined();
+      expect((await (await fetch(`${base}/status`)).json()).bankChanges).toBe(0);
+    } finally {
+      server.close();
+      delete process.env.GATE_BANK_IMPORT;
+      delete process.env.GATE_PLAID_SYNC;
+    }
   });
 
   test('bank login errors park the item; the hourly run skips it until re-login', async () => {

@@ -440,9 +440,11 @@ async function fetchAllChanges(accessToken, startCursor) {
   throw new Error('transactions sync kept changing during pagination');
 }
 
-async function applyChanges(trx, item, accountsById, changes) {
-  const counts = { inserted: 0, updated: 0, deleted: 0, flagged: 0, skipped: {} };
-  const skip = (reason) => { counts.skipped[reason] = (counts.skipped[reason] || 0) + 1; };
+async function applyChanges(trx, accountsById, changes) {
+  // `skips` = per-transaction reasons; a whole-run skip is the separate
+  // string `skipped` on syncItem's result
+  const counts = { inserted: 0, updated: 0, deleted: 0, flagged: 0, skips: {} };
+  const skip = (reason) => { counts.skips[reason] = (counts.skips[reason] || 0) + 1; };
 
   // label→type invariant under the same per-label lock the CSV upload takes
   const labels = [...new Set([...accountsById.values()].filter(a => a.enabled).map(a => a.account_label.trim().toUpperCase()))].sort();
@@ -533,9 +535,6 @@ async function syncItem(itemId, { runMatching = true } = {}) {
   if (!item) { const e = new Error('connection not found'); e.status = 404; throw e; }
   if (item.status === 'removed') return { itemId, skipped: 'removed' };
   if (item.status === 'setup') return { itemId, skipped: 'setup' };
-  const accounts = await db('plaid_accounts').where({ plaid_item_id: itemId });
-  const accountsById = new Map(accounts.map(a => [a.account_id, a]));
-
   let result;
   try {
     const accessToken = await decryptToken(db, item.access_token_enc);
@@ -550,7 +549,13 @@ async function syncItem(itemId, { runMatching = true } = {}) {
       const fresh = await trx('plaid_items').where({ id: itemId }).forUpdate().first('sync_cursor', 'status');
       if (!fresh || fresh.status === 'removed') return { skipped: 'removed' };
       if ((fresh.sync_cursor || null) !== startCursor) return { skipped: 'concurrent' };
-      const counts = await applyChanges(trx, item, accountsById, changes);
+      // The mapping is read HERE, under the item row lock setupItem also
+      // takes: an edit that committed while Plaid was answering (account
+      // disabled, relabeled, start date moved later) applies to this batch
+      // instead of being overwritten by a mapping read before the request.
+      const accounts = await trx('plaid_accounts').where({ plaid_item_id: itemId });
+      const accountsById = new Map(accounts.map(a => [a.account_id, a]));
+      const counts = await applyChanges(trx, accountsById, changes);
       await trx('plaid_items').where({ id: itemId }).update({
         sync_cursor: changes.nextCursor,
         status: 'active',

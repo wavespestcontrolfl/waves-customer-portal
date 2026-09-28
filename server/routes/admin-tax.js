@@ -1864,8 +1864,12 @@ router.get('/bank-import/status', async (req, res, next) => {
     if (!gateEnvValue('GATE_BANK_IMPORT')) return res.json({ enabled: false });
     await healBankImportSnapshot();
     const counts = await db('bank_transactions').select('status').count('* as n').groupBy('status');
+    const bankChanges = await db('bank_transactions')
+      .whereRaw("suggestion->'plaidModified' IS NOT NULL OR suggestion->'plaidRemoved' IS NOT NULL")
+      .count('* as n').first();
     res.json({
       enabled: true,
+      bankChanges: parseInt(bankChanges?.n, 10) || 0,
       plaidEnabled: gateEnvValue('GATE_PLAID_SYNC'),
       counts: Object.fromEntries(counts.map(c => [c.status, parseInt(c.n, 10)])),
     });
@@ -1894,6 +1898,11 @@ router.use('/bank-import/plaid', (req, res, next) => {
 
 router.param('plaidItemId', (req, res, next, id) => {
   if (!UUID_RE.test(String(id))) return res.status(404).json({ error: 'connection not found' });
+  next();
+});
+
+router.param('plaidRowId', (req, res, next, id) => {
+  if (!UUID_RE.test(String(id))) return res.status(404).json({ error: 'no bank change on this row' });
   next();
 });
 
@@ -1951,6 +1960,44 @@ router.post('/bank-import/plaid/items/:plaidItemId/reconnected', async (req, res
 router.post('/bank-import/plaid/items/:plaidItemId/sync', async (req, res, next) => {
   try {
     res.json({ success: true, sync: await plaidSync.syncItem(req.params.plaidItemId) });
+  } catch (err) { plaidRouteError(res, next, err); }
+});
+
+// A reviewed row the bank later corrected (plaidModified) or withdrew
+// (plaidRemoved) is never rewritten under the operator; this is where they
+// resolve it. 'dismiss' keeps the row as reviewed and clears the flag.
+// 'apply' takes the bank's corrected values — only on an UNMATCHED row
+// (unlink it first), and only for the exact flag the operator saw.
+router.post('/bank-import/plaid/rows/:plaidRowId/bank-change', async (req, res, next) => {
+  try {
+    const { action } = req.body || {};
+    if (!['apply', 'dismiss'].includes(action)) return res.status(400).json({ error: "action must be 'apply' or 'dismiss'" });
+    const row = await db('bank_transactions').where({ id: req.params.plaidRowId, source: 'plaid' }).first('id', 'status', 'suggestion');
+    const flags = row && row.suggestion ? { modified: row.suggestion.plaidModified, removed: row.suggestion.plaidRemoved } : {};
+    if (!row || (!flags.modified && !flags.removed)) return res.status(404).json({ error: 'no bank change on this row' });
+    if (action === 'dismiss') {
+      await db('bank_transactions').where({ id: row.id }).update({
+        suggestion: bankImport.suggestionMerge({}, ['plaidModified', 'plaidRemoved']),
+        updated_at: new Date(),
+      });
+      return res.json({ success: true });
+    }
+    if (!flags.modified) return res.status(409).json({ error: 'the bank withdrew this transaction — dismiss it, or unlink and ignore the row' });
+    if (row.status !== 'unmatched') return res.status(409).json({ error: 'unlink this row before applying the bank\'s correction' });
+    const m = flags.modified;
+    const changed = await db('bank_transactions')
+      .where({ id: row.id, status: 'unmatched' })
+      .whereRaw("suggestion->'plaidModified' = ?::jsonb", [JSON.stringify(m)])
+      .update({
+        txn_date: m.txn_date,
+        amount: m.amount,
+        direction: m.direction,
+        description: m.description,
+        suggestion: bankImport.suggestionMerge({}, ['plaidModified']),
+        updated_at: new Date(),
+      });
+    if (!changed) return res.status(409).json({ error: 'this row changed — reload and try again' });
+    res.json({ success: true });
   } catch (err) { plaidRouteError(res, next, err); }
 });
 
@@ -2184,7 +2231,10 @@ router.get('/bank-import/transactions', async (req, res, next) => {
     // txn_date+created_at, and an unstable order across offset pages would
     // repeat some rows and silently drop others from review.
     let q = db('bank_transactions').orderBy('txn_date', 'desc').orderBy('created_at', 'desc').orderBy('id', 'desc').limit(limit + 1).offset(offset);
-    if (status) q = q.where('status', String(status));
+    // bank_change = Plaid rows the bank corrected/withdrew after review
+    // (not a status — a flag the operator resolves via /plaid/rows/:id)
+    if (status === 'bank_change') q = q.where(qb => qb.whereNotNull(db.raw("suggestion->'plaidModified'")).orWhereNotNull(db.raw("suggestion->'plaidRemoved'")));
+    else if (status) q = q.where('status', String(status));
     if (account) q = q.where('account_label', String(account));
     if (month && /^\d{4}-\d{2}$/.test(String(month))) {
       q = q.whereRaw("to_char(txn_date, 'YYYY-MM') = ?", [String(month)]);
