@@ -43,8 +43,7 @@ function redactText(value, context = {}) {
     context?.estimate?.customer_name,
     context?.lead?.first_name,
     context?.lead?.last_name,
-    // Callers that hold names outside a customer/lead record (the gap
-    // reports collector's resolved task targets) pass them here.
+    // Callers that hold names outside a customer/lead record pass them here.
     ...(Array.isArray(context?.names) ? context.names : []),
   ].map((item) => String(item || '').trim()).filter((item) => item.length >= 3);
 
