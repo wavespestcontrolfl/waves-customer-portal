@@ -27,9 +27,19 @@ function makeDbMock() {
     };
     return chain;
   });
-  dbMock.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  dbMock.raw = jest.fn((sql, bindings = []) => ({ __raw: sql, bindings }));
   dbMock._updates = updates;
   return dbMock;
+}
+
+// The runner records a retry marker with one atomic jsonb_set write; the
+// marker key and its JSON payload ride as the raw expression's bindings.
+function retryMarkerWrites(dbMock, marker) {
+  return dbMock._updates
+    .filter((u) => u.table === 'opportunity_queue')
+    .map((u) => u.patch.signal_metadata)
+    .filter((m) => m && Array.isArray(m.bindings) && m.bindings[0] === marker)
+    .map((m) => JSON.parse(m.bindings[1]));
 }
 
 const IN_WALL = {
@@ -380,10 +390,9 @@ describe('PR codex r16 — one retry, every finding', () => {
     expect(result.outcome).toBe('deferred_gate_retry');
     expect(result.skip_reason).toBe('content_guardrails_failed');
     expect(result.reviewer_notes).toMatch(/topic targeting also failed: P0 TOPIC_GEO_STATEWIDE/);
-    const retry = dbMock._updates.map((u) => u.patch)
-      .find((p) => p.signal_metadata?.__raw?.includes('jsonb_set'));
+    const [retry] = retryMarkerWrites(dbMock, 'gate_retry');
     expect(retry).toBeDefined();
-    const codes = JSON.parse(retry.signal_metadata.bindings[0]).findings.map((f) => f.code);
+    const codes = retry.findings.map((f) => f.code);
     expect(codes).toEqual(expect.arrayContaining(['PRICE_CLAIM', 'TOPIC_GEO_STATEWIDE']));
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
   });
@@ -403,7 +412,7 @@ describe('post-draft topic-gate ENGINE failure parks for review (hook, PR codex 
     expect(result.skip_reason).toBe('topic_targeting_unavailable');
     expect(queue.skip).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
     expect(queue.defer).not.toHaveBeenCalled();
-    expect(dbMock._updates.map((u) => u.patch).some((p) => p.signal_metadata?.__raw?.includes('jsonb_set'))).toBe(false);
+    expect(retryMarkerWrites(dbMock, 'gate_retry')).toEqual([]);
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_TARGETING_ERROR');
   });
 });
