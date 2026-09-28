@@ -107,18 +107,31 @@ function buildDashboard(rows, queries) {
     }
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
+  // "missing" (next to noAnswer): expected active-question x configured-engine
+  // pairs the fixed benchmark should have produced a measured observation for
+  // in this window, minus the pairs that actually did. "Configured engine"
+  // is read off what actually probed in the window (grid's platform set),
+  // not env presence, so a provider outage/removal shows up as gap growth
+  // rather than a silent drop in the denominator.
+  const activeQuestionCount = benchmark.questions.filter(q => managed.has(q.query)).length;
+  const configuredEngines = [...new Set(grid.map(row => row.llm_platform))];
+  const observedFixedPairs = new Set(fixed.filter(isMeasuredAnswer).map(row => `${row.query}::${row.llm_platform}`));
+  const expectedObservations = activeQuestionCount * configuredEngines.length;
+  const missing = Math.max(0, expectedObservations - observedFixedPairs.size);
   return {
     summary: {
       ...summarizeObservations(grid),
       queriesTracked: new Set(grid.map(row => row.query)).size,
-      platforms: [...new Set(grid.map(row => row.llm_platform))],
+      platforms: configuredEngines,
     },
     benchmark: {
       version: benchmark.version,
       questions: benchmark.questions.length,
-      activeQuestions: benchmark.questions.filter(q => managed.has(q.query)).length,
+      activeQuestions: activeQuestionCount,
       observedQuestions: new Set(fixed.filter(isMeasuredAnswer).map(row => row.query)).size,
       ...summarizeObservations(fixed),
+      expectedObservations,
+      missing,
       byPlatform: observationGroups(fixed, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
       byCity: observationGroups(fixed, row => row.city),
       byIntent: observationGroups(fixed, row => row.intent),

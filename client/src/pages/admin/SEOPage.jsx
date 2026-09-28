@@ -2035,6 +2035,14 @@ function BacklinksTab() {
                 </div>
                 <div>
                   <div className="text-ui-body text-ink-secondary">
+                    Recommended rate
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.benchmark.recommendedRate)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
                     Questions observed
                   </div>
                   <div className="text-[24px] text-zinc-900">
@@ -2045,14 +2053,64 @@ function BacklinksTab() {
               </div>
               <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
                 {llmDash.benchmark.activeQuestions} questions active ·{" "}
-                {llmDash.benchmark.measured} measured answers. Excluded:{" "}
-                {llmDash.benchmark.legacy} legacy, {llmDash.benchmark.noAnswer}{" "}
-                no answer, {llmDash.benchmark.unresolved} unresolved. Historical
+                {llmDash.benchmark.measured} measured answers. Recommended
+                counts a mentioned answer with positive sentiment ranked in
+                the top 3 brands. Excluded: {llmDash.benchmark.legacy} legacy,{" "}
+                {llmDash.benchmark.noAnswer} no answer,{" "}
+                {llmDash.benchmark.unresolved} unresolved,{" "}
+                {llmDash.benchmark.missing ?? 0} missing (expected
+                question×engine pairs with no observation yet, of{" "}
+                {llmDash.benchmark.expectedObservations ?? 0}). Historical
                 observations used a different citation method. Compare the same
                 questions and model in repeat runs. This view uses the latest
                 observations within 30 days; sampling dates may differ by
                 engine.
               </p>
+            </UiCard>
+          )}
+          {llmDash?.citedUrlHealth && (
+            <UiCard className="p-6">
+              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+                Owned page health
+              </h3>
+              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
+                Daily check of every owned URL an answer engine cited in the
+                last 30 days — a citation with no live page behind it is worse
+                than no citation. {llmDash.citedUrlHealth.checked} checked
+                {llmDash.citedUrlHealth.lastCheckedOn
+                  ? ` (last: ${llmDash.citedUrlHealth.lastCheckedOn})`
+                  : ""}
+                , {llmDash.citedUrlHealth.bad} broken.
+              </p>
+              {llmDash.citedUrlHealth.badUrls.length === 0 ? (
+                <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
+                  No broken owned URLs detected.
+                </p>
+              ) : (
+                llmDash.citedUrlHealth.badUrls.map((b) => (
+                  <div
+                    key={b.url}
+                    className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+                  >
+                    <a
+                      href={b.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 break-words"
+                    >
+                      {b.url}
+                    </a>
+                    <div className="text-ink-secondary">
+                      {b.verdict}
+                      {b.finalUrl && b.finalUrl !== b.url
+                        ? ` · final: ${b.finalUrl}`
+                        : ""}{" "}
+                      · cited {b.citationCount}x · checked{" "}
+                      {b.lastCheckedOn}
+                    </div>
+                  </div>
+                ))
+              )}
             </UiCard>
           )}
           <AeoRateTable

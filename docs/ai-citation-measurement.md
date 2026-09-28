@@ -8,6 +8,14 @@ Version 2 stores `measurement_version`, `answer_available`, `citations_complete`
 
 The current grid takes the latest observation for each question, engine, and reported model within 30 days. The daily benchmark history uses the observations on each date. Custom queries stay outside the fixed benchmark. Always compare equivalent question and engine/model cohorts, with the measured and excluded counts visible.
 
+### Recommended and missing (additive, 2026-09-27)
+
+`recommended` sits next to `mentioned`/`cited` in both the sitewide summary and the fixed-benchmark block: a measured answer counts when Waves is mentioned, the light sentiment pass (`classifySentiment`) scored it `positive`, and `rank_position` — the 1-indexed order Waves' first mention appears among Waves + the hardcoded `COMPETITORS` list in `llm-mention-prober.js`'s `parse()` — is 1, 2, or 3. Same denominator as mentioned/cited (measured answers), so all three rates stay comparable; `recommendedRate` is the numerator/denominator pair the panel renders. This is a proxy for "would this answer actually steer a prospect to Waves", not a claim about a consumer-facing ranked list — no answer engine in this cohort returns an explicit rank.
+
+`missing` sits next to `noAnswer` in the fixed-benchmark block only: the gap between the pairs the cohort *should* have produced a measured observation for in the window (active benchmark questions x engines that actually probed at least one managed query in the window) and the pairs that actually have one. `expectedObservations` is the denominator. A rotating daily attempt window (see below) means a healthy, fully-configured cohort still carries some `missing` most days — it is a coverage gauge, not a failure count on its own; watch its trend, not a single day's value.
+
+Both fields are purely additive: every existing field name and denominator (`mentioned`, `cited`, `mentionRate`, `citationRate`, `noAnswer`, `unresolved`, `legacy`) is unchanged.
+
 - OpenAI: `url_citation` annotations. The dedicated `gpt-5-search-api` Chat Completions model replaces the retired 4o search preview, which returned 404 during preflight; `OPENAI_MENTIONS_MODEL` remains configurable. Each reported model stays in its own cohort. [Official web-search response documentation](https://developers.openai.com/api/docs/guides/tools-web-search)
 - Gemini: grounding support indexes linking an answer segment to a chunk. Chunk lists alone are source pools. Known Google redirect URLs are resolved without requesting the destination or forwarding credentials. [Google grounding documentation](https://ai.google.dev/gemini-api/docs/google-search)
 - Claude: citations attached to answer text blocks. Thinking and refusal blocks are excluded. [Anthropic web search](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool)
@@ -49,3 +57,23 @@ The September 7 pre-publication API baseline is recorded in [the summary](aeo-ba
 The run used staging provider credentials with a dedicated QA database in codex-dev; no production database was accessed. The retired OpenAI search default was replaced after a 404 preflight. Original local credentials had failed authentication. Raw answer evidence remains in the task's local evidence bundle; no customer or credential payload is committed.
 
 Consumer-interface observations are recorded separately in the companion tracker. Google Search, ChatGPT and Perplexity access challenges and Copilot regional unavailability must not be counted as citation misses. The signed-out Gemini sample uses its displayed Flash-Lite mode, separately from the Gemini API model.
+
+## 2026-09-27 grid snapshot
+
+[The current admin-dashboard grid](aeo-grid-2026-09-27.csv) — the latest observation per question x engine within 30 days, same columns as the September 7 baseline above — now carries five engines including Perplexity `sonar`: 196 measured (answer-available, citations-complete) of 200 attempted, 105 with an owned link, 30 with the brand named.
+
+This is **not like-for-like** with the September 7 four-engine baseline: Perplexity was unconfigured then and is measured now, so the pooled totals cannot be diffed as before/after movement on the same cohort. A true comparison holds question, engine and model fixed and compares matching rows only. No causal claim is made about anything shipped between the two snapshots — this is a coverage/composition note, not an improvement measurement.
+
+## Owned cited-URL health check
+
+A citation with no live page behind it is worse than no citation — motivating case: `bradentonflpestcontrol.com/pest-control-costs/` was cited 39x/30d while it had gone 301→404, unnoticed. `server/services/seo/owned-url-health.js` runs daily at 3:45am ET (behind `GATE_SEO_INTELLIGENCE`, right after the 3:00am mention probe): it collects the distinct owned URLs cited in `seo_llm_mentions.waves_cited_urls` over the trailing 30 days, fetches each with a SAFE, allowlisted fetcher (hub + the 16 fleet spoke domains only, https, every redirect hop re-validated against that allowlist before it is requested, private/internal IPs blocked on the real socket connection, ~10s timeout, ~1.5MB cap, concurrency ≤3), and classifies the result past the bare HTTP status:
+
+- `ok` / `redirect_ok` — live; `redirect_ok` is specifically a 301/308 chain landing on an ok page
+- `soft_404` — a 2xx response rendering a not-found template (title/body markers; the Astro fleet's own `404.astro` renders "Page Not Found" with `robots=noindex,nofollow`)
+- `not_found` / `server_error` — 404/410, or 5xx
+- `challenge` — a bot/login/rate-limit interstitial (401/403/429, or a Cloudflare-style challenge page)
+- `noindex` — meta robots or `X-Robots-Tag` says noindex
+- `canonical_elsewhere` — the page's own `rel=canonical` normalizes to a different URL than where the chain landed
+- `fetch_blocked` — timeout/DNS/TLS/size/disallowed-host; **never** reported as `not_found`, so a checker outage never reads as "the page is gone"
+
+Results persist to `seo_owned_url_health` (one row per URL per day; migration `20260928020000_seo_owned_url_health.js`). The dashboard's `citedUrlHealth` block (checked count, bad count, the bad URLs with verdict/final URL/citation count/last-checked date) renders in the LLM Mentions panel, and a FIX ops-digest item posts (via the same `deliverOpsDigest` seam every other watcher uses, in-app under `GATE_OPS_DIGESTS_IN_APP` or email otherwise) whenever the bad count is above zero, retiring on the next clean run.

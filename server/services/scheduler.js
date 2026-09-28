@@ -1934,6 +1934,24 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:45AM — Owned cited-URL health check. Runs after the 3:00AM probe
+  // so it can see that day's freshly-recorded citations; fetches every owned
+  // URL an answer engine cited in the last 30 days and flags a silent break
+  // (owner finding 2026-09-27: a 39x/30d-cited page had gone 301->404).
+  // runExclusive: a deploy-overlap or slow prior tick must not double-check
+  // (and double-digest) the same day.
+  cron.schedule('45 3 * * *', async () => {
+    if (!isEnabled('seoIntelligence')) return;
+    logger.info('Running: Owned cited-URL health check');
+    try {
+      await runExclusive('owned-url-health-check', async () => {
+        const { runOwnedUrlHealthCheck } = require('./seo/owned-url-health');
+        const result = await runOwnedUrlHealthCheck();
+        logger.info(`[owned-url-health] checked=${result.checked} bad=${result.bad}`);
+      });
+    } catch (err) { logger.error(`Owned cited-URL health check failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
   // competitors' ranked keywords from DataForSEO Labs, diffs against our
   // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners

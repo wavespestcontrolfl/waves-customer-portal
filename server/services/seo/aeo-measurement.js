@@ -62,17 +62,31 @@ function citationMatchesPage(citation, page) {
   } catch { return false; }
 }
 
+// A "recommended" answer is the bar above a bare mention: Waves is named,
+// portrayed positively, and ranks in the top 3 brands the answer surfaces
+// (rank_position is 1-indexed order of first appearance among Waves +
+// COMPETITORS in llm-mention-prober.js's parse()). Same denominator as
+// mentioned/cited (measured answers) so the three rates stay comparable.
+function isRecommendedAnswer(row) {
+  return row.waves_mentioned === true
+    && row.sentiment === 'positive'
+    && Number.isInteger(row.rank_position) && row.rank_position >= 1 && row.rank_position <= 3;
+}
+
 function summarizeObservations(rows) {
   const measured = rows.filter(isMeasuredAnswer);
   const cited = measured.filter(row => ownedCitations(row).length > 0).length;
   const mentioned = measured.filter(row => row.waves_mentioned === true).length;
+  const recommended = measured.filter(isRecommendedAnswer).length;
   return {
     total: rows.length,
     measured: measured.length,
     mentioned,
     cited,
+    recommended,
     mentionRate: measured.length ? Math.round(100 * mentioned / measured.length) : null,
     citationRate: measured.length ? Math.round(100 * cited / measured.length) : null,
+    recommendedRate: measured.length ? Math.round(100 * recommended / measured.length) : null,
     legacy: rows.filter(row => row.measurement_version !== MEASUREMENT_VERSION).length,
     noAnswer: rows.filter(row => row.measurement_version === MEASUREMENT_VERSION && row.answer_available === false).length,
     unresolved: rows.filter(row => row.measurement_version === MEASUREMENT_VERSION
@@ -80,4 +94,4 @@ function summarizeObservations(rows) {
   };
 }
 
-module.exports = { MEASUREMENT_VERSION, observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage, summarizeObservations };
+module.exports = { MEASUREMENT_VERSION, observationDate, asJsonArray, cleanUrls, isOwnedUrl, isMeasuredAnswer, ownedCitations, citationMatchesPage, isRecommendedAnswer, summarizeObservations };

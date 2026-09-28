@@ -52,7 +52,7 @@ test('rates exclude legacy, no-answer and unresolved evidence rather than record
     measured(), measured({ measurement_version: null, waves_mentioned: true, waves_cited_urls: [WAVES] }),
     measured({ answer_available: false }), measured({ citations_complete: false }),
   ]);
-  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, mentionRate: 33, citationRate: 33, legacy: 1, noAnswer: 1, unresolved: 1 });
+  expect(result).toEqual({ total: 6, measured: 3, mentioned: 1, cited: 1, recommended: 0, mentionRate: 33, citationRate: 33, recommendedRate: 0, legacy: 1, noAnswer: 1, unresolved: 1 });
   expect(summarizeObservations([])).toMatchObject({ citationRate: null, mentionRate: null });
 });
 
@@ -95,6 +95,33 @@ test('the frozen benchmark excludes custom queries and does not blend provider m
   expect(dashboard.benchmark.byPlatform).toHaveLength(2);
   expect(dashboard.grid[0].target_cited).toBe(true);
   expect(dashboard.summary.measured).toBe(3);
+});
+
+test('recommended counts a mentioned, positively-sentimented, top-3-ranked answer; missing counts unobserved question x engine pairs', () => {
+  const question2 = benchmark.questions[1].query;
+  const rows = [
+    // Q1 on chatgpt: mentioned + positive + rank 1 -> recommended.
+    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 1 }),
+    // Q1 on gemini: mentioned but negative sentiment -> not recommended.
+    measured({ llm_platform: 'gemini', waves_mentioned: true, sentiment: 'negative', rank_position: 1 }),
+    // Q2 on chatgpt: mentioned + positive but rank 4 (outside top 3) -> not recommended.
+    measured({ query: question2, waves_mentioned: true, sentiment: 'positive', rank_position: 4 }),
+  ];
+  const dashboard = buildDashboard(rows, benchmark.questions);
+  // 40 active questions x 2 configured engines (chatgpt, gemini) = 80 expected
+  // pairs; observed pairs are Q1::chatgpt, Q1::gemini, Q2::chatgpt = 3.
+  expect(dashboard.benchmark).toMatchObject({
+    activeQuestions: 40, measured: 3, recommended: 1, recommendedRate: 33,
+    expectedObservations: 80, missing: 77,
+  });
+  expect(dashboard.summary).toMatchObject({ measured: 3, recommended: 1 });
+});
+
+test('missing never goes negative when every expected pair is observed', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()];
+  const dashboard = buildDashboard(rows, oneQuestion);
+  expect(dashboard.benchmark).toMatchObject({ activeQuestions: 1, expectedObservations: 1, missing: 0 });
 });
 
 test('Gemini attributes only supported chunks and ignores thinking text', async () => {
