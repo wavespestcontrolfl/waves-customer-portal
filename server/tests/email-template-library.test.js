@@ -5,6 +5,9 @@ jest.mock('../services/sendgrid-mail', () => ({
   newsletterGroupId: jest.fn(() => 101),
   serviceGroupId: jest.fn(() => 202),
   sendOne: jest.fn(),
+  // The shared annual-offer guard (sendOne's own pre-provider decision) —
+  // preflightTemplateSend calls it directly; default = not withheld.
+  applyAnnualOfferGuard: jest.fn(async ({ html, text, estimateIds }) => ({ sendHtml: html, sendText: text, sendEstimateIds: estimateIds })),
   isDefiniteRejection: jest.fn((err) => [400, 401, 403, 404, 405, 413, 415, 422, 429]
     .includes(Number(err?.status))),
 }));
@@ -2581,6 +2584,48 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
     });
 
     expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'Suppressed: unsubscribe' }));
+  });
+
+  // codex P2 round 5 on #5154: the annual-offer guard is the SAME function
+  // sendOne runs at the live provider boundary, not a narrower mirror.
+  test('runs the shared annual-offer guard with the send\'s estimate id and template key; a withheld offer blocks', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.applyAnnualOfferGuard.mockRejectedValueOnce(annualOfferWithheldError('est-1'));
+
+    const result = await EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      estimateId: 'est-1',
+    });
+
+    expect(sendgrid.applyAnnualOfferGuard).toHaveBeenCalledWith(expect.objectContaining({
+      estimateIds: ['est-1'],
+      templateKey: 'estimate.expiring_notice',
+      html: expect.stringContaining('https://example.com/estimate/est-1'),
+    }));
+    expect(result).toEqual({ ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a guard LOOKUP failure is not a verdict — it is rethrown for the caller, never read as ok or blocked', async () => {
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.applyAnnualOfferGuard.mockRejectedValueOnce(annualOfferGuardFailedError());
+
+    await expect(EmailTemplates.preflightTemplateSend({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/estimate/est-1', expires_at: 'June 12' },
+      estimateId: 'est-1',
+    })).rejects.toMatchObject({ annualOfferGuardFailed: true });
   });
 
   test('blocks (ok:false) a missing template', async () => {

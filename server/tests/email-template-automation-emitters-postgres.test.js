@@ -15,7 +15,14 @@
  *  - the attempts ceiling's single-statement CASE really reads the
  *    PRE-update attempts value (Postgres SET semantics), and the sweep's
  *    ORDER BY attempts, occurred_at really puts a fresh marker ahead of an
- *    older, repeatedly failing one (pre-push audit P1).
+ *    older, repeatedly failing one (pre-push audit P1);
+ *  - a FAILED marker insert inside the caller's transaction is isolated by
+ *    a savepoint — Postgres aborts the whole transaction on a failed
+ *    statement even when JS catches it, so only a real transaction can
+ *    show the caller's transition still commits (codex P1 round 5);
+ *  - the customer email fan-out's jsonb predicates really retarget a
+ *    pending estimate.expired marker to the corrected address, and leave
+ *    another customer's / a settled marker alone (codex P1 round 5).
  */
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -28,6 +35,7 @@ jest.mock('../config/feature-gates', () => ({
   emailTemplateAutomationsMode: jest.fn(() => 'live'),
 }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, fn) => fn()) }));
+jest.mock('../services/newsletter-confirm', () => ({ sendConfirmationEmail: jest.fn(async () => true) }));
 jest.mock('../services/email-template-automation-executor', () => ({
   processTrigger: jest.fn(async () => ({ automation_count: 1, results: [] })),
 }));
@@ -136,6 +144,94 @@ jest.mock('../services/email-template-automation-executor', () => ({
       expect(markerAfter.entity_id).toBe(reviewId);
     } finally {
       await cleanup({ customerIds: [customerId], reviewIds: [reviewId], markerIds: markerId ? [markerId] : [] });
+    }
+  });
+
+  // codex P1 round 5: a caught insert failure must not poison the caller's
+  // transaction. entity_id is varchar(120), so a 200-char id makes the
+  // marker insert itself fail inside the real transaction.
+  test('a FAILED marker insert rolls back only its savepoint — the caller keeps running and its transition commits', async () => {
+    const customerId = await makeCustomer();
+    const reviewId = randomUUID();
+    await db('google_reviews').insert({
+      id: reviewId, location_id: 'venice', star_rating: 5, customer_id: null,
+    });
+
+    try {
+      await db.transaction(async (trx) => {
+        await trx('google_reviews').where({ id: reviewId }).update({ customer_id: customerId });
+        const intent = await emitters.recordAutomationIntent(trx, {
+          triggerEventKey: 'review.linked_5star',
+          entityType: 'review',
+          entityId: 'x'.repeat(200),
+          occurredAt: new Date(),
+          payload: { review_id: reviewId, customer_id: customerId, star_rating: 5 },
+        });
+        expect(intent).toBeNull();
+        const batch = await emitters.recordAutomationIntents(trx, [{
+          triggerEventKey: 'estimate.expired', entityType: 'estimate', entityId: 'y'.repeat(200), occurredAt: new Date(), payload: {},
+        }]);
+        expect(batch).toEqual([]);
+        // Without the savepoint this statement fails with "current
+        // transaction is aborted, commands ignored until end of
+        // transaction block".
+        const midTrx = await trx('google_reviews').where({ id: reviewId }).first('customer_id');
+        expect(midTrx.customer_id).toBe(customerId);
+      });
+
+      const reviewAfter = await db('google_reviews').where({ id: reviewId }).first();
+      expect(reviewAfter.customer_id).toBe(customerId); // the attribution committed
+    } finally {
+      await cleanup({ customerIds: [customerId], reviewIds: [reviewId] });
+    }
+  });
+
+  // codex P1 round 5: a pending estimate.expired marker snapshots the
+  // estimate's customer_email; the fan-out skips the now-expired estimate
+  // row itself, so it must retarget the marker or the replay mails the old
+  // address. Run inside a transaction that is rolled back — no residue.
+  test('the customer email fan-out retargets only this customer\'s still-pending, old-address intent markers', async () => {
+    const { propagateCustomerEmailChange } = require('../services/customer-email-fanout');
+    const customerId = await makeCustomer();
+    const otherCustomerId = randomUUID();
+    const occurredAt = new Date(Date.now() - 10 * 60 * 1000);
+    const marker = (id, status, payload) => ({
+      id, trigger_event_key: 'estimate.expired', entity_type: 'estimate', entity_id: `est-${id.slice(0, 8)}`,
+      occurred_at: occurredAt, status, payload: JSON.stringify(payload),
+    });
+    const pendingId = randomUUID();
+    const processedId = randomUUID();
+    const tenantId = randomUUID();
+    const strangerId = randomUUID();
+    const rollback = new Error('rollback the fan-out proof');
+
+    try {
+      await expect(db.transaction(async (trx) => {
+        await trx('email_template_automation_intents').insert([
+          marker(pendingId, 'pending', { id: 'est-a', customer_id: customerId, customer_email: 'Old.Typo@example.com', category: 'pest' }),
+          marker(processedId, 'processed', { id: 'est-b', customer_id: customerId, customer_email: 'old.typo@example.com' }),
+          marker(tenantId, 'pending', { id: 'est-c', customer_id: customerId, customer_email: 'tenant@example.com' }),
+          marker(strangerId, 'pending', { id: 'est-d', customer_id: otherCustomerId, customer_email: 'old.typo@example.com' }),
+        ]);
+
+        const counts = await propagateCustomerEmailChange({
+          before: { id: customerId, email: 'old.typo@example.com' },
+          after: { id: customerId, email: 'fixed@example.com' },
+        }, trx);
+        expect(counts.templateRuns).toBe(1);
+
+        const rows = await trx('email_template_automation_intents')
+          .whereIn('id', [pendingId, processedId, tenantId, strangerId]).select('id', 'payload');
+        const emailOf = (id) => rows.find((r) => r.id === id).payload.customer_email;
+        expect(emailOf(pendingId)).toBe('fixed@example.com');
+        expect(rows.find((r) => r.id === pendingId).payload).toMatchObject({ id: 'est-a', category: 'pest', customer_id: customerId });
+        expect(emailOf(processedId)).toBe('old.typo@example.com'); // settled: audit trail, untouched
+        expect(emailOf(tenantId)).toBe('tenant@example.com'); // its own address, not the customer's old one
+        expect(emailOf(strangerId)).toBe('old.typo@example.com'); // another customer's marker
+        throw rollback;
+      })).rejects.toBe(rollback);
+    } finally {
+      await cleanup({ customerIds: [customerId], markerIds: [pendingId, processedId, tenantId, strangerId] });
     }
   });
 

@@ -293,6 +293,21 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
   });
 
+  // codex P2 round 5 — the executor's recipient lookup FAILING (503,
+  // AUTOMATION_RECIPIENT_LOOKUP_FAILED) is transient, unlike a customer that
+  // resolves no address (400 / AUTOMATION_RECIPIENT_EMAIL_REQUIRED).
+  test('a failed recipient lookup (503) keeps a review marker pending for the sweep', async () => {
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(Object.assign(
+      new Error('recipient email lookup failed: connection terminated'),
+      { status: 503, code: 'AUTOMATION_RECIPIENT_LOOKUP_FAILED', retryable: true },
+    ));
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitReviewLinked5Star({ reviewId: 'rev-1', customerId: 'cust-1', locationId: 'venice', starRating: 5 }, 'intent-1');
+
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
+  });
+
   // codex P1 round 4 — the executor's off-mode no-op evaluated nothing, so
   // it must never settle the marker 'processed' (covers a mode flip between
   // the emitter's gate read and the executor's own).

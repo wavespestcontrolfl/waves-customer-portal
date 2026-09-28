@@ -193,6 +193,47 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
   }, intentId);
 }
 
+// Best-effort marker insert, isolated from the caller's transaction (codex
+// P1 round 5 on #5154). In Postgres a failed statement aborts the WHOLE
+// enclosing transaction even when the JS error is caught — so a bare insert
+// that failed here (the intents table unavailable mid-rollout, a constraint
+// surprise) would either roll back the caller's lifecycle transition (the
+// estimate-expiry flip, the review attribution) at COMMIT, or leave the
+// caller running further statements on an aborted transaction. A nested
+// knex transaction is a SAVEPOINT: a failure rolls back only the marker
+// insert and the caller's transition commits normally — the same isolation
+// logRunEvent (email-template-automation-executor.js) already uses for its
+// best-effort event rows.
+//
+// Losing a marker this way is a DELIBERATE, logged degradation, not a silent
+// one: the marker is only the RECOVERY record. The direct emitter still runs
+// right after the caller's commit (with no marker id, exactly as a caller
+// with no outbox behaves), so the event is still delivered on the normal
+// path; what is lost is only the sweep's retry should that direct emit ALSO
+// fail. Failing the business transition (an estimate that never expires, a
+// review that never attributes) over its automation bookkeeping would be the
+// worse outcome — the automation catalog ships dark and is a secondary
+// consumer of these transitions.
+async function insertIntentRows(conn, rows) {
+  const insert = (c) => c('email_template_automation_intents')
+    .insert(rows)
+    .onConflict(['trigger_event_key', 'entity_id', 'occurred_at'])
+    .ignore()
+    .returning(['id', 'entity_id']);
+  if (conn && conn.isTransaction) return conn.transaction((sp) => insert(sp));
+  return insert(conn || db);
+}
+
+function intentRow({ triggerEventKey, entityType, entityId, occurredAt, payload }) {
+  return {
+    trigger_event_key: triggerEventKey,
+    entity_type: entityType,
+    entity_id: String(entityId),
+    occurred_at: occurredAt || new Date(),
+    payload: JSON.stringify(payload || {}),
+  };
+}
+
 // Records ONE durable intent marker for a transition — called by a
 // transition's OWN transaction (conn = that trx), before any further
 // processing, so a rollback of the transition rolls back the marker too.
@@ -200,44 +241,23 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
 // occurred_at) values a real caller passes are unique per call in practice
 // (occurred_at is that call's own `now`), so a genuine conflict only means
 // the exact same transition was already durably recorded.
-async function recordAutomationIntent(conn, {
-  triggerEventKey, entityType, entityId, occurredAt, payload,
-}) {
+async function recordAutomationIntent(conn, entry) {
   try {
-    const rows = await conn('email_template_automation_intents')
-      .insert({
-        trigger_event_key: triggerEventKey,
-        entity_type: entityType,
-        entity_id: String(entityId),
-        occurred_at: occurredAt || new Date(),
-        payload: JSON.stringify(payload || {}),
-      })
-      .onConflict(['trigger_event_key', 'entity_id', 'occurred_at'])
-      .ignore()
-      .returning(['id', 'entity_id']);
+    const rows = await insertIntentRows(conn, intentRow(entry));
     return (rows && rows[0]) || null;
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] failed to record intent for ${triggerEventKey}/${entityId}: ${safeErrorText(err)}`);
+    logger.warn(`[email-template-automation-emitters] failed to record intent for ${entry.triggerEventKey}/${entry.entityId}: ${safeErrorText(err)}`);
     return null;
   }
 }
 
 // Batch version — estimate-expiration.js flips many rows in one statement;
-// this records all of their markers in that SAME transaction in one insert.
+// this records all of their markers in that SAME transaction in one insert
+// (one savepoint: a failure loses the batch's markers, never the flip).
 async function recordAutomationIntents(conn, entries) {
   if (!entries || !entries.length) return [];
   try {
-    return await conn('email_template_automation_intents')
-      .insert(entries.map((e) => ({
-        trigger_event_key: e.triggerEventKey,
-        entity_type: e.entityType,
-        entity_id: String(e.entityId),
-        occurred_at: e.occurredAt || new Date(),
-        payload: JSON.stringify(e.payload || {}),
-      })))
-      .onConflict(['trigger_event_key', 'entity_id', 'occurred_at'])
-      .ignore()
-      .returning(['id', 'entity_id']);
+    return await insertIntentRows(conn, entries.map(intentRow));
   } catch (err) {
     logger.warn(`[email-template-automation-emitters] failed to record intents: ${safeErrorText(err)}`);
     return [];

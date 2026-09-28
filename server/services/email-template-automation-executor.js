@@ -430,6 +430,7 @@ async function resolveEmailForTrigger(eventKey, payload, recipient) {
   if (already) return payload;
   const customerId = cleanString(recipient?.id || firstDefined(payload, mapping.recipientIdKeys), '');
   if (!customerId) return payload;
+  let row;
   try {
     // Live customers only (pre-push audit P1) — the same whereNull('deleted_at')
     // predicate every customer-addressed sender uses (automation-enroll.js's
@@ -437,11 +438,25 @@ async function resolveEmailForTrigger(eventKey, payload, recipient) {
     // merged-away customer resolves NO address, so recipientFor's
     // recipient-email-required error skips the trigger instead of mailing a
     // retired record.
-    const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
-    if (row && row.email) return { ...payload, customer_email: row.email };
+    row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
   } catch (err) {
-    logger.warn(`[email-template-automation] recipient email lookup failed for ${eventKey} customer ${customerId}: ${scrubSentryText(err && err.message ? err.message : err)}`);
+    // A FAILED lookup is not "this customer has no email" (codex P2 round 5
+    // on #5154): swallowing it let recipientFor raise the deterministic
+    // AUTOMATION_RECIPIENT_EMAIL_REQUIRED (status 400), which the lifecycle
+    // emitter settles 'unrecoverable' on first sight — one DB hiccup
+    // permanently lost the event. Rethrown as a TRANSIENT error (status
+    // 503, its own code, never 400) so every caller's retry path handles it
+    // like any other infrastructure failure: the emitter counts a failed
+    // attempt and the intent sweep replays the marker.
+    const safe = scrubSentryText(err && err.message ? err.message : err);
+    logger.warn(`[email-template-automation] recipient email lookup failed for ${eventKey} customer ${customerId}: ${safe}`);
+    throw Object.assign(new Error(`recipient email lookup failed: ${safe}`), {
+      status: 503,
+      code: 'AUTOMATION_RECIPIENT_LOOKUP_FAILED',
+      retryable: true,
+    });
   }
+  if (row && row.email) return { ...payload, customer_email: row.email };
   return payload;
 }
 
@@ -1320,17 +1335,28 @@ function recipientDomain(email) {
 function recipientHash(email) {
   return crypto.createHash('sha256').update(String(email || '').trim().toLowerCase()).digest('hex').slice(0, 12);
 }
+// Delivery-guards slice (re-cut of #4569): an estimate-triggered automation
+// run (auto-renew's estimate.auto_renewed, expiring reminders, etc.) shares
+// the same chokepoint every other estimate sender routes through — this
+// executor is generic across entity types, so only an 'estimate' run carries
+// its id through. ONE function for both the live send (dispatchRun) and the
+// shadow preflight, so the two always guard the same estimate.
+function annualGuardArgsFor(run) {
+  return run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {};
+}
+
 // Runs the SAME pre-provider checks dispatchRun's sendTemplate call would
 // hit (codex P2): disabled/missing template, required-variable validation,
-// and recipient suppression. A block records the same audit-safe would_send
-// metadata under event type 'would_block' with the library's own reason
-// instead of finalizing 'shadow' — a suppressed recipient or an invalid
-// template no longer counts as rollout-readiness evidence it isn't. Never
-// calls the provider, never writes email_messages, never throws into the
-// caller: a preflight infrastructure hiccup (not a real block) fails OPEN
-// to would_send, same posture as every other best-effort check in this
-// file — an evidence-collection bug must not make shadow mode itself
-// unreliable.
+// recipient suppression, and the estimate annual-offer guard. A block
+// records the same audit-safe would_send metadata under event type
+// 'would_block' with the library's own reason instead of finalizing
+// 'shadow' — a suppressed recipient, an invalid template or a withheld
+// annual offer no longer counts as rollout-readiness evidence it isn't.
+// Never calls the provider, never writes email_messages, never throws into
+// the caller: a preflight infrastructure hiccup (not a real block — the
+// annual guard's own lookup failing included) fails OPEN to would_send,
+// same posture as every other best-effort check in this file — an
+// evidence-collection bug must not make shadow mode itself unreliable.
 async function shadowPreflight(run, executionPayload, automation) {
   try {
     return await EmailTemplates.preflightTemplateSend({
@@ -1339,6 +1365,11 @@ async function shadowPreflight(run, executionPayload, automation) {
       payload: executionPayload,
       to: run.recipient_email,
       suppressionGroupKey: automation.suppression_group_key || undefined,
+      // The same estimate id the live dispatchRun hands the annual-offer
+      // guard (codex P2 round 5) — preflightTemplateSend runs the guard
+      // itself (sendgrid-mail.js applyAnnualOfferGuard), so a withheld offer
+      // is a would_block here exactly as it is a block live.
+      ...annualGuardArgsFor(run),
     });
   } catch (err) {
     logger.warn(`[email-template-automation] shadow preflight failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
@@ -1421,12 +1452,7 @@ async function dispatchRun(run, automation, executionPayload) {
       suppressionGroupKey: automation.suppression_group_key || undefined,
       // Fires immediately before the provider call — the dispatch boundary.
       onQueued: () => { prepDispatched = true; },
-      // Delivery-guards slice (re-cut of #4569): an estimate-triggered
-      // automation run (auto-renew's estimate.auto_renewed, expiring
-      // reminders, etc.) shares the same chokepoint every other estimate
-      // sender routes through — this executor is generic across entity
-      // types, so only an 'estimate' run carries its id through.
-      ...(run.entity_type === 'estimate' && run.entity_id ? { estimateId: run.entity_id } : {}),
+      ...annualGuardArgsFor(run),
     });
     // Pre-push audit P1: a pre-dispatch abort (result.aborted — the annual
     // guard's own row lookup threw, or any other onQueued-style abort) is

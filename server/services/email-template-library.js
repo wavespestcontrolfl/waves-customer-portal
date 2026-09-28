@@ -1149,6 +1149,13 @@ function clearedProviderRetryState(message) {
   };
 }
 
+// The explicit estimate id(s) a send hands the annual-offer guard — shared by
+// sendTemplate and preflightTemplateSend so the live send and shadow
+// preflight guard the same ids.
+function guardEstimateIdsFor({ estimateId = null, estimateIds = null } = {}) {
+  return Array.isArray(estimateIds) && estimateIds.length ? estimateIds : (estimateId ? [estimateId] : []);
+}
+
 function assertTemplateSendable(template, { test = false } = {}) {
   if (test) return;
   const status = String(template?.status || 'active').toLowerCase();
@@ -1173,21 +1180,29 @@ function assertTemplateSendable(template, { test = false } = {}) {
 // would block or fail — this preflight lets shadow tell the difference.
 //
 // Deliberately NARROWER than sendTemplate's full guard set — sendTemplate
-// remains the single source of truth for the checks below (this mirrors
-// them; it does not call into sendTemplate, since sendTemplate's own
-// pre-dispatch block is entangled with per-attempt email_messages
-// bookkeeping (audit-issue writes, the message-level idempotency/in-flight
-// lookup) that only makes sense against a real dispatch attempt — pulling
-// this preflight INTO that flow risked destabilizing the codebase's most
-// heavily-hardened send path for a P2 shadow-accuracy improvement). Two
-// checks are intentionally NOT reproduced: the message-level idempotency
-// lookup against email_messages (a real-send concern; a shadow "would
-// this collide" answer has no meaning since shadow inserts no message),
-// and the estimate annual-offer guard (server/services/sendgrid-mail.js
-// sendOne, the true provider boundary — it reads state no earlier point
-// can see). Keep the checks below in sync BY HAND with sendTemplate's own
-// if either changes.
-async function preflightTemplateSend({ templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey } = {}) {
+// remains the single source of truth for the template/variable/suppression
+// checks below (this mirrors them; it does not call into sendTemplate,
+// since sendTemplate's own pre-dispatch block is entangled with per-attempt
+// email_messages bookkeeping (audit-issue writes, the message-level
+// idempotency/in-flight lookup) that only makes sense against a real
+// dispatch attempt). Keep those in sync BY HAND with sendTemplate's own if
+// either changes. The one check intentionally NOT reproduced is the
+// message-level idempotency lookup against email_messages (a real-send
+// concern; a shadow "would this collide" answer has no meaning since shadow
+// inserts no message).
+//
+// The estimate annual-offer guard is NOT mirrored — it is the SAME function
+// the live provider boundary runs (sendgrid-mail.js applyAnnualOfferGuard,
+// codex P2 round 5 on #5154), fed the same estimate ids
+// (guardEstimateIdsFor) and the same template key, over this preflight's
+// rendered content. A withheld verdict is a block (ok:false, code
+// ANNUAL_OFFER_WITHHELD — live sendTemplate returns blocked for it); the
+// guard's own lookup failure is NOT a verdict and is rethrown for the
+// caller to handle as an infrastructure error.
+async function preflightTemplateSend({
+  templateKey, versionId, expectedContentHash = null, payload, to, suppressionGroupKey,
+  estimateId = null, estimateIds = null, withheldLinkPolicy = null,
+} = {}) {
   if (!to) return { ok: false, reason: 'recipient email required' };
   let template;
   let version;
@@ -1237,6 +1252,18 @@ async function preflightTemplateSend({ templateKey, versionId, expectedContentHa
   const suppression = await activeSuppressionFor(template, to, suppressionGroupKey);
   if (suppression) {
     return { ok: false, reason: `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}` };
+  }
+  try {
+    await sendgrid.applyAnnualOfferGuard({
+      html: rendered.html,
+      text: rendered.text,
+      estimateIds: guardEstimateIdsFor({ estimateId, estimateIds }),
+      templateKey,
+      ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
+    });
+  } catch (err) {
+    if (err?.annualOfferWithheld) return { ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' };
+    throw err;
   }
   return { ok: true, template, version, rendered };
 }
@@ -1747,8 +1774,7 @@ async function sendTemplate({
     // (and any future sender) can carry an estimate link without ever
     // passing an id. sendOne's own content derivation covers that; this is
     // only the explicit addition.
-    const guardEstimateIds = Array.isArray(estimateIds) && estimateIds.length
-      ? estimateIds : (estimateId ? [estimateId] : []);
+    const guardEstimateIds = guardEstimateIdsFor({ estimateId, estimateIds });
     // dispatchToProvider is composed so a caller's own withProviderHandoff
     // (outermost) has already acquired its lock by the time sendOne's guard
     // reads a fresh row, whether or not a caller handoff is present at all

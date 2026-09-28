@@ -238,6 +238,29 @@ describe('propagateCustomerEmailChange', () => {
     expect(callSync.review_status).toBe('resolved');
   });
 
+  test('retargets a still-pending automation intent marker (estimate.expired replay) to the corrected address (#5154 codex P1 r5)', async () => {
+    const conn = makeConn({
+      email_template_automation_intents: {
+        rows: [{ id: 'intent-1', payload: { id: 'est-9', customer_id: 'cust-1', customer_email: 'chris.w.sample@example.com', category: 'pest' } }],
+      },
+    });
+    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(counts.templateRuns).toBe(1);
+    // Customer-linked, pending, still-old-address markers only.
+    const filters = conn.__calls.filter((c) => c.table === 'email_template_automation_intents');
+    expect(filters.find((c) => c.op === 'where').arg).toEqual({ status: 'pending' });
+    expect(filters.filter((c) => c.op === 'whereRaw').map((c) => c.arg.bindings)).toEqual(
+      expect.arrayContaining([['cust-1'], ['chris.w.sample@example.com']]),
+    );
+    const [intentSync] = conn.__updates('email_template_automation_intents');
+    expect(JSON.parse(intentSync.arg.payload)).toEqual({
+      id: 'est-9', customer_id: 'cust-1', customer_email: 'chriswsample@example.com', category: 'pest',
+    });
+    // The settle CAS re-asserts 'pending' so a replay that already settled the marker wins.
+    expect(conn.__calls.some((c) => c.table === 'email_template_automation_intents' && c.op === 'where'
+      && c.arg && c.arg.id === 'intent-1' && c.arg.status === 'pending')).toBe(true);
+  });
+
   test('matches copies by the OLD email only', async () => {
     const conn = makeConn();
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);

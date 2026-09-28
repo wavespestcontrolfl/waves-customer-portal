@@ -1620,6 +1620,37 @@ describe('email template automation executor', () => {
       }));
     });
 
+    // codex P2 round 5 on #5154: shadow preflight hands the annual-offer
+    // guard the SAME estimate id the live dispatchRun does (one shared
+    // helper), so a withheld offer is a would_block, not a false would_send.
+    test('an estimate run passes its estimate id to the preflight; a withheld annual offer records would_block', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      EmailTemplates.preflightTemplateSend.mockResolvedValueOnce({ ok: false, reason: 'annual_offer_withheld', code: 'ANNUAL_OFFER_WITHHELD' });
+      const queuedRun = run({ attempts: 0 });
+      const blockedRunQuery = chain({ returning: [{ ...queuedRun, status: 'skipped', exit_reason: 'annual_offer_withheld' }] });
+      const wouldBlockLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [
+          chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+          blockedRunQuery,
+        ],
+        email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] }), wouldBlockLogQuery],
+        estimates: [chain({ first: { id: 'est-1', status: 'sent' } })],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, {
+        automation: automation(),
+        now: new Date('2026-05-18T12:00:00.000Z'),
+      });
+
+      expect(result.status).toBe('skipped');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(EmailTemplates.preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-1' }));
+      const metadata = JSON.parse(wouldBlockLogQuery.insert.mock.calls[0][0].metadata);
+      expect(metadata.guard).toBe('ANNUAL_OFFER_WITHHELD');
+      expect(wouldBlockLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'would_block' }));
+    });
+
     test('a preflight infrastructure failure fails OPEN to would_send (never breaks shadow itself)', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
       EmailTemplates.preflightTemplateSend.mockRejectedValueOnce(new Error('db unavailable'));
@@ -1928,6 +1959,35 @@ describe('email template automation executor', () => {
 
       expect(lookup.where).toHaveBeenCalledWith({ id: 'cust-1' });
       expect(lookup.whereNull).toHaveBeenCalledWith('deleted_at');
+      expect(globalDbAccesses).not.toContain('email_template_automation_runs');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    // codex P2 round 5 on #5154: a lookup that FAILED is not a customer
+    // with no email — it must surface as a transient (non-400) error so the
+    // lifecycle emitter retries the marker instead of settling it
+    // unrecoverable on one DB hiccup.
+    test('a failed lookup rejects with a transient, retryable error — never the deterministic recipient-required error', async () => {
+      const lookup = chain();
+      lookup.first = jest.fn(async () => { throw new Error('connection terminated unexpectedly for sam@example.com'); });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({
+          automation_key: 'review.thank_you', trigger_event_key: 'review.linked_5star', template_key: 'review.thank_you',
+        })] })],
+        customers: [lookup],
+      });
+
+      const err = await AutomationExecutor.processTrigger({
+        triggerEventKey: 'review.linked_5star',
+        triggerEventId: 'review_linked_5star:rev-1',
+        entityType: 'review',
+        entityId: 'rev-1',
+        recipient: { type: 'customer', id: 'cust-1' },
+        payload: { review_id: 'rev-1', customer_id: 'cust-1', location_id: 'venice' },
+      }).then(() => null, (e) => e);
+
+      expect(err).toMatchObject({ code: 'AUTOMATION_RECIPIENT_LOOKUP_FAILED', status: 503, retryable: true });
+      expect(err.message).not.toContain('sam@example.com');
       expect(globalDbAccesses).not.toContain('email_template_automation_runs');
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     });
