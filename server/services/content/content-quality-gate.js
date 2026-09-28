@@ -670,11 +670,26 @@ function checkLocalBusinessServiceSchema(draft) {
 // A box prop's rendered value: a quoted attribute, or a static string
 // expression ({"…"}, {'…'}, {`…`}) that MDX renders the same (Codex r4 on
 // #5272).
+// Values are decoded to what renders (Codex r5 on #5272): character
+// references in a quoted prop ("Call&#32;today"), JavaScript escapes in a
+// static expression ({"Call\x20today"}).
 function boxProp(tag, name) {
+  const { decodeEntitiesForScan } = require('./content-guardrails')._internals;
   const quoted = attrValue(tag, name);
-  if (quoted !== null && quoted !== undefined) return String(quoted);
+  if (quoted !== null && quoted !== undefined) return decodeEntitiesForScan(String(quoted));
   const m = String(tag).match(new RegExp(`\\b${name}\\s*=\\s*\\{\\s*(["'\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1\\s*\\}`));
-  return m ? m[2] : '';
+  return m ? decodeJsStringEscapes(m[2]) : '';
+}
+const JS_SIMPLE_ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
+function decodeJsStringEscapes(raw) {
+  return String(raw).replace(/\\(?:x([0-9a-fA-F]{2})|u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|([\s\S]))/g, (all, hex, codePoint, unicode, ch) => {
+    const code = hex || codePoint || unicode;
+    if (code) {
+      const n = parseInt(code, 16);
+      return n <= 0x10ffff ? String.fromCodePoint(n) : all;
+    }
+    return Object.prototype.hasOwnProperty.call(JS_SIMPLE_ESCAPES, ch) ? JS_SIMPLE_ESCAPES[ch] : ch;
+  });
 }
 
 function leadingVerdictBox(body) {
@@ -1393,7 +1408,8 @@ function validateLibraryPhoto(photo, alt, url, renderedBody, line, { viewLines =
   // Each credit line is consumed by ONE image: two copies ending on the same
   // line cannot share it (Codex r3 on #5272).
   const lines = renderedBody.split('\n');
-  const skip = (i) => !(viewLines ? viewLines[i] || '' : lines[i]).trim();
+  // A line left with only blockquote markers is empty too.
+  const skip = (i) => !(viewLines ? viewLines[i] || '' : lines[i]).replace(/^[\s>]+$/, '').trim();
   let next = line + 1;
   while (next < lines.length && skip(next)) next += 1;
   if (next >= lines.length || lines[next].trim() !== photoAttributionLine(photo) || usedCreditLines.has(next)) {
@@ -1492,7 +1508,11 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   // Lines to skip between an image and its credit: blank once reference
   // definitions (any length) are blanked — a visible MDX component on the
   // way still counts as content (Codex r4 on #5272).
-  const viewLines = cg.blankReferenceDefinitions(renderedBody).split('\n');
+  // Block context (blockquote depth, list membership) comes from the
+  // depth-aware blanker, so a definition inside "> [p]: …" is recognised
+  // too (Codex r5 on #5272).
+  const withDepths = cg.blankNonRenderedMarkdownWithDepths(body);
+  const viewLines = cg.blankReferenceDefinitions(cg.blankDefinitelyHiddenContent(withDepths.text), { depths: withDepths.depths, inList: withDepths.inList }).split('\n');
   const allowed = allowedIdentificationPhotoSrcs(brief, context);
   const occurrences = collectBodyImageOccurrences(body, { mdx });
   const usedCreditLines = new Set();

@@ -839,3 +839,20 @@ describe('#5272 r4: expression props and visible components', () => {
   });
 });
 
+// ── Codex r5 on #5272 ────────────────────────────────────────────────
+describe('#5272 r5: decoded prop values, blockquote definitions', () => {
+  test.each([
+    ['recommendation={"Call\\x20today."}'],
+    ['recommendation={"Call\\u0020today."}'],
+    ['recommendation="Call&#32;today."'],
+  ])('%s decodes to a pitch', (prop) => {
+    const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('a reference definition inside a blockquote between the image and its credit is skipped', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}][p]\n\n> [p]: ${PHOTO_URL}\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+  });
+});
+
