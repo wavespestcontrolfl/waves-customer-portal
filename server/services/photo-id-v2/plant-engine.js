@@ -1613,6 +1613,11 @@ function identifyLaneSlotsFor(subject) {
  * at high confidence. The 2026-09-28 photo eval read a textbook bahiagrass
  * photo (Y-shaped seed heads) as "Likely: Bermudagrass" with bahia as the
  * runner-up and no escalation; with the second opinion it read bahiagrass. */
+// Slots that hold ONE identity (the lawn's grass, the host plant). A lawn can
+// hold several weeds at once, so two weeds are not rival answers and never a
+// close call (Codex #5255 r1 P2): treating them as one would let a provider
+// ranking them the other way mark the whole weed slot disagreed.
+const SINGLE_IDENTITY_SLOTS = ['turf', 'host'];
 function closeCallIn(candidates) {
   const [top, second] = candidates.filter((c) => c.entry);
   return !!(top && second && top.entry.group === second.entry.group && second.confidence >= CLOSE_CALL_MIN);
@@ -1626,7 +1631,7 @@ function identitySlotTriggers(identity, run) {
     [!identity.candidatesJson || identity.verifyMissedSlots[slot], 'gemini_missed'],
     [noLaneAnswer && laneSlots.includes(slot), 'no_identity_candidate'],
     [identity.slots[slot].length > 0 && identity.slots[slot][0].confidence < escalateBelow(), 'low_confidence'],
-    [closeCallIn(identity.slots[slot]), 'close_call'],
+    [SINGLE_IDENTITY_SLOTS.includes(slot) && closeCallIn(identity.slots[slot]), 'close_call'],
     [identity.flippedSlots[slot], 'self_contradiction'],
   ]));
 }

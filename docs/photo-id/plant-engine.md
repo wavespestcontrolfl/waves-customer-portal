@@ -344,12 +344,14 @@ Bermudagrass" with bahia as the runner-up, and no second opinion ran
 because Gemini was confident. With the second opinion forced on, it read
 bahiagrass.
 
-- **Close calls escalate** (`close_call`): when an identity slot's top two
-  catalog candidates share a group (two grasses, two palms, two broadleaf
-  weeds) and the runner-up reads >= 0.20, the slot gets the OpenAI second
-  opinion even at high confidence. An agreement keeps the name; a
-  disagreement drops to the shared group ("Looks like a lawn grass") rather
-  than a confident wrong name.
+- **Close calls escalate** (`close_call`): when the turf or host slot's top
+  two catalog candidates share a group (two grasses, two palms) and the
+  runner-up reads >= 0.20, the slot gets the OpenAI second opinion even at
+  high confidence. An agreement keeps the name; a disagreement names neither
+  — identify mode answers with the shared group ("Looks like a lawn grass"),
+  and a workup leaves `subject.plant` unnamed — rather than a confident wrong
+  name. The weeds slot is excluded: a lawn can hold several weeds at once,
+  so two weeds are not rival answers.
 - **Output budget 4096**: Gemini's reasoning shares the output budget with
   the JSON answer, and at 2048 one lawn read came back cut off (a miss).
 

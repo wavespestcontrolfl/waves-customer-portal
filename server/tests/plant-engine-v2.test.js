@@ -1734,9 +1734,10 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
     const verified = (slug, confidence) => ({
       slug, entry: catalog.getEntry(slug), confidence, verified: true, checked: true, uncovered: false, cuesVisible: [1], cuesNotVisible: [], offCatalogName: null, groupId: catalog.getEntry(slug).group,
     });
-    const triggersFor = (turf) => engine._test.identitySlotTriggers({
-      candidatesJson: {}, slots: { turf, weeds: [], host: [] }, verifyMissedSlots: { turf: false, weeds: false, host: false }, flippedSlots: { turf: false, weeds: false, host: false },
-    }, { subject: 'lawn', mode: 'workup' }).turf;
+    const triggersForSlot = (slot, list) => engine._test.identitySlotTriggers({
+      candidatesJson: {}, slots: { turf: [], weeds: [], host: [], [slot]: list }, verifyMissedSlots: { turf: false, weeds: false, host: false }, flippedSlots: { turf: false, weeds: false, host: false },
+    }, { subject: 'lawn', mode: 'workup' })[slot];
+    const triggersFor = (turf) => triggersForSlot('turf', turf);
 
     test('a confident read with a same-group runner-up is a close call that gets the second opinion', () => {
       expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.30)])).toEqual(['close_call']);
@@ -1744,6 +1745,9 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-nutsedge', 0.40)])).toEqual([]);
       expect(triggersFor([verified('fixture-st-augustine', 0.95), verified('fixture-bahia', 0.10)])).toEqual([]);
       expect(triggersFor([verified('fixture-st-augustine', 0.95)])).toEqual([]);
+      // Codex #5255 r1: two weeds in one lawn are not rival answers — the weeds slot is never a close call.
+      const secondWeed = { ...verified('fixture-nutsedge', 0.40), slug: 'fixture-other-weed' };
+      expect(triggersForSlot('weeds', [verified('fixture-nutsedge', 0.95), secondWeed])).toEqual([]);
     });
 
     test('identify mode: a close call between two grasses runs the escalation, and a disagreement names neither', async () => {
