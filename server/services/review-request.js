@@ -4582,6 +4582,21 @@ const ReviewService = {
       // shape, matching create()-minted rows) — never 'custom'.
       : canonicalTemplate ? null : smsTemplateId || "custom";
 
+    // GATE_REVIEW_DAY0_CONTEXT: the one narrow exception to the controlled
+    // Day-0 composition above. A recurring customer who raised a topic before
+    // the visit (stored at enrollment on ask_context; owner ruling 2026-09-28:
+    // same service only) gets a Day-0 text naming it, drafted fresh at this
+    // send tick and never reused. Every miss sends the day0_ask template, and
+    // the touch records its own template key so the outreach funnel can
+    // compare the two.
+    if (day0Controlled && require("../config/feature-gates").isEnabled("reviewDay0Context")) {
+      const contextBody = await this._day0ContextBody({ sequenceId, customer, contact, serviceRecordId, serviceDate });
+      if (contextBody) {
+        persistedBody = contextBody;
+        recordedTemplateKey = `${OUTREACH.DAY0_ASK_TEMPLATE_KEY}_context`;
+      }
+    }
+
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
     // touches only (sequenceId required — a CSR's one-off send keeps exactly
     // the template they picked; Codex P1, r1), and never the Day-0 touch
@@ -4861,6 +4876,39 @@ const ReviewService = {
     }
     return this._applyOutreachSendResult(request,
       { ...result, deliveryOutcome: "not_sent", deferred: true, nextAllowedAt }, manageRetryVia, "sms");
+  },
+
+  /**
+   * The Day-0 body naming the customer's pre-visit topic, or null for the
+   * day0_ask template. Only while the sequence is still on the recurring plan
+   * (a first-send re-resolve can swap it) and holds a stored topic, and only
+   * to the account holder — the topic is their own words, so a tenant or
+   * other service contact never sees it. Never throws.
+   */
+  async _day0ContextBody({ sequenceId, customer, contact, serviceRecordId, serviceDate }) {
+    try {
+      const recipientIsAccountHolder = !!(contact.phone && customer.phone
+        && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+      if (!recipientIsAccountHolder) return null;
+      const seq = await db("review_sequences").where({ id: sequenceId }).first("plan", "ask_context");
+      const plan = typeof seq?.plan === "string" ? JSON.parse(seq.plan) : seq?.plan;
+      const askContext = parseDecision(seq?.ask_context);
+      if (!isRecurringAskPlan(plan) || !askContext?.topic) return null;
+      const record = serviceRecordId
+        ? await db("service_records").where({ id: serviceRecordId }).first("structured_notes")
+        : null;
+      const drafted = await require("./review-ask-drafter").draftDay0ContextBody({
+        customerId: customer.id,
+        recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
+        topic: askContext.topic,
+        completionNotes: record?.structured_notes,
+        serviceDate,
+      });
+      return drafted?.body || null;
+    } catch (err) {
+      logger.warn(`[review] Day-0 context skipped (sequenceId=${sequenceId}): ${err.message}`);
+      return null;
+    }
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {

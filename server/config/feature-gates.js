@@ -822,11 +822,11 @@ const gates = {
 
   // Day-0 review-ask contextual topic (recurring customers only): stores a
   // grounded service topic (review-ask-topic.js) on review_sequences.ask_context
-  // for a later PR's wording to read. This PR only WRITES the
-  // topic — nothing customer-facing reads it yet. Customer-facing generated
-  // text still needs its own opt-in when that lane ships; this gate exists
-  // so the storage half ships dark first. Off = enrollPostService makes no
-  // extra DB read and no model call.
+  // at enrollment, and at the Day-0 send words that text around it
+  // (review-ask-drafter.js draftDay0ContextBody, which also needs
+  // GATE_REVIEW_ASK_PERSONALIZED). Customer-facing: owner flips it only after
+  // reading the dry-run drafts. Off = no extra DB read, no model call, and the
+  // fixed day0_ask template, exactly as before.
   reviewDay0Context: process.env.GATE_REVIEW_DAY0_CONTEXT === 'true',
 
   // Digital business card — the card.issued email a customer gets after their

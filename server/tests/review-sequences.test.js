@@ -20,9 +20,11 @@ jest.mock('../config/feature-gates', () => ({
 // null = template path, matching the gate-off production posture.
 const mockDraftAskBody = jest.fn(async () => null);
 const mockDraftEmailIntro = jest.fn(async () => null);
+const mockDraftDay0Context = jest.fn(async () => null);
 jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
+  draftDay0ContextBody: (...a) => mockDraftDay0Context(...a),
 }));
 // Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
 // = no topic, matching the gate-off production posture; this file only
@@ -188,7 +190,9 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
+  mockDraftDay0Context.mockReset().mockResolvedValue(null);
   mockResolveReviewTopic.mockReset().mockResolvedValue(null);
+  mockGates.reviewDay0Context = false;
 });
 
 describe('review sequences — cadence engine', () => {
@@ -534,6 +538,71 @@ describe('review sequences — cadence engine', () => {
     expect(mockDraftEmailIntro).not.toHaveBeenCalled();
     const payload = mockEmailSendTemplate.mock.calls[0][0].payload;
     expect(payload.intro_paragraph).toMatch(/small, family-owned/);
+  });
+
+  describe('GATE_REVIEW_DAY0_CONTEXT — the recurring Day-0 text names the customer\'s topic', () => {
+    const RECURRING = JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]);
+    const TOPIC = JSON.stringify({ topic: 'ants in the kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', serviceLine: 'pest', confidence: 0.9, version: 'review-day0-context-v3' });
+    const CONTEXT_BODY = "Hi Dee! How are the ants looking since the visit? A Google review means a lot: {review_url} Reply if anything's off.";
+    const setup = ({ seq = {}, customer = {}, requests = [] } = {}) => {
+      const mock = makeMock({
+        customers: [{ id: 'dc-1', first_name: 'Dee', last_name: 'K', phone: '+19410000081', nearest_location_id: 'bradenton', ...customer }],
+        review_sequences: [{ id: 'seq-dc', customer_id: 'dc-1', status: 'active', current_step: 0, touches_sent: 0, plan: RECURRING, ask_context: TOPIC, ...seq }],
+        service_records: [{ id: 'sr-dc', customer_id: 'dc-1', service_date: '2026-09-28', structured_notes: JSON.stringify({ observations: ['ant trail under the sink'] }) }],
+        review_requests: requests,
+      });
+      db.mockImplementation(mock);
+      return mock;
+    };
+    const send = (mock) => ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'day0_ask',
+      serviceRecordId: 'sr-dc', sequenceId: 'seq-dc', sequenceStep: 0, manageRetryVia: 'sequence',
+    });
+    const sentTouch = (mock) => mock.__state.rows.review_requests[mock.__state.rows.review_requests.length - 1];
+
+    beforeEach(() => {
+      mockGates.reviewDay0Context = true;
+      mockDraftDay0Context.mockResolvedValue({ body: CONTEXT_BODY, mode: 'ask' });
+    });
+
+    test('gate on, recurring plan, stored topic, account holder → the Day-0 text names the topic', async () => {
+      const mock = setup();
+      const out = await send(mock);
+
+      expect(out.ok).toBe(true);
+      expect(mockDraftDay0Context).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'dc-1', recipientFirstName: 'Dee', topic: 'ants in the kitchen',
+        completionNotes: expect.stringContaining('ant trail'),
+      }));
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/^Hi Dee! How are the ants looking since the visit\? A Google review means a lot: \S+ Reply if anything's off\.$/);
+      expect(sentTouch(mock).template_key).toBe('day0_ask_context');
+    });
+
+    test.each([
+      ['the gate is off', { gateOff: true }],
+      ['the plan is no longer the recurring one', { seq: { plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]) } }],
+      ['no topic was stored', { seq: { ask_context: null } }],
+      ['the text goes to a service contact, not the account holder', { customer: { service_contact_phone: '+19410000099' } }],
+    ])('%s → the fixed day0_ask template, and no draft', async (_label, { gateOff, ...opts }) => {
+      if (gateOff) mockGates.reviewDay0Context = false;
+      const mock = setup(opts);
+      await send(mock);
+
+      expect(mockDraftDay0Context).not.toHaveBeenCalled();
+      expect(sentTouch(mock).template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/If we earned it/);
+    });
+
+    test('a refused draft sends the fixed template, and an earlier attempt\'s draft is never reused (owner decision 2026-09-07)', async () => {
+      mockDraftDay0Context.mockResolvedValue(null);
+      const mock = setup({ requests: [{ id: 'rr-prior', sequence_id: 'seq-dc', sequence_step: 0, customer_id: 'dc-1', channel: 'sms', status: 'failed', custom_body: CONTEXT_BODY, created_at: new Date(Date.now() - 3600000) }] });
+      await send(mock);
+
+      expect(mockDraftDay0Context).toHaveBeenCalledTimes(1);
+      expect(sentTouch(mock).template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/If we earned it/);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).not.toMatch(/ants/);
+    });
   });
 
   test('a no-link template is recorded with followup_sent=true (no legacy Day-3 ask)', async () => {

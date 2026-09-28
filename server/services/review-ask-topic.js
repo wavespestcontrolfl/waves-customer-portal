@@ -305,6 +305,20 @@ function isTopicGrounded(topic, citedText) {
   return checked.length > 0 && checked.every((w) => isWordInEvidence(w, evidenceLower));
 }
 
+/**
+ * Whether `text` names the topic: at least one of the topic's own words
+ * (function words aside) appears in it as a whole word. The Day-0 wording
+ * (review-ask-drafter.js) uses it twice — the sentence must name the topic,
+ * and it may claim the work was done only when the technician's completion
+ * notes name it too.
+ */
+function mentionsTopic(text, topic) {
+  const textLower = String(text || "").toLowerCase();
+  if (!textLower) return false;
+  const words = (String(topic || "").toLowerCase().match(/[a-z]+/g) || []).filter((w) => !TOPIC_FILLER_WORDS.has(w));
+  return words.some((w) => isWordInEvidence(w, textLower));
+}
+
 function hasEvidenceToClassify(ev) {
   const hasCompletion = !!ev?.completion?.concernText;
   const hasTexts = Array.isArray(ev?.texts) && ev.texts.length > 0;
@@ -431,6 +445,7 @@ async function resolveReviewTopicForEnrollment({ customerId, serviceRecordId = n
 module.exports = {
   TOPIC_VERSION,
   isRecurringAskPlan,
+  mentionsTopic,
   readTopicEvidence,
   collectTopicEvidence,
   classifyTopic,
