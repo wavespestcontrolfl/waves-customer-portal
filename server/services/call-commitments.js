@@ -1940,6 +1940,17 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
+  const rejudged = await rejudgeSlotKept(conn, kept, row, callLogId);
+  failed += rejudged.failed;
+  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened: rejudged.reopened };
+}
+
+// Judges refreshFulfillment's slot-kept rows again: still kept by the same
+// record (untouched), kept by another (re-pointed, same customer guard as
+// the open-row write), or reopened carrying whatever hint the facts support.
+async function rejudgeSlotKept(conn, kept, row, callLogId) {
+  const LOOKUP_FAILED = Symbol("lookup_failed");
+  let failed = 0;
   let reopened = 0;
   for (const c of kept) {
     const proof = await resolveFulfillment(conn, c, row).catch((err) => {
@@ -1972,7 +1983,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     reopened += await unchanged(conn("call_commitments"))
       .update({ status: "open", fulfillment: proof ? JSON.stringify(proof) : null, fulfilled_at: null, updated_at: new Date() });
   }
-  return { checked: open.length + kept.length, fulfilled, hinted, cleared, failed, reopened };
+  return { reopened, failed };
 }
 
 // Calls holding a promise kept by a booking for its promised slot — the

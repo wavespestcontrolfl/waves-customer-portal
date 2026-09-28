@@ -372,7 +372,7 @@ router.get('/commitments/open', async (req, res, next) => {
       for (const id of callIds) {
         const r = await refreshFulfillment(db, id).catch(() => ({}));
         // reopened: a promise a booking kept lapsed and is owed again (codex #5081 r6 P2).
-        changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0) + (r.reopened || 0);
+        changed += ['fulfilled', 'hinted', 'cleared', 'reopened'].reduce((n, k) => n + (r[k] || 0), 0);
       }
       if (changed > 0) rows = await listOpenCommitments(db, reread);
     }
