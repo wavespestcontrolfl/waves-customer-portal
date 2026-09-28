@@ -112,6 +112,18 @@ describe('groundRescheduleAgreement', () => {
     expect(said('No worries. We will see you Thursday at two in the afternoon.', `Great. ${OK_CALLER}`).ok).toBe(true);
   });
 
+  // Codex #5092 r15: the agent's commitment must be to the recorded slot.
+  test('the agent commitment quote must say the slot\'s hour and day', () => {
+    const committed = (commit) => ground(v2({ evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', commit),
+      quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two in the afternoon works for me'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two in the afternoon works for me'),
+    ] }), `Caller: Thursday at two in the afternoon works for me.\nAgent: ${commit}.`);
+    expect(committed('We will see you Friday at three')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('Okay we will see you then')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('Great, we will see you Thursday at two').ok).toBe(true);
+  });
+
   test('a quote under three words must be the whole turn, never a fragment of a longer one', () => {
     const shortYes = (callerLine) => ground(v2({ evidence: [
       quote('/scheduling/agent_committed_booking', 'agent', COMMIT),
@@ -182,6 +194,13 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt(THURSDAY_2PM, 'We will move it to two PM Thursday.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(true);
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at ten minutes to two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5092 r15: a minute word right before the hour, and a part of the
+    // day that does not contain the hour.
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at half two in the afternoon.', { day: 'Thursday', hour: 'two', period: 'in the afternoon' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at two at night.', { day: 'Thursday', hour: 'two', period: 'at night' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(agreedAt('2026-09-24T20:00:00-04:00', 'We will see you Thursday at eight at night.', { day: 'Thursday', hour: 'eight', period: 'at night' }).ok).toBe(true);
     // Codex #5092 r13: twelve with a part of the day states no hour; with am/pm it does.
     expect(agreedAt('2026-09-23T12:00:00-04:00', 'We will see you at 12 tonight.', { day: 'tonight', hour: '12', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });

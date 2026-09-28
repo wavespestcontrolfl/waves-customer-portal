@@ -66,8 +66,20 @@ const PERIOD_PHRASES = {
   evening: 'pm', 'in the evening': 'pm', 'this evening': 'pm', tonight: 'pm', 'at night': 'pm',
   noon: 'am', midnight: 'pm',
 };
+// The 24-hour range a part of the day covers; an hour outside it is not
+// what the words state ("two at night" is not 14:00, and not reliably 02:00).
+const PART_OF_DAY_HOURS = {
+  morning: [5, 11], afternoon: [12, 17], evening: [17, 23], tonight: [17, 23], night: [17, 23],
+};
+function withinPartOfDay(phrase, hour24) {
+  const part = phrase.split(' ').pop();
+  if (!Object.hasOwn(PART_OF_DAY_HOURS, part)) return true;
+  const [from, to] = PART_OF_DAY_HOURS[part];
+  return hour24 >= from && hour24 <= to;
+}
 
 function padded(s) { return ` ${s} `; }
+function stringOrNull(v) { return typeof v === 'string' ? v : null; }
 
 // Lowercase words, punctuation dropped, with "a.m." / "p.m." kept as one
 // word ("am") so a quote matches its turn however either was punctuated
@@ -185,7 +197,8 @@ function statedHour(hourWords, periodWords) {
   // Twelve with a part of the day ("12 tonight", "12 in the morning") says
   // noon or midnight only loosely: it states an hour only with am/pm.
   if (n === 12 && phrase !== 'am' && phrase !== 'pm') return null;
-  return (n % 12) + (PERIOD_PHRASES[phrase] === 'pm' ? 12 : 0);
+  const hour24 = (n % 12) + (PERIOD_PHRASES[phrase] === 'pm' ? 12 : 0);
+  return withinPartOfDay(phrase, hour24) ? hour24 : null;
 }
 
 // "Next Thursday" / "this coming Thursday" read as the weekday (both are
@@ -290,6 +303,7 @@ const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of']);
 function hourHasMinutes(toks, [ha, hb]) {
   const next = toks[hb] || '';
   return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next)
+    || isMinuteCount(toks[ha - 1]) // "half two", "quarter two", "October 2, 2 PM" all fail closed
     || (MINUTES_BEFORE.has(toks[ha - 1]) && isMinuteCount(toks[ha - 2]));
 }
 
@@ -323,6 +337,21 @@ function periodIsTheHours(quote, words) {
     const between = pa >= hb ? toks.slice(hb, pa) : toks.slice(pb, ha);
     return !between.some(isHourToken);
   }));
+}
+
+// Does this slot quote hold every recorded word, with the period its hour's
+// and the hour on the hour?
+function statesSlotWords(quote, words) {
+  return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words);
+}
+
+// Does this agent commitment quote commit to the recorded slot? It must say
+// the recorded hour, on the hour (periodIsTheHours's minute check), and any
+// day words the slot records.
+function commitsToSlot(quote, words) {
+  const withoutPeriod = { ...words, period: null };
+  return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
+    && (typeof words.day !== 'string' || holds(quote, words.day));
 }
 
 // The recorded words the slot quote must hold.
@@ -359,19 +388,20 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
     .filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker)
       && isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath))
     .map((e) => e.quote);
-  if (!grounded('/scheduling/agent_committed_booking', 'agent').length) return fail('agent_commitment_ungrounded');
+  const commitments = grounded('/scheduling/agent_committed_booking', 'agent');
+  if (!commitments.length) return fail('agent_commitment_ungrounded');
   if (!grounded('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
-  const movedDate = typeof scheduling.moved_appointment_date === 'string' ? scheduling.moved_appointment_date : null;
+  const movedDate = stringOrNull(scheduling.moved_appointment_date);
   if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'), started)) {
     return fail('moved_appointment_ungrounded');
   }
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
-  const said = slotPhrases(words);
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)) && periodIsTheHours(q, words) && twelveSaidTogether(q, words))) {
-    return fail('agreed_slot_ungrounded');
-  }
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words))) return fail('agreed_slot_ungrounded');
+  // The agent committed to THIS slot: the commitment quote says its hour,
+  // on the hour, and no day but the slot's.
+  if (!commitments.some((q) => commitsToSlot(q, words))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 
