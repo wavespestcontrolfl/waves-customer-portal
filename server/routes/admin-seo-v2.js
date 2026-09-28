@@ -711,11 +711,8 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
     if (patch.query) {
       const current = await db('seo_llm_mention_queries').where('id', req.params.id).first('query');
       if (!current) return res.status(404).json({ error: 'not found' });
-      if (patch.query !== current.query && isEntityQuestion(current.query)) {
-        return res.status(409).json({ error: 'entity cohort question text is frozen; toggle active instead' });
-      }
-      if (patch.query !== current.query && BENCHMARK_PROMPTS.has(current.query)) {
-        return res.status(409).json({ error: 'benchmark question text is frozen; toggle active instead' });
+      if (patch.query !== current.query && (isEntityQuestion(current.query) || BENCHMARK_PROMPTS.has(current.query))) {
+        return res.status(409).json({ error: 'entity cohort and benchmark question text is frozen; toggle active instead' });
       }
     }
     patch.updated_at = db.fn.now();
