@@ -307,6 +307,29 @@ describe('content registry live status helpers', () => {
     )).resolves.toEqual(expect.objectContaining({ live_status: 'challenge' }));
   });
 
+  // Codex r5 on #5123: the response's real Content-Type reaches the shared
+  // classifier — a 200 JSON error or image at a page URL is not the page,
+  // directly or at the end of a redirect; an HTML page stays live.
+  test('a 200 non-HTML payload at a page URL classifies as soft_404, never live or redirected', async () => {
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-json', canonical_url_normalized: '/ghost/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost/': response(200, '{"error":"not_found","message":"No document exists at this address any longer."}', { 'content-type': 'application/json; charset=utf-8' }) }) },
+    )).resolves.toEqual(expect.objectContaining({ http_status: '200', live_status: 'soft_404' }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-image', canonical_url_normalized: '/legacy-ghost/' },
+      {
+        fetchImpl: fetchMap({
+          'https://www.wavespestcontrol.com/legacy-ghost/': response(301, '', { location: '/ghost.png' }),
+          'https://www.wavespestcontrol.com/ghost.png': response(200, 'PNG-bytes', { 'content-type': 'image/png' }, 'https://www.wavespestcontrol.com/ghost.png'),
+        }),
+      },
+    )).resolves.toEqual(expect.objectContaining({ http_status: '301', live_status: 'soft_404' }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'row-html', canonical_url_normalized: '/ghost-ants/' },
+      { fetchImpl: fetchMap({ 'https://www.wavespestcontrol.com/ghost-ants/': response(200, '<html><head><title>Ghost ants</title></head><body><p>Ghost ants are tiny pale ants.</p></body></html>', { 'content-type': 'text/html; charset=utf-8' }) }) },
+    )).resolves.toEqual(expect.objectContaining({ live_status: 'live' }));
+  });
+
   test('a redirect landing on a soft-404 template classifies as soft_404, not redirected', async () => {
     await expect(liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-redirect-soft-404', canonical_url_normalized: '/legacy-ghost/' },

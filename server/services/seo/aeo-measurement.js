@@ -66,14 +66,23 @@ function citationMatchesPage(citation, page) {
 // portrayed positively, and ranks in the top 3 brands the answer surfaces
 // (rank_position is 1-indexed order of first appearance among Waves +
 // COMPETITORS in llm-mention-prober.js's parse()). Denominator: measured
-// answers, less the mentioned ones whose sentiment was never classified
-// (stored NULL — no key, provider error, off-contract reply). Those are
-// neither recommended nor not, so they are counted as `unclassified` rather
-// than read as misses (Codex r4 on #5123).
+// answers, less the mentioned ones whose sentiment is not known — neither
+// recommended nor not, so counted as `unclassified` rather than read as
+// misses (Codex r4 on #5123).
 function isRecommendedAnswer(row) {
   return row.waves_mentioned === true
     && row.sentiment === 'positive'
     && Number.isInteger(row.rank_position) && row.rank_position >= 1 && row.rank_position <= 3;
+}
+
+// A mentioned answer's sentiment is known when its row says it was
+// classified. Rows from before sentiment_status existed are trusted only for
+// a positive/negative label: the old writer stored 'neutral' on any failure
+// (no key, provider error, off-contract reply), so an old 'neutral' may be an
+// outage rather than a verdict (Codex r5 on #5123).
+function hasKnownSentiment(row) {
+  if (row.sentiment_status != null) return row.sentiment_status === 'classified';
+  return row.sentiment === 'positive' || row.sentiment === 'negative';
 }
 
 function summarizeObservations(rows) {
@@ -81,7 +90,7 @@ function summarizeObservations(rows) {
   const cited = measured.filter(row => ownedCitations(row).length > 0).length;
   const mentioned = measured.filter(row => row.waves_mentioned === true).length;
   const recommended = measured.filter(isRecommendedAnswer).length;
-  const unclassified = measured.filter(row => row.waves_mentioned === true && row.sentiment == null).length;
+  const unclassified = measured.filter(row => row.waves_mentioned === true && !hasKnownSentiment(row)).length;
   const recommendable = measured.length - unclassified;
   return {
     total: rows.length,

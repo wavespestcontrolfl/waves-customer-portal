@@ -331,6 +331,25 @@ describe('checkOwnedUrlHealth (shared checker, injected fetchImpl)', () => {
     expect(result.verdict).toBe('redirect_ok');
   });
 
+  // Codex r5 on #5123: an HTTPS -> HTTP downgrade is never a clean verdict.
+  test('a redirect that downgrades to http:// is fetch_blocked, never redirect_ok', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://wavespestcontrol.com/old/': response(301, '', { location: 'http://bradentonflpestcontrol.com/pest-control-costs/' }),
+      'http://bradentonflpestcontrol.com/pest-control-costs/': response(200, '<html><head><title>Pest control costs</title></head><body>Real content here, plenty of it, well past the minimum visible length this module enforces for a clean page.</body></html>', {}, 'http://bradentonflpestcontrol.com/pest-control-costs/'),
+    }));
+    const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/old/', { fetchImpl });
+    expect(result).toMatchObject({ verdict: 'fetch_blocked', detail: { reason: 'insecure_redirect' } });
+  });
+
+  // Codex r5 on #5123: the real Content-Type reaches the shared classifier.
+  test('a 200 JSON error at a cited page URL is soft_404, never ok', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://wavespestcontrol.com/pest-control-costs/': response(200, JSON.stringify({ error: 'not_found', message: 'The requested resource could not be located on this server.' }), { 'content-type': 'application/json' }),
+    }));
+    const result = await checkOwnedUrlHealth('https://wavespestcontrol.com/pest-control-costs/', { fetchImpl });
+    expect(result).toMatchObject({ verdict: 'soft_404', detail: { contentType: 'application/json' } });
+  });
+
   test('a network-level failure surfaces as fetch_blocked', async () => {
     const fetchImpl = jest.fn(fetchMap({
       'https://wavespestcontrol.com/x/': new Error('timeout'),

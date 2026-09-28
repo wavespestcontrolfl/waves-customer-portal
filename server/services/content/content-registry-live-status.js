@@ -148,26 +148,27 @@ function visibleText(html) {
     .trim();
 }
 
-// Challenge detection is the shared page-body classifier's strict mode
-// (server/services/seo/page-body-classifier.js — also used by the link
-// prospect verifier), not a second copy: interstitial title/h1, interstitial
-// markup, or a CAPTCHA/challenge wall on a thin page.
-function isChallengePage(body) {
-  return classifyPageBody(body, 'text/html', { strictChallenge: true }) === 'challenge';
-}
-
-/** Computed once per fetched body; harmless (and unused) for a non-2xx page. */
-function computeBodySignals(html) {
+/**
+ * Computed once per fetched body; harmless (and unused) for a non-2xx page.
+ * Challenge and non-document detection are the shared page-body classifier's
+ * strict mode (server/services/seo/page-body-classifier.js — also used by the
+ * link prospect verifier), not a second copy, fed the response's REAL
+ * Content-Type: a 200 JSON error, image or other non-HTML payload at a page
+ * URL is not the page (Codex r5 on #5123).
+ */
+function computeBodySignals(html, contentType) {
   const title = extractTitle(html);
+  const kind = classifyPageBody(html, contentType, { strictChallenge: true });
   return {
     title,
-    challenge: isChallengePage(html),
+    challenge: kind === 'challenge',
+    nonHtml: kind === 'non_html',
     softNotFound: SOFT_404_RE.test(title) || SOFT_404_RE.test(String(html || '').slice(0, 4000)),
     visibleTextLength: visibleText(html).length,
   };
 }
 
-function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex, challenge, softNotFound }) {
+function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex, challenge, softNotFound, nonHtml }) {
   if (!status) return 'unknown';
   const code = Number(status);
   if (code === 404 || code === 410) return 'missing';
@@ -176,9 +177,10 @@ function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, req
   if (code === 401 || code === 403) return 'blocked';
   if (code >= 400) return 'error';
   // Body-aware verdicts, checked before noindex/canonicalized — a page that
-  // renders as a challenge or a not-found template is neither of those.
+  // renders as a challenge, a not-found template or no document at all is
+  // neither of those.
   if (challenge) return 'challenge';
-  if (softNotFound) return 'soft_404';
+  if (softNotFound || nonHtml) return 'soft_404';
   if (noindex) return 'noindex';
   const requested = normalizeInternalTarget(requestedUrl);
   const canonical = normalizeInternalTarget(canonicalTargetUrl);
@@ -187,7 +189,7 @@ function classifyLiveStatus({ status, redirectTargetUrl, canonicalTargetUrl, req
   return 'unknown';
 }
 
-function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex, challenge, softNotFound }) {
+function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex, challenge, softNotFound, nonHtml }) {
   const code = Number(finalStatus);
   if (!code) return redirectTargetUrl ? 'redirected' : 'unknown';
   // The followed chain ended on another 3xx (e.g. no Location on a later
@@ -202,10 +204,10 @@ function classifyRedirectLiveStatus({ finalStatus, redirectTargetUrl, noindex, c
   // motivating case (a 301 chain landing on a "Page Not Found" 2xx page)
   // from a bare status check.
   if (challenge) return 'challenge';
-  if (softNotFound) return 'soft_404';
+  if (softNotFound || nonHtml) return 'soft_404';
   if (noindex) return 'noindex';
   if (code >= 200 && code < 300 && redirectTargetUrl) return 'redirected';
-  return classifyLiveStatus({ status: finalStatus, redirectTargetUrl, noindex, challenge, softNotFound });
+  return classifyLiveStatus({ status: finalStatus, redirectTargetUrl, noindex, challenge, softNotFound, nonHtml });
 }
 
 async function fetchText(fetchImpl, url, { redirect = 'manual', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
@@ -330,6 +332,7 @@ async function checkUrlLiveStatus(requestedUrl, {
     let followError = null;
     let finalUrl = requestedUrl;
     let finalBody = first.text;
+    let finalContentType = first.res.headers.get('content-type');
     let finalTruncated = Boolean(first.res.truncated);
 
     if (redirectTargetUrl && first.res.status >= 300 && first.res.status < 400) {
@@ -340,22 +343,23 @@ async function checkUrlLiveStatus(requestedUrl, {
         noindex = noindex || isNoindex(follow.text) || isNoindexHeader(follow.res.headers);
         finalUrl = follow.finalUrl || redirectTargetUrl;
         finalBody = follow.text;
+        finalContentType = follow.res.headers.get('content-type');
         finalTruncated = Boolean(follow.res.truncated);
       } catch (err) {
         followError = `Redirect target check failed: ${err.message}`;
       }
     }
 
-    const bodySignals = followError ? null : computeBodySignals(finalBody);
+    const bodySignals = followError ? null : computeBodySignals(finalBody, finalContentType);
     const sitemap = sitemapSignal({ sitemapPaths, requestedUrl, redirectTargetUrl, canonicalTargetUrl });
     const liveStatus = followError ? 'error' : redirectTargetUrl
       ? classifyRedirectLiveStatus({
         finalStatus, redirectTargetUrl, noindex,
-        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound,
+        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
       })
       : classifyLiveStatus({
         status, redirectTargetUrl, canonicalTargetUrl, requestedUrl, noindex,
-        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound,
+        challenge: bodySignals?.challenge, softNotFound: bodySignals?.softNotFound, nonHtml: bodySignals?.nonHtml,
       });
 
     return {
@@ -371,6 +375,7 @@ async function checkUrlLiveStatus(requestedUrl, {
       sitemap_status: sitemap.status,
       page_title: bodySignals?.title ?? null,
       visible_text_length: bodySignals?.visibleTextLength ?? null,
+      content_type: finalContentType || null,
       truncated: finalTruncated,
       error: followError,
     };
@@ -681,7 +686,6 @@ module.exports = {
   isNoindexHeader,
   extractTitle,
   visibleText,
-  isChallengePage,
   computeBodySignals,
   SOFT_404_RE,
   classifyLiveStatus,

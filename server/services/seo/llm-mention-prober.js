@@ -558,6 +558,7 @@ class LLMMentionProber {
         rank_position: parsed.rankPosition,
         entity_facts: entityFacts ? JSON.stringify(entityFacts) : null,
         sentiment,
+        sentiment_status: parsed.wavesMentioned ? (sentiment ? 'classified' : 'unclassified') : null,
         model_version: probe.model,
         grounded: !!probe.grounded,
         check_date: checkDate,

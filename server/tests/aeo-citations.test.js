@@ -121,12 +121,25 @@ test('recommended counts a mentioned, positively-sentimented, top-3-ranked answe
 // (NULL) is neither recommended nor a miss — it leaves the denominator.
 test('a mentioned answer with unclassified sentiment is excluded from the recommended rate and counted', () => {
   const result = summarizeObservations([
-    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 1 }),
-    measured({ waves_mentioned: true, sentiment: null, rank_position: 1 }),
+    measured({ waves_mentioned: true, sentiment: 'positive', sentiment_status: 'classified', rank_position: 1 }),
+    measured({ waves_mentioned: true, sentiment: null, sentiment_status: 'unclassified', rank_position: 1 }),
     measured({ sentiment: 'neutral' }),
   ]);
   expect(result).toMatchObject({ measured: 3, mentioned: 2, recommended: 1, unclassified: 1, recommendedRate: 50, mentionRate: 67 });
-  expect(summarizeObservations([measured({ waves_mentioned: true, sentiment: null })])).toMatchObject({ unclassified: 1, recommendedRate: null });
+  expect(summarizeObservations([measured({ waves_mentioned: true, sentiment: null, sentiment_status: 'unclassified' })])).toMatchObject({ unclassified: 1, recommendedRate: null });
+});
+
+// Codex r5 on #5123: rows written before sentiment_status existed stored
+// 'neutral' on any failure, so an old mentioned 'neutral' is not trusted as
+// a verdict; old positive/negative labels were real classifications.
+test('a pre-status mentioned neutral is unclassified; pre-status positive/negative and new classified neutral count', () => {
+  const result = summarizeObservations([
+    measured({ waves_mentioned: true, sentiment: 'neutral', rank_position: 1 }), // old row: ambiguous
+    measured({ waves_mentioned: true, sentiment: 'positive', rank_position: 2 }), // old row: real label
+    measured({ waves_mentioned: true, sentiment: 'negative', rank_position: 1 }), // old row: real label
+    measured({ waves_mentioned: true, sentiment: 'neutral', sentiment_status: 'classified', rank_position: 1 }), // new real neutral
+  ]);
+  expect(result).toMatchObject({ measured: 4, recommended: 1, unclassified: 1, recommendedRate: 33 });
 });
 
 // Codex r4 on #5123: a provider's model change leaves two cohort rows on one
@@ -304,6 +317,30 @@ test('probe rotation honors same-day dedupe', async () => {
   });
   await prober.runDaily();
   expect(probe.mock.calls.map(args => args[0]).sort()).toEqual(['newer', 'older']);
+});
+
+// Codex r5 on #5123: each mentioned row records whether its sentiment was
+// actually classified; an unmentioned row carries no status.
+test('runDaily stores sentiment_status: classified, unclassified (NULL sentiment), or none when Waves is absent', async () => {
+  const prober = new LLMMentionProber();
+  jest.spyOn(prober, 'getQueries').mockResolvedValue([{ query: 'q-classified' }, { query: 'q-failed' }, { query: 'q-absent' }]);
+  const answers = {
+    'q-classified': 'Waves Pest Control is a strong local choice.',
+    'q-failed': 'Waves Pest Control also serves this area.',
+    'q-absent': 'Inspect first.',
+  };
+  Object.defineProperty(prober, 'providers', { value: { chatgpt: async question => ({ text: answers[question], model: 'test' }) } });
+  jest.spyOn(prober, 'classifySentiment').mockImplementation(async context => (/strong/.test(context) ? 'positive' : null));
+  const inserted = [];
+  db.mockReturnValue({
+    where: () => ({ select: async () => [] }),
+    insert: row => { inserted.push(row); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
+  });
+  await prober.runDaily();
+  const byQuery = Object.fromEntries(inserted.map(row => [row.query, row]));
+  expect(byQuery['q-classified']).toMatchObject({ sentiment: 'positive', sentiment_status: 'classified' });
+  expect(byQuery['q-failed']).toMatchObject({ sentiment: null, sentiment_status: 'unclassified' });
+  expect(byQuery['q-absent']).toMatchObject({ sentiment: 'neutral', sentiment_status: null });
 });
 
 test('disabling all managed queries does not reactivate fallback probes', async () => {

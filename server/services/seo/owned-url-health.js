@@ -22,7 +22,8 @@
  *
  * Safety (owned hosts only — the hub + the 16 fleet spoke domains, reusing
  * content-registry.js's isContentFleetUrl so this can never drift from the
- * canonical fleet list): https only, every redirect hop re-validated against
+ * canonical fleet list): https only (a redirect landing on http:// is never
+ * a clean verdict), every redirect hop re-validated against
  * the allowlist before it is fetched (fetchText, shared), private/internal
  * IPs blocked on the real socket connection via contact-finder.js's
  * rejectingLookup (shared, via safeFetchImpl), ~8s per-hop timeout (shared
@@ -165,6 +166,7 @@ function mapSharedResultToVerdict(shared) {
     finalHttpStatus: shared.final_http_status,
     redirectTargetUrl: shared.redirect_target_url,
     title: shared.page_title,
+    contentType: shared.content_type || null,
   };
 
   switch (shared.live_status) {
@@ -202,6 +204,12 @@ function mapSharedResultToVerdict(shared) {
     // above can all live past the cutoff point.
     if (shared.truncated) {
       return { verdict: 'fetch_blocked', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'response_truncated' } };
+    }
+    // Only an HTTPS landing is confirmed healthy. The shared walker follows a
+    // fleet-host hop on either scheme, so a redirect downgrading to http:// is
+    // an unauthenticated response, never a clean verdict (Codex r5 on #5123).
+    if (shared.final_url && !/^https:\/\//i.test(shared.final_url)) {
+      return { verdict: 'fetch_blocked', httpStatus: shared.http_status, finalUrl: shared.final_url, detail: { ...detailBase, reason: 'insecure_redirect' } };
     }
     // The shared classifier's redirect path (classifyRedirectLiveStatus)
     // deliberately does NOT reclassify on a canonical mismatch — that is
