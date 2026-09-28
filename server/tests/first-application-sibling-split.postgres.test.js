@@ -1,15 +1,22 @@
 /**
- * Same-trip first-application billing ALERT — periodic sweep (owner
- * ruling, 2026-09-27 redesign; supersedes the #5021 round-3..9 "alert from
- * every writer" design). A reserved-accept slot selling two recurring
- * programs mints ONE draft invoice for the combined same-day total, linked
- * to the reserved (priced) row; the promoted sibling is left
- * estimated_price NULL on purpose (covered by that invoice while the two
- * visits share a date). A periodic sweep (server/services/scheduler.js)
- * re-derives every open first-application invoice's estimate group fresh
- * and opens/refreshes or clears ONE durable admin alert
- * (notification-service.notifyAdmin, category 'billing') per estimate —
- * it never touches the invoice's money, never holds collection, never
+ * Same-trip first-application billing ALERT — periodic SWEEP over STAMPED
+ * PROVENANCE (owner ruling, 2026-09-27; supersedes the #5021 round-3..9
+ * "alert from every writer" design AND the round-10..r8 structural-guessing
+ * sweep). A reserved-accept slot selling two-or-more recurring programs
+ * mints ONE combined "First service application" invoice; every covered
+ * member — the reserved anchor AND each promoted same-day sibling — is
+ * stamped, once, with that invoice's id
+ * (scheduled_services.first_application_invoice_id) inside the SAME
+ * transaction that mints the invoice
+ * (estimate-converter.js stampCombinedFirstApplicationInvoiceCoverage). A
+ * one-time backfill migration stamped the small number of live historical
+ * pairs using the OLD text-based recognition
+ * (estimate-first-application-invoice.js backfillFirstApplicationInvoiceStamps).
+ * The sweep (server/services/scheduler.js) NEVER guesses membership any
+ * more: it reads the stamp, groups by invoice, re-derives each group's
+ * state fresh, and opens/refreshes or clears ONE durable admin alert
+ * (notification-service.notifyAdmin, category 'billing') per invoice group
+ * — it never touches the invoice's money, never holds collection, never
  * takes a new lock beyond notifyAdmin's own dedupe advisory lock. The
  * office splits the invoice by hand.
  *
@@ -37,13 +44,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
   let db;
   const {
     loadCandidates,
-    groupCandidatesByEstimate,
+    groupCandidatesByInvoice,
     evaluateEstimateCandidates,
     clearStandingAlerts,
     loadSweepCursor,
     saveSweepCursor,
-    loadGroupMembers,
   } = require('../services/first-application-sibling-split');
+  const { stampCombinedFirstApplicationInvoiceCoverage } = require('../services/estimate-converter');
+  const { backfillFirstApplicationInvoiceStamps } = require('../services/estimate-first-application-invoice');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
@@ -58,10 +66,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
   // A reserved pest row (priced — the invoice-holder) + a promoted lawn
   // parent (unpriced sibling), both accepted off the same estimate on the
   // same day, exactly like a same-day accept that sold two recurring
-  // programs into one reserved slot. `matchInvoiceText: false` mints an
-  // invoice whose title/notes do NOT match the auto-generated
-  // pay-per-application pattern (never a sweep candidate). `invoiceStatus`
-  // lets a test mint an already-settled invoice.
+  // programs into one reserved slot. `stamp: false` mints the invoice
+  // WITHOUT stamping either member — models an invoice that predates this
+  // feature, or one created off some other path, so the pair must never be
+  // discovered by mere resemblance. `matchInvoiceText: false` mints an
+  // invoice whose title/notes do NOT match the OLD auto-generated
+  // pay-per-application pattern — under the stamp design this must have NO
+  // bearing on candidacy at all. `invoiceStatus` lets a test mint an
+  // already-settled invoice.
   const SAME_DATE = '2026-10-01';
   async function fixture(trx, {
     reservedPrice = 153.60,
@@ -69,6 +81,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
     matchInvoiceText = true,
     noInvoice = false,
     invoiceStatus = 'draft',
+    stamp = true,
   } = {}) {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -102,6 +115,16 @@ suite('first-application-sibling-split — periodic sweep', () => {
         line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: reservedPrice, amount: reservedPrice }]),
         subtotal: reservedPrice, total: reservedPrice,
       });
+      if (stamp) {
+        // Mirrors estimate-converter.js's own
+        // stampCombinedFirstApplicationInvoiceCoverage write — done here in
+        // the SAME (fixture) transaction as the mint, exactly like the real
+        // accept path stamps inside its own invoice-mint transaction. The
+        // stamp IS the membership signal now (owner ruling 2026-09-27); a
+        // test that wants to model an unstamped historical invoice passes
+        // `stamp: false`.
+        await trx('scheduled_services').whereIn('id', [pestId, lawnId]).update({ first_application_invoice_id: invoiceId });
+      }
     }
     return {
       customerId, estimateId, pestId, lawnId, invoiceId,
@@ -113,17 +136,18 @@ suite('first-application-sibling-split — periodic sweep', () => {
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first();
   }
 
-  // Runs the sweep's own candidate-discovery + per-estimate evaluation on
-  // ONE connection (the test's own transaction) — the same two calls
-  // runFirstApplicationSiblingSplitSweep makes per estimate, just without
-  // the outer runExclusive lock or the per-estimate transaction split
+  // Runs the sweep's own candidate-discovery + per-invoice-group evaluation
+  // on ONE connection (the test's own transaction) — the same two calls
+  // runFirstApplicationSiblingSplitSweep makes per group, just without the
+  // outer runExclusive lock or the per-group transaction split
   // (rollbackTest already isolates the whole test in one transaction).
-  // Every candidate row for this estimate is evaluated TOGETHER (see the
-  // module header) — never a picked-by-heuristic representative.
+  // Groups are now keyed by the stamped first_application_invoice_id, never
+  // an estimate-keyed guess — "mine" is whichever group contains a member
+  // under this estimate.
   async function sweepOnce(trx, estimateId) {
     const candidates = await loadCandidates(trx);
-    const groups = groupCandidatesByEstimate(candidates);
-    const mine = groups.find((g) => g[0].source_estimate_id === estimateId);
+    const groups = groupCandidatesByInvoice(candidates);
+    const mine = groups.find((g) => g.some((m) => String(m.source_estimate_id) === String(estimateId)));
     if (!mine) return [];
     return [await evaluateEstimateCandidates(trx, mine)];
   }
@@ -225,23 +249,24 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
   }));
 
-  // Codex P2 (PR #5021 r7): loadCandidates' invoice_status is read OUTSIDE
-  // this estimate's own evaluation transaction (plain `db`, before any
-  // per-estimate `db.transaction` opens), so it can already be stale by
-  // the time evaluateEstimateCandidates runs. Simulates that race
-  // directly: use a candidate row loadCandidates already returned with the
-  // invoice still 'sent', then settle the invoice, then feed that STALE
-  // row into evaluateEstimateCandidates — it must re-read the invoice
-  // fresh under FOR UPDATE and clear, never alert off the stale status.
+  // Codex P2 (PR #5021 r7): loadCandidates' invoice status is read OUTSIDE
+  // this group's own evaluation transaction (plain `db`, before any
+  // per-group `db.transaction` opens), so it can already be stale by the
+  // time evaluateEstimateCandidates runs. Simulates that race directly: use
+  // a candidate group loadCandidates already returned while the invoice was
+  // still 'draft', then settle the invoice, then feed that STALE group into
+  // evaluateEstimateCandidates — it must re-read the invoice fresh under
+  // FOR UPDATE and clear, never alert off the stale status.
   test('evaluateEstimateCandidates re-reads the invoice fresh — a settle that lands after loadCandidates still clears', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
 
     const staleCandidates = await loadCandidates(trx);
-    const staleGroup = groupCandidatesByEstimate(staleCandidates).find((g) => g[0].source_estimate_id === ids.estimateId);
-    expect(staleGroup[0].invoice_status).toBe('draft');
+    const staleGroup = groupCandidatesByInvoice(staleCandidates).find((g) => String(g[0].invoice_id) === String(ids.invoiceId));
+    expect(staleGroup).toBeTruthy();
+    expect(staleGroup).toHaveLength(2);
 
-    // The invoice settles AFTER loadCandidates already read it.
+    // The invoice settles AFTER loadCandidates already read the group.
     await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
 
     const result = await evaluateEstimateCandidates(trx, staleGroup);
@@ -251,11 +276,11 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(await readBell(trx, dedupeKey)).toBeUndefined();
   }));
 
-  // Codex round-1 P1 on the pre-push fix: a divergence the SWEEP ITSELF
-  // auto-cleared (realigned) that recurs on the EXACT SAME date must still
-  // reopen — its fingerprint and notification content match the pre-clear
-  // alert exactly, so plain fingerprint dedupe would otherwise leave it
-  // silently cleared even though the problem is back.
+  // A divergence the SWEEP ITSELF auto-cleared (realigned) that recurs on
+  // the EXACT SAME date must still reopen — its fingerprint and
+  // notification content match the pre-clear alert exactly, so plain
+  // fingerprint dedupe would otherwise leave it silently cleared even
+  // though the problem is back.
   test('a divergence the sweep auto-cleared, recurring on the SAME date, reopens rather than staying cleared', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -306,21 +331,15 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
-  // Real-data manual-split detection (pre-push P1 fix): the office's own
-  // instructed fix — giving the moved sibling its own live invoice linked
-  // to its own scheduled_service_id — must stop the alert on its own,
-  // without relying on any invoice title/notes text.
+  // Real-data manual-split detection: the office's own instructed fix —
+  // giving the moved sibling its own live invoice linked to its own
+  // scheduled_service_id — must stop the alert on its own, without relying
+  // on any invoice title/notes text.
   //
   // Signal (a) alone — has_own_live_invoice — DELIBERATELY, not signal (b)
-  // (a dollar comparison against the combined invoice's total/lines):
-  // pre-push rounds 4-7 tried progressively narrower dollar reconciliation
-  // (a raw-total reduction, then a per-sibling attributable sum, then an
-  // application-only figure excluding setup fees, then accounting for
-  // plan-credit discounts) and each fix closed one gap in the invoice's
-  // open-ended composition (setup fees, rodent-bait fees, plan-credit
-  // slices, taxes, ...) only to open the next — exactly the "fall back to
-  // (a) if (b) is not reliable" contingency the task's own instructions
-  // anticipated. See the module header for the full history.
+  // (a dollar comparison against the combined invoice's total/lines): see
+  // the module header for the full history of why a dollar reconciliation
+  // proved unreliable across three independent design rounds.
   test('a manual split with both invoices still unpaid → no alert, and an existing alert is cleared', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -377,9 +396,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  // Codex round-1 P1 on the pre-push fix: void alone was excluded, so a
-  // cancelled sibling invoice (no replacement charge ever billed) could
-  // falsely clear the alert.
   test('a cancelled "split" invoice does not count either — still alerts', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -398,50 +414,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  // Codex round-3 P1 on the pre-push fix: the ALERTED (anchor's own)
-  // invoice is voided and re-minted for the SAME anchor visit while the
-  // group is STILL diverging. loadCandidates now returns two rows for this
-  // one estimate — the live replacement (from the primary non-settled
-  // scan) and the stale voided original (pulled in only because the
-  // standing alert still names it) — and evaluating both independently
-  // let the voided row's 'invoice_settled' clear verdict wipe out the
-  // live row's 'alert' verdict for the very same group.
-  test('the alerted invoice is voided and replaced — the live replacement governs, not the stale voided row', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx);
-    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
-
-    // The original invoice is voided...
-    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'void' });
-    // ...and re-minted for the SAME anchor visit (pestId) — same shared-
-    // invoice pattern, still open, the group still genuinely diverging.
-    const replacementInvoiceId = randomUUID();
-    await trx('invoices').insert({
-      id: replacementInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
-      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-      status: 'draft', title: 'First Service Application',
-      notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
-      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 }]),
-      subtotal: 153.60, total: 153.60,
-    });
-
-    const results = await sweepOnce(trx, ids.estimateId);
-    // Only ONE representative evaluated for this estimate — the live
-    // replacement — never a second, contradictory 'cleared' verdict from
-    // the stale voided row.
-    expect(results).toHaveLength(1);
-    expect(results[0].action).toBe('alerted');
-
-    const stillOpen = await readBell(trx, dedupeKey);
-    expect(stillOpen.read_at).toBeNull();
-    const metadata = typeof stillOpen.metadata === 'string' ? JSON.parse(stillOpen.metadata) : stillOpen.metadata;
-    expect(metadata.invoiceId).toBe(replacementInvoiceId);
-  }));
-
-  // Dismissal semantics (pre-push P1 fix): a dismissed alert must not
-  // reopen on the next tick unless the state materially changed.
+  // Dismissal semantics: a dismissed alert must not reopen on the next tick
+  // unless the state materially changed.
   test('dismissed alert + unchanged state → stays dismissed', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -482,17 +456,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
-  // Codex on head f0212d669f: staff dismiss the alert BEFORE completing the
-  // split (read_at set, autoCleared never stamped — the sweep hasn't yet
-  // confirmed resolution). They then complete the split (price + invoice
-  // the sibling), which makes the estimate drop out of structural
-  // discovery entirely (neither member has an uncovered sibling any more)
-  // — the exact gap where the FIRST established-anchor fix (bounded to
-  // unread-or-structurally-current) never got a chance to run the sweep
-  // for this estimate at all, so autoCleared was never actually stamped.
-  // Later, staff VOID the split invoice (undoing it) — a genuinely NEW
-  // recurrence of the SAME divergence. The sweep must reopen it, not
-  // silently leave it dismissed forever.
   test('dismiss → complete the split → sweep → void the split invoice → sweep reopens the recurrence', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -505,10 +468,9 @@ suite('first-application-sibling-split — periodic sweep', () => {
     await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
 
     // THEN they complete the instructed split: lawn gets its own price and
-    // its own live invoice. The estimate now satisfies structural
-    // discovery for NEITHER member — pest's only sibling (lawn) is fully
-    // covered by its own invoice, and lawn's only sibling (pest) already
-    // has its own (the shared) invoice too.
+    // its own live invoice. Note: under the stamp design lawn's
+    // first_application_invoice_id is untouched by this — the group stays
+    // the same two-member stamped pair; only has_own_live_invoice changes.
     const lawnInvoiceId = randomUUID();
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 42 });
     await trx('invoices').insert({
@@ -519,9 +481,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
       subtotal: 42, total: 42,
     });
 
-    // The sweep must still find this dismissed-but-unconfirmed alert and
-    // actually stamp autoCleared — the one piece of state a later genuine
-    // recurrence needs to be recognized as new information.
     const [afterSplit] = await sweepOnce(trx, ids.estimateId);
     expect(afterSplit.action).toBe('cleared');
     expect(afterSplit.reason).toBe('split_completed');
@@ -543,12 +502,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
-  // Codex round-2 P1 on the pre-push fix: a PLAIN human dismissal (read_at
-  // set, no autoCleared) followed by a GENUINE realignment must still
-  // record the resolution (clearStandingAlerts previously skipped an
-  // already-read row entirely), so a later recurrence onto the EXACT SAME
-  // original date is recognized as a real recurrence and reopens — not
-  // silently left dismissed forever.
   test('dismissed while diverging, then a genuine realignment, then recurrence onto the SAME original date reopens', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -581,18 +534,61 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
-  // PR #5021 Codex r6 (head 2168cb0877): candidacy is structural now, not
-  // text-matched — InvoiceService.update lets staff freely edit an unpaid
-  // invoice's title/notes, and a copy edit made before the FIRST sweep ever
-  // ran used to drop the invoice out of every future candidate scan
-  // forever (no standing alert yet existed to carry it through the
-  // stale-invoice fallback). A hand-edited title/notes must not matter.
-  test('invoice text unrecognizable — still a candidate (candidacy is structural, not text-matched)', () => rollbackTest(async (trx) => {
+  // ---------------------------------------------------------------------
+  // Candidacy semantics (owner ruling 2026-09-27): the stamp is the ONLY
+  // membership signal now. No text match, no structural guess (an unpriced
+  // sibling, no live invoice of its own, ...) ever makes a pair a
+  // candidate on its own.
+  // ---------------------------------------------------------------------
+
+  // Replaces the old structural-guessing "invoice text unrecognizable —
+  // still a candidate (candidacy is structural, not text-matched)" test:
+  // under the stamp design the invoice's own title/notes were NEVER read by
+  // candidate discovery in the first place, so a stamped pair is a
+  // candidate regardless of what its invoice happens to say.
+  test('a stamped pair with unrecognizable invoice text IS a candidate — the stamp is the only signal, never the text', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { matchInvoiceText: false });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     const [result] = await sweepOnce(trx, ids.estimateId);
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  // New: the mirror image — an invoice that WOULD match the old text
+  // pattern (or even one with genuinely first-application-shaped text) but
+  // was never stamped must never be discovered. This is the case a
+  // hand-edited invoice, or one minted by any path other than
+  // estimate-converter.js's own accept-time stamp, actually produces.
+  test('an unstamped pair is never a candidate, even with matching invoice text', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx, { stamp: false });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const [pest, lawn] = await Promise.all([
+      trx('scheduled_services').where({ id: ids.pestId }).first('first_application_invoice_id'),
+      trx('scheduled_services').where({ id: ids.lawnId }).first('first_application_invoice_id'),
+    ]);
+    expect(pest.first_application_invoice_id).toBeNull();
+    expect(lawn.first_application_invoice_id).toBeNull();
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
+  }));
+
+  // New: a stamped group whose partner has since lost its stamp (the FK's
+  // ON DELETE SET NULL firing, or a manual correction) collapses to a
+  // group of one — groupCandidatesByInvoice drops it, so it is never
+  // evaluated at all, alerted or cleared.
+  test('a stamped group whose partner is unstamped (group of one) is never evaluated', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ first_application_invoice_id: null, scheduled_date: '2026-10-02' });
+
+    // The pest row alone still shows up in the raw candidate scan (its own
+    // stamp is untouched)...
+    const candidates = await loadCandidates(trx);
+    const mine = candidates.filter((c) => String(c.source_estimate_id) === String(ids.estimateId));
+    expect(mine.map((c) => c.id)).toEqual([ids.pestId]);
+
+    // ...but grouping drops the now-solo stamp, so nothing is evaluated.
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
   }));
 
   test('no first-application invoice at all — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
@@ -602,25 +598,26 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
-  // Codex P2 (PR #5021 r7): the load concern is the historical backlog of
-  // ordinary, ALIGNED same-day multi-program invoices sitting open
-  // (sent/viewed/overdue) for weeks — every one of them was structurally
-  // "still covered" from day one (the unpriced sibling shares the invoice)
-  // regardless of whether anything ever diverged, so the old query re-swept
-  // every one of them, every tick, forever. Excluded cheaply in SQL now: a
-  // sibling that never diverged by date and was never cancelled is not a
-  // candidate at all, aligned or not, open invoice or not.
-  test('an ALIGNED, never-diverged, non-cancelled group is never a sweep candidate, even with a long-open invoice', () => rollbackTest(async (trx) => {
+  // Under the stamp design, loadCandidates' own SQL has NO alignment
+  // filter any more (that filtering moved entirely to
+  // evaluateGroupDivergence) — a stamped, never-diverged, non-cancelled
+  // group on a long-open invoice IS returned as a candidate and evaluated
+  // every tick, but it never alerts.
+  test('an ALIGNED, never-diverged, non-cancelled stamped group is a candidate but never alerts, even with a long-open invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { invoiceStatus: 'overdue' });
+    const candidates = await loadCandidates(trx);
+    expect(candidates.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(true);
     const results = await sweepOnce(trx, ids.estimateId);
-    expect(results).toEqual([]);
+    expect(results).toHaveLength(1);
+    expect(results[0].action).toBe('cleared');
+    expect(results[0].reason).toBe('realigned');
   }));
 
-  // False-positive coverage for the structural candidacy signal (PR #5021
-  // Codex r6, head 2168cb0877): a normal single-program estimate has no
-  // sibling top-level visit at all, so it must never become a candidate —
-  // even when its invoice's own title/notes WOULD have matched the old
-  // text pattern.
+  // A normal single-program estimate has no same-day top-level recurring
+  // sibling to stamp alongside it — stampCombinedFirstApplicationInvoiceCoverage
+  // bails out with nothing stamped, so the anchor's own
+  // first_application_invoice_id stays NULL forever, regardless of what its
+  // own invoice's title/notes happen to say.
   test('a normal single-program estimate is never a candidate, even with first-application-shaped invoice text', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -641,16 +638,19 @@ suite('first-application-sibling-split — periodic sweep', () => {
       line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 99, amount: 99 }]),
       subtotal: 99, total: 99,
     });
-    // Move the visit's own date around — a single-program estimate has no
-    // sibling to diverge from in the first place.
+    // No stamp is ever written here — a single-program accept never gets
+    // one. Move the visit's own date around — a single-program estimate has
+    // no sibling to diverge from in the first place.
     await trx('scheduled_services').where({ id: soloId }).update({ scheduled_date: '2026-10-09' });
+    const solo = await trx('scheduled_services').where({ id: soloId }).first('first_application_invoice_id');
+    expect(solo.first_application_invoice_id).toBeNull();
     const results = await sweepOnce(trx, estimateId);
     expect(results).toEqual([]);
   }));
 
-  // False-positive coverage: two SEPARATE recurring programs off one
-  // estimate, each independently priced AND independently invoiced from
-  // day one (never sharing one combined invoice), must never be read as a
+  // Two SEPARATE recurring programs off one estimate, each independently
+  // priced AND independently invoiced from day one (never sharing one
+  // combined invoice, never stamped), must never be read as a
   // reserved-accept split just because they share an estimate.
   test('two independently priced-and-invoiced programs from one estimate are never a candidate', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
@@ -687,6 +687,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
         subtotal: 80, total: 80,
       },
     ]);
+    // Neither row is ever stamped — nothing minted a COMBINED invoice here.
     // One of the two visits moves — a real divergence between two
     // independently billed programs, not a shared-invoice conflict.
     await trx('scheduled_services').where({ id: lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -694,14 +695,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
-  // A THREE-program group (A anchor + B + C). B and C both diverge; staff
-  // then price and separately invoice B ONLY (a partial split), leaving C
-  // still unpriced and un-invoiced. B's own new invoice legitimately
-  // registers as a second candidate for this estimate too (see the module
-  // header — this is by design now, not a bug to prevent), but
-  // evaluateEstimateCandidates evaluating both together must still keep
-  // the real alert open (naming C, still uncovered by A's combined
-  // invoice) — never silently cleared by B's own narrow 'clear' verdict.
+  // A THREE-member stamped group (A anchor + B + C, all stamped with the
+  // SAME invoice at accept time). B and C both diverge; staff then price
+  // and separately invoice B ONLY (a partial split), leaving C still
+  // unpriced and un-invoiced. Because the stamp is permanent and shared, B
+  // and C are STILL grouped with A on every future tick — B's own new
+  // invoice never changes B's own first_application_invoice_id — so the
+  // group evaluation must correctly resolve B (has_own_live_invoice) while
+  // keeping the real alert open for C.
   test('a partially completed THREE-program split (B priced + invoiced, C still uncovered) keeps the real alert open', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -726,11 +727,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
         service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
       },
     ]);
-    // Explicit, distinct created_at values (real acceptance vs a later
-    // hand-split are always separate requests/transactions in production,
-    // so their created_at values are naturally ordered — this test sets
-    // them explicitly rather than relying on the fixture's single shared
-    // transaction, whose default now() would otherwise tie them).
     const anchorInvoiceId = randomUUID();
     await trx('invoices').insert({
       id: anchorInvoiceId, customer_id: customerId, scheduled_service_id: anchorId,
@@ -738,12 +734,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
       status: 'draft', title: 'First Service Application',
       notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
       line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-      subtotal: 200, total: 200, created_at: new Date('2026-09-01T00:00:00Z'),
+      subtotal: 200, total: 200,
     });
+    // All three stamped together at accept time — exactly what
+    // stampCombinedFirstApplicationInvoiceCoverage writes for a 3-program
+    // reserved accept.
+    await trx('scheduled_services').whereIn('id', [anchorId, bId, cId]).update({ first_application_invoice_id: anchorInvoiceId });
 
-    // B and C both diverge from the anchor onto the SAME new day — the
-    // exact shape where B's own narrow view, once split off, would read C
-    // as "aligned" with it (same date as B) rather than diverging.
+    // B and C both diverge from the anchor onto the SAME new day.
     await trx('scheduled_services').where({ id: bId }).update({ scheduled_date: '2026-10-02' });
     await trx('scheduled_services').where({ id: cId }).update({ scheduled_date: '2026-10-02' });
     const [firstResult] = await sweepOnce(trx, estimateId);
@@ -753,76 +751,41 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
     // Office splits B only: prices it and mints its own live invoice —
-    // well AFTER the anchor's own invoice, exactly like a real hand-split
-    // done days later.
+    // B's own first_application_invoice_id stays pointed at the anchor's
+    // invoice; this new invoice is a SEPARATE row linked via
+    // invoices.scheduled_service_id, never a re-stamp.
     await trx('scheduled_services').where({ id: bId }).update({ estimated_price: 60 });
-    const bInvoiceId = randomUUID();
     await trx('invoices').insert({
-      id: bInvoiceId, customer_id: customerId, scheduled_service_id: bId,
+      id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
       line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
-      subtotal: 60, total: 60, created_at: new Date('2026-09-05T00:00:00Z'),
+      subtotal: 60, total: 60,
     });
 
-    // loadCandidates now returns ONLY the true anchor's own invoice for
-    // this estimate — never B's own new invoice too — because the first
-    // sweep already ESTABLISHED anchorId=A in the standing alert's own
-    // metadata, and every later tick re-derives that SAME known anchor
-    // directly instead of re-running the (ambiguous, once a split exists)
-    // structural scan. B's own invoice is not even discovered here.
+    // The group is still all three members, keyed by the one stamped
+    // invoice id — never narrowed by B's own new invoice.
     const candidates = await loadCandidates(trx);
-    const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
-    expect(mine.map((c) => c.invoice_id)).toEqual([anchorInvoiceId]);
+    const mine = candidates.filter((c) => String(c.source_estimate_id) === String(estimateId));
+    expect(mine.map((c) => c.id).sort()).toEqual([anchorId, bId, cId].sort());
+    expect(mine.every((c) => String(c.invoice_id) === String(anchorInvoiceId))).toBe(true);
 
     const [result] = await sweepOnce(trx, estimateId);
     expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([cId]);
 
     // The alert for the now-narrower diverging set (just C, since B
-    // resolved) is open and unread — never wiped by a bogus clear from B's
-    // own invoice's point of view, which would have marked THIS row read
-    // too (clearStandingAlerts with no exceptKey clears every dedupeKey
-    // under the estimate's prefix).
+    // resolved) is open and unread.
     const newDedupeKey = DEDUPE_KEY(estimateId, [cId]);
     const stillOpen = await readBell(trx, newDedupeKey);
     expect(stillOpen.read_at).toBeNull();
-
-    // Now the anchor's OWN invoice is voided and reissued (a fresh #2 for
-    // the SAME anchor visit), minted AFTER B's own split invoice — the
-    // exact combination that broke an earlier "earliest invoice wins"
-    // heuristic (Codex on head daf724131f): the reissue is "younger" than
-    // B's own invoice, so age alone can't tell them apart. C is still
-    // uncovered throughout.
-    await trx('invoices').where({ id: anchorInvoiceId }).update({ status: 'void' });
-    const anchorReplacementId = randomUUID();
-    await trx('invoices').insert({
-      id: anchorReplacementId, customer_id: customerId, scheduled_service_id: anchorId,
-      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-      status: 'draft', title: 'First Service Application',
-      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
-      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
-      subtotal: 200, total: 200, created_at: new Date('2026-09-10T00:00:00Z'),
-    });
-
-    const [afterReissue] = await sweepOnce(trx, estimateId);
-    expect(afterReissue.action).toBe('alerted');
-    expect(afterReissue.divergingSiblingIds).toEqual([cId]);
-    const stillOpenAfterReissue = await readBell(trx, newDedupeKey);
-    expect(stillOpenAfterReissue.read_at).toBeNull();
-    const meta = typeof stillOpenAfterReissue.metadata === 'string' ? JSON.parse(stillOpenAfterReissue.metadata) : stillOpenAfterReissue.metadata;
-    expect(meta.invoiceId).toBe(anchorReplacementId);
   }));
 
-  // Codex on head 5531a784ac: the opposite failure mode from the tests
-  // above. A THREE-program group where C stays ALIGNED with the true
-  // anchor A the whole time — only B moves and gets split off. Evaluating
-  // B AS an anchor (the union-of-all-candidates fix) computes divergence
-  // BACKWARDS from B's own (moved) date: it reads C, which never moved at
-  // all, as "diverging FROM B" and manufactures a false alert about a
-  // sibling that needs no action whatsoever. The established-anchor
-  // mechanism must never let B become a reference frame in the first
-  // place once A is already established.
+  // The opposite shape: a THREE-program group where C stays ALIGNED with
+  // the anchor the whole time — only B moves and gets split off.
+  // evaluateGroupDivergence computes every member's divergence against the
+  // SAME anchor, always, so C (which never moved) must never be reported
+  // even after B resolves, across repeated sweeps and a dismissal.
   test('C stays aligned with A after B splits off — never a false alert about C, even across repeated sweeps and a dismissal', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -856,6 +819,7 @@ suite('first-application-sibling-split — periodic sweep', () => {
       line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
       subtotal: 200, total: 200,
     });
+    await trx('scheduled_services').whereIn('id', [anchorId, bId, cId]).update({ first_application_invoice_id: anchorInvoiceId });
 
     // Only B moves. C stays put, aligned with A, the whole time.
     await trx('scheduled_services').where({ id: bId }).update({ scheduled_date: '2026-10-02' });
@@ -887,23 +851,15 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const cDedupeKey = DEDUPE_KEY(estimateId, [cId]);
     expect(await readBell(trx, cDedupeKey)).toBeUndefined();
 
-    // Codex P1 on this fix: the FIRST fix scoped the established-anchor
-    // lookup to currently-UNREAD alerts only, so the estimate FORGOT its
-    // own anchor the instant this alert cleared — C is permanently
-    // unpriced (though perfectly aligned with A, no real problem), so it
-    // keeps the estimate structurally "in play" forever, and the very NEXT
-    // tick re-ran the (now ambiguous) structural scan and resurrected a
-    // bogus alert about C from B's own invoice's point of view. Repeated
-    // sweeps here — with the ORIGINAL alert both left alone (still
-    // cleared) and explicitly re-dismissed — must never resurrect it.
+    // Repeated sweeps — with the original alert both left alone (still
+    // cleared) and explicitly re-dismissed — must never resurrect a bogus
+    // alert about C.
     for (let tick = 0; tick < 3; tick += 1) {
       const [repeat] = await sweepOnce(trx, estimateId);
       expect(repeat.action).toBe('cleared');
       expect(await readBell(trx, cDedupeKey)).toBeUndefined();
     }
 
-    // Even an explicit re-dismissal of the (already-cleared) original
-    // alert changes nothing about the estimate's remembered anchor.
     await trx('notifications').where({ id: cleared.id }).update({ read_at: new Date() });
     const [afterDismiss] = await sweepOnce(trx, estimateId);
     expect(afterDismiss.action).toBe('cleared');
@@ -925,11 +881,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results.every((r) => r.action !== 'alerted')).toBe(true);
   }));
 
-  // PR #5021 Codex r6 (head 2168cb0877): a completed sibling used to be
-  // excluded from divergence on the theory that completion is a "settled
-  // fact" — but completing a visit never settles or rewrites the
-  // still-open COMBINED invoice, so the office lost the alert the moment
-  // the moved sibling finished. A completed sibling now still alerts.
   test('a completed sibling still alerts — completion never settles the still-open combined invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId })
@@ -939,16 +890,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  // Codex P1 (PR #5021 r7): a CANCELLED top-level sibling used to be
-  // excluded from the group entirely at loadGroupMembers's own query level
-  // (the group then dissolved to 'no_group', never alerting) — but
-  // cancelling a visit never removes its share of the still-open combined
-  // invoice (voidOpenInvoicesForCancelledService only voids an invoice
-  // linked to the CANCELLED service's OWN scheduled_service_id, never the
-  // anchor's shared one), so the customer stayed billed for work that
-  // never happened with nothing telling the office. It now stays a member
-  // and alerts, with copy telling the office to remove its charge rather
-  // than split it by hand.
   test('a cancelled sibling still alerts — its charge is still on the combined invoice', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId })
@@ -965,9 +906,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(bell.body).not.toContain('split it by hand');
   }));
 
-  // Reconsidered explicitly in the same fix: a sibling cancelled WITHOUT
-  // ever diverging by date (same-trip, same day, just called off) still
-  // leaves exactly as stale a charge on the combined invoice.
   test('a sibling cancelled on the SAME day as the anchor (never diverged by date) still alerts', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
@@ -978,10 +916,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect((await readBell(trx, dedupeKey)).body).toContain('remove its charge from the combined invoice');
   }));
 
-  // The fingerprinted dismissal is the office's own "done" signal for the
-  // cancelled case too: unchanged state (still cancelled, still no own
-  // invoice) stays dismissed; the office actually moving the charge off
-  // (its own live invoice appears) is a genuine state change and reopens.
   test('a dismissed cancelled-sibling alert stays dismissed while unchanged, reopens once the charge is actually moved off', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ status: 'cancelled' });
@@ -1009,11 +943,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
   }));
 
-  // Codex P1 (PR #5021 r8): 'skipped' and 'no_show' are equally terminal,
-  // equally never-serviced statuses on the scheduled_services CHECK
-  // constraint (AGENTS.md) and must get the same billing-review treatment
-  // as 'cancelled' — the fix generalizes from a single hardcoded status to
-  // the shared VISIT_NEVER_RAN_STATUSES vocabulary (invoice-helpers.js).
   test.each(['skipped', 'no_show'])('a %s sibling still alerts — its charge is still on the combined invoice', (status) => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ status });
@@ -1027,20 +956,16 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(bell.body).not.toContain('split it by hand');
   }));
 
-  // Codex P2 (PR #5021 r8): an UNPRICED sibling that already has its own
-  // live invoice (the manual split completed) used to still count as a
-  // fresh structural candidate forever — the "unpriced" branch matched
-  // regardless of the invoice — bypassing the fresh-batch limit
-  // (selectFreshBatch/FRESH_BATCH_LIMIT) since it never graduated off the
-  // structural scan. Fixed by requiring "no own live invoice" alone. Once
-  // resolved (autoCleared), the estimate must drop out of loadCandidates
-  // entirely on the next tick — not just clear its alert, but stop being
-  // evaluated every tick at all. If the split invoice is later voided,
-  // recovery still finds it through the alert-history (established-anchor)
-  // path, never through this structural branch again.
-  test('a resolved unpriced sibling (own live invoice, never priced) drops out of candidate discovery once autoCleared', () => rollbackTest(async (trx) => {
+  // Corrects the old "drops out of candidate discovery once autoCleared"
+  // framing: loadCandidates' own SQL excludes a group ONLY when its invoice
+  // is settled OR (its invoice is open AND its alert is already confirmed
+  // autoCleared) — there is no more "no own live invoice" gate at the
+  // discovery layer. A resolved-but-still-open group therefore STAYS a
+  // candidate every tick (harmlessly re-evaluating to 'cleared' each time)
+  // until the underlying invoice itself actually settles.
+  test('a resolved unpriced sibling (own live invoice, never priced) stops alerting but stays a candidate while its combined invoice is still open', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
-    // Diverge first so an alert actually gets raised and established.
+    // Diverge first so an alert actually gets raised.
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     const [alerted] = await sweepOnce(trx, ids.estimateId);
     expect(alerted.action).toBe('alerted');
@@ -1065,39 +990,49 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const clearedMeta = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
     expect(clearedMeta.autoCleared).toBe(true);
 
-    // The combined invoice is STILL open (never paid) — before this fix,
-    // the unpriced sibling would keep matching the structural scan's
-    // "unpriced" branch forever regardless of its own live invoice. Now
-    // the estimate must be entirely ABSENT from loadCandidates: not a
-    // fresh candidate (excluded by "no own live invoice"), and not an
-    // established one either (its alert is confirmed autoCleared).
+    // The combined invoice is STILL open (never paid) — the stamped group
+    // remains in loadCandidates (the stamp never expires), and sweeping
+    // again re-evaluates to the same harmless 'cleared' verdict, never a
+    // fresh alert.
     const stillOpenInvoice = await trx('invoices').where({ id: ids.invoiceId }).first('status');
     expect(['draft', 'sent', 'viewed', 'overdue']).toContain(stillOpenInvoice.status);
     const candidatesAfter = await loadCandidates(trx);
-    expect(candidatesAfter.some((c) => c.source_estimate_id === ids.estimateId)).toBe(false);
-
-    // Recovery still works through alert history if the split is undone:
-    // voiding the split invoice re-establishes the same anchor via
-    // loadEstablishedAnchorsByEstimate's own "not yet confirmed-resolved"
-    // scope — this estimate's alert IS confirmed-resolved (autoCleared),
-    // so voiding alone does not resurrect it from THAT branch; but the
-    // group is still structurally "still covered" again (no live invoice),
-    // so the fresh scan picks it right back up.
-    await trx('invoices').where({ scheduled_service_id: ids.lawnId }).update({ status: 'void' });
-    const candidatesAfterVoid = await loadCandidates(trx);
-    expect(candidatesAfterVoid.some((c) => c.source_estimate_id === ids.estimateId)).toBe(true);
-    const [reopened] = await sweepOnce(trx, ids.estimateId);
-    expect(reopened.action).toBe('alerted');
+    expect(candidatesAfter.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(true);
+    const [resweep] = await sweepOnce(trx, ids.estimateId);
+    expect(resweep.action).toBe('cleared');
+    expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
   }));
 
-  // Codex P2 (PR #5021 r8): loadGroupMembers used to pull in EVERY
-  // top-level row under the source_estimate_id, including a one-time
-  // (non-recurring) add-on booked alongside the recurring programs —
-  // candidate discovery's own structural scan already requires
-  // `is_recurring = true` for a sibling to count; loadGroupMembers now
-  // mirrors that predicate so it never evaluates a superset of what
-  // discovery reasons about.
-  test('a one-time (non-recurring) appointment under the same estimate is never treated as a member — no alert for its own date', () => rollbackTest(async (trx) => {
+  // Continuation: once the combined invoice ITSELF settles too (paid,
+  // void, ...), the group finally drops out of loadCandidates entirely —
+  // the alert is already confirmed autoCleared, so the standing-alert
+  // recovery clause does not rescue it either.
+  test('once the combined invoice itself settles, a resolved group drops out of candidate discovery entirely', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+    const [resolved] = await sweepOnce(trx, ids.estimateId);
+    expect(resolved.action).toBe('cleared');
+    expect(resolved.reason).toBe('split_completed');
+
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
+    const candidatesAfter = await loadCandidates(trx);
+    expect(candidatesAfter.some((c) => String(c.source_estimate_id) === String(ids.estimateId))).toBe(false);
+  }));
+
+  // Replaces the old loadGroupMembers-based coverage (that export no longer
+  // exists): a one-time (non-recurring) appointment under the same
+  // estimate is never stamped by stampCombinedFirstApplicationInvoiceCoverage
+  // (it requires is_recurring = true), so it can never appear in a
+  // candidate group at all — confirmed directly against loadCandidates.
+  test('a one-time (non-recurring) appointment under the same estimate is never a stamped member', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     const oneTimeId = randomUUID();
     await trx('scheduled_services').insert({
@@ -1106,13 +1041,16 @@ suite('first-application-sibling-split — periodic sweep', () => {
     });
     // Both recurring programs stay aligned — only the one-time add-on sits
     // on a wildly different date, which must never itself trigger an
-    // alert (it is not a same-trip sibling at all).
+    // alert (it is not a same-trip stamped member at all).
     const results = await sweepOnce(trx, ids.estimateId);
     expect(results.every((r) => r.action !== 'alerted')).toBe(true);
 
-    const members = await loadGroupMembers(trx, { customerId: ids.customerId, sourceEstimateId: ids.estimateId });
-    expect(members.map((m) => m.id).sort()).toEqual([ids.lawnId, ids.pestId].sort());
-    expect(members.some((m) => m.id === oneTimeId)).toBe(false);
+    const candidates = await loadCandidates(trx);
+    const mine = candidates.filter((c) => String(c.source_estimate_id) === String(ids.estimateId));
+    expect(mine.map((c) => c.id).sort()).toEqual([ids.lawnId, ids.pestId].sort());
+    expect(mine.some((c) => c.id === oneTimeId)).toBe(false);
+    const oneTime = await trx('scheduled_services').where({ id: oneTimeId }).first('first_application_invoice_id');
+    expect(oneTime.first_application_invoice_id).toBeNull();
   }));
 
   test('the priced (invoice-holding) row itself moving off the sibling\'s date raises the same alert', () => rollbackTest(async (trx) => {
@@ -1149,26 +1087,20 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(cleared).toBe(0);
   }));
 
-  test('an alert-write failure surfaces per-candidate — the failing estimate is reported, never silently dropped', () => rollbackTest(async (trx) => {
+  test('an alert-write failure surfaces per-candidate — the failing group is reported, never silently dropped', () => rollbackTest(async (trx) => {
     const notificationService = require('../services/notification-service');
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     const spy = jest.spyOn(notificationService, 'notifyAdmin').mockRejectedValueOnce(new Error('injected notifyAdmin failure'));
     try {
       const candidates = await loadCandidates(trx);
-      const mine = candidates.filter((c) => c.source_estimate_id === ids.estimateId);
+      const mine = candidates.filter((c) => String(c.source_estimate_id) === String(ids.estimateId));
       await expect(evaluateEstimateCandidates(trx, mine)).rejects.toThrow('injected notifyAdmin failure');
     } finally {
       spy.mockRestore();
     }
   }));
 
-  // Codex P2 (PR #5021 r7): the fresh-candidate sweep cursor
-  // (first_application_sibling_split_sweep_cursor, id=1) is the durable
-  // keyset bookmark runSweepInner advances so a large fresh backlog is
-  // visited fairly over successive ticks instead of the same head every
-  // time. Round-tripped here directly against the real table (rolled back
-  // like every other fixture in this suite).
   test('the sweep cursor round-trips through the real table and is restored on rollback', () => rollbackTest(async (trx) => {
     const before = await loadSweepCursor(trx);
     const sentinel = randomUUID();
@@ -1177,4 +1109,281 @@ suite('first-application-sibling-split — periodic sweep', () => {
     // Never observable outside this rolled-back transaction.
     expect(await loadSweepCursor(db)).toBe(before);
   }));
+
+  // ---------------------------------------------------------------------
+  // stampCombinedFirstApplicationInvoiceCoverage (estimate-converter.js) —
+  // the writer that records the stamp at accept time, inside the SAME
+  // transaction that mints the combined invoice.
+  // ---------------------------------------------------------------------
+  describe('stampCombinedFirstApplicationInvoiceCoverage', () => {
+    async function seedProgram(trx, {
+      customerId, estimateId, scheduledDate = SAME_DATE, isRecurring = true, recurringParentId = null, estimatedPrice = null,
+    } = {}) {
+      const id = randomUUID();
+      await trx('scheduled_services').insert({
+        id, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: scheduledDate,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: isRecurring,
+        recurring_parent_id: recurringParentId, estimated_price: estimatedPrice,
+      });
+      return id;
+    }
+
+    async function seedCustomerAndEstimate(trx, label) {
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      await trx('customers').insert({
+        id: customerId, first_name: `Synthetic ${label} fixture`, phone: `qa-${customerId.slice(0, 8)}`, active: true,
+      });
+      await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+      return { customerId, estimateId };
+    }
+
+    test('stamps the anchor + a promoted same-day top-level recurring sibling, both, inside the trx', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-pair');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
+      const siblingId = await seedProgram(trx, { customerId, estimateId });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'First Service Application', notes: 'n/a',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+        subtotal: 200, total: 200,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+
+      const [anchor, sibling] = await Promise.all([
+        trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: siblingId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBe(invoiceId);
+      expect(sibling.first_application_invoice_id).toBe(invoiceId);
+    }));
+
+    test('a single-program anchor (no sibling) leaves the column NULL', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-solo');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 99 });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'Quarterly Pest Control', notes: 'n/a',
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', quantity: 1, unit_price: 99, amount: 99 }]),
+        subtotal: 99, total: 99,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+
+      const anchor = await trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id');
+      expect(anchor.first_application_invoice_id).toBeNull();
+    }));
+
+    test('a CHILD occurrence (recurring_parent_id set) on the same day is NOT stamped', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-child');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
+      const siblingParentId = await seedProgram(trx, { customerId, estimateId });
+      const childId = await seedProgram(trx, { customerId, estimateId, recurringParentId: siblingParentId });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'First Service Application', notes: 'n/a',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+        subtotal: 200, total: 200,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+
+      const [siblingParent, child] = await Promise.all([
+        trx('scheduled_services').where({ id: siblingParentId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: childId }).first('first_application_invoice_id'),
+      ]);
+      expect(siblingParent.first_application_invoice_id).toBe(invoiceId);
+      expect(child.first_application_invoice_id).toBeNull();
+    }));
+
+    test('a non-recurring one-time row on the same day is NOT stamped', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-onetime');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
+      const oneTimeId = await seedProgram(trx, { customerId, estimateId, isRecurring: false, estimatedPrice: 75 });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'First Service Application', notes: 'n/a',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+        subtotal: 200, total: 200,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+
+      const [anchor, oneTime] = await Promise.all([
+        trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: oneTimeId }).first('first_application_invoice_id'),
+      ]);
+      // The one-time row alone never qualifies as "the sibling that
+      // justifies a pair" — the anchor itself is therefore left unstamped
+      // too (single-program-equivalent: no recurring sibling exists).
+      expect(anchor.first_application_invoice_id).toBeNull();
+      expect(oneTime.first_application_invoice_id).toBeNull();
+    }));
+
+    test('a sibling on a DIFFERENT date is NOT stamped', () => rollbackTest(async (trx) => {
+      const { customerId, estimateId } = await seedCustomerAndEstimate(trx, 'stamp-different-date');
+      const anchorId = await seedProgram(trx, { customerId, estimateId, estimatedPrice: 200 });
+      const laterId = await seedProgram(trx, { customerId, estimateId, scheduledDate: '2026-11-01' });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'draft', title: 'First Service Application', notes: 'n/a',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+        subtotal: 200, total: 200,
+      });
+
+      await stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId });
+
+      const [anchor, later] = await Promise.all([
+        trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: laterId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBeNull();
+      expect(later.first_application_invoice_id).toBeNull();
+    }));
+  });
+
+  // ---------------------------------------------------------------------
+  // backfillFirstApplicationInvoiceStamps
+  // (estimate-first-application-invoice.js) — the one-time, idempotent
+  // historical backfill (also the one the schema migration itself calls),
+  // using the OLD text-based recognition on existing data.
+  // ---------------------------------------------------------------------
+  describe('backfillFirstApplicationInvoiceStamps', () => {
+    async function seedHistoricalPair(trx, {
+      matchInvoiceText = true, invoiceStatus = 'sent', siblingPriced = false,
+    } = {}) {
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      const anchorId = randomUUID();
+      const siblingId = randomUUID();
+      await trx('customers').insert({
+        id: customerId, first_name: 'Synthetic backfill fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+      });
+      await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+      await trx('scheduled_services').insert([
+        {
+          id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+          service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 200,
+        },
+        {
+          id: siblingId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+          service_type: 'Lawn Care', status: 'confirmed', is_recurring: true,
+          estimated_price: siblingPriced ? 60 : null,
+        },
+      ]);
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: invoiceStatus,
+        title: matchInvoiceText ? 'First Service Application' : 'Custom invoice title',
+        notes: matchInvoiceText
+          ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`
+          : 'A hand-edited note with nothing recognizable in it.',
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+        subtotal: 200, total: 200,
+      });
+      return {
+        customerId, estimateId, anchorId, siblingId, invoiceId,
+      };
+    }
+
+    test('stamps a historical text-recognized pair', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx);
+      const result = await backfillFirstApplicationInvoiceStamps(trx);
+      expect(result.stamped).toBeGreaterThanOrEqual(2);
+      const [anchor, sibling] = await Promise.all([
+        trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+      expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('skips a single-program invoice (no unpriced same-day top-level recurring sibling)', () => rollbackTest(async (trx) => {
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      const anchorId = randomUUID();
+      await trx('customers').insert({
+        id: customerId, first_name: 'Synthetic backfill solo fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+      });
+      await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+      await trx('scheduled_services').insert({
+        id: anchorId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 99,
+      });
+      const invoiceId = randomUUID();
+      await trx('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: anchorId,
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: 'sent', title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 99, amount: 99 }]),
+        subtotal: 99, total: 99,
+      });
+
+      await backfillFirstApplicationInvoiceStamps(trx);
+
+      const anchor = await trx('scheduled_services').where({ id: anchorId }).first('first_application_invoice_id');
+      expect(anchor.first_application_invoice_id).toBeNull();
+    }));
+
+    test('skips a void invoice', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx, { invoiceStatus: 'void' });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      const anchor = await trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id');
+      expect(anchor.first_application_invoice_id).toBeNull();
+    }));
+
+    test('skips an unrecognizable-text invoice', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx, { matchInvoiceText: false });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      const anchor = await trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id');
+      expect(anchor.first_application_invoice_id).toBeNull();
+    }));
+
+    test('leaves an already-priced sibling out (single-program-equivalent — never stamped)', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx, { siblingPriced: true });
+      await backfillFirstApplicationInvoiceStamps(trx);
+      const [anchor, sibling] = await Promise.all([
+        trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBeNull();
+      expect(sibling.first_application_invoice_id).toBeNull();
+    }));
+
+    test('idempotent — a second run returns the same mapping, with no change', () => rollbackTest(async (trx) => {
+      const ids = await seedHistoricalPair(trx);
+      const first = await backfillFirstApplicationInvoiceStamps(trx);
+      const second = await backfillFirstApplicationInvoiceStamps(trx);
+      expect(second.stamped).toBe(first.stamped);
+      const [anchor, sibling] = await Promise.all([
+        trx('scheduled_services').where({ id: ids.anchorId }).first('first_application_invoice_id'),
+        trx('scheduled_services').where({ id: ids.siblingId }).first('first_application_invoice_id'),
+      ]);
+      expect(anchor.first_application_invoice_id).toBe(ids.invoiceId);
+      expect(sibling.first_application_invoice_id).toBe(ids.invoiceId);
+    }));
+
+    test('returns { scanned, stamped }', () => rollbackTest(async (trx) => {
+      await seedHistoricalPair(trx);
+      const result = await backfillFirstApplicationInvoiceStamps(trx);
+      expect(typeof result.scanned).toBe('number');
+      expect(typeof result.stamped).toBe('number');
+      expect(result.scanned).toBeGreaterThanOrEqual(1);
+      expect(result.stamped).toBeGreaterThanOrEqual(2);
+    }));
+  });
 });

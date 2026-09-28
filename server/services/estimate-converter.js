@@ -2020,6 +2020,44 @@ function shouldAttachScheduledServiceToStandardDraftInvoice({
   return !!firstScheduledServiceId && roundMoney(firstApplicationAmount) > 0;
 }
 
+// Stamps scheduled_services.first_application_invoice_id on every member a
+// freshly-minted combined first-application invoice covers — the reserved
+// anchor AND each promoted same-day, top-level, recurring sibling — in the
+// SAME transaction the invoice itself commits in. Durable provenance for
+// first-application-sibling-split.js's sweep, replacing its old structural
+// guessing (Codex P1, PR #5021 pre-push): an unpriced sibling with no live
+// invoice of its own could not be told apart from a genuinely separate,
+// independently-billed recurring program that simply hadn't been invoiced
+// yet — this records the real relationship once, at the source, instead.
+// ONLY when 2+ programs actually share the invoice: a single-program
+// accept is never stamped as a pair (no same-day top-level recurring
+// sibling exists to stamp alongside the anchor), so the sweep's own
+// membership query (first_application_invoice_id IS NOT NULL, grouped)
+// never sees a group of one. Every same-day top-level recurring sibling
+// is, by construction, still estimated_price NULL at this exact instant
+// (the promotion insert above never sets a price) — no extra "unpriced"
+// filter is needed here the way the one-time backfill migration needs one
+// to infer the same relationship from current-state data alone.
+async function stampCombinedFirstApplicationInvoiceCoverage(trx, { invoiceId, anchorId }) {
+  if (!invoiceId || !anchorId) return;
+  const anchor = await trx('scheduled_services').where({ id: anchorId })
+    .first('customer_id', 'source_estimate_id', 'scheduled_date');
+  if (!anchor || !anchor.source_estimate_id || !anchor.scheduled_date) return;
+  const siblings = await trx('scheduled_services')
+    .where({
+      customer_id: anchor.customer_id,
+      source_estimate_id: anchor.source_estimate_id,
+      scheduled_date: anchor.scheduled_date,
+    })
+    .whereNot('id', anchorId)
+    .whereNull('recurring_parent_id')
+    .where('is_recurring', true)
+    .select('id');
+  if (!siblings.length) return; // single-program accept — never stamped as a pair
+  const memberIds = [anchorId, ...siblings.map((s) => s.id)];
+  await trx('scheduled_services').whereIn('id', memberIds).update({ first_application_invoice_id: invoiceId });
+}
+
 function normalizeEstimateData(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -7747,6 +7785,15 @@ const EstimateConverter = {
                   }
                 }
                 appliedDepositCredit = effectiveDepositCredit;
+                // Durable combined-invoice provenance (Codex P1, PR #5021
+                // pre-push; owner ruling 2026-09-27) — same transaction,
+                // so a failure here rolls the whole invoice mint back
+                // rather than leaving an unstamped combined invoice.
+                if (created?.id && scheduledServiceId) {
+                  await stampCombinedFirstApplicationInvoiceCoverage(trx, {
+                    invoiceId: created.id, anchorId: scheduledServiceId,
+                  });
+                }
                 return created;
               });
               if (inv && appliedDepositCredit > 0 && appliedDepositCredit < requestedDepositCredit) {
@@ -8430,6 +8477,7 @@ module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
 module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConversion;
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
+module.exports.stampCombinedFirstApplicationInvoiceCoverage = stampCombinedFirstApplicationInvoiceCoverage;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
 module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;

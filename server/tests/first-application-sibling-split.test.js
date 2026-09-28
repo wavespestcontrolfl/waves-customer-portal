@@ -12,12 +12,12 @@ const {
   evaluateGroupDivergence,
   divergingSiblings,
   divergenceStateFingerprint,
-  groupCandidatesByEstimate,
+  groupCandidatesByInvoice,
   isInvoiceSettled,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
-  selectFreshBatch,
-  FRESH_BATCH_LIMIT,
+  selectSweepBatch,
+  SWEEP_BATCH_LIMIT,
 } = require('../services/first-application-sibling-split');
 
 const anchor = (over = {}) => ({ id: 'anchor-1', scheduled_date: '2026-10-01', completed_at: null, ...over });
@@ -308,32 +308,40 @@ describe('divergenceStateFingerprint', () => {
   });
 });
 
-// groupCandidatesByEstimate is a PLAIN grouping, never a pick-one filter
-// (Codex history on heads 3681fe5c5e and daf724131f: "prefer live over
-// settled, newest wins" and "only the group's earliest live invoice" were
-// both tried and both broke on a real multi-anchor scenario — see the
-// module header). evaluateEstimateCandidates evaluates every row in each
-// group together instead.
-describe('groupCandidatesByEstimate', () => {
+// groupCandidatesByInvoice groups stamped MEMBER rows by the invoice they
+// carry (first_application_invoice_id) — owner ruling 2026-09-27: the
+// stamp makes membership durable and unambiguous, replacing the old
+// groupCandidatesByEstimate's estimate-keyed grouping (which existed only
+// because the old design could find MORE THAN ONE structurally-eligible
+// invoice row for the same estimate). A group under 2 members — a stray
+// single stamp, should never happen given the converter's own 2+-only
+// stamping guarantee — is dropped: the sweep never evaluates a lone stamp.
+describe('groupCandidatesByInvoice', () => {
   const row = (over = {}) => ({
-    source_estimate_id: 'est-1', invoice_status: 'draft', invoice_created_at: '2026-09-01T00:00:00Z', ...over,
+    invoice_id: 'inv-1', source_estimate_id: 'est-1', status: 'confirmed', ...over,
   });
 
-  test('a single row per estimate becomes a group of one', () => {
-    const r = row();
-    expect(groupCandidatesByEstimate([r])).toEqual([[r]]);
+  test('a single stamped row with no partner is dropped (never a group of one)', () => {
+    expect(groupCandidatesByInvoice([row({ id: 'solo' })])).toEqual([]);
   });
 
-  test('multiple rows for the same estimate stay grouped together, in order', () => {
-    const a = row({ invoice_id: 'a' });
-    const b = row({ invoice_id: 'b', invoice_status: 'void' });
-    expect(groupCandidatesByEstimate([a, b])).toEqual([[a, b]]);
+  test('two rows stamped with the same invoice stay grouped together, in order', () => {
+    const a = row({ id: 'a' });
+    const b = row({ id: 'b', status: 'confirmed' });
+    expect(groupCandidatesByInvoice([a, b])).toEqual([[a, b]]);
   });
 
-  test('rows for different estimates are kept in separate groups', () => {
-    const a1 = row({ source_estimate_id: 'est-a', invoice_id: 'a' });
-    const b1 = row({ source_estimate_id: 'est-b', invoice_id: 'b' });
-    expect(groupCandidatesByEstimate([a1, b1])).toEqual([[a1], [b1]]);
+  test('rows stamped with different invoices are kept in separate groups', () => {
+    const a1 = row({ id: 'a1', invoice_id: 'inv-a' });
+    const a2 = row({ id: 'a2', invoice_id: 'inv-a' });
+    const b1 = row({ id: 'b1', invoice_id: 'inv-b' });
+    const b2 = row({ id: 'b2', invoice_id: 'inv-b' });
+    expect(groupCandidatesByInvoice([a1, b1, a2, b2])).toEqual([[a1, a2], [b1, b2]]);
+  });
+
+  test('a three-member group (partial split, one sibling still unstamped-resolved) stays one group', () => {
+    const rows = [row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })];
+    expect(groupCandidatesByInvoice(rows)).toEqual([rows]);
   });
 });
 
@@ -346,54 +354,55 @@ describe('dateOnly', () => {
   });
 });
 
-// Codex P2 (PR #5021 r7): bound the FRESH structural sweep in fair,
-// wrapping keyset batches so no single tick runs unbounded and no
-// candidate is starved behind an always-same head of the list. Never
-// applies to established-anchor groups (see runSweepInner) — this is
-// purely the fresh-candidate pagination helper.
-describe('selectFreshBatch', () => {
-  const freshGroup = (estimateId) => [{ source_estimate_id: estimateId, candidate_source: 'fresh' }];
+// Bound the whole candidate set in fair, wrapping keyset batches so no
+// single tick runs unbounded and no candidate is starved behind an
+// always-same head of the list. Owner ruling 2026-09-27: there is no more
+// "established, never bounded" category to special-case — every stamped
+// candidate loadCandidates returns (including the standing-alert recovery
+// case) is equally current, so this one batcher covers everything.
+describe('selectSweepBatch', () => {
+  const group = (invoiceId) => [{ invoice_id: invoiceId }];
   // Sorted ascending, exactly like loadCandidates' own ORDER BY.
-  const ids = Array.from({ length: FRESH_BATCH_LIMIT + 50 }, (_, i) => `est-${String(i).padStart(4, '0')}`);
-  const groups = ids.map(freshGroup);
+  const ids = Array.from({ length: SWEEP_BATCH_LIMIT + 50 }, (_, i) => `inv-${String(i).padStart(4, '0')}`);
+  const groups = ids.map(group);
 
   test('at or under the limit, every group is returned untouched regardless of cursor', () => {
-    const small = groups.slice(0, FRESH_BATCH_LIMIT);
-    expect(selectFreshBatch(small, null)).toBe(small);
-    expect(selectFreshBatch(small, 'est-0005')).toBe(small);
+    const small = groups.slice(0, SWEEP_BATCH_LIMIT);
+    expect(selectSweepBatch(small, null)).toBe(small);
+    expect(selectSweepBatch(small, 'inv-0005')).toBe(small);
   });
 
   test('over the limit with no cursor, starts from the beginning', () => {
-    const batch = selectFreshBatch(groups, null);
-    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
-    expect(batch[0][0].source_estimate_id).toBe(ids[0]);
-    expect(batch[batch.length - 1][0].source_estimate_id).toBe(ids[FRESH_BATCH_LIMIT - 1]);
+    const batch = selectSweepBatch(groups, null);
+    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
+    expect(batch[0][0].invoice_id).toBe(ids[0]);
+    expect(batch[batch.length - 1][0].invoice_id).toBe(ids[SWEEP_BATCH_LIMIT - 1]);
   });
 
   test('resumes strictly after the cursor', () => {
     const cursor = ids[10];
-    const batch = selectFreshBatch(groups, cursor);
-    expect(batch[0][0].source_estimate_id).toBe(ids[11]);
-    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
+    const batch = selectSweepBatch(groups, cursor);
+    expect(batch[0][0].invoice_id).toBe(ids[11]);
+    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
   });
 
   test('wraps around to the start once the cursor is near the end — nothing is starved forever', () => {
     const cursor = ids[ids.length - 5];
-    const batch = selectFreshBatch(groups, cursor);
-    expect(batch).toHaveLength(FRESH_BATCH_LIMIT);
+    const batch = selectSweepBatch(groups, cursor);
+    expect(batch).toHaveLength(SWEEP_BATCH_LIMIT);
     // The last 4 ids, then wraps to the beginning.
-    expect(batch.slice(0, 4).map((g) => g[0].source_estimate_id)).toEqual(ids.slice(ids.length - 4));
-    expect(batch[4][0].source_estimate_id).toBe(ids[0]);
+    expect(batch.slice(0, 4).map((g) => g[0].invoice_id)).toEqual(ids.slice(ids.length - 4));
+    expect(batch[4][0].invoice_id).toBe(ids[0]);
   });
 
-  test('a cursor for an estimate no longer present (evaluated then resolved) still resumes from the next-highest id', () => {
-    const withoutTen = groups.filter((g) => g[0].source_estimate_id !== ids[10]);
-    const batch = selectFreshBatch(withoutTen, ids[10]);
-    expect(batch[0][0].source_estimate_id).toBe(ids[11]);
+  test('a cursor for an invoice no longer present (evaluated then resolved) still resumes from the next-highest id', () => {
+    const withoutTen = groups.filter((g) => g[0].invoice_id !== ids[10]);
+    const batch = selectSweepBatch(withoutTen, ids[10]);
+    expect(batch[0][0].invoice_id).toBe(ids[11]);
   });
 
   test('a cursor past every remaining id wraps to the start', () => {
-    const batch = selectFreshBatch(groups, ids[ids.length - 1]);
-    expect(batch[0][0].source_estimate_id).toBe(ids[0]);
+    const batch = selectSweepBatch(groups, ids[ids.length - 1]);
+    expect(batch[0][0].invoice_id).toBe(ids[0]);
   });
 });
