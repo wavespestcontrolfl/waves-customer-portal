@@ -193,10 +193,19 @@ class BalanceReminder {
         "customers.first_name",
         "customers.last_name",
       );
+    // One alert per customer per visit day: several services on the same
+    // day used to produce one alert (the legacy reminder's same-day history
+    // check suppressed the rest), so dedupe here too (Codex #5294 r1 P2).
+    const alerted = new Set();
     for (const service of upcoming) {
       try {
+        const alertKey = `${service.cust_id}:${dateOnlyString(service.scheduled_date)}`;
+        if (alerted.has(alertKey)) continue;
         const balance = await this.getCustomerBalance(service.cust_id);
-        if (!balance || balance.daysOverdue < 30) continue;
+        // Same scope the legacy alert had: a real balance (dailyCheck skipped
+        // totalBalance <= 0) on an unpaid invoice (sendReminder needed one
+        // before it alerted).
+        if (!balance || balance.totalBalance <= 0 || balance.daysOverdue < 30 || !balance.oldestInvoiceId) continue;
         // scheduled_date is a DATE column — comparing it against `new Date()`
         // as instants (Codex P1) shifts by TZ: on Railway (TZ=UTC) a DATE
         // parses to UTC midnight, and this cron runs ~10 AM ET (~14:00 UTC),
@@ -213,6 +222,7 @@ class BalanceReminder {
           `💰 Overdue: ${service.first_name} ${service.last_name} — $${balance.totalBalance.toFixed(2)} (${balance.daysOverdue} days). Service ${daysUntil === 0 ? "today" : "tomorrow"}.`,
           { messageType: "internal_alert" },
         );
+        alerted.add(alertKey);
       } catch (err) {
         logger.error(`Imminent overdue owner alert failed for ${service.cust_id}: ${err.message}`);
       }
@@ -736,14 +746,9 @@ class BalanceReminder {
       body: `$${balance.totalBalance.toFixed(2)} overdue ${balance.daysOverdue} days.`,
       metadata: JSON.stringify({ channel, notificationEventKey: eventKey }),
     });
-    // Shared with the Day 90 ladder (invoice-followups.js fireTouch) and
-    // late-payment-checker.js's own tiers — one implementation so none of
-    // the callers can drift on which fields this stamps or which rows are
-    // safe to touch (dunning unification, Codex P1 — a churned/archived
-    // customer's stage must never be overwritten).
-    if (stage >= 60 && result.deliveredNow.length) {
-      await require('../invoice-followups').markAtRiskForLongOverdue(customer.id);
-    }
+    if (stage >= 60 && result.deliveredNow.length) await db('customers').where({ id: customer.id }).update({
+      pipeline_stage: 'at_risk', pipeline_stage_changed_at: new Date(),
+    });
     return result.deliveredNow.length > 0;
   }
 
@@ -755,11 +760,19 @@ class BalanceReminder {
     // gate is unset would drop every 60/90-day reminder with nothing
     // replacing it. dailyCheck() has its own, separate coupling above.
     if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
-      if (process.env.GATE_DUNNING_LADDER_90 === 'true') {
-        logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js own these');
+      // An invoice with no follow-up sequence also needs an owner: the
+      // late-payment checker while it runs, or orphan adoption once it
+      // retires (Codex #5294 r1 P1). Otherwise this stays the fallback.
+      const InvoiceFollowUps = require('../invoice-followups');
+      const sequencelessOwned = !InvoiceFollowUps.latePaymentCheckerRetiredLive()
+        || InvoiceFollowUps.adoptOrphanInvoicesLive();
+      if (process.env.GATE_DUNNING_LADDER_90 === 'true' && sequencelessOwned) {
+        logger.info('[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these');
         return;
       }
-      logger.warn('[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
+      logger.warn(process.env.GATE_DUNNING_LADDER_90 === 'true'
+        ? '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live'
+        : '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live');
     }
     const customers = await db("customers")
       .where({ active: true })
@@ -857,14 +870,20 @@ class BalanceReminder {
         count <= 3
       ) {
         templateKey = "late_payment_60d";
-        // Shared with the Day 90 ladder (invoice-followups.js fireTouch) and
-        // late-payment-checker.js's own tiers — one implementation so none
-        // of the callers can drift (dunning unification, Codex P1 — a
-        // churned/archived customer's stage must never be overwritten).
-        await require("../invoice-followups").markAtRiskForLongOverdue(customer.id);
+        await db("customers")
+          .where({ id: customer.id })
+          .update({
+            pipeline_stage: "at_risk",
+            pipeline_stage_changed_at: new Date(),
+          });
       } else if (balance.daysOverdue >= 90 && count <= 4) {
         templateKey = "late_payment_90d";
-        await require("../invoice-followups").markAtRiskForLongOverdue(customer.id);
+        await db("customers")
+          .where({ id: customer.id })
+          .update({
+            pipeline_stage: "at_risk",
+            pipeline_stage_changed_at: new Date(),
+          });
       } else continue;
 
       if (templateKey) {

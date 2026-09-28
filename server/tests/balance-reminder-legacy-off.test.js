@@ -41,6 +41,11 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/invoice-followups', () => ({
   hasActiveSequence: jest.fn(async () => false),
   isDunningStopped: jest.fn(async () => false),
+  // The real readers, so the sequence-less-owner coupling reads the env.
+  latePaymentCheckerRetiredLive: () => process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true'
+    && process.env.GATE_DUNNING_LADDER_90 === 'true',
+  adoptOrphanInvoicesLive: () => process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true'
+    && process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true' && process.env.GATE_DUNNING_LADDER_90 === 'true',
 }));
 
 const db = require('../models/db');
@@ -51,7 +56,8 @@ const balanceReminder = require('../services/workflows/balance-reminder');
 
 const DAILY_RETIRED_LOG = '[balance-reminders] dailyCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the pre-visit balance reminder owns these now';
 const DAILY_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for dailyCheck: the pre-visit balance reminder replacement (PREVISIT_BALANCE_REMINDER + its SMS template) is not live yet';
-const LATE_RETIRED_LOG = '[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js own these';
+const LATE_RETIRED_LOG = '[balance-reminders] latePaymentCheck retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and late-payment-checker.js (or orphan adoption) own these';
+const LATE_NO_ORPHAN_OWNER_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: the late-payment checker is retired and orphan adoption is not live';
 const LATE_IGNORED_WARN = '[balance-reminders] GATE_BALANCE_REMINDER_LEGACY_OFF ignored for latePaymentCheck: GATE_DUNNING_LADDER_90 is not live';
 
 beforeEach(() => {
@@ -75,6 +81,15 @@ afterAll(() => {
 // scheduled_services query (where/where/whereIn/leftJoin/where/whereNull/
 // whereNotNull/select) — every method returns the same object so any call
 // order/count on it resolves, and `select()` is the terminal read.
+// customerDunningStopped's own reads for a balance with invoice ids: no
+// active payment plan, no invoice awaiting microdeposit verification.
+function firstChain(row) {
+  const q = {};
+  ['where', 'whereIn'].forEach((method) => { q[method] = jest.fn(() => q); });
+  q.first = jest.fn(async () => row);
+  return q;
+}
+
 function scheduledServicesChain(rows) {
   const q = {};
   ['where', 'whereIn', 'leftJoin', 'whereNull', 'whereNotNull'].forEach((method) => {
@@ -156,6 +171,54 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     jest.useRealTimers();
   });
 
+  test('several services for one customer on the same day produce ONE owner alert', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    const base = {
+      cust_id: 'cust-1', first_name: 'Taylor', last_name: 'Morgan',
+      scheduled_date: new Date('2026-05-26T00:00:00.000Z'), waveguard_tier: 'Gold',
+    };
+    const services = [{ ...base, id: 'ss-a' }, { ...base, id: 'ss-b' }];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain(services);
+      if (table === 'payment_plans') return firstChain(undefined);
+      if (table === 'invoices') return scheduledServicesChain([]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
+      totalBalance: 250, daysOverdue: 35, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1',
+    });
+
+    await balanceReminder.dailyCheck();
+
+    expect(TwilioService.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['a $0 balance', { totalBalance: 0, daysOverdue: 35, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1' }],
+    ['debt with no unpaid invoice behind it', { totalBalance: 120, daysOverdue: 35, invoiceIds: [], oldestInvoiceId: null }],
+  ])('no owner alert for %s (the legacy alert\'s own scope)', async (_label, balance) => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
+    PrevisitBalanceReminder.smsTemplateActive.mockResolvedValue(true);
+    const service = {
+      id: 'ss-9', cust_id: 'cust-9', first_name: 'Alex', last_name: 'Kim',
+      scheduled_date: new Date('2026-05-26T00:00:00.000Z'), waveguard_tier: 'Gold',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      if (table === 'payment_plans') return firstChain(undefined);
+      if (table === 'invoices') return scheduledServicesChain([]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+
+    await balanceReminder.dailyCheck();
+
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+  });
+
   test('a customer 30+ days overdue with service today gets the owner alert even though dailyCheck retired', async () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     PrevisitBalanceReminder.gateEnabled.mockReturnValue(true);
@@ -166,10 +229,12 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      if (table === 'payment_plans') return firstChain(undefined);
+      if (table === 'invoices') return scheduledServicesChain([]);
       throw new Error(`unexpected table ${table}`);
     });
     jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
-      totalBalance: 250, daysOverdue: 35, invoiceIds: [], oldestInvoiceId: null,
+      totalBalance: 250, daysOverdue: 35, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1',
     });
 
     await balanceReminder.dailyCheck();
@@ -194,10 +259,12 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      if (table === 'payment_plans') return firstChain(undefined);
+      if (table === 'invoices') return scheduledServicesChain([]);
       throw new Error(`unexpected table ${table}`);
     });
     jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
-      totalBalance: 90, daysOverdue: 30, invoiceIds: [], oldestInvoiceId: null,
+      totalBalance: 90, daysOverdue: 30, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1',
     });
 
     await balanceReminder.dailyCheck();
@@ -222,6 +289,8 @@ describe('imminentOverdueOwnerAlertSweep (the one dailyCheck duty with no pre-vi
     };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledServicesChain([service]);
+      if (table === 'payment_plans') return firstChain(undefined);
+      if (table === 'invoices') return scheduledServicesChain([]);
       throw new Error(`unexpected table ${table}`);
     });
     jest.spyOn(balanceReminder, 'getCustomerBalance').mockResolvedValue({
@@ -242,6 +311,36 @@ describe('latePaymentCheck', () => {
     expect(db).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
     expect(logger.warn).not.toHaveBeenCalledWith(LATE_IGNORED_WARN);
+  });
+
+  test('checker retired but orphan adoption off: nobody owns sequence-less invoices, so latePaymentCheck keeps running', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
+    try {
+      await expect(balanceReminder.latePaymentCheck()).rejects.toThrow();
+      expect(db).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(LATE_NO_ORPHAN_OWNER_WARN);
+      expect(logger.info).not.toHaveBeenCalledWith(LATE_RETIRED_LOG);
+    } finally {
+      delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
+    }
+  });
+
+  test('checker retired and orphan adoption live: retires', async () => {
+    process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    try {
+      await expect(balanceReminder.latePaymentCheck()).resolves.toBeUndefined();
+      expect(db).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(LATE_RETIRED_LOG);
+    } finally {
+      delete process.env.GATE_LATE_PAYMENT_CHECKER_OFF;
+      delete process.env.GATE_DUNNING_ADOPT_ORPHANS;
+    }
   });
 
   test('legacy-off alone (ladder gate unset): warns and runs the legacy body unchanged', async () => {

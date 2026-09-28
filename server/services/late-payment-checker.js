@@ -851,7 +851,8 @@ const LatePaymentService = {
             // breaking "unset = byte-identical." Run AFTER completePendingEmail
             // above (the dedupe marker for this episode) and guarded (Codex
             // P1): a failure here must never cost that marker.
-            if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+            if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
               try {
                 await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
               } catch (stampErr) {
@@ -958,7 +959,8 @@ const LatePaymentService = {
         // waveguard_tier filters would have excluded). Run AFTER the
         // activity_log dedupe marker above (Codex P1): a failure here must
         // never cost that marker and risk a re-send.
-        if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+        if (tierDays >= 60 && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true'
+              && process.env.GATE_DUNNING_LADDER_90 === 'true') {
           try {
             await require('./invoice-followups').markAtRiskForLongOverdue(customer.id, db);
           } catch (stampErr) {

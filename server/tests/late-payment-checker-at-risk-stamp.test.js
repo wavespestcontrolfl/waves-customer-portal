@@ -108,11 +108,13 @@ beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-05-26T14:00:00.000Z'));
   jest.clearAllMocks();
   process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
+  process.env.GATE_DUNNING_LADDER_90 = 'true';
 });
 
 afterEach(() => {
   jest.useRealTimers();
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
+  delete process.env.GATE_DUNNING_LADDER_90;
 });
 
 test('a delivered 60-day-overdue invoice with no sequence row stamps at_risk', async () => {
@@ -217,6 +219,25 @@ test('GATE_BALANCE_REMINDER_LEGACY_OFF unset: a delivered 60-day tier does NOT s
   // Unset (or any non-'true' spelling): this checker's own stamp stays
   // dark — balance-reminder.js's legacy latePaymentCheck() is still the one
   // unconditionally stamping any customer IT reaches.
+  expect(InvoiceFollowUps.markAtRiskForLongOverdue).not.toHaveBeenCalled();
+});
+
+test('legacy-off without the ladder gate: latePaymentCheck has not retired, so the checker does not stamp either', async () => {
+  delete process.env.GATE_DUNNING_LADDER_90;
+  const invoice = invoiceRow({ dueDate: '2026-03-20' });
+  setDbQueues({
+    invoices: [
+      chain({ result: [invoice] }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
+    activity_log: [chain({ first: null }), chain({ result: [] }), chain()],
+    customers: [chain({ first: customer })],
+  });
+
+  await LatePaymentChecker.checkAndNotify();
+
   expect(InvoiceFollowUps.markAtRiskForLongOverdue).not.toHaveBeenCalled();
 });
 

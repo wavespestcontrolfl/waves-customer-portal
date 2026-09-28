@@ -3370,7 +3370,7 @@ const gates = {
   // pipeline_stage stamp both methods carried for 60/90-day debt is shared
   // (invoice-followups.js's markAtRiskForLongOverdue, warn-and-continue on
   // failure rather than a bare await) with the ladder's own Day 60/90 steps
-  // (fireTouch, unconditional on GATE_DUNNING_LADDER_90 alone) and with
+  // (fireTouch, on GATE_DUNNING_LADDER_90 AND this gate) and with
   // late-payment-checker.js's own tiers — including for an invoice with no
   // invoice_followup_sequences row, which late-payment-checker.js is the
   // only sender left for once this gate retires latePaymentCheck()

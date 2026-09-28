@@ -155,8 +155,15 @@ test('a delivered Day 60 touch stamps at_risk exactly as the legacy path would',
   // where({ id }).
   expect(atRiskChain.where).toHaveBeenCalledWith({ id: 'cust-1' });
   expect(atRiskChain.where).toHaveBeenCalledWith('active', true);
-  expect(atRiskChain.whereNotIn).toHaveBeenCalledWith(
-    'pipeline_stage', ['churned', 'past_customer', 'dormant'],
+  // Only live customer stages move (or NULL, a legacy row): a lead, a lost
+  // record and a former customer never become at_risk here.
+  const stageGuard = atRiskChain.where.mock.calls.find(([arg]) => typeof arg === 'function')?.[0];
+  expect(stageGuard).toBeInstanceOf(Function);
+  const builder = { whereNull: jest.fn(() => builder), orWhereIn: jest.fn(() => builder) };
+  stageGuard.call(builder);
+  expect(builder.whereNull).toHaveBeenCalledWith('pipeline_stage');
+  expect(builder.orWhereIn).toHaveBeenCalledWith(
+    'pipeline_stage', ['active_customer', 'won', 'at_risk'],
   );
 });
 

@@ -326,24 +326,25 @@ function followupSteps() {
   return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
 }
 
-// Shared at-risk pipeline_stage stamp for 60/90-day debt-age tiers — one
-// implementation for every caller that reaches that tier (this ladder's own
-// Day 60/90 steps, late-payment-checker.js's tiers, and balance-reminder.js's
-// legacy branches while they still run) so they can never drift on which
-// fields this stamps or which rows it's safe to touch. No predicate on
-// balance/invoice state — the caller has already confirmed the tier and a
-// delivery. Guarded (dunning unification round-2 review, Codex P1) against a
-// CHURNED/archived customer: fireTouch excludes only deleted customers, and
-// an unconditional update would flip a churned row's pipeline_stage back to
-// 'at_risk' while leaving active=false and the churn fields intact —
-// corrupting lifecycle reporting and the plan_restart flow's churned-state
-// check. Restricting to active, non-former-customer-stage rows preserves the
-// stage instead.
+// The at-risk pipeline_stage stamp for 60/90-day debt once the legacy
+// balance-reminder late check retires (GATE_BALANCE_REMINDER_LEGACY_OFF):
+// called from this ladder's Day 60/90 steps and late-payment-checker.js's
+// tiers (the legacy method keeps its own inline stamp while it runs). The
+// caller has already confirmed the tier and a delivery. Only an active
+// customer in a live customer stage (or NULL, a legacy row) moves:
+// fireTouch excludes only deleted customers, so a churned/past/dormant
+// customer, a lead or a lost record must be protected here.
 async function markAtRiskForLongOverdue(customerId, database = db) {
-  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+  const { CUSTOMER_STAGES } = require('./customer-stages');
   await database('customers').where({ id: customerId })
     .where('active', true)
-    .whereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES)
+    // Only a live customer stage (or NULL, a legacy row) moves to at_risk:
+    // a lead or lost record must not become a customer here, bypassing the
+    // lifecycle stamps a real stage change applies (Codex #5294 r1 P1), and
+    // a churned/past/dormant customer keeps its stage.
+    .where(function () {
+      this.whereNull('pipeline_stage').orWhereIn('pipeline_stage', CUSTOMER_STAGES);
+    })
     .update({
       pipeline_stage: 'at_risk',
       pipeline_stage_changed_at: new Date(),
@@ -2720,6 +2721,8 @@ module.exports = {
   STALE_TOUCH_GRACE_MS,
   ladderThrough90Live,
   markAtRiskForLongOverdue,
+  latePaymentCheckerRetiredLive,
+  adoptOrphanInvoicesLive,
   // Pure predicates, exported for tests only.
   _test: { canSystemResume, isSystemStopStamp },
 };
