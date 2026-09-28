@@ -1972,8 +1972,18 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // still owes this stamp (Codex P2, round 2): the legacy implicit-channel
   // branch stamped unconditionally at template selection, so a deduped
   // Day 60/90 replay must not lose the transition the legacy code never did.
+  // Guarded (Codex P1): the sequence has already advanced above and the
+  // customer already has the message — a transient failure on this
+  // best-effort lifecycle stamp must never throw out of fireTouch and cost
+  // the step advance / interaction logging below, or strand the sequence on
+  // this step for as long as the stamp keeps failing. Same reasoning
+  // late-payment-checker.js's own callers use.
   if (ladderThrough90Live() && (step.id === 'd60_reminder' || step.id === 'd90_final_notice')) {
-    await markAtRiskForLongOverdue(row.customer_id);
+    try {
+      await markAtRiskForLongOverdue(row.customer_id);
+    } catch (stampErr) {
+      logger.warn(`[invoice-followups] at-risk stamp failed for customer ${row.customer_id} (sequence ${row.id}): ${stampErr.message}`);
+    }
   }
 
   // An already delivered leg advances its step without a new outbound touch.
