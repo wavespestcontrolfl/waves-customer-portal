@@ -1624,3 +1624,19 @@ describe('internal-link close records the rejection before cleanup', () => {
   });
 });
 
+
+describe('internal-link verification vs pending advanced-head cleanup', () => {
+  test('verification leaves a published-but-uncleaned PR row pr_open for the cleanup gate', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn();
+    instance._failAbandonedPrTask = jest.fn();
+    GitHubClient.getPr.mockResolvedValue({ number: 77, merged: false, state: 'open', head: { ref: 'b' } });
+    const result = await instance.verifyMergedTask({
+      id: 't1', status: 'pr_open', merged_at: new Date().toISOString(),
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77',
+    });
+    expect(result).toMatchObject({ status: 'pr_open', skipped: 'advanced_head_cleanup_pending' });
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
+    expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
+  });
+});

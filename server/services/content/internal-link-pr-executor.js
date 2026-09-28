@@ -861,8 +861,15 @@ class InternalLinkPrExecutor {
       return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: prNumber };
     }
     const resolvedPrNumber = prNumber || prInfo.number || null;
-    // task.merged_at: runAutoMerge published the verified head itself (an
-    // advanced-head PR is then closed without GitHub's merged flag).
+    // pr_open + merged_at: an advanced-head merge published the verified
+    // head but its PR cleanup is still pending. publishedCleanupGate (the
+    // auto-merge tick) owns that row until the PR is closed; leave it pr_open
+    // so the one-open-PR guard stays up and the cleanup keeps retrying.
+    if (task.status === 'pr_open' && task.merged_at) {
+      return { task_id: task.id, status: 'pr_open', skipped: 'advanced_head_cleanup_pending', pr_number: resolvedPrNumber };
+    }
+    // merged_at on a settled row: runAutoMerge published the verified head
+    // itself (an advanced-head PR is closed without GitHub's merged flag).
     if (!prInfo?.merged && !task.merged_at) {
       // A closed-but-unmerged PR (abandoned canary, manual close) is terminal.
       // Leaving the task at pr_open strands it forever: the review queue can't
