@@ -34,7 +34,7 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
-const { isFaqBlockedService } = require('./content-guardrails');
+const { isFaqBlockedService, isKnownGoodInternalRoute } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
 // threshold is always a reachable fraction of that page type's own
@@ -108,6 +108,22 @@ const HARD_CHECKS = [
   // Owner ruling 2026-08-28: bodies outside the writer's plain Markdown
   // subset park for human review instead of being parsed (fail-closed).
   { name: 'body_syntax_supported', weight: 0, evaluate: checkBodySyntaxSupported },
+  // Owner ruling 2026-09-28 (work order C2): every identification
+  // (post_type "diagnostic") or customer-question draft must open on the
+  // verdict box, never a pitch. Weight 0 — pure hard gate, matches the
+  // other structural checks above.
+  { name: 'verdict_box_first', weight: 0, evaluate: checkVerdictBoxFirst },
+  { name: 'cta_after_verdict_box', weight: 0, evaluate: checkCtaAfterVerdictBox },
+  // Owner ruling 2026-09-28 (work order C3): an identification draft's
+  // pest/sign/look-alike photos are a CLOSED set — exactly the licensed
+  // URLs the brief's voice_constraints.photo_slots supplied. Common (not
+  // page-type-scoped) because post_type is independent of page_type.
+  { name: 'photo_slots_licensed_only', weight: 0, evaluate: checkPhotoSlotsLicensedOnly },
+  // Owner ruling 2026-09-28 (work order C2): frontmatter.next_steps /
+  // .related_posts are optional (no minimum — #5062), but when present
+  // every href/path must be a route the brief already verified, same
+  // closed-set posture as body internal links.
+  { name: 'next_steps_related_posts_closed_set', weight: 0, evaluate: checkNextStepsRelatedPostsClosedSet },
 ];
 
 const PAGE_TYPE_CHECKS = {
@@ -1068,6 +1084,122 @@ function checkBodySyntaxSupported(draft, _brief, context = {}) {
   return { ok: false, reason: `unsupported_body_syntax:${added.join(',')}` };
 }
 
+// ── C2/C3 structural checks (owner ruling 2026-09-28) ─────────────────
+
+// True for every draft the ANSWER FIRST, PITCH SECOND writer instruction
+// covers: any post_type "diagnostic" draft (whatever page type it landed
+// on — post_type is a writer decision independent of the brief's page_type)
+// and every customer-question page (post_type doesn't gate that one; the
+// page type itself IS the "question" case).
+function isIdentificationOrQuestionDraft(draft, brief) {
+  return draft?.frontmatter?.post_type === 'diagnostic' || brief?.page_type === 'customer-question';
+}
+
+// C2: the verdict box (BottomLineBox) must be the LITERAL first block of
+// the body — before any heading, prose, or other component. A plain
+// leading `[BottomLineBox` component tag is unambiguous: the writer's
+// Markdown subset never puts significant whitespace or commentary before
+// the first real content.
+function checkVerdictBoxFirst(draft, brief) {
+  if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
+  const body = String(draft.body || '').trim();
+  if (!body) return { ok: false, reason: 'empty_body' };
+  if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
+  return { ok: true };
+}
+
+// C2: on the same drafts, the early estimate/quote CTA link must land
+// AFTER the verdict box closes, never before it. checkVerdictBoxFirst
+// already covers "no box at all" / "box isn't first" — this check only
+// judges relative order once a box is present, so the two never double-
+// report the same root cause.
+const EARLY_CTA_ANCHOR_RE = /\[[^\]]*\b(?:estimate|estimates|quote|quotes)\b[^\]]*\]\(([^)]+)\)/gi;
+function checkCtaAfterVerdictBox(draft, brief) {
+  if (!isIdentificationOrQuestionDraft(draft, brief)) return { ok: true, reason: 'not_identification_or_question' };
+  const body = String(draft.body || '');
+  const boxMatch = body.match(/<BottomLineBox\b[^>]*\/?>/);
+  if (!boxMatch) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  const boxEnd = boxMatch.index + boxMatch[0].length;
+  EARLY_CTA_ANCHOR_RE.lastIndex = 0;
+  let m;
+  while ((m = EARLY_CTA_ANCHOR_RE.exec(body))) {
+    if (m.index < boxEnd) return { ok: false, reason: 'cta_before_verdict_box' };
+  }
+  return { ok: true };
+}
+
+// C3: an identification draft's pest/sign/look-alike photos are a CLOSED
+// set — exactly the licensed URLs voice_constraints.photo_slots supplied.
+// No brief photo_slots at all (non-diagnostic drafts, or a diagnostic
+// draft on a page type the composer never attaches slots to) means this
+// check has nothing to enforce and defers.
+function checkPhotoSlotsLicensedOnly(draft, brief) {
+  if (draft?.frontmatter?.post_type !== 'diagnostic') return { ok: true, reason: 'not_identification_post' };
+  const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
+  if (!slots.length) return { ok: true, reason: 'no_photo_slots_on_brief' };
+  const allowedUrls = new Set(slots.map((s) => s?.photo?.url).filter(Boolean));
+  const body = String(draft.body || '');
+  const imgRe = /!\[[^\]]*\]\(([^)]+)\)/g;
+  let m;
+  while ((m = imgRe.exec(body))) {
+    const url = String(m[1] || '').trim();
+    if (!allowedUrls.has(url)) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
+  }
+  return { ok: true };
+}
+
+// C2: frontmatter.next_steps / .related_posts are optional (no minimum —
+// the owner dropped the related-links quota, #5062) but every href/path
+// present must be a route the brief already verified: one of
+// voice_constraints.related_posts' paths, internal_links_to_add, or the
+// static allowlist / known city-service pattern (isKnownGoodInternalRoute)
+// — the same closed-set posture the body's own internal-route gate applies.
+function normalizeFrontmatterPath(value) {
+  if (!value) return null;
+  let candidate = String(value);
+  try {
+    const u = new URL(candidate);
+    candidate = u.pathname || '/';
+  } catch { /* not absolute — use as-is */ }
+  if (!candidate.startsWith('/')) candidate = `/${candidate}`;
+  candidate = candidate.toLowerCase();
+  if (!candidate.endsWith('/')) candidate += '/';
+  return candidate;
+}
+function checkNextStepsRelatedPostsClosedSet(draft, brief) {
+  const fm = draft.frontmatter || {};
+  const nextSteps = Array.isArray(fm.next_steps) ? fm.next_steps : [];
+  const relatedPosts = Array.isArray(fm.related_posts) ? fm.related_posts : [];
+  if (!nextSteps.length && !relatedPosts.length) return { ok: true, reason: 'no_next_steps_or_related_posts' };
+  if (nextSteps.length > 4) return { ok: false, reason: 'next_steps_exceeds_max_4' };
+
+  const briefRelated = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
+  const briefRelatedPaths = new Set(
+    briefRelated.map((r) => normalizeFrontmatterPath(typeof r === 'string' ? r : r?.path)).filter(Boolean),
+  );
+  const briefLinks = new Set(
+    (Array.isArray(brief?.internal_links_to_add) ? brief.internal_links_to_add : [])
+      .map(normalizeFrontmatterPath)
+      .filter(Boolean),
+  );
+  const isVerified = (value) => {
+    const norm = normalizeFrontmatterPath(value);
+    return Boolean(norm) && (briefRelatedPaths.has(norm) || briefLinks.has(norm) || isKnownGoodInternalRoute(value));
+  };
+
+  for (const value of relatedPosts) {
+    if (typeof value !== 'string' || !value.trim()) return { ok: false, reason: 'related_posts_entry_not_a_string' };
+    if (!isVerified(value)) return { ok: false, reason: `related_posts_entry_not_verified:${value}` };
+  }
+  for (const step of nextSteps) {
+    if (!step || typeof step.label !== 'string' || !step.label.trim() || typeof step.href !== 'string' || !step.href.trim()) {
+      return { ok: false, reason: 'next_steps_entry_missing_label_or_href' };
+    }
+    if (!isVerified(step.href)) return { ok: false, reason: `next_steps_entry_not_verified:${step.href}` };
+  }
+  return { ok: true };
+}
+
 function checkVoiceMatch(draft) {
   const body = String(draft.body || '').toLowerCase();
   // Lightweight voice signals from the canonical waves_default voice
@@ -1261,4 +1393,6 @@ module.exports._internals = {
   checkBlogMetaSoftCta, checkAuthoredMetaLength,
   checkNoRawMarkdownTables,
   checkBodySyntaxSupported,
+  checkVerdictBoxFirst, checkCtaAfterVerdictBox,
+  checkPhotoSlotsLicensedOnly, checkNextStepsRelatedPostsClosedSet,
 };

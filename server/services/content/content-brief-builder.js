@@ -22,6 +22,7 @@ const { buildSeoRequirements } = require('./blog-seo-contract');
 const {
   isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
 } = require('./content-guardrails');
+const { buildPhotoSlots } = require('./licensed-photo-library');
 // "List-shaped" detection is shared with the miner's listicle_family bucket
 // (single grammar — a mined listicle opportunity must actually receive the
 // overlay). Never fork a private copy of the regexes here.
@@ -977,6 +978,18 @@ class ContentBriefBuilder {
           : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
         const withRetry = gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        // Photo slots for a possible identification ("diagnostic") post (C3,
+        // blog work order 2026-09-28) — supporting-blog and customer-question
+        // are the only page types a diagnostic post can be; the WRITER decides
+        // post_type, not this composer, so the slots ride along unconditionally
+        // on those two page types and the writer only uses them when it lands
+        // on post_type: 'diagnostic'. Sourced ONLY from the licensed photo
+        // library (never a generated/guessed asset) keyed off the brief's own
+        // target_keyword — a slot with no verified match carries photo: null
+        // and is never backfilled with AI art (see licensed-photo-library.js).
+        const withPhotoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
+          ? { ...withRetry, photo_slots: buildPhotoSlots(opportunity.query || opportunity.signal_metadata?.representative_query || null) }
+          : withRetry;
         // Related-post link allowance rides here (not internal_links_to_add,
         // which is a MUST-appear checklist) — see _loadRelatedPosts. No
         // migration: content_briefs has no dedicated column, and
@@ -985,12 +998,12 @@ class ContentBriefBuilder {
         // round-trips through get_content_brief AND the stored-draft
         // revalidation path (_loadReviewedBrief), so the gate allowance
         // survives a re-check exactly like it did the first time.
-        if (decision.action_type !== 'new_supporting_blog') return withRetry;
+        if (decision.action_type !== 'new_supporting_blog') return withPhotoSlots;
         // Persist independently of lookup results. content_briefs has no
         // target_sites column, so this JSONB marker is also the publisher's
         // durable routing decision after a reviewed brief is reloaded.
         const withRouting = {
-          ...withRetry,
+          ...withPhotoSlots,
           related_posts_target_sites: effectivePublishTargetSites,
         };
         return (Array.isArray(relatedPosts) && relatedPosts.length)

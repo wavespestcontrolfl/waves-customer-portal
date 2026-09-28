@@ -663,8 +663,12 @@ describe('evaluate (full gate)', () => {
         // Realistic capitalization density: a two-sentence all-lowercase-ish
         // body dips under the redactor's effectively-lowercase threshold and
         // trips the (correct) pii_confidence_low hard fail — real drafts are
-        // article-length with headings and proper nouns.
-        body: 'A termite swarm means a mature colony is nearby — here is how to identify one fast. Swarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
+        // article-length with headings and proper nouns. Leads with the
+        // required verdict box (owner ruling 2026-09-28, C2: every
+        // customer-question draft opens on BottomLineBox, not a plain
+        // paragraph) — its own text still satisfies answer_in_first_paragraph
+        // (matches the brief's "termite"/"swarm" keywords).
+        body: '<BottomLineBox verdict="Yes — a termite swarm means a mature colony is nearby." recommendation="Photograph what you are seeing and call a licensed inspector before more swarmers appear." />\n\nSwarmers in Southwest Florida usually appear after warm spring rain, and Sarasota homes see them first.\n\nSee our [termite inspection](/termite-inspection/) page for next steps.',
       }),
       brief({ page_type: 'customer-question' }),
       { previewBuildSuccess: true, sitemapHasUrl: true }
