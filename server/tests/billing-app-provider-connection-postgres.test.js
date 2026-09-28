@@ -69,6 +69,27 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     await mockPg('notifications').del();
+    await mockPg('autopay_log').del();
+  });
+
+  test('expired recurrence selects the latest matching durable progress with normalized card expiry', async () => {
+    const methodId = randomUUID();
+    const base = { customer_id: customerId, event_type: 'card_expired', payment_method_id: methodId };
+    const insert = (createdAt, details) => mockPg('autopay_log').insert({
+      ...base, created_at: createdAt, details: JSON.stringify(details),
+    }).returning('id');
+    await insert('2026-07-01T12:00:00Z', { reminder_stage: 'expired', exp_month: '7', exp_year: '26' });
+    const [wanted] = await insert('2026-08-01T12:00:00Z', { reminder_stage: 'expired', exp_month: 7, exp_year: 2026 });
+    await insert('2026-09-01T12:00:00Z', { reminder_stage: '7_day', exp_month: 7, exp_year: 2026 });
+    await insert('2026-10-01T12:00:00Z', { reminder_stage: 'expired', exp_month: 8, exp_year: 2026 });
+    await insert('2026-11-01T12:00:00Z', { reminder_stage: 'expired', exp_month: 7, exp_year: 2027 });
+    const latest = await require('../services/autopay-log').latestExpiredCardProgress(customerId, methodId, '07', 2026);
+    expect(latest).toMatchObject({ id: wanted.id, created_at: new Date('2026-08-01T12:00:00Z') });
+    const [undated] = await mockPg('autopay_log').insert({ ...base, created_at: null,
+      details: JSON.stringify({ reminder_stage: 'expired', exp_month: 7, exp_year: 2026 }),
+    }).returning('id');
+    expect(await require('../services/autopay-log').latestExpiredCardProgress(customerId, methodId, 7, 2026))
+      .toMatchObject({ id: undated.id, created_at: null });
   });
 
   test.each([4900, 0])('reads the live %i-cent balance through the bell transaction', async (liveCents) => {

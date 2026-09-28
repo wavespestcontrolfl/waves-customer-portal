@@ -339,6 +339,29 @@ describe('late-payment checker email sidecar', () => {
     else expect(activityInsert.insert.mock.calls[0][0]).not.toHaveProperty('created_at');
   });
 
+  test.each(['sms', 'email'])('repairs an old %s-only reminder without a fresh amount or send count', async (channel) => {
+    const originalAt = new Date('2026-05-20T14:00:00Z');
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00Z' };
+    if (channel === 'sms') sendCustomerMessage.mockResolvedValueOnce({ sent: true,
+      deliveryOutcome: 'accepted', deduped: true, sentAt: originalAt });
+    ContactLedger.recordContact.mockResolvedValue({ id: `${channel}-14`, occurred_at: originalAt, metadata: {} });
+    if (channel === 'email') ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(4).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: channel === 'sms' ? '+19415550101' : null } })],
+      notification_prefs: [chain({ first: { billing_channels: [channel] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, emailedFallback: 0, skipped: 1 });
+    expect(activityInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ created_at: originalAt }));
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata)).toMatchObject({ delivery_repaired: true });
+    expect(JSON.parse(activityInsert.insert.mock.calls[0][0].metadata)).not.toHaveProperty('amount');
+    if (channel === 'email') expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+  });
+
   test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
     const invoice = {
       id: 'inv-1',

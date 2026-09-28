@@ -299,6 +299,29 @@ describe('late-payment micro-deposit diversion', () => {
     expect(completion.update.mock.calls[0][0].metadata.bindings).toEqual([`${pending.channel}+email`]);
   });
 
+  test.each(['delivered claim', 'deduped provider'])('pending verification Email with %s closes old activity without a new send', async (source) => {
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
+    const originalAt = new Date('2026-05-20T14:00:00Z');
+    const pending = { pendingEmail: true, channel: 'sms', tierDays: 14,
+      invoiceKey: 'WPC-2026-1042|14 DAYS', ledgerIds: ['sms-14', 'email-14'], emailLedgerId: 'email-14' };
+    const completion = chain();
+    ContactLedger.recordContact.mockResolvedValueOnce({ id: 'email-14', metadata: {}, occurred_at: originalAt });
+    if (source === 'delivered claim') ContactLedger.claimAttempt.mockResolvedValueOnce({ allowed: false, delivered: true });
+    else sendMicrodepositVerificationEmail.mockResolvedValueOnce({ ok: true, deduped: true, sentAt: originalAt });
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: { id: 'activity-14', metadata: pending } }), completion],
+      customers: [chain({ first: customer })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email', 'sms'] } })],
+    });
+    expect(await LatePaymentChecker.checkAndNotify()).toMatchObject({ notified: 0, skipped: 1 });
+    expect(completion.update).toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    if (source === 'delivered claim') expect(sendMicrodepositVerificationEmail).not.toHaveBeenCalled();
+    else expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'email-14' }), { occurredAt: originalAt });
+  });
+
   test('a failed verification ledger read holds the reminder instead of opening a new tier', async () => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     const failedRecovery = chain();

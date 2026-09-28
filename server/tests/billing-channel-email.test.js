@@ -105,6 +105,7 @@ describe('billing channel email adapter', () => {
     ['created_at fallback', { sent_at: null, created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
     ['valid created_at after invalid sent_at', { sent_at: 'invalid', created_at: new Date('2026-05-19T14:00:00Z') }, new Date('2026-05-19T14:00:00Z')],
     ['no usable timestamp', { sent_at: 'invalid', created_at: null }, null],
+    ['missing message', null, null],
   ])('deduped accepted Email carries stored %s for stamp repair', async (_label, message, sentAt) => {
     mockSendTemplate.mockResolvedValueOnce({ sent: true, deduped: true, message });
 

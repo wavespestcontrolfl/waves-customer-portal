@@ -385,6 +385,37 @@ postgres('invoice send episode ownership', () => {
     expect(await read()).toMatchObject({ status: 'sent', send_claim_token: null });
   });
 
+  test.each([
+    ['old Email only', false, '2026-08-20T14:00:00Z'],
+    ['old Email and fresh Text', true, null],
+  ])('%s uses original aggregate time only with no fresh sibling', async (_name, freshText, expectedTime) => {
+    const originalAt = new Date('2026-08-20T14:00:00Z');
+    const sms = jest.spyOn(Invoice, 'sendViaSMS').mockResolvedValueOnce(freshText
+      ? { sent: true } : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'NO_PHONE' });
+    require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({ ok: true, deduped: true, sentAt: originalAt });
+    try {
+      expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true, email: { deduped: true } });
+      const saved = await read();
+      expect(saved.status).toBe('sent');
+      if (expectedTime) expect(saved.sent_at).toEqual(originalAt);
+      else expect(saved.sent_at.getTime()).toBeGreaterThan(originalAt.getTime());
+    } finally { sms.mockRestore(); }
+  });
+
+  test('Email-pending retry retains the previously accepted Text time over an older Email', async () => {
+    const textAt = new Date('2026-08-22T14:00:00Z');
+    const emailAt = new Date('2026-08-20T14:00:00Z');
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'scheduled',
+      sms_sent_at: textAt, scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    const sms = jest.spyOn(Invoice, 'sendViaSMS');
+    require('../services/invoice-email').sendInvoiceEmail.mockResolvedValueOnce({ ok: true, deduped: true, sentAt: emailAt });
+    try {
+      expect(await Invoice.sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: true, sms: { deduped: true } });
+      expect(sms).not.toHaveBeenCalled();
+      expect((await read()).sent_at).toEqual(textAt);
+    } finally { sms.mockRestore(); }
+  });
+
   // Ported from #4131's own invoice-send-claim-chokepoint-postgres.test.js
   // (round 16/17), against the CURRENT claim shape — deferred by #4632 r2
   // ("packet-invoice queue adoption remains deferred to slice 5") and by

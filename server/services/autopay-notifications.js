@@ -1,7 +1,7 @@
 const { billingLegDeliveryState, billingLegContactTime } = require('./messaging/billing-channel-routing');
 const db = require('../models/db');
 const logger = require('./logger');
-const { logAutopay, eventExistsRecently } = require('./autopay-log');
+const { logAutopay, eventExistsRecently, latestExpiredCardProgress } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -34,6 +34,26 @@ function autopayProgressStamp(result, deduped, freshFields = {}) {
   if (!deduped) return freshFields;
   const createdAt = billingLegContactTime(result);
   return createdAt ? { createdAt } : freshFields;
+}
+
+// An expired card's next notice is anchored to the latest completed progress
+// row. A missing row keeps the first key stable after a lost log insert.
+async function cardExpiryEpisode(row, expYear, stage, eventType, now) {
+  const baseKey = `payment-expiry:${row.payment_method_id}:${row.exp_month}:${expYear}:${stage}`;
+  const cooldownDays = stage === '7_day' ? 7 : 30;
+  if (stage !== 'expired') return {
+    already: await eventExistsRecently(row.customer_id, eventType, cooldownDays,
+      row.payment_method_id, { reminder_stage: stage }),
+    eventKey: baseKey,
+  };
+  const progress = await latestExpiredCardProgress(row.customer_id, row.payment_method_id, row.exp_month, expYear);
+  const time = progress?.created_at == null ? null : new Date(progress.created_at).getTime();
+  return {
+    // A null/invalid durable time cannot prove that the 30 days elapsed.
+    already: !!progress && (time === null || !Number.isFinite(time)
+      || time >= now.getTime() - cooldownDays * 86400000),
+    eventKey: progress ? `${baseKey}:after:${progress.id}` : baseKey,
+  };
 }
 
 // Selected legs that have not yet been accepted for this billing cycle.
@@ -393,8 +413,7 @@ async function sendCardExpiryWarnings() {
       // Keep each escalation reachable: the cooldown is keyed by stage, so a
       // 60-day notice cannot delay the 30-day pass and a 30-day notice
       // cannot suppress the distinct 7-day stage roughly three weeks later.
-      const cooldownDays = reminderStage === '7_day' ? 7 : 30;
-      const already = await eventExistsRecently(r.customer_id, eventType, cooldownDays, r.payment_method_id, { reminder_stage: reminderStage });
+      const { already, eventKey } = await cardExpiryEpisode(r, expYear, reminderStage, eventType, now);
       if (already) { await emailPromise; skipped++; continue; }
 
       const expStr = `${String(r.exp_month).padStart(2, '0')}/${String(r.exp_year).slice(-2)}`;
@@ -426,7 +445,7 @@ async function sendCardExpiryWarnings() {
         metadata: {
           original_message_type: 'payment_expiry',
           billingDeliveryCategory: 'billing',
-          notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}:${reminderStage}`,
+          notificationEventKey: eventKey,
           billing_mode_at_send: r.billing_mode_at_send,
           payment_method_id: r.payment_method_id,
           expiry_month: String(r.exp_month),
@@ -443,7 +462,8 @@ async function sendCardExpiryWarnings() {
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,
         ...stamp,
-        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4, reminder_stage: reminderStage },
+        details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4,
+          reminder_stage: reminderStage, notification_event_key: eventKey },
       });
       await emailPromise;
       if (sendResult.deduped) skipped++; else sent++;

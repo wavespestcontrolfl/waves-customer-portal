@@ -7,6 +7,7 @@ const {
   blocked,
 } = require('./billing-channel-email-authority');
 const { buildBillingReplayContext, isBillingReplaySource } = require('./billing-email-replay-context');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
 
 function clean(value) {
   return String(value || '').trim();
@@ -17,9 +18,7 @@ function emailNotificationBody(value) {
 }
 
 function acceptedResult(result) {
-  const storedTime = [result.message?.sent_at, result.message?.created_at]
-    .map((value) => (value == null ? null : new Date(value)))
-    .find((value) => value && !Number.isNaN(value.getTime())) || null;
+  const storedTime = storedEmailAcceptedAt(result.message);
   return {
     sent: true,
     provider: 'email',

@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState, billingLegContactTime, previouslySettledBillingLegs } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -6323,7 +6323,11 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
-          if (smsResult.deduped) { sms.deduped = true; sms.eventVisibleAt = smsResult.eventVisibleAt; }
+          if (smsResult.deduped) {
+            sms.deduped = true;
+            sms.eventVisibleAt = smsResult.eventVisibleAt;
+            sms.originalAt = billingLegContactTime(smsResult);
+          }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
@@ -6461,7 +6465,8 @@ const InvoiceService = {
         });
         if (r?.ok) email.ok = true;
         if (r?.deduped) email.deduped = true;
-        else if (r?.error) email.error = r.error;
+        if (r?.sentAt) email.sentAt = r.sentAt;
+        if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
@@ -6592,6 +6597,7 @@ const InvoiceService = {
         }
       }
       if (!adoptedQueueUnrestored) {
+        const priorSettlement = previouslySettledBillingLegs([sms, email]);
         const finalized = await whereSendClaimOwned(
           db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
@@ -6600,7 +6606,8 @@ const InvoiceService = {
             status: db.raw(
               "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
             ),
-            sent_at: sms.deduped && !(email.ok && !email.deduped) ? (sms.eventVisibleAt || new Date()) : new Date(),
+            sent_at: priorSettlement
+              ? db.raw("COALESCE(sent_at, ?::timestamptz)", [priorSettlement.originalAt]) : new Date(),
             scheduled_send_at: null,
             scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
             scheduled_request_review: false,

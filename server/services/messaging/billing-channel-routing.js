@@ -141,11 +141,30 @@ function billingLegContactTime(result = {}) {
     ? Object.entries(result.channelResults)
       .filter(([channel, leg]) => billingLegDeliveryState(channel, leg) === 'deduped')
       .flatMap(([, leg]) => [leg.sentAt, leg.eventVisibleAt])
-      .concat([result.sentAt, result.eventVisibleAt])
-    : result.deduped ? [result.sentAt, result.eventVisibleAt] : [result.eventVisibleAt];
+      .concat([result.sentAt, result.eventVisibleAt, result.originalAt])
+    : result.deduped ? [result.sentAt, result.eventVisibleAt, result.originalAt] : [result.eventVisibleAt];
   const times = candidates.filter(Boolean).map((candidate) => new Date(candidate))
     .filter((time) => !Number.isNaN(time.getTime()));
   return times.length ? new Date(Math.max(...times.map((time) => time.getTime()))) : null;
+}
+
+function storedEmailAcceptedAt(message = {}) {
+  for (const candidate of [message?.sent_at, message?.created_at]) {
+    if (candidate == null) continue;
+    const time = new Date(candidate);
+    if (!Number.isNaN(time.getTime())) return time;
+  }
+  return null;
+}
+
+// A replay may close progress only when every accepted rail belongs to an
+// earlier episode. The same decision governs invoice and collections writers.
+function previouslySettledBillingLegs(results) {
+  const accepted = results.filter((result) => result?.sent === true || result?.ok === true);
+  if (!accepted.length || accepted.some((result) => result.deduped !== true)) return null;
+  const times = accepted.map(billingLegContactTime).filter(Boolean);
+  return { originalAt: times.length
+    ? new Date(Math.max(...times.map((time) => time.getTime()))) : null };
 }
 
 function needsRetry(result) {
@@ -267,5 +286,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
   billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
-  billingLegContactTime,
+  billingLegContactTime, previouslySettledBillingLegs, storedEmailAcceptedAt,
 };
