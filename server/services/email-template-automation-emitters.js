@@ -11,9 +11,20 @@
  *
  * visit.completed_first and customer.churned are intentionally NOT wired
  * here yet — see the PR body for why (deferred to a follow-up PR).
+ *
+ * sweepMissedLifecycleEvents (codex P2 x2) is the retry safety net for both
+ * direct emitters above: if processTrigger fails before it durably inserts
+ * a run (a transient DB outage, most likely), the direct call above returns
+ * null and the triggering write (the estimate flipped to 'expired', the
+ * review's customer_id set) is never replayed on its own — the entity's
+ * OWN state IS the durable evidence a run is owed. No new table: the sweep
+ * re-derives "missed" straight from the entities plus a NOT EXISTS against
+ * email_template_automation_runs (idempotency_key already prevents a
+ * double run if the direct emitter partially succeeded).
  */
+const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 
 async function emitTrigger(eventKey, args) {
   if (!isEnabled('emailTemplateAutomations')) return null;
@@ -61,7 +72,118 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
   });
 }
 
+const SWEEP_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const SWEEP_ROW_LIMIT = 100;
+
+// True only when at least one ACTIVE automation catalog row targets this
+// trigger key — the sweep does zero work (no entity query at all) for a
+// key nobody has configured yet.
+async function hasActiveAutomation(triggerEventKey) {
+  try {
+    const row = await db('email_template_automations')
+      .where({ trigger_event_key: triggerEventKey, status: 'active' })
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[email-template-automation-emitters] active-automation check failed for ${triggerEventKey}: ${err.message}`);
+    return false;
+  }
+}
+
+// Estimates the direct emitter (estimate-expiration.js) may have missed:
+// flipped to 'expired' within the window, no run recorded for THIS trigger
+// key against this entity. expires_at is the sweep's own bound (mirrors
+// the direct emitter's own 7-day-ish cadence, not a precision requirement
+// — the NOT EXISTS below is what actually decides "missed").
+async function sweepMissedExpiredEstimates(since) {
+  if (!(await hasActiveAutomation('estimate.expired'))) return 0;
+  let rows;
+  try {
+    rows = await db('estimates as e')
+      .where('e.status', 'expired')
+      .where('e.expires_at', '>=', since)
+      .whereNotExists(function notEmitted() {
+        this.select(1).from('email_template_automation_runs as r')
+          .whereRaw('r.entity_type = ? AND r.entity_id = e.id AND r.trigger_event_key = ?', ['estimate', 'estimate.expired']);
+      })
+      .select('e.id', 'e.customer_id', 'e.customer_email', 'e.category', 'e.service_interest', 'e.expires_at')
+      .limit(SWEEP_ROW_LIMIT);
+  } catch (err) {
+    logger.warn(`[email-template-automation-emitters] missed-estimate sweep query failed: ${err.message}`);
+    return 0;
+  }
+  let emitted = 0;
+  for (const row of rows) {
+    try {
+      const result = await emitEstimateExpired(row);
+      if (result) emitted += 1;
+    } catch (err) {
+      logger.warn(`[email-template-automation-emitters] missed estimate.expired emit failed for ${row.id}: ${err.message}`);
+    }
+  }
+  return emitted;
+}
+
+// Reviews google-business.js's two sync sites or review-incentives.js's
+// manual-attribution branch may have missed: five-star, linked to a live
+// customer, not dismissed, not removed from Google, touched within the
+// window, no run recorded for THIS trigger key against this entity.
+// google_reviews has no dedicated "linked_at" column (checked the table's
+// migrations — auto_linked_at only covers the click-auto-link path);
+// updated_at is bumped by every attribution path (ordinary sync, manual
+// match, click-auto), so it is the sweep's bound — again just a window,
+// not the correctness check (the NOT EXISTS is).
+async function sweepMissedFiveStarReviews(since) {
+  if (!(await hasActiveAutomation('review.linked_5star'))) return 0;
+  let rows;
+  try {
+    rows = await db('google_reviews as g')
+      .where('g.star_rating', 5)
+      .whereNotNull('g.customer_id')
+      .where('g.dismissed', false)
+      .whereNull('g.missing_since')
+      .where('g.updated_at', '>=', since)
+      .whereNotExists(function notEmitted() {
+        this.select(1).from('email_template_automation_runs as r')
+          .whereRaw('r.entity_type = ? AND r.entity_id = g.id AND r.trigger_event_key = ?', ['review', 'review.linked_5star']);
+      })
+      .select('g.id', 'g.customer_id', 'g.location_id', 'g.star_rating')
+      .limit(SWEEP_ROW_LIMIT);
+  } catch (err) {
+    logger.warn(`[email-template-automation-emitters] missed-review sweep query failed: ${err.message}`);
+    return 0;
+  }
+  let emitted = 0;
+  for (const row of rows) {
+    try {
+      const result = await emitReviewLinked5Star({
+        reviewId: row.id, customerId: row.customer_id, locationId: row.location_id, starRating: row.star_rating,
+      });
+      if (result) emitted += 1;
+    } catch (err) {
+      logger.warn(`[email-template-automation-emitters] missed review.linked_5star emit failed for ${row.id}: ${err.message}`);
+    }
+  }
+  return emitted;
+}
+
+// Scheduler entry point (every 15 min, runExclusive-wrapped by the caller
+// or here — wrapped HERE so a direct test/manual call gets the same
+// single-flight guarantee as the cron tick). No-op, no query at all, when
+// the mode is 'off' — matches every other reader's off-mode contract.
+async function sweepMissedLifecycleEvents() {
+  if (emailTemplateAutomationsMode() === 'off') return { estimatesEmitted: 0, reviewsEmitted: 0 };
+  const { runExclusive } = require('../utils/cron-lock');
+  return runExclusive('email-template-automation-lifecycle-sweep', async () => {
+    const since = new Date(Date.now() - SWEEP_WINDOW_MS);
+    const estimatesEmitted = await sweepMissedExpiredEstimates(since);
+    const reviewsEmitted = await sweepMissedFiveStarReviews(since);
+    return { estimatesEmitted, reviewsEmitted };
+  });
+}
+
 module.exports = {
   emitEstimateExpired,
   emitReviewLinked5Star,
+  sweepMissedLifecycleEvents,
 };

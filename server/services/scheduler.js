@@ -3202,6 +3202,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Email template automation lifecycle reconciliation sweep.
+  // Retry safety net (codex P2) for the direct estimate.expired /
+  // review.linked_5star emitters: re-derives any MISSED event straight from
+  // the entities (expired estimates, five-star linked reviews) against
+  // email_template_automation_runs, so a transient failure in the direct
+  // call — not caught by the emitter's own idempotency key, since no run
+  // was ever durably created — is not permanently lost. No-op (no query)
+  // when the mode is off, or per-key when no active automation targets it.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await require('./email-template-automation-emitters').sweepMissedLifecycleEvents();
+    } catch (err) {
+      logger.error(`[email-template-automation] lifecycle sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Appointment reminders (72h, 24h) from appointment_reminders table
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {

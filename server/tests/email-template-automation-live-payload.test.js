@@ -83,6 +83,72 @@ describe('livePayloadForRun — scheduled_service refresh', () => {
   });
 });
 
+describe('livePayloadForRun — review revalidation (review.linked_5star)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function run(overrides = {}) {
+    return { entity_type: 'review', entity_id: 'rev-1', recipient_id: 'cust-1', ...overrides };
+  }
+
+  test('still valid: five-star, linked to the run\'s own customer, not dismissed, not missing — no block', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live).toEqual({});
+  });
+
+  test('blocked: the review no longer exists', async () => {
+    mockTables({ google_reviews: undefined });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review no longer exists');
+  });
+
+  test('blocked: reattributed to a different customer since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-2', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is attributed to a different customer now');
+  });
+
+  test('blocked: edited below five stars since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 4, customer_id: 'cust-1', dismissed: false, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is no longer five-star');
+  });
+
+  test('blocked: dismissed since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: true, missing_since: null },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review was dismissed');
+  });
+
+  test('blocked: removed from Google (missing_since stamped) since queueing', async () => {
+    mockTables({
+      google_reviews: { id: 'rev-1', star_rating: 5, customer_id: 'cust-1', dismissed: false, missing_since: new Date() },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked review is no longer visible on Google');
+  });
+});
+
 describe('exitReasonFor — send-time appointment guards', () => {
   const PREP_EXITS = { stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] };
 

@@ -310,7 +310,7 @@ function staleRunningCutoff(now = new Date()) {
   return new Date(now.getTime() - RUNNING_STALE_AFTER_MS);
 }
 
-function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, payload, recipient, automation }) {
+function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, payload, recipient, automation, mode }) {
   const context = {
     ...(payload || {}),
     trigger_event_key: triggerEventKey,
@@ -327,6 +327,14 @@ function contextFor({ triggerEventKey, triggerEventId, entityType, entityId, pay
     context.entity_id = entityId;
     context[`${entityType}_id`] = context[`${entityType}_id`] || entityId;
   }
+  // Stamped at CREATION time so a delayed/retried run remembers the mode
+  // that promised its outcome (codex P1): 'shadow' must finalize shadow
+  // however long it sits in run_after, even if the gate flips to 'true'
+  // before it becomes due. Only the shadow->live promotion path
+  // (createRunUnlocked) may advance this to 'live' — see there. Never
+  // referenced by an idempotency_key_template (no catalog row predates
+  // this field), so adding it here cannot change any existing dedup key.
+  if (mode) context.origin_mode = mode;
   return context;
 }
 
@@ -701,6 +709,40 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   });
 }
 
+// The one place every automation-derived run FIELD is built, used by BOTH
+// the fresh insert below and the shadow->live promotion (codex P1: the two
+// must not drift — a promotion that hand-rolled its own subset once left
+// template_key/template_version_id at their shadow-era values while the
+// live automation had since republished a corrected template, so the
+// first live attempt sent stale content under the CURRENT automation's
+// suppression settings). Everything the automation itself decides —
+// template identity/version, automation_key/id, max_attempts — reflects
+// THIS call's automation row; recipient/payload/context reflect THIS
+// call's freshly resolved values.
+function automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }) {
+  return {
+    automation_id: automation.id || null,
+    automation_key: automation.automation_key,
+    trigger_event_key: triggerEventKey,
+    trigger_event_id: triggerEventId || null,
+    entity_type: entityType || null,
+    entity_id: entityId || null,
+    template_key: automation.template_key,
+    template_version_id: automation.active_version_id || automation.template_version_id || null,
+    recipient_type: recipient.type || null,
+    recipient_id: recipient.id || null,
+    recipient_email: recipient.email,
+    idempotency_key: idempotencyKey,
+    status,
+    run_after: runAfter,
+    max_attempts: retryPolicy.maxAttempts,
+    exit_reason: exitReason || null,
+    payload: JSON.stringify(payload || {}),
+    context: JSON.stringify(context || {}),
+    completed_at: status === 'skipped' ? new Date() : null,
+  };
+}
+
 async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode }) {
   const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
   if (existing) {
@@ -727,23 +769,17 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
       const promotedRows = await conn('email_template_automation_runs')
         .where({ id: existing.id, status: 'shadow' })
         .update({
-          status,
-          run_after: runAfter,
+          // Built from the SAME field set the fresh insert below uses
+          // (codex P1) — template_key/template_version_id/automation_id/
+          // max_attempts refresh to THIS live attempt's automation row, not
+          // the shadow-era values, and recipient/payload/context (whose
+          // origin_mode is already 'live' — contextFor stamped it from this
+          // call's own `mode`) refresh to this attempt's freshly resolved
+          // values. Never the stale address/content a corrected template
+          // or a since-changed recipient would otherwise leave behind.
+          ...automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }),
           attempts: 0,
           last_error: null,
-          exit_reason: exitReason || null,
-          // Recipient fields refresh too (codex P1): the shadow row's
-          // stored address is whatever it was when shadow mode created it,
-          // days or weeks before this live replay — `recipient` here is
-          // this call's freshly resolved value (under-lock re-read for a
-          // customer id), so a since-corrected email is honored on
-          // promotion instead of dispatchRun sending to the stale address.
-          recipient_type: recipient.type || null,
-          recipient_id: recipient.id || null,
-          recipient_email: recipient.email,
-          payload: JSON.stringify(payload || {}),
-          context: JSON.stringify(context || {}),
-          completed_at: status === 'skipped' ? new Date() : null,
           updated_at: new Date(),
         }).returning('*');
       if (promotedRows.length) {
@@ -779,27 +815,9 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
   // concurrent replay won, and the recovery fetch + audit event run on a
   // still-healthy connection. Any OTHER error still throws and rolls the
   // transaction back as before.
-  const [run] = await conn('email_template_automation_runs').insert({
-    automation_id: automation.id || null,
-    automation_key: automation.automation_key,
-    trigger_event_key: triggerEventKey,
-    trigger_event_id: triggerEventId || null,
-    entity_type: entityType || null,
-    entity_id: entityId || null,
-    template_key: automation.template_key,
-    template_version_id: automation.active_version_id || automation.template_version_id || null,
-    recipient_type: recipient.type || null,
-    recipient_id: recipient.id || null,
-    recipient_email: recipient.email,
-    idempotency_key: idempotencyKey,
-    status,
-    run_after: runAfter,
-    max_attempts: retryPolicy.maxAttempts,
-    exit_reason: exitReason || null,
-    payload: JSON.stringify(payload || {}),
-    context: JSON.stringify(context || {}),
-    completed_at: status === 'skipped' ? new Date() : null,
-  }).onConflict('idempotency_key').ignore().returning('*');
+  const [run] = await conn('email_template_automation_runs')
+    .insert(automationRunFields({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, idempotencyKey, runAfter, status, exitReason, retryPolicy, payload, context }))
+    .onConflict('idempotency_key').ignore().returning('*');
   if (!run) {
     const replayed = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
     if (!replayed) {
@@ -884,6 +902,7 @@ async function processTrigger({
       payload,
       recipient: resolvedRecipient,
       automation,
+      mode,
     });
     const idempotencyTemplate = cleanString(automation.idempotency_key_template);
     if (!idempotencyTemplate) {
@@ -1102,6 +1121,25 @@ async function livePayloadForRun(run, storedPayload = {}) {
       setLiveValue(live, 'customer_type', row.recurring ? 'recurring' : '');
     }
     return live;
+  }
+
+  // review.linked_5star's revalidation (codex P1): unlike every other
+  // entity type above, a review can be legitimately un-attributed,
+  // reattributed to a DIFFERENT customer, edited below five stars, or
+  // dismissed/removed from Google in the window between queueing (a delay
+  // or a retry) and dispatch — sending stale five-star follow-up copy off
+  // the ORIGINAL match would be wrong. __blocked signals executeRun to
+  // markRunSkipped with a stable reason instead of a normal field refresh.
+  if (entityType === 'review') {
+    const row = await loadEntityRow('google_reviews', id);
+    if (!row) return { __blocked: 'linked review no longer exists' };
+    if (row.dismissed) return { __blocked: 'linked review was dismissed' };
+    if (row.missing_since) return { __blocked: 'linked review is no longer visible on Google' };
+    if (Number(row.star_rating) !== 5) return { __blocked: 'linked review is no longer five-star' };
+    if (String(row.customer_id || '') !== String(run.recipient_id || '')) {
+      return { __blocked: 'linked review is attributed to a different customer now' };
+    }
+    return {};
   }
 
   return {};
@@ -1430,10 +1468,16 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
 
   try {
     const storedPayload = asObject(claimedRun.payload);
-    const executionPayload = {
-      ...storedPayload,
-      ...await livePayloadForRun(claimedRun, storedPayload),
-    };
+    const livePayload = await livePayloadForRun(claimedRun, storedPayload);
+    // Hard invariant, not a catalog-configurable exit/condition (codex P1):
+    // a review.linked_5star run whose review was reattributed, edited below
+    // five stars, dismissed, or removed since it was queued must never
+    // dispatch on stale evidence. livePayloadForRun's 'review' branch signals
+    // this with __blocked rather than a normal field refresh.
+    if (livePayload.__blocked) {
+      return markRunSkipped(claimedRun, livePayload.__blocked, { guard: 'review_invalid', attempt: attemptNumber });
+    }
+    const executionPayload = { ...storedPayload, ...livePayload };
     const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);
     if (exitReason) {
       return markRunSkipped(claimedRun, exitReason, { guard: 'exit_conditions', attempt: attemptNumber });
@@ -1447,8 +1491,16 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // dispatchRun would call the email library. This single spot covers
     // BOTH callers of executeRun (processTrigger's immediate path and
     // processDueRuns' due-run sweep), since both funnel through here.
+    // origin_mode (stamped at creation, contextFor) OUTRANKS the current
+    // gate read for 'shadow' (codex P1): a run created while shadow was
+    // promised to finalize as would_send must keep that promise even if a
+    // delay/retry lets the gate flip to 'true' before it becomes due — only
+    // the shadow->live promotion path may advance origin_mode to 'live'.
+    // Absent a stamp (rows predating this fix) falls through to today's
+    // current-gate read.
+    const originMode = asObject(claimedRun.context).origin_mode;
     const dispatchMode = emailTemplateAutomationsMode();
-    if (dispatchMode === 'shadow') {
+    if (originMode === 'shadow' || dispatchMode === 'shadow') {
       return finalizeShadowRun(claimedRun, resolvedAutomation);
     }
     // Fail-closed (codex P1): a run already sitting in the queue (created

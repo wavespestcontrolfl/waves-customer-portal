@@ -1248,6 +1248,22 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       starRating: review.star_rating,
       source: 'google_review_manual_match',
     });
+    // review.linked_5star (email_template_automation, dark/shadow) — same
+    // attribution moment as the two google-business.js sync sites (codex
+    // P2: a review that first synced with no customer and was later
+    // matched here never reached either sync site's justAttributed check,
+    // so without this call any automation on this trigger silently missed
+    // every manually matched review). A SEPARATE catalog from the
+    // thank-you sequence above; never throws (emitter's own contract), so
+    // a failure here must not touch it.
+    try {
+      const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
+      await emitReviewLinked5Star({
+        reviewId: review.id, customerId, locationId: review.location_id, starRating: review.star_rating,
+      });
+    } catch (emitErr) {
+      logger.warn(`[review-incentives] review.linked_5star emit failed for review ${review.id}: ${emitErr.message}`);
+    }
   }
 
   const attributionSnapshot = {

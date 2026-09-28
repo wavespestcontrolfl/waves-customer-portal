@@ -1580,6 +1580,31 @@ describe('email template automation executor', () => {
       // Never the full address in the event.
       expect(JSON.stringify(metadata)).not.toContain('sam@example.com');
     });
+
+    test('a shadow-ORIGIN delayed run finalizes as shadow even after the gate flips to true (codex P1)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      // The run was CREATED while shadow was promised (contextFor stamped
+      // origin_mode:'shadow' at creation time) — this is what a delayed or
+      // retried shadow-origin run looks like once it comes due; the current
+      // gate reading 'true' above must not override that promise.
+      const queuedRun = run({
+        entity_type: '', entity_id: '',
+        context: JSON.stringify({ origin_mode: 'shadow' }),
+      });
+      const runningRunQuery = chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] });
+      const shadowRunQuery = chain({ returning: [{ ...queuedRun, status: 'shadow' }] });
+      const attemptLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      const wouldSendLogQuery = chain({ returning: [{ id: 'event-2' }] });
+      setDbQueues({
+        email_template_automation_runs: [runningRunQuery, shadowRunQuery],
+        email_template_automation_run_events: [attemptLogQuery, wouldSendLogQuery],
+      });
+
+      const result = await AutomationExecutor.executeRun(queuedRun, { automation: automation() });
+
+      expect(result.status).toBe('shadow');
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    });
   });
 
   describe('idempotency: a shadow run does not block a later live attempt', () => {
@@ -1648,6 +1673,58 @@ describe('email template automation executor', () => {
       expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
         recipient_email: 'sam@example.com',
       }));
+    });
+
+    test('promotion refreshes template identity/version/automation_id from THIS live attempt, not the shadow-era values, and stamps origin_mode:live (codex P1)', async () => {
+      // The shadow row was created under an OLDER automation/template
+      // (shadow-era: automation-1 / estimate.extension_notice / version-1).
+      // The automation has since republished a corrected template under a
+      // NEW automation row — the live replay must send THAT content, not
+      // resend the shadow-era template identity dispatchRun would read off
+      // the stale row.
+      const existingShadowRun = run({
+        status: 'shadow',
+        automation_id: 'automation-1',
+        template_key: 'estimate.extension_notice',
+        template_version_id: 'version-1',
+      });
+      const existingRunQuery = chain({ first: existingShadowRun });
+      const currentAutomation = automation({
+        id: 'automation-2',
+        delay_minutes: 60,
+        template_key: 'estimate.extension_notice_v2',
+        active_version_id: 'version-2',
+      });
+      const promotedRunQuery = chain({
+        returning: [{
+          ...existingShadowRun, status: 'scheduled',
+          automation_id: 'automation-2', template_key: 'estimate.extension_notice_v2', template_version_id: 'version-2',
+        }],
+      });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [currentAutomation] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [promotedLogQuery],
+      });
+
+      await AutomationExecutor.processTrigger({
+        triggerEventKey: 'estimate.auto_renewed',
+        triggerEventId: 'estimate_auto_renew:est-1',
+        payload: {
+          estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+          first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+        },
+      });
+
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        automation_id: 'automation-2',
+        template_key: 'estimate.extension_notice_v2',
+        template_version_id: 'version-2',
+      }));
+      const updateArg = promotedRunQuery.update.mock.calls[0][0];
+      expect(JSON.parse(updateArg.context).origin_mode).toBe('live');
     });
 
     test('a shadow replay of an existing shadow row still dedupes (no promotion while mode stays shadow)', async () => {
