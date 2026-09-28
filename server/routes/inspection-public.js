@@ -735,7 +735,7 @@ async function serviceAreaFailure(location, address = null) {
 
 async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
   const booking = require('./booking');
-  const { buildBookingAvailability } = booking._internals;
+  const { buildBookingAvailability, bookInsertionOffersLive } = booking._internals;
   return buildBookingAvailability({
     lat: coords.lat,
     lng: coords.lng,
@@ -754,10 +754,14 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     selfServeNotice: true,
     // This route's commit (phase 2, createSelfBooking below) re-verifies
     // with traffic and persists the certified route order while
-    // GATE_BOOK_CAPACITY_COMMIT is live, so an inserted offer here is safe
+    // bookInsertionOffersLive() is live, so an inserted offer here is safe
     // to commit at the position it was offered (see the capacityPlacement
-    // comment inside buildBookingAvailability, booking.js).
-    capacityPlacement: require('../config/feature-gates').bookCapacityCommitLive(),
+    // comment inside buildBookingAvailability, booking.js). This callback
+    // flow skips the signed-offer HMAC (its anti-forgery proof is a fresh
+    // rebuild in the same request, a few lines before createSelfBooking) —
+    // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
+    // and the commit's own preparedCapacity gate reading the same env.
+    capacityPlacement: bookInsertionOffersLive(),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }

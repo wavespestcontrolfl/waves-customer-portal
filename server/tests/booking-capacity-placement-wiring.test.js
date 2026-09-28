@@ -2,19 +2,28 @@
  * Codex round 1 on PR #5231 (owner 2026-09-28): insertion offers must only
  * reach callers whose commit persists the certified route order. Only
  * createSelfBooking does that, and only while GATE_BOOK_CAPACITY_COMMIT is
- * live — so exactly the callers below pass
- * `capacityPlacement: bookCapacityCommitLive()` into buildBookingAvailability
- * (booking.js), and exactly the callers whose own commit does NOT persist a
- * route order (public reschedule — SmartRebooker clears route_order on a
- * move; the voice agent — relay-booking.js/relay-tools.js insert with no
- * route_order) omit it and stay append-only.
+ * live — so exactly the callers below pass `capacityPlacement:
+ * bookInsertionOffersLive()` into buildBookingAvailability (booking.js), and
+ * exactly the callers whose own commit does NOT persist a route order
+ * (public reschedule — SmartRebooker clears route_order on a move; the
+ * voice agent — relay-booking.js/relay-tools.js insert with no route_order)
+ * omit it and stay append-only.
+ *
+ * Round 2 (Codex P1, same PR): bookCapacityCommitLive() alone wasn't the
+ * right condition either — it doesn't also require GATE_SCHEDULING_CAPACITY,
+ * the gate that actually turns on whole-route insertion in the first place.
+ * Renamed to bookInsertionOffersLive() = bookCapacityCommitLive() &&
+ * capacityEnabled() (routes/booking.js), exported via _internals, and every
+ * caller below switched to it.
  *
  * Source-level assertions on each call's own text, mirroring the existing
  * pattern for asserting WHERE/HOW a call is wired rather than re-running the
  * whole route (booking-capacity-commit.test.js, which reads routes/booking.js
  * the same way). buildBookingAvailability's own pass-through of whatever
- * capacityPlacement value it's given is a behavioral test in
- * booking-availability-insertion.test.js.
+ * capacityPlacement value it's given, and the signed policy tag its mint
+ * attaches, are behavioral tests in booking-availability-insertion.test.js;
+ * the commit-side verify of that tag is in booking-confirm-signed-offer
+ * .test.js.
  */
 const fs = require('fs');
 const path = require('path');
@@ -34,40 +43,67 @@ function callAfter(src, anchor) {
   return src.slice(callStart, callEnd);
 }
 
-describe('booking.js — self-serve callers pass capacityPlacement: bookCapacityCommitLive()', () => {
+describe('booking.js — bookInsertionOffersLive() is bookCapacityCommitLive() AND capacityEnabled()', () => {
+  test('the reader itself is exported and computes the AND, not just bookCapacityCommitLive() alone', () => {
+    const { bookInsertionOffersLive } = require('../routes/booking')._internals;
+    expect(typeof bookInsertionOffersLive).toBe('function');
+    const gates = require('../config/feature-gates');
+    const policy = require('../services/scheduling/policy');
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      for (const [commit, capacity, expected] of [
+        ['true', 'true', true], ['true', 'false', false], ['false', 'true', false], ['false', 'false', false],
+      ]) {
+        process.env.GATE_BOOK_CAPACITY_COMMIT = commit;
+        process.env.GATE_SCHEDULING_CAPACITY = capacity;
+        expect(gates.bookCapacityCommitLive()).toBe(commit === 'true');
+        expect(policy.capacityEnabled()).toBe(capacity === 'true');
+        expect(bookInsertionOffersLive()).toBe(expected);
+      }
+    } finally {
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+    }
+  });
+});
+
+describe('booking.js — self-serve callers pass capacityPlacement: bookInsertionOffersLive()', () => {
   const src = read('../routes/booking.js');
 
   test('GET /availability — commits through /confirm -> createSelfBooking', () => {
     const call = callAfter(src, "router.get('/availability'");
-    expect(call).toContain('capacityPlacement: bookCapacityCommitLive()');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
   });
 
   test('POST /find-slots — same /confirm -> createSelfBooking commit as /availability', () => {
     const call = callAfter(src, "router.post('/find-slots'");
-    expect(call).toContain('capacityPlacement: bookCapacityCommitLive()');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
   });
 
   test('POST /capture-intent revalidation — must match /availability and /find-slots (offer/commit parity)', () => {
     const call = callAfter(src, "router.post('/capture-intent'");
-    expect(call).toContain('capacityPlacement: bookCapacityCommitLive()');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
   });
 });
 
 describe('reservice-public.js — commits through createSelfBooking (callbackVisit)', () => {
-  test('buildAvailabilityForCustomer passes capacityPlacement: bookCapacityCommitLive()', () => {
+  test('buildAvailabilityForCustomer passes capacityPlacement: bookInsertionOffersLive()', () => {
     const src = read('../routes/reservice-public.js');
     const call = callAfter(src, 'async function buildAvailabilityForCustomer');
     expect(call).toContain('capacityPlacement:');
-    expect(call).toContain('bookCapacityCommitLive()');
+    expect(call).toContain('bookInsertionOffersLive()');
   });
 });
 
 describe('inspection-public.js — commits through createSelfBooking (phase 2)', () => {
-  test('buildAvailabilityForLead passes capacityPlacement: bookCapacityCommitLive()', () => {
+  test('buildAvailabilityForLead passes capacityPlacement: bookInsertionOffersLive()', () => {
     const src = read('../routes/inspection-public.js');
     const call = callAfter(src, 'async function buildAvailabilityForLead');
     expect(call).toContain('capacityPlacement:');
-    expect(call).toContain('bookCapacityCommitLive()');
+    expect(call).toContain('bookInsertionOffersLive()');
   });
 });
 
