@@ -291,6 +291,7 @@ const LANES = [
   L('sms-commitment-fulfillment', 'SMS completion verification', 'sms-commitment-fulfillment.js', 'deep', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('review_topic', 'Day-0 review-ask topic classification', 'review-ask-topic.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call_sentiment', 'Call sentiment', 'call-sentiment.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('ask_waves_emergency_check', 'Ask Waves · emergency second opinion', 'ask-waves-intake.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('parse_when', 'Scheduling "when" parse', 'scheduling/parse-when.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
@@ -399,7 +400,7 @@ const LANES = [
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
   L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
-  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
+  L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), null, { note: 'shares VOICE_RELAY_MODEL with inbound and the same allowlist walk (VOICE_RELAY_MODEL, then MODEL_VOICE, then the code default); VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
   // ── Report writer ──
@@ -416,6 +417,7 @@ const LANES = [
   L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
+  L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
   L('seo_advisor', 'SEO weekly advisor + action drafts', 'seo/seo-advisor.js, seo/seo-action-generator.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('ads_advisor', 'Ads campaign advisor (daily)', 'ads/campaign-advisor.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('chart_builder_image', 'AI chart builder · image intent read', 'ai-chart-builder.js', 'qa', T('GEMINI_VISION_BEST'), T('FLAGSHIP'), { note: 'image-backed charts only; stage 1 of 2' }),
@@ -603,6 +605,7 @@ const LANE_AREA = {
   review_ask: 'content',
   review_reply: 'content',
   review_gate_text: 'content',
+  review_topic: 'content',
   hero_alt: 'content',
   image_screen: 'content',
   editorial_review: 'content',
@@ -620,6 +623,7 @@ const LANE_AREA = {
   form_filler: 'content',
   signup_worker: 'content',
   link_investigator: 'content',
+  internal_link_judge: 'content',
   mentions_prober: 'content',
   mentions_sentiment: 'content',
   image_gen: 'content',
@@ -743,6 +747,7 @@ const LANE_DESCRIBE = {
   review_ask: 'Writes the review request',
   review_reply: 'Replies to Google reviews',
   review_gate_text: 'Drafts the review text for a customer',
+  review_topic: 'Finds the topic a customer raised before the Day-0 review ask',
   hero_alt: 'Writes alt text for hero images',
   image_screen: 'Screens a generated blog image for a wrong text mark, logo, uniform badge or van wrap',
   editorial_review: 'Audits complete article evidence and editorial quality',
@@ -760,6 +765,7 @@ const LANE_DESCRIBE = {
   form_filler: 'Fills signup forms from a screenshot',
   signup_worker: 'Works through backlink signups',
   link_investigator: 'Investigates internal link paths',
+  internal_link_judge: 'Checks each automatic internal link reads right',
   mentions_prober: 'Asks each AI engine whether it mentions Waves',
   mentions_sentiment: 'Scores those mentions',
   image_gen: 'Generates blog images',

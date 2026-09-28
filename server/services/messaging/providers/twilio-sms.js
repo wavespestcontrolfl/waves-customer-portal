@@ -116,7 +116,10 @@ async function sendViaTwilio(input, hooks = {}) {
 }
 
 async function sendViaTwilioOnce(input, {
-  preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
+  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, withSmsHandoff, providerHandoffReservation,
+  // codex #5018 structural fix (post-r7): threaded straight through, same
+  // as onDispatchStart/onDispatchAbort above.
+  logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
   const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
@@ -207,7 +210,20 @@ async function sendViaTwilioOnce(input, {
       // template lookup, customer/location query).
       preSendCheck,
       providerPreSendCheck,
+      // The REAL attempt boundary (codex #5018 r15 P1) — awaited by
+      // twilio.js immediately before dispatchStarted flips true and
+      // messages.create() runs, AFTER providerPreSendCheck's own refusal
+      // path has already cleared.
+      onDispatchStart,
+      // codex #5018 r15 pre-push P1: lets the caller undo its own marker
+      // when twilio.js's post-onDispatchStart window recheck refuses.
+      onDispatchAbort,
       withSmsHandoff,
+      // codex #5018 structural fix (post-r7): gates twilio.js's in-
+      // transaction sms_log insert (dispatch()'s own comment there).
+      // Omitted (the default), twilio.js falls back to origin/main's
+      // post-handoff, out-of-transaction insert.
+      logInHandoff,
       providerHandoffReservation: internalProviderReservation,
       // The opaque owner token is issued only from the complete canonical
       // input and callback contract. Raw Twilio callers cannot bypass the
@@ -238,7 +254,7 @@ async function sendViaTwilioOnce(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.eventVisibleAt ? { eventVisibleAt: result.eventVisibleAt } : {}), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
       return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };

@@ -17,8 +17,14 @@
  *                               reprocess can correct it after a deferral)
  *   not_a_prospect            — a call with this number, the one setting
  *                               the text off included, showed a salesperson,
- *                               vendor, robocall, wrong number or job
- *                               applicant
+ *                               robocall, wrong number or job applicant — or
+ *                               a vendor/partner call ALSO flagged spam
+ *                               (owner ruling 2026-09-28: a vendor_or_partner
+ *                               call V2 cleared of spam content — a genuine
+ *                               property manager or referral partner — is a
+ *                               prospect like any other and no longer holds;
+ *                               the office's own callback to them is
+ *                               untouched either way)
  * The call setting the text off is read by its id as well as by number: a
  * voicemail can be texted at a spoken callback number its own row does not
  * carry (call-recording-processor.js resolveCallContactPhone).
@@ -41,10 +47,12 @@ const RECENT_CONVERSATION_MS = 7 * 24 * 60 * 60 * 1000;
 // 'send_failed' row without either never went out) or sits in a status only
 // a delivered estimate reaches.
 const QUOTED_ESTIMATE_STATUSES = ['sent', 'viewed', 'accepted', 'declined'];
-// V2 call natures that are not a prospect (utils/extraction-compat.js's
-// spam-class set plus a job applicant), and the legacy extraction's own
-// spam / wrong-number labels for calls processed before V2.
-const NOT_A_PROSPECT_NATURES = ['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner', 'job_applicant'];
+// V2 call natures that are not a prospect on their own, no additional spam
+// flag needed (utils/extraction-compat.js's HARD_SPAM_CALL_NATURES plus a
+// job applicant), and the legacy extraction's own spam / wrong-number labels
+// for calls processed before V2. vendor_or_partner is deliberately NOT here
+// (owner ruling 2026-09-28) — see the dedicated vendor/spam check below.
+const NOT_A_PROSPECT_NATURES = ['spam_solicitation', 'robocall', 'wrong_number', 'job_applicant'];
 // Outbound sms_log statuses that reached nobody — lead-auto-reply.js's
 // delayed-reply rule: scheduled, cancelled, or bounced.
 const UNSENT_STATUSES = ['scheduled', 'cancelled', 'canceled', 'failed', 'undelivered'];
@@ -129,16 +137,41 @@ async function autoTextHoldReason(phone, {
   // the processor itself acted on, and the only label on a call processed
   // before V2 or with it off or failed. The call setting this text off
   // counts too: the voicemail route vetoes neither a vendor nor a job
-  // applicant, so one naming a service still becomes a lead. A vendor V2
-  // cleared of spam (a property manager, a referral partner) still holds:
-  // the automated quote link is for a homeowner, and the lead and the
-  // office's callback are untouched.
+  // applicant, so one naming a service still becomes a lead.
+  //
+  // vendor_or_partner is split out from the other natures (owner ruling
+  // 2026-09-28): it holds ONLY when the SAME call is ALSO flagged spam
+  // (extraction-compat.js's merge stamps is_spam true on the legacy
+  // ai_extraction column for every vendor_or_partner call UNLESS V2's own
+  // spam_verdict explicitly cleared its content — that clearing is what a
+  // genuine property manager or referral partner looks like). A vendor call
+  // V2 cleared of spam is a prospect like any other and no longer holds;
+  // the office's own callback to them is untouched either way.
   const notAProspect = await callsWith(dbi, digits, originCallId)
     .where((q) => q
       .where((v2) => v2.where('v2_extraction_status', 'valid')
         .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
-      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
-      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
+      // A valid V2 vendor_or_partner call V2 itself judged spam holds on its
+      // own verdict — a shadow-mode row persists that verdict without
+      // stamping the legacy is_spam flag the fallback below reads.
+      .orWhere((v2VendorSpam) => v2VendorSpam.where('v2_extraction_status', 'valid')
+        .whereRaw("ai_extraction_enriched->>'call_nature' = 'vendor_or_partner'")
+        .whereRaw("ai_extraction_enriched->'spam_verdict'->>'is_spam_content' = 'true'"))
+      .orWhere((legacy) => legacy
+        .where((flag) => flag
+          .whereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
+          .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
+        // A valid V2 vendor_or_partner call whose own spam_verdict cleared
+        // its content is authoritative over the legacy labels: a call
+        // processed while V2 was shadow-only keeps the legacy is_spam /
+        // call_type "spam" that V2-primary adoption would have cleared, and
+        // one such row in the number's history must not silence a genuine
+        // property manager or referral partner for good. COALESCE: a row
+        // with no V2 data evaluates the clear as false, so its legacy flag
+        // still holds.
+        .whereRaw(`NOT COALESCE(v2_extraction_status = 'valid'
+          AND ai_extraction_enriched->>'call_nature' = 'vendor_or_partner'
+          AND ai_extraction_enriched->'spam_verdict'->>'is_spam_content' = 'false', false)`)))
     .first('id');
   if (notAProspect) return 'not_a_prospect';
 

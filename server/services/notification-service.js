@@ -337,10 +337,7 @@ const NotificationService = {
     // byte for byte. No visit, no house: untouched.
     const PushService = require('./push-notifications');
     const scopeOn = require('./account-properties').appPropertyScopeEnabled();
-    const metadataRaw = createOptsRaw.metadata || {};
-    const visitId = scopeOn
-      ? (createOptsRaw.appointmentId || metadataRaw.appointmentId || metadataRaw.scheduledServiceId || null)
-      : null;
+    const visitId = scopeOn ? preferenceVisitId : null;
     // Nothing to resolve for a notification about no visit and no house (a
     // receipt, a document): no lookup at all.
     const notifiedPropertyId = scopeOn && (visitId || createOptsRaw.propertyId)
@@ -398,6 +395,15 @@ const NotificationService = {
     if (!notification || notification.suppressed) return notification;
 
     if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
+    // An event key identifies the committed bell's copy. In particular, a
+    // retry after a lost commit acknowledgement must not send a new quote
+    // natively while reusing the earlier bell or its provider acceptance.
+    if (deduped && ['category', 'title', 'body', 'link']
+      .some((field) => (notification[field] || null) !== (createArgs[field] || null))) {
+      return { ...notification, deduped, push: {
+        queued: false, accepted: 0, reason: 'dedupe_payload_changed',
+      } };
+    }
     let pushQueued = false;
     try {
       const dispatch = PushService.sendToCustomer(customerId, {

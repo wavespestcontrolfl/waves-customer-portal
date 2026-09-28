@@ -38,6 +38,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
+import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
@@ -6712,22 +6713,9 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
   );
 }
 
-function fmtUnit(unit) {
-  return unit ? String(unit).replace(/_/g, " ") : "";
-}
-
-// Small doses keep their precision: under 1 oz they render in mL / g (a
-// syringe or scale number), anything else to three significant decimals.
-const SMALL_DOSE = { "fl oz": ["mL", 29.5735], fl_oz: ["mL", 29.5735], oz: ["g", 28.3495] };
-function fmtAmount(amount, unit) {
-  if (amount == null) return null;
-  const n = Number(amount);
-  const small = n > 0 && n < 1 ? SMALL_DOSE[String(unit || "").toLowerCase()] : null;
-  if (small) return `${(n * small[1]).toFixed(1).replace(/\.0$/, "")} ${small[0]}`;
-  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(n < 1 ? 3 : 2).replace(/\.?0+$/, "");
-  const u = fmtUnit(unit);
-  return `${txt}${u ? ` ${u}` : ""}`;
-}
+// Amounts a tech can measure: teaspoons under 1 fl oz, fl oz above, never mL
+// (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
+const fmtAmount = formatMeasuredAmount;
 
 function JobCardOrderButton({ productId, name, order, D, compact = false }) {
   const [state, setState] = useState("idle");
@@ -6991,14 +6979,14 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {formatMeasuredRange(mix.amount, mix.amountMax, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
-                Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
+                Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
             <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
@@ -12927,6 +12915,17 @@ export function CompletionPanel({
   // (codex r23). An edited draft is the tech's reviewed copy and is theirs.
   const generatedReportTextRef = useRef(null);
   const [generatedReportCleared, setGeneratedReportCleared] = useState(false);
+  // Whether the CURRENTLY INSTALLED draft was actually generated with photo
+  // grounding — the server's own photoGroundingUsed flag on its response
+  // (pre-push P2, Codex #5145 r3), never guessed client-side. With the gate
+  // off (the default) the server drops captions/summary before building the
+  // prompt, so this stays false and the watcher below must not track them —
+  // editing either afterward would otherwise clear an untouched, ungrounded
+  // draft. Read by buildGenerationInputsSnapshot; set by
+  // applyGeneratedReport, which also rebuilds generationInputsRef right
+  // below under the NEW value so the flag flipping never itself reads as a
+  // mismatch.
+  const installedPhotoGroundingUsedRef = useRef(false);
   // Baseline for the generation-inputs watcher below — null means "not yet
   // initialized" (fresh mount or just-restored draft), so the first run
   // records without invalidating.
@@ -13768,20 +13767,78 @@ export function CompletionPanel({
   // (admin-dispatch completion + Charge-now). Mirror that here so the tech UI's
   // willInvoice / pay-link prediction, AI recap framing, and review suppression
   // match the report-only/no-invoice completion the server actually performs.
+  // For an unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else (per_application's own
+  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
+  // first-application visits…) the AUTHORITATIVE amount is the schedule
+  // payload's own billingLane.prediction, computed server-side by the exact
+  // same predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
+  // completion itself uses — never re-derived locally, so this can't drift
+  // from what completion actually bills (codex pre-push P1: a local
+  // tier/lane guard either showed the wrong monthlyRate for a legacy
+  // inferred lane, or zeroed a real per-application fee).
+  //
+  // The prediction's `amount` is ALREADY net of prepaidAmount for an
+  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
+  // server-side), and a 'prepaid' kind's amount is what was ALREADY
+  // collected, not a new balance — so `usingUnpricedPrediction` keeps
+  // prepaidCovered below from netting the SAME prepayment a second time
+  // against a figure that's already final (codex pre-push P1: double-
+  // netting misclassified a partially-prepaid visit as fully covered and
+  // suppressed the invoice for its real remaining balance).
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = !hasVisitPrice && !isCallback;
+  // Round-8 P1: `billingLane.siblingCoverage` (the server's ONE canonical
+  // per-visit collection verdict — owner decision, narrow + fail closed) in
+  // state 'collect_on_combined_invoice' means completion REUSES that
+  // sibling invoice (complete-scheduled-service.js) exactly like an
+  // existing outstanding invoice — never a fresh mint, but still a real
+  // amount due, a pay link, and a held review — so this panel must not
+  // treat it as `usingUnpricedPrediction`'s ordinary $0/no-invoice path.
+  const siblingCoverage = service.billingLane?.siblingCoverage || null;
+  const collectOnSiblingInvoice = siblingCoverage?.state === 'collect_on_combined_invoice';
+  // Codex pre-push P2: a covering sibling invoice reads `state: 'settled'`
+  // for FIVE distinct reasons (billing-lane.js siblingCoverageForSchedule) —
+  // 'invoice_settled' (literal paid/prepaid), 'invoice_processing' (money in
+  // flight, e.g. a pending ACH debit), 'withdrawn_from_customer' /
+  // 'payer_billed' (draft/sent, but not collectible from this homeowner at
+  // all), and 'credit_applied' (draft/sent, covered by account credit, never
+  // marked literally paid). A technician collects nothing at the door for
+  // any of the five — but complete-scheduled-service.js's own
+  // invoiceBlocksReview holds the review ask for every invoice status
+  // EXCEPT literal 'paid'/'prepaid', which only 'invoice_settled' actually
+  // is. This used to recognize 'invoice_processing' alone (codex round-9
+  // P2's own fix), which correctly held the ask for THAT one reason but
+  // missed the other three draft/sent-but-not-collectible reasons — the
+  // panel promised an immediate review request the server still withheld
+  // pending manual reconciliation. Every reason except the literal
+  // paid/prepaid one now holds the preview the same way.
+  const siblingInvoiceNotYetSettled = siblingCoverage?.state === 'settled'
+    && siblingCoverage?.reason !== 'invoice_settled';
   const invoiceAmount = hasVisitPrice
     ? Number(completionVisitPrice)
     : isCallback
       ? 0
-      : Number(service.monthlyRate || 0);
-  const autopayCoversVisit =
-    !!service.autopayActive &&
-    !hasVisitPrice &&
-    !!service.waveguardTier &&
-    Number(service.monthlyRate || 0) > 0;
-  const prepaidCovered =
-    service.prepaidAmount != null &&
-    Number(service.prepaidAmount) > 0 &&
-    Number(service.prepaidAmount) >= invoiceAmount;
+      : collectOnSiblingInvoice
+        ? Number(siblingCoverage.amountDue) || 0
+        : (predictionKind === 'prepaid' ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
+  // Codex round-2 P1 (sweep): this used to infer "dues cover it" from
+  // autopayActive + a tier + a positive monthlyRate + no stamped visit
+  // price — the SAME shape as MobileAppointmentDetailSheet's
+  // coveredByMembership bug. A tiered per_application (or per_visit)
+  // customer can have autopay on AND carry a real, positive invoice/
+  // auto_charge prediction for an unpriced row (e.g. the $97.20
+  // acceptance-fee case in this file's own billing-lane-amount test) —
+  // that heuristic never looked at the prediction at all, so it would
+  // report-only a visit completion (and the schedule sheet's own Charge
+  // Now mint) actually bills. `covered_membership` is the ONLY signal
+  // this panel may treat as "dues cover it, no invoice."
+  const autopayCoversVisit = predictionKind === 'covered_membership';
+  const prepaidCovered = usingUnpricedPrediction
+    ? predictionKind === 'prepaid'
+    : (service.prepaidAmount != null &&
+      Number(service.prepaidAmount) > 0 &&
+      Number(service.prepaidAmount) >= invoiceAmount);
   // paid and prepaid are both settled to the server (invoiceBlocksReview,
   // report-only completion) — codex #4140 r15 P2.
   const invoiceAlreadyPaid =
@@ -13810,7 +13867,8 @@ export function CompletionPanel({
   const willInvoice =
     !oneTimeRecapOnly &&
     !reportOnlyCompletion &&
-    (!!service.createInvoiceOnComplete ||
+    (collectOnSiblingInvoice ||
+      !!service.createInvoiceOnComplete ||
       !!service.waveguardTier ||
       typedOneTimeBilling) &&
     invoiceAmount > 0;
@@ -13856,8 +13914,13 @@ export function CompletionPanel({
   // The server's invoiceBlocksReview: an UNPAID invoice after completion —
   // one minted now (willInvoice) or one already sent from dispatch and still
   // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
-  // paid invoices never hold the ask.
-  const reviewAwaitsPayment = willInvoice || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
+  // paid invoices never hold the ask. A covering sibling invoice awaiting
+  // payment or reconciliation holds it too (siblingInvoiceNotYetSettled
+  // above) — the reused invoice completion actually checks is the
+  // SIBLING's, and invoiceBlocksReview clears only on its literal
+  // 'paid'/'prepaid' status, not this row's own.
+  const reviewAwaitsPayment = willInvoice || siblingInvoiceNotYetSettled
+    || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
   // An unpaid invoice holds the customer-requested ask server-side
   // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
   // is false) — the preview must not promise the link the timing hint says
@@ -14847,6 +14910,13 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
+        // Whether that installed report was actually generated WITH photo
+        // grounding (pre-push P2, Codex #5145 r3) — restores alongside it so
+        // a reload/billing-detour doesn't forget a grounded draft is
+        // grounded (which would silently stop tracking caption/summary
+        // edits against it) or an ungrounded one isn't (which would start
+        // invalidating on edits the server never even received).
+        generationPhotoGroundingUsed: installedPhotoGroundingUsedRef.current,
         // Metadata retains the count so a failed photo write invalidates
         // prose grounded in photos that could not be restored.
         generationPhotoCount: servicePhotos.length,
@@ -15237,6 +15307,10 @@ export function CompletionPanel({
     generatedReportTextRef.current = typeof savedDraft.generatedReportText === "string" && savedDraft.generatedReportText
       ? savedDraft.generatedReportText
       : null;
+    // Restores with it (pre-push P2, Codex #5145 r3) — older drafts lack the
+    // field, which defaults to false (byte-identical to this fix not
+    // existing yet: nothing tracked, nothing invalidates).
+    installedPhotoGroundingUsedRef.current = savedDraft.generationPhotoGroundingUsed === true;
     preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
       ? savedDraft.preGenerationNotes
       : null;
@@ -15399,6 +15473,9 @@ export function CompletionPanel({
     if (restorePruned && generatedReportTextRef.current) {
       const installed = generatedReportTextRef.current;
       generatedReportTextRef.current = null;
+      // No draft installed any more (pre-push P2, Codex #5145 r3) — the
+      // NEXT generation's own flag decides again.
+      installedPhotoGroundingUsedRef.current = false;
       setAiReportUsed(false);
       if (String(savedDraft.notes || "").trim() === installed.trim()) {
         // The parked fields own the free-typed [Found]/[Next] lines once a
@@ -15648,7 +15725,7 @@ export function CompletionPanel({
   // record (and interior-treatment safety scopes) survive drafting, and the
   // pills UI takes over as the deselect handle. (notes still holds the
   // pre-draft text here; setNotes(report) hasn't applied yet.)
-  function applyGeneratedReport(reportText, { deterministic = false } = {}) {
+  function applyGeneratedReport(reportText, { deterministic = false, photoGroundingUsed = false } = {}) {
     // Telemetry (specialty completion contract): an installed AI report is
     // an AI-assisted completion — persisted as ai_draft_used (codex r14).
     // A double-provider miss returns deterministic template copy, which is
@@ -15656,6 +15733,10 @@ export function CompletionPanel({
     // deterministic REGENERATION replaces a previously installed AI report,
     // so the flag follows each installed result exactly (codex r29).
     setAiReportUsed(!deterministic);
+    // The server's own verdict on THIS generation (pre-push P2, Codex #5145
+    // r3) — never guessed client-side. Read by buildGenerationInputsSnapshot
+    // below via the ref.
+    installedPhotoGroundingUsedRef.current = photoGroundingUsed;
     // Capture the tech's own notes the FIRST time a draft replaces them —
     // an untouched installed draft is never the grounding for regeneration.
     // An EDITED older draft still carries the two-section report shape and
@@ -15694,6 +15775,13 @@ export function CompletionPanel({
     const nextParkedNext = parkTaggedNoteLines({ notes, tag: "next", labels: selectedRecommendationLabels, current: parkedNext });
     if (nextParkedNext !== null) setParkedNext(nextParkedNext);
     setNotes(String(reportText || "").trim());
+    // Rebuild the watcher's baseline NOW, under the FRESH grounding flag
+    // just above (pre-push P2, Codex #5145 r3) — the effect re-runs once
+    // `generating` flips false right after this call returns, and without
+    // rebuilding here it would compare against a baseline recorded under
+    // the OLD flag/shape, self-invalidating a draft the tech never touched
+    // the instant the flag changes.
+    generationInputsRef.current = buildGenerationInputsSnapshot();
   }
   // Deselect handle after an AI draft: remove a structured selection from its
   // label array (and its recorded re-entry/treatment scope, for protocol
@@ -15773,6 +15861,31 @@ export function CompletionPanel({
   function recommendationFreeText() {
     return uniqueLines([...freeTextLines(recommendationsText), ...freeTextLines(parkedNext), ...taggedNoteLines("next")]);
   }
+  // The tech-reviewed photo captions/summary the writer may actually see
+  // (owner spec 2026-09-27, GATE_REPORT_PHOTO_CONTENT) — the SINGLE source
+  // both buildAiReportPayload (what gets sent) and
+  // buildGenerationInputsSnapshot (what invalidates a draft) read, so they
+  // cannot drift (pre-push P2, Codex #5145 r4). Captions read straight off
+  // the CURRENT servicePhotos array, so a photo the tech deleted before
+  // Generate never contributes one; capped defensively (first 5, 200 chars
+  // each — the server re-caps from scratch and never trusts this client
+  // cap, but the snapshot must track the SAME capped list, not the raw
+  // one, or an edit past the cap would falsely (or falsely NOT) invalidate).
+  // The summary is basic-flow's own separate story: it is NEVER submitted
+  // in the generate payload for a non-typed visit — the existing "Add to
+  // technician notes" button already carries the reviewed text into
+  // notes/serviceNotes, reaching the writer that one way, so there is no
+  // second provenance to track or approve. The typed flow still sends it
+  // directly (it "appears on the customer report", no opt-in step exists).
+  function reportPhotoInputs() {
+    const captions = (Array.isArray(servicePhotos) ? servicePhotos : [])
+      .map((p) => String(p?.caption || "").trim())
+      .filter(Boolean)
+      .slice(0, 5)
+      .map((c) => c.slice(0, 200));
+    const summary = isTypedFindings ? String(typedPhotoSummary || "").trim().slice(0, 600) : "";
+    return { captions, summary };
+  }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
   // server can't drift. The payload classifies inputs by provenance so the
@@ -15783,6 +15896,14 @@ export function CompletionPanel({
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
+    // Tech-reviewed photo captions/summary for the AI writer (owner spec
+    // 2026-09-27, GATE_REPORT_PHOTO_CONTENT) — the EXACT values the request
+    // actually submits. Shared with buildGenerationInputsSnapshot
+    // (reportPhotoInputs, defined below) so the two can never drift on what
+    // "the photo inputs actually submitted" means (pre-push P2, Codex #5145
+    // r4: an edit to a 6th caption, or beyond the 200-char cap, must not
+    // invalidate the draft — it was never part of the submitted set).
+    const { captions: reportPhotoCaptions, summary: reportPhotoSummary } = reportPhotoInputs();
     const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
     // Free text is the input surface now; restored older drafts can still
     // carry chip-label selections, so both merge into the same arrays.
@@ -15977,6 +16098,19 @@ export function CompletionPanel({
       // activity (codex r2).
       pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
+      // Tech-reviewed photo captions (GATE_REPORT_PHOTO_CONTENT, owner spec
+      // 2026-09-27): captions live ON the servicePhotos entries, so a photo
+      // the tech deleted before Generate is already gone from this array —
+      // its caption is never sent. Capped defensively; the server re-caps
+      // from scratch and never trusts this client-side cap.
+      ...(reportPhotoCaptions.length ? { photoCaptions: reportPhotoCaptions } : {}),
+      // Basic (non-typed) flow never sends a photoSummary at all (pre-push
+      // P2, Codex #5145 r4) — reportPhotoInputs() returns "" for it there,
+      // since the existing "Add to technician notes" button already puts
+      // the reviewed summary text into notes/serviceNotes, reaching the
+      // writer that one way. The typed flow keeps sending it (it "appears
+      // on the customer report" directly, with no separate opt-in step).
+      ...(reportPhotoSummary ? { photoSummary: reportPhotoSummary } : {}),
       includeCustomerComms: aiReportIncludeComms,
       ...typedFindingsPayload,
     };
@@ -15993,6 +16127,17 @@ export function CompletionPanel({
       // A confirmed photo-scored assessment is substantive visit detail on
       // its own — a scores-only lawn visit can still generate.
       Boolean(payload.lawnAssessmentId) ||
+      // Reviewed photo captions do NOT open Generate on their own here
+      // (pre-push P2, Codex #5145 r1) — GATE_REPORT_PHOTO_CONTENT is a
+      // deploy-wide GATE_* flag, not a per-user flag `useFeatureFlag` can
+      // read, and no dedicated readout endpoint exists for it the way
+      // GATE_JOB_CARD or GATE_DISCOUNT_STACKING each have their own. With
+      // the gate off the server always 400s a captions-only request, so
+      // letting captions alone flip this client-side would just hand the
+      // tech a false "Generate" affordance that fails on click. Captions
+      // still RIDE ALONG in the payload above whenever some other input
+      // already opens Generate — this only removes them as an independent
+      // opener; the server stays the sole authority on whether they count.
       // The omitted-field fallback state must REACH the server — after a
       // failed lookup the client can't know whether a visit-linked confirmed
       // row exists; the server's validated gate decides.
@@ -17927,8 +18072,16 @@ export function CompletionPanel({
   // stale copy beside the final record (codex r36). A value-diff watcher
   // covers the many inline setters without wrapping each; the baseline
   // resets on draft restore so restoring never invalidates.
-  useEffect(() => {
-    const snapshot = JSON.stringify([
+  //
+  // Shared with applyGeneratedReport (pre-push P2, Codex #5145 r3), which
+  // must rebuild generationInputsRef under the FRESH
+  // installedPhotoGroundingUsedRef value at install time — otherwise the
+  // instant that ref flips (a first grounded generation lands, or a
+  // regeneration drops grounding) the snapshot's own SHAPE changes and the
+  // stale pre-install baseline reads as a mismatch, self-invalidating a
+  // draft the tech never touched.
+  function buildGenerationInputsSnapshot() {
+    return JSON.stringify([
       areasServiced, observationsText, recommendationsText,
       customerInteraction, customerConcern, clientPestRating,
       // Trace/default fetches can update product evidence while Generate is
@@ -17943,6 +18096,25 @@ export function CompletionPanel({
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
+      // GATE_REPORT_PHOTO_CONTENT (pre-push P2, Codex #5145 r1, r3, r4):
+      // reviewed captions (and, typed flow only, the summary) are
+      // generation inputs too — the set's SIZE above doesn't catch an
+      // edited caption on an unchanged photo count. reportPhotoInputs()
+      // (defined above buildAiReportPayload) is the SAME capped
+      // captions/summary buildAiReportPayload actually sends — an edit to
+      // a 6th caption, or past the 200-char cap, is outside what was
+      // submitted and must NOT invalidate; an edit WITHIN the submitted
+      // set must. Tracked only when the INSTALLED draft was actually
+      // generated WITH grounding (installedPhotoGroundingUsedRef, set from
+      // the server's photoGroundingUsed response flag) — with the gate off
+      // (the default) neither value ever reached the model, so editing
+      // them must not clear an otherwise-untouched draft (r3).
+      ...(installedPhotoGroundingUsedRef.current
+        ? (() => {
+          const { captions, summary } = reportPhotoInputs();
+          return [captions, summary];
+        })()
+        : []),
       // a retaken/reconfirmed lawn assessment changes what completion and
       // the final report describe — the draft must invalidate with it
       // (codex r58)
@@ -17955,6 +18127,9 @@ export function CompletionPanel({
       // input
       aiReportIncludeComms,
     ]);
+  }
+  useEffect(() => {
+    const snapshot = buildGenerationInputsSnapshot();
     if (generationInputsRef.current === null) {
       generationInputsRef.current = snapshot;
       return;
@@ -17970,7 +18145,7 @@ export function CompletionPanel({
     }
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
-    servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision,
+    servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
     aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
@@ -17980,6 +18155,9 @@ export function CompletionPanel({
     const installed = generatedReportTextRef.current;
     if (!installed) return chipLinesDetached;
     generatedReportTextRef.current = null;
+    // No draft installed any more (pre-push P2, Codex #5145 r3) — the NEXT
+    // generation's own flag decides again.
+    installedPhotoGroundingUsedRef.current = false;
     if (String(notes || "").trim() === installed) {
       // The tech's handwritten pre-generation notes come BACK when the
       // draft clears — clearing to empty would drop them from a
@@ -19232,7 +19410,7 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
+                    if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -21668,7 +21846,7 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true });
+                  if (r.report) applyGeneratedReport(r.report, { deterministic: r.deterministic === true, photoGroundingUsed: r.photoGroundingUsed === true });
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }

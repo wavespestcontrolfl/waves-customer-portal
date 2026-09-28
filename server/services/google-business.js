@@ -1169,7 +1169,11 @@ class GoogleBusinessService {
     if (data.status !== 'OK') throw new Error(`Places API: ${data.status}`);
     const googleRating = data.result?.rating || null;
     const googleTotalReviews = data.result?.user_ratings_total || null;
-    if (!googleRating && !googleTotalReviews) return null;
+    // Returns the listing's public review count. Google answered and the
+    // listing has no reviews: nothing to store, but the 0 lets the health
+    // check tell a profile that has never had a review from a feed that went
+    // silent (a skipped or failed call yields no count at all).
+    if (!googleRating && !googleTotalReviews) return 0;
     const existing = await db('google_reviews').where({ google_review_id: `places_stats_${loc.id}` }).first();
     const statsData = JSON.stringify({ rating: googleRating, totalReviews: googleTotalReviews });
     if (existing) {
@@ -1185,7 +1189,7 @@ class GoogleBusinessService {
         synced_at: db.fn.now(),
       });
     }
-    return { rating: googleRating, totalReviews: googleTotalReviews };
+    return googleTotalReviews;
   }
 
   // `countedRowIds`: review row ids a breaker-tripped GBP store of this
@@ -1514,6 +1518,10 @@ class GoogleBusinessService {
     // codex #3298 r1).
     const pulledCounts = {};
     const gbpFailures = {};
+    // This run's public review count per location, from Places. A number
+    // only when Places answered this run; a skipped or failed call leaves
+    // null or undefined.
+    const placesTotals = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -1542,7 +1550,7 @@ class GoogleBusinessService {
         // newest information always rings last.
         const locRestored = [];
         if (GOOGLE_KEY) {
-          await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
+          placesTotals[loc.id] = await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
             logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
           });
         }
@@ -1681,7 +1689,7 @@ class GoogleBusinessService {
     // class the 2026-08-08 manual review-status backfill fixed by hand.
     // Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures, observedAt).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts, gbpFailures, observedAt, placesTotals).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1698,16 +1706,18 @@ class GoogleBusinessService {
    *                      or a breaker trip that stored part of the GBP feed
    *                      and no Places sample landed (source gbp_partial)
    *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
-   *                      (the Venice wipe class — mechanically "healthy")
+   *                      (the Venice wipe class — mechanically "healthy").
+   *                      Not raised for a profile that has never had a
+   *                      review: Places confirms zero this run and nothing
+   *                      was ever stored for it (no review row, no stats row)
    *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
    *                      nothing new has landed in 14d — reviewers exist that
    *                      auto-mark can never see
    *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
    *                      totals cross-check above is running blind
    */
-  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, gbpFailure, rowCount, storedCount, newestIngestAt, statsUpdatedAt, statsTotal, placesTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
-    if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
 
     const failureText = gbpFailure && gbpFailure !== 'no_client' ? String(gbpFailure).replace(/\s+/g, ' ').slice(0, 200) : null;
@@ -1732,13 +1742,20 @@ class GoogleBusinessService {
       const why = failureText ? failedWhat : 'GBP credentials are broken (client could not be initialized)';
       return { cls: 'feed_degraded', severity: 'ACT', detail: `${why} — running on the ~5-review Places sample; removals and most new reviews are invisible` };
     }
+    // The checks below judge a completed GBP pull; concurrent_skip means
+    // another runner owns this cycle.
+    if (source !== 'gbp') return null;
     // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
     // its historical rows (missing_since-stamped, never deleted), so a
     // stored-row count would read healthy forever after the wipe.
-    if (source === 'gbp' && Number(pulledCount) === 0) {
+    if (Number(pulledCount) === 0) {
+      // Nothing is missing from a profile that has never had a review. A
+      // wipe still alerts: its removal-stamped rows and its Places stats
+      // row stay stored.
+      if (placesTotal === 0 && storedCount === 0) return null;
       return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
     }
-    if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
+    if (statsTotal > rowCount && days(newestIngestAt) > 14) {
       return { cls: 'ingest_stale', severity: 'ACT', detail: `Google shows ${statsTotal} reviews but only ${rowCount} were ever ingested and nothing new in ${Math.floor(days(newestIngestAt))}d — those reviewers can never auto-mark` };
     }
     if (days(statsUpdatedAt) > 7) {
@@ -1754,7 +1771,7 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}, observedAt = new Date().toISOString()) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}, gbpFailures = {}, observedAt = new Date().toISOString(), placesTotals = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
     // A cycle split across overlapping runners (per-location locks) gives
     // each runner a PARTIAL fleet view — two different signatures would both
@@ -1771,6 +1788,12 @@ class GoogleBusinessService {
       // (codex #3298 r2). newest_ingest_at stays all-rows: ingestion recency
       // is about the pipeline moving, not the row's later removal.
       .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats' AND missing_since IS NULL) AS row_count`))
+      // Every row ever stored for the location: review rows, removal-stamped
+      // ones included, plus the Places _stats row, which is written only
+      // once Google has shown a rating or review count and never cleared by
+      // a later zero. A wiped profile keeps them; a profile that never had
+      // a review has none.
+      .select(db.raw('COUNT(*) AS stored_count'))
       .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
       // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
       // auto-touch trigger) — reading updated_at would mark every
@@ -1797,9 +1820,11 @@ class GoogleBusinessService {
         pulledCount: pulledCounts[loc.id],
         gbpFailure: gbpFailures[loc.id],
         rowCount: Number(agg.row_count) || 0,
+        storedCount: Number(agg.stored_count) || 0,
         newestIngestAt: agg.newest_ingest_at || null,
         statsUpdatedAt: agg.stats_updated_at || null,
         statsTotal: totals[loc.id],
+        placesTotal: placesTotals[loc.id],
       });
       if (verdict) findings.push({ loc, ...verdict });
     }

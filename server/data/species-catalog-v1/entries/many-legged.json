@@ -10,8 +10,9 @@
     "safety_line": "Can pinch if handled, but venom is too weak to bother most people. See a doctor for an unusual reaction.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": "Range fact-check closed 2026-09-28: iNaturalist has 9 Florida observations ever (5 research-grade: Tampa, Orlando, Miami, Navarre; none in Manatee/Sarasota/Charlotte/Lee) vs 1,151 in Virginia and 1,778 in Pennsylvania; GBIF likewise 5 Florida records. Clemson HGIC confirms it as the Southeast indoor species. Range set to rare (was common, which would have told customers it is common here now). Awaiting owner approval of this wording."
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-28 after the range fact-check closed (rare in Florida; see #5114).",
+      "approval_hash": "556e6575b557722e142c15b51be0914b21d597b49eed9ea51331837eaf8fea57"
     },
     "slug": "house-centipede",
     "common_name": "House Centipede",

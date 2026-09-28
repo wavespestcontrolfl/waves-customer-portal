@@ -1111,10 +1111,15 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
         if (result) {
           patch.link_tasks_queued = result.queued || 0;
           logger.info(`[autonomous-pr-poller] internal-link planning for ${result.url}: queued=${result.queued} candidates=${result.candidates}`);
+        } else {
+          // Planning could not run (no corpus): retry marker for the daily
+          // sweep (InternalLinkPrExecutor._replanUnplannedPublishes).
+          patch.link_planning_failed_at = new Date();
         }
       }
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] internal-link planning failed for ${target.url}: ${err.message}`);
+      patch.link_planning_failed_at = new Date();
     }
   }
 
@@ -1213,32 +1218,50 @@ async function finalizeClosed(run, prNumber) {
  * was built from the PR's CURRENT head commit, AND Codex review is clear —
  * each condition individually blocking.
  */
+// The preview-build merge gate every Astro auto-merge lane shares (blog/
+// metadata runs here, internal-link PRs via InternalLinkPrExecutor):
+//   1. the hub Cloudflare preview build for the PR branch is green, and
+//   1b. that deployment was built from the PR's CURRENT head.
+// latestDeploymentForBranch returns the newest deployment for the branch,
+// which can still be an OLDER commit's build when a new push hasn't
+// registered a deployment yet — merging on that signal would ship an
+// unverified head. Fails closed when the deployment carries no usable commit
+// hash. `failed` marks a definitive red build of the current head.
+async function previewGate(pr) {
+  const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
+  const branch = pr?.head?.ref;
+  if (!branch) return { ok: false, reason: 'pr_head_branch_unknown' };
+  const deploy = await latestDeploymentForBranch(branch);
+  // The bounded deployment search may miss an older successful preview.
+  if (!deploy) return { ok: false, transient: true, reason: 'preview_build_pending' };
+  const headSha = normalizeSha(pr.head?.sha);
+  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
+  if (!headSha) return { ok: false, reason: 'pr_head_sha_unknown' };
+  const { status } = extractStatus(deploy);
+  if (status !== 'success') {
+    // A terminal non-success of the CURRENT head never resolves on its own
+    // (no newer preview appears without another push): `failed` for a red
+    // build, `abandoned` for canceled/skipped. Callers that can't push
+    // (the link lane) close on either; maybeAutoMerge keeps holding.
+    const ofHead = !!deployedSha && deployedSha === headSha;
+    const failed = ofHead && status === 'failure';
+    const abandoned = ofHead && (status === 'canceled' || status === 'skipped');
+    return { ok: false, failed, abandoned, reason: `preview_build_${status || 'pending'}` };
+  }
+  if (!deployedSha) return { ok: false, reason: 'preview_build_commit_unknown' };
+  if (deployedSha !== headSha) return { ok: false, reason: 'preview_build_stale_commit' };
+  return { ok: true };
+}
+
 async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
   const branch = pr.head?.ref;
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
   let verifiedApprovedEvidenceChild = false;
 
-  // 1. Cloudflare preview build for the PR branch must be green.
-  const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
-  const deploy = await latestDeploymentForBranch(branch);
-  // The bounded deployment search may miss an older successful preview.
-  if (!deploy) return { pending: true, transient: true, reason: 'preview_build_pending' };
-  const { status } = extractStatus(deploy);
-  if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
-
-  // 1b. The green deployment must be a build of the PR's CURRENT head.
-  //     latestDeploymentForBranch returns the newest deployment for the
-  //     branch, which can still be an OLDER commit's build when a new push
-  //     hasn't registered a deployment yet — merging on that signal would
-  //     ship an unverified head. Fail closed when the deployment object
-  //     carries no usable commit hash (skip the merge this tick; merged/
-  //     closed reconciliation is unaffected).
-  const headSha = normalizeSha(pr.head?.sha);
-  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
-  if (!headSha) return { pending: true, reason: 'pr_head_sha_unknown' };
-  if (!deployedSha) return { pending: true, reason: 'preview_build_commit_unknown' };
-  if (deployedSha !== headSha) return { pending: true, reason: 'preview_build_stale_commit' };
+  // 1. + 1b. Green preview build of the PR's CURRENT head (previewGate).
+  const preview = await previewGate(pr);
+  if (!preview.ok) return { pending: true, ...(preview.transient ? { transient: true } : {}), reason: preview.reason };
 
   // 1c. A remediation push that never finished its portal sync blocks EVERY
   //     merge path, so it is asserted here — before the Codex gate — not inside
@@ -2045,7 +2068,10 @@ async function pollPending() {
   // tick (a retire that failed or half-completed after the durable park).
   let topicBlocked = { count: 0, retired: 0 };
   try { topicBlocked = await reconcileTopicBlockedPrs(require('../content-astro/github-client')); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile failed: ${err.message}`); }
-  if (!rows.length) return { count: 0, results: [], topicBlocked };
+  if (!rows.length) {
+    const internalLinks = await pollInternalLinkPr({ allowMerge: maxAutoMergesPerPoll() > 0 });
+    return { count: 0, results: [], topicBlocked, internalLinks, autoMerges: internalLinks?.status === 'merged' ? 1 : 0 };
+  }
 
   // Human review-queue actions (requeue/dismiss) update ONLY the
   // opportunity_queue row and leave the run's parked outcome/skip_reason in
@@ -2095,14 +2121,40 @@ async function pollPending() {
     await trackPendingReason(run, r);
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
+  const internalLinks = await pollInternalLinkPr({ allowMerge: autoMerges < maxAutoMerges });
+  if (internalLinks?.status === 'merged') autoMerges += 1;
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
-  return { count: results.length, results, autoMerges, topicBlocked };
+  return { count: results.length, results, autoMerges, topicBlocked, internalLinks };
+}
+
+// The internal-link lane rides this same tick (same lock, same per-tick
+// merge cap) instead of a second merger. Link PRs have no autonomous_runs
+// row — their lifecycle lives on content_internal_link_tasks — so the
+// executor owns task selection and its gates: previewGate above (shared),
+// a link-only diff pinned to a main SHA, and a Codex rule without the blog
+// lane's remediation loop (a link PR has nothing to remediate: findings
+// close it; silence merges after the grace window). Fail-soft: a link-lane
+// error never disturbs blog reconciliation.
+async function pollInternalLinkPr({ allowMerge }) {
+  try {
+    const executor = require('./internal-link-pr-executor');
+    const result = await executor.runAutoMerge({ allowMerge });
+    if (result?.status && !['no_open_pr', 'shadow', 'disabled'].includes(result.status)) {
+      logger.info(`[autonomous-pr-poller] internal-link PR: ${result.status}${result.reason ? ` (${result.reason})` : ''}${result.pr_number ? ` #${result.pr_number}` : ''}`);
+    }
+    return result;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] internal-link PR poll failed: ${err.message}`);
+    return { status: 'error', reason: err.message };
+  }
 }
 
 module.exports = {
   pollPending,
   pollRun,
+  previewGate,
   _internals: {
+    pollInternalLinkPr,
     affiliateBeltVerdict,
     autoMergeEnabled,
     blogMergeSocialShareEnabled,

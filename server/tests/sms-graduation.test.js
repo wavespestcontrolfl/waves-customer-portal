@@ -33,6 +33,32 @@ describe('judge-signal cohort (superseded prompt versions are not readiness evid
     expect(resolveCohortVersions({ raw: undefined })).toEqual([PROMPT_VERSION]);
   });
 
+  test('default tracks currentPromptVersion(), not the static PROMPT_VERSION — GATE_SMS_REAL_ANSWERS on shifts the cohort to v12 (pre-push audit P1)', () => {
+    // PROMPT_VERSION never moves once the real-answers gate goes live (it
+    // stays house_voice_v11 forever, by design — see sms-shadow-drafter.js).
+    // Readiness evidence must track whichever prompt is ACTUALLY drafting
+    // right now, or a gate flip would silently freeze the cohort on a
+    // drafter that stopped running and never count the new prompt's own
+    // evidence.
+    const drafter = require('../services/sms-shadow-drafter');
+    const prior = process.env.GATE_SMS_REAL_ANSWERS;
+    try {
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+      expect(resolveCohortVersions({ raw: undefined })).toEqual([drafter.PROMPT_VERSION]);
+
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      expect(resolveCohortVersions({ raw: undefined })).toEqual([drafter.REAL_ANSWERS_PROMPT_VERSION]);
+      expect(drafter.REAL_ANSWERS_PROMPT_VERSION).not.toBe(drafter.PROMPT_VERSION);
+
+      // and back off again — no residue from the flip
+      process.env.GATE_SMS_REAL_ANSWERS = 'false';
+      expect(resolveCohortVersions({ raw: undefined })).toEqual([drafter.PROMPT_VERSION]);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS;
+      else process.env.GATE_SMS_REAL_ANSWERS = prior;
+    }
+  });
+
   test('a list naming the current version pools it with compatible priors (trimmed, empties dropped, deduped)', () => {
     expect(resolveCohortVersions({ raw: ' house_voice_v7 , house_voice_v8 ,', currentVersion: 'house_voice_v8' }))
       .toEqual(['house_voice_v7', 'house_voice_v8']);

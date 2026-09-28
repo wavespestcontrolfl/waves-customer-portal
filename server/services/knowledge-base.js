@@ -7,6 +7,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const { createDeepMessage } = require('./llm/deep');
 const { etDateString } = require('../utils/datetime-et');
+const { convertToOz, costLineFromUsage, countUnitsCompatible, normalizeUnit, parsePackCount } = require('./product-costing');
 
 // ══════════════════════════════════════════════════════════════
 // SLUG GENERATION
@@ -165,6 +166,105 @@ async function flagIsFromAIAudit(entry, conn = db) {
 // ══════════════════════════════════════════════════════════════
 // CORE CRUD
 // ══════════════════════════════════════════════════════════════
+// One COGS line per usage row. The per-unit cost comes from
+// product-costing.costLineFromUsage (cost_per_unit, or the package price
+// scaled by unit_size_oz) so the write-up never prices an ounce at the whole
+// jug; usage counted in whole containers (1 bottle, 2 bags) prices at the
+// package. The amount mirrors usageAmountForArea: a usage_per_1000sf row
+// scales with the treated area, plus its flat amount on base-plus rows, and
+// at least its flat amount on max rows (kept as its own term, never folded
+// into a linear total).
+const CONTAINER_USAGE_UNITS = new Set(['bottle', 'bottles', 'jug', 'jugs', 'container', 'containers', 'can', 'cans', 'bag', 'bags', 'pail', 'pails', 'box', 'boxes', 'case', 'cases', 'each', 'ea', 'unit', 'units']);
+
+// How many usage units one catalog package holds when both are counts:
+// "1 trap" for traps, "4 x 30g tubes" for tubes. Null when the pack is
+// measured by weight/volume ("500 g" of packets, an "18 lb pail" of blocks).
+function packCountForUsage(containerSize, usageUnit) {
+  // Same count-noun normalization parsePackCount applies (boxes -> box,
+  // blox -> block); anything it does not know just drops a trailing s.
+  const singular = (w) => {
+    const word = String(w || '').trim().toLowerCase();
+    return parsePackCount(`1 ${word}`)?.unit || word.replace(/s$/, '');
+  };
+  const pack = parsePackCount(containerSize);
+  if (pack && countUnitsCompatible(pack.unit, singular(usageUnit))) return pack.count;
+  const multi = String(containerSize || '').trim().toLowerCase().match(/^(\d+)\s*x\s.*?([a-z]+)$/);
+  // "4 x 1 gal case": a trailing case/pack/box/kit names the outer wrapper,
+  // not the multiplied item, so one case keeps the full package price.
+  const outer = /^(?:case|pack|box|kit|carton)$/;
+  if (multi && Number(multi[1]) > 0 && !outer.test(singular(multi[2])) && singular(multi[2]) === singular(usageUnit)) return Number(multi[1]);
+  return null;
+}
+
+function cogsUnitCost(p) {
+  // cost_per_unit only applies when its unit is the usage unit or both
+  // convert to ounces — an $/oz cost never prices a bottle or a block.
+  const costUnit = p.cost_unit || p.usage_unit;
+  const sameUnit = normalizeUnit(costUnit) === normalizeUnit(p.usage_unit);
+  const bothMeasured = convertToOz(1, costUnit) != null && convertToOz(1, p.usage_unit) != null;
+  const usable = p.cost_per_unit != null && (sameUnit || bothMeasured);
+  // A zero is a placeholder, never a real unit cost: fall back to the
+  // package price scaled by unit_size_oz.
+  const unitLine = (withCostPerUnit) => costLineFromUsage({
+    ...p, ...(withCostPerUnit ? {} : { cost_per_unit: null }), usage_amount: 1, usage_per_1000sf: null, notes: '',
+  }, 0);
+  for (const line of usable ? [unitLine(true), unitLine(false)] : [unitLine(false)]) {
+    if (!line.warning && Number.isFinite(line.cost) && line.cost > 0) return line.cost;
+  }
+  const price = parseFloat(p.best_price);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const count = packCountForUsage(p.container_size, p.usage_unit);
+  if (count) return price / count;
+  if (CONTAINER_USAGE_UNITS.has(String(p.usage_unit || '').trim().toLowerCase())) return price;
+  return null;
+}
+
+function cogsLineForUsage(p) {
+  const base = parseFloat(p.usage_amount || 0) || 0;
+  const rate = parseFloat(p.usage_per_1000sf || 0) || 0;
+  const unit = p.usage_unit || '';
+  const n = (x) => Number(x.toFixed(4));
+  const $ = (x) => `$${x.toFixed(2)}`;
+  const head = `- ${p.product_name} (${p.active_ingredient || 'n/a'}):`;
+  const notes = String(p.notes || '');
+  const kind = rate <= 0 ? 'flat'
+    : notes.includes('[usage:base_plus_per_1000]') ? 'base_plus'
+      : notes.includes('[usage:max_base_or_per_1000]') ? 'max' : 'area';
+  const amount = kind === 'flat' ? `${p.usage_amount || '?'} ${unit}`
+    : kind === 'base_plus' ? `${n(base)} ${unit} + ${n(rate)} ${unit} per 1,000 sq ft`
+      : kind === 'max' ? `greater of ${n(base)} ${unit} or ${n(rate)} ${unit} per 1,000 sq ft`
+        : `${n(rate)} ${unit} per 1,000 sq ft`;
+  const unitCost = cogsUnitCost(p);
+  if (unitCost == null) return { term: null, line: `${head} ${amount} — cost unavailable (no normalized price)` };
+  const at = `@ ${$(unitCost)}/${unit || 'unit'}`;
+  const fixed = base * unitCost;
+  const per1000 = rate * unitCost;
+  if (kind === 'flat') return { term: { fixed, per1000: 0 }, line: `${head} ${amount} ${at} = ${$(fixed)}` };
+  if (kind === 'base_plus') return { term: { fixed, per1000 }, line: `${head} ${amount} ${at} = ${$(fixed)} + ${$(per1000)} per 1,000 sq ft` };
+  if (kind === 'max') return { term: { floor: fixed, per1000 }, line: `${head} ${amount} ${at} = greater of ${$(fixed)} or ${$(per1000)} per 1,000 sq ft` };
+  return { term: { fixed: 0, per1000 }, line: `${head} ${amount} ${at} = ${$(per1000)} per 1,000 sq ft` };
+}
+
+function cogsTotalLine(terms) {
+  const $ = (x) => `$${x.toFixed(2)}`;
+  let fixed = 0;
+  let per1000 = 0;
+  const maxes = [];
+  let missing = 0;
+  for (const t of terms) {
+    if (!t) { missing++; continue; }
+    if (t.floor != null) { maxes.push(t); continue; }
+    fixed += t.fixed;
+    per1000 += t.per1000;
+  }
+  const parts = [];
+  if (fixed > 0 || (per1000 === 0 && maxes.length === 0)) parts.push($(fixed));
+  if (per1000 > 0) parts.push(`${$(per1000)} per 1,000 sq ft`);
+  for (const m of maxes) parts.push(`the greater of ${$(m.floor)} or ${$(m.per1000)} per 1,000 sq ft`);
+  const suffix = missing ? ` (excludes ${missing} product${missing === 1 ? '' : 's'} with no normalized price)` : '';
+  return `Total COGS per application: ${parts.join(' + ')}${suffix}`;
+}
+
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const safeTitle = cleanText(title) || 'Knowledge Base Entry';
@@ -824,7 +924,9 @@ const KnowledgeBaseService = {
       const usage = await db('service_product_usage')
         .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
         .select('service_product_usage.*', 'products_catalog.name as product_name',
-          'products_catalog.best_price', 'products_catalog.active_ingredient')
+          'products_catalog.best_price', 'products_catalog.active_ingredient',
+          'products_catalog.unit_size_oz', 'products_catalog.cost_per_unit', 'products_catalog.cost_unit',
+          'products_catalog.container_size')
         .orderBy('service_type');
 
       const grouped = {};
@@ -835,13 +937,13 @@ const KnowledgeBaseService = {
 
       for (const [svcType, products] of Object.entries(grouped)) {
         const lines = [`**${svcType} — Cost of Goods**\n`];
-        let totalCost = 0;
+        const terms = [];
         for (const p of products) {
-          const cost = p.best_price && p.usage_amount ? parseFloat(p.best_price) * parseFloat(p.usage_amount) : 0;
-          totalCost += cost;
-          lines.push(`- ${p.product_name} (${p.active_ingredient || 'n/a'}): ${p.usage_amount || '?'} ${p.usage_unit || ''} @ $${parseFloat(p.best_price || 0).toFixed(2)} = $${cost.toFixed(2)}`);
+          const c = cogsLineForUsage(p);
+          terms.push(c.term);
+          lines.push(c.line);
         }
-        lines.push(`\nTotal COGS per application: $${totalCost.toFixed(2)}`);
+        lines.push(`\n${cogsTotalLine(terms)}`);
         const slug = `cogs-${slugify(svcType)}`;
         await upsert(slug, `${svcType} — COGS Breakdown`, lines.join('\n'), 'pricing', ['cogs', svcType.toLowerCase()]);
       }
@@ -854,4 +956,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit };
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };

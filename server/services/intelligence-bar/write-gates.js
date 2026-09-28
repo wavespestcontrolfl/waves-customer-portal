@@ -32,6 +32,7 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
+  'repair_closeout',
 ]);
 
 // Legacy writes with no structural gate — their executors mutate on call, so
@@ -73,6 +74,7 @@ const CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES = new Set([
   'approve_seo_action',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
 ]);
 
 module.exports = {
