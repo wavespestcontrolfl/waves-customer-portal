@@ -7913,6 +7913,7 @@ function ActionsTab({ domain }) {
   const [summary, setSummary] = useState(null);
   const [actions, setActions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [actionError, setActionError] = useState(null);
   const canAdmin = isAdminUser();
   const loadData = () => {
     setLoading(true);
@@ -7934,9 +7935,10 @@ function ActionsTab({ domain }) {
 
   useEffect(loadData, [domain, subTab]);
   function handleAction(id, verb) {
+    setActionError(null);
     adminPost(`/admin/seo/actions/${id}/${verb}`, {})
       .then(loadData)
-      .catch(() => {});
+      .catch((e) => setActionError(e.message || "Action failed."));
   }
   const subTabs = [
     {
@@ -7986,9 +7988,12 @@ function ActionsTab({ domain }) {
               Generate Actions
             </Button>
             <Button
-              onClick={() =>
-                adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)
-              }
+              onClick={() => {
+                setActionError(null);
+                adminPost("/admin/seo/actions/auto-approve", { domain })
+                  .then(loadData)
+                  .catch((e) => setActionError(e.message || "Auto-approve failed."));
+              }}
               variant="secondary"
             >
               Auto-Approve
@@ -8006,6 +8011,12 @@ function ActionsTab({ domain }) {
           </Button>
         )}
       </div>
+
+      {actionError && (
+        <div className="text-alert-fg text-ui-body [margin-top:8px]">
+          {actionError}
+        </div>
+      )}
 
       {summary && (
         <div className="seo-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:16px]">

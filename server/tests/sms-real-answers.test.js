@@ -1782,3 +1782,456 @@ describe('round-7 deterministic guards (gate on)', () => {
     expect(drafter.replyQuotesUngroundedAmount('We received your $95 payment.', paid)).toBe(false);
   });
 });
+
+
+describe('follow-up #1: an edited follow-up promise with unrecognized timing is unsendable', () => {
+  const { followupPromiseEdited, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const DAY = new Date('2026-09-29T14:00:00Z'); // 10:00 ET
+  const NIGHT = new Date('2026-09-30T01:00:00Z'); // 21:00 ET
+  const original = 'Sorry about that — someone will follow up within the hour.';
+
+  test('the drafted phrase edited into "within 60 minutes" → edited (the promise stayed, the timing left the phrase list)', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.' })).toBe(true);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: 'Sorry about that — someone will follow up within 60 minutes.', now: DAY })).toBe('sla_phrase_edited');
+  });
+  test('kept verbatim → not edited; unrelated wording edits → not edited; stale beats edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: original })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: original, body: 'So sorry about that — someone will follow up within the hour. Thank you!' })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: DAY })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: original, now: NIGHT })).toBe('sla_phrase_stale');
+  });
+  test('no recorded promise, or no original body known → never edited', () => {
+    expect(followupPromiseEdited({ inputSnapshot: { intended_actions: [] }, originalBody: original, body: 'within 60 minutes' })).toBe(false);
+    expect(followupPromiseEdited({ inputSnapshot: promised, originalBody: null, body: 'within 60 minutes' })).toBe(false);
+  });
+});
+
+describe('follow-up #5: a NEW booking is priced with the requested service, not the next scheduled visit', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/customer-pricing-ai'); jest.dontMock('../services/service-library'); jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+
+  test('requestedServiceType resolves the message through the existing catalog resolvers; no service named → null; resolver error → null', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    // realistic catalog: only the seeded service_keys resolve (service_library migration)
+    const CATALOG = { lawn_fertilization: 'Lawn Fertilization & Weed Control', pest_general_quarterly: 'General Pest Control (Quarterly)', mosquito_monthly: 'Mosquito Control (Monthly)', termite_bait: 'Termite Bait Station System', palm_injection: 'Palm Injection Service', wdo_inspection: 'WDO Inspection (Termite Letter)' };
+    const resolveServiceType = jest.fn(async (key) => (CATALOG[key] ? { name: CATALOG[key] } : null));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add lawn service for me?')).resolves.toBe('Lawn Fertilization & Weed Control');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn_fertilization'); // a real catalog key, never a partial-match phrase
+    await expect(drafter.requestedServiceType('When are you coming next?')).resolves.toBeNull();
+    resolveServiceType.mockRejectedValueOnce(new Error('boom'));
+    await expect(drafter.requestedServiceType('lawn please')).resolves.toBeNull();
+  });
+
+  test('a RESCHEDULE of a combined visit keeps the visit\'s own service; a service already on the calendar is not a new booking (audit P1)', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'lawn_fertilization' ? { name: 'Lawn Care' } : null) }));
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const combined = { summary: 'x', upcomingServices: [{ type: 'Lawn + Tree & Shrub', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure — let me check.', intended_actions: [], missing_info: null }) }] }) } };
+    const args = (inboundMessage, context) => ({ client, context, inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    await drafter.generateGroundedDraft(args('Can we move my lawn and shrub visit?', combined));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn + Tree & Shrub' }));
+    // naming a service already scheduled, without reschedule wording, is still about that visit
+    await drafter.generateGroundedDraft(args('Question about my lawn service', combined));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn + Tree & Shrub' }));
+    // a genuinely new service on a pest-only account → the requested one
+    const pestOnly = { ...combined, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] };
+    await drafter.generateGroundedDraft(args('Can you add lawn service?', pestOnly));
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
+    // unit: reschedule words veto a new booking, and a named service with no visit on file is uncertain (never the pest visit)
+    await expect(drafter.serviceIdentityFor('Please reschedule my lawn visit', pestOnly)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
+  });
+
+  test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'lawn_fertilization' ? { name: 'Lawn Care' } : null) }));
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const context = { summary: 'x', upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure — let me check.', intended_actions: [], missing_info: null }) }] }) } };
+    await drafter.generateGroundedDraft({ client, context, inboundMessage: 'Can you add lawn service?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
+    await drafter.generateGroundedDraft({ client, context, inboundMessage: 'Can we move my visit?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Quarterly Pest' }));
+  });
+});
+
+describe('follow-up #7: the promised deadline is pinned by phrase + draft time, not just the window', () => {
+  const { followupDeadline, followupDeadlinePassed, followupPromiseBlockReason } = require('../services/sms-followup-sla');
+  const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+  const MON_NIGHT = new Date('2026-09-29T01:30:00Z'); // Mon Sep 28 21:30 ET
+  const TUE_NIGHT = new Date('2026-09-30T01:30:00Z'); // Tue Sep 29 21:30 ET
+  const TUE_8AM = new Date('2026-09-29T12:00:00Z');  // Tue 08:00 ET
+  const MON_10AM = new Date('2026-09-28T14:00:00Z'); // Mon 10:00 ET
+
+  test('deadlines: within the hour → +60 min; by 9 AM tomorrow → next ET 9:00; by 9 AM this morning → same ET 9:00', () => {
+    expect(followupDeadline('within the hour', MON_10AM).toISOString()).toBe('2026-09-28T15:00:00.000Z');
+    expect(followupDeadline('by 9 AM tomorrow morning', MON_NIGHT).toISOString()).toBe('2026-09-29T13:00:00.000Z'); // Tue 09:00 EDT
+    expect(followupDeadline('by 9 AM this morning', new Date('2026-09-29T10:00:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    expect(followupDeadline('anything else', MON_10AM)).toBeNull();
+    expect(followupDeadline('within the hour', 'not a date')).toBeNull();
+  });
+
+  test('"by 9 AM tomorrow morning" drafted Monday night, sent Tuesday night → deadline passed (the window alone would call it current)', () => {
+    const body = 'A manager will reach out by 9 AM tomorrow morning.';
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe(true);
+    expect(followupDeadlinePassed({ body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe(false);
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_NIGHT })).toBe('sla_deadline_passed');
+    // before the deadline the window rule still speaks: at 8 AM "tomorrow morning" is no longer the current phrase
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: TUE_8AM })).toBe('sla_phrase_stale');
+    // same night it was drafted, inside its window → sendable
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_NIGHT, now: new Date('2026-09-29T02:00:00Z') })).toBeNull();
+  });
+
+  test('"within the hour" drafted at 10 AM and sent two hours later → passed; no draft time known → the window rule alone applies', () => {
+    const body = 'Someone will follow up within the hour.';
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T16:30:00Z') })).toBe('sla_deadline_passed');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: MON_10AM, now: new Date('2026-09-28T14:30:00Z') })).toBeNull();
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, body, draftedAt: null, now: new Date('2026-09-28T16:30:00Z') })).toBeNull();
+  });
+});
+
+
+describe('#5194 round 1', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/customer-pricing-ai'); jest.dontMock('../services/service-library'); jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  const mockCatalog = () => {
+    const resolveServiceType = jest.fn(async (key) => ({ termite_bait: { name: 'Termite Bait Station System' }, palm_injection: { name: 'Palm Injection' }, mosquito_monthly: { name: 'Mosquito Control' } }[key] || null));
+    jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/termite/i.test(t) ? 'termite' : /palm/i.test(t) ? 'palm' : /mosquito/i.test(t) ? 'mosquito' : null) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    return resolveServiceType;
+  };
+
+  test('pricing families resolve through their exact catalog keys (termite → termite_bait, palm → palm_injection)', async () => {
+    const resolveServiceType = mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('termite_bait');
+    await expect(drafter.requestedServiceType('Can you do my palms?')).resolves.toBe('Palm Injection');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('palm_injection');
+  });
+
+  test('explicit inspection intent wins over the pricing family, using the REAL keyword resolver (audit P1: WDO ≠ termite bait)', async () => {
+    jest.dontMock('../services/customer-pricing-ai');
+    const resolveServiceType = jest.fn(async (key) => ({ wdo_inspection: { name: 'WDO Inspection' }, termite_inspection: { name: 'Termite Inspection' }, termite_bait: { name: 'Termite Bait Station System' }, rodent_inspection: { name: 'Rodent Inspection' } }[key] || null));
+    // a key list falls through to the next real row: an older catalog without palm_injection still resolves palms
+    
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I schedule a WDO inspection?')).resolves.toBe('WDO Inspection');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('wdo_inspection');
+    await expect(drafter.requestedServiceType('I need a termite inspection for closing')).resolves.toBe('Termite Inspection');
+    await expect(drafter.requestedServiceType('Can someone do a rodent inspection?')).resolves.toBe('Rodent Inspection');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System');
+    expect(resolveServiceType).toHaveBeenLastCalledWith('termite_bait');
+  });
+
+  test('a complaint callback ("the mosquitoes came back") keeps the completed visit\'s service — never a new standalone booking', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-20' }], customer: { id: 'c1' } };
+    await expect(drafter.serviceIdentityFor('The mosquitoes came back after the last visit', ctx)).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', reason: 'named_completed_visit' });
+    await expect(drafter.serviceIdentityFor('Can you add mosquito service?', ctx)).resolves.toMatchObject({ serviceType: 'Mosquito Control', reason: 'new_booking' });
+  });
+
+  test('with the gate OFF, or on a frozen replay, the catalog is never queried', async () => {
+    const resolveServiceType = mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Sure.', intended_actions: [], missing_info: null }) }] }) } };
+    const base = { client, context: { summary: 'x', upcomingServices: [], customer: { id: 'c1' } }, inboundMessage: 'Can you add termite protection?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' };
+    await drafter.generateGroundedDraft({ ...base, factsBlock: 'FROZEN\nFOLLOW-UP SLA RIGHT NOW: within the hour\n' });
+    expect(resolveServiceType).not.toHaveBeenCalled();
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    await drafter.generateGroundedDraft(base);
+    expect(resolveServiceType).not.toHaveBeenCalled();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('#5194 round 2', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', pest_inspection: 'Pest Inspection Service', pest_general_quarterly: 'General Pest Control (Quarterly)', lawn_fertilization: 'Lawn Fertilization & Weed Control' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key] } : null) }));
+
+  test('explicit one-time / initial pest work and a generic pest inspection resolve (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I book a one-time pest treatment?')).resolves.toBe('Initial Pest Cleanout');
+    await expect(drafter.requestedServiceType('I need an initial cleanout for roaches')).resolves.toBe('Initial Pest Cleanout');
+    await expect(drafter.requestedServiceType('Can someone do a pest inspection?')).resolves.toBe('Pest Inspection Service');
+    await expect(drafter.requestedServiceType('Can you add quarterly pest control?')).resolves.toBe('General Pest Control (Quarterly)');
+  });
+
+  test('already-scheduled is judged by service FAMILY: "pest control?" against a "Quarterly Pest + Termite Bait Station" visit is not a new booking', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }], customer: { id: 'c1' } };
+    await expect(drafter.serviceIdentityFor('What times do you have for pest control?', ctx)).resolves.toMatchObject({ serviceType: 'Quarterly Pest + Termite Bait Station', reason: 'named_scheduled_visit' });
+    await expect(drafter.serviceIdentityFor('Can you add lawn service?', ctx)).resolves.toMatchObject({ serviceType: 'Lawn Fertilization & Weed Control', reason: 'new_booking' });
+  });
+
+  test('the deadline for "by 9 AM tomorrow morning" on a row inserted after midnight is that row\'s own 9 AM, not a day later', () => {
+    const { followupDeadline } = require('../services/sms-followup-sla');
+    // drafted 23:58 ET Monday, row inserted 00:02 ET Tuesday (= 04:02Z) → Tuesday 9 AM
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T04:02:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+    // drafted and inserted 21:30 ET Monday → Tuesday 9 AM (unchanged)
+    expect(followupDeadline('by 9 AM tomorrow morning', new Date('2026-09-29T01:30:00Z')).toISOString()).toBe('2026-09-29T13:00:00.000Z');
+  });
+});
+
+
+describe('#5194 round 3', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+
+  test('an archived catalog row never prices a booking: the active replacement key is tried first, and an archived first hit is skipped', async () => {
+    const CATALOG = {
+      lawn_fertilization: { name: 'Lawn Fertilization & Weed Control', is_archived: true, is_active: false },
+      lawn_care_one_time: { name: 'One-Time Lawn Care Service', is_archived: false, is_active: true },
+      mosquito_event: { name: 'Mosquito Event Spray', is_archived: true, is_active: false },
+      mosquito_one_time: { name: 'One-Time Mosquito Treatment', is_archived: false, is_active: true },
+    };
+    const resolveServiceType = jest.fn(async (key) => CATALOG[key] || null);
+    jest.doMock('../services/service-library', () => ({ resolveServiceType }));
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can I get a one-time fungicide treatment?')).resolves.toBe('One-Time Lawn Care Service');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn_care_one_time');
+    await expect(drafter.requestedServiceType('Can you do an event spray for a party?')).resolves.toBe('One-Time Mosquito Treatment');
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBeNull(); // only archived rows → nothing
+    // an active but no-longer-offered row (booking_enabled=false, the bi-monthly lawn service) is skipped too
+    CATALOG.lawn_care_recurring = { name: 'Bi-Monthly Lawn Care Service', is_archived: false, is_active: true, booking_enabled: false };
+    CATALOG.lawn_care_monthly = { name: 'Monthly Lawn Care Service', is_archived: false, is_active: true, booking_enabled: true };
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBe('Monthly Lawn Care Service');
+    delete CATALOG.lawn_care_monthly;
+    await expect(drafter.requestedServiceType('Can you add lawn service?')).resolves.toBeNull();
+  });
+
+  test('the pest family matches identity terms only: a "Quarterly Tree & Shrub Care Service" visit does not make pest control already scheduled', async () => {
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'pest_general_quarterly' ? { name: 'General Pest Control (Quarterly)', is_active: true, is_archived: false } : null) }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Tree & Shrub Care Service', date: '2026-10-01' }], customer: { id: 'c1' } };
+    await expect(drafter.serviceIdentityFor('Can you add pest control?', ctx)).resolves.toMatchObject({ serviceType: 'General Pest Control (Quarterly)', reason: 'new_booking' });
+    const pestCtx = { ...ctx, upcomingServices: [{ type: 'Bi-Monthly Pest Control Service', date: '2026-10-01' }] };
+    await expect(drafter.serviceIdentityFor('Can you add pest control?', pestCtx)).resolves.toMatchObject({ serviceType: 'Bi-Monthly Pest Control Service', reason: 'named_scheduled_visit' });
+  });
+});
+
+
+describe('#5194 round 4', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
+  });
+  const CATALOG = { pest_initial_cleanout: 'Initial Pest Cleanout', lawn_care_recurring: 'Lawn Care', rodent_exclusion_only: 'Rodent Exclusion Only', rodent_trapping: 'Rodent Trapping', rodent_exclusion: 'Rodent Exclusion & Trapping', pest_general_quarterly: 'General Pest Control (Quarterly)', wdo_inspection: 'WDO Inspection' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('serviceIdentityFor: a named service picks the MATCHING scheduled visit, not the first one; several visits with none named is uncertain', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const two = { upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('What times do you have for my initial pest cleanout?', two)).resolves.toMatchObject({ serviceType: 'Initial Pest Cleanout', certain: true });
+    await expect(serviceIdentityFor('When are you coming?', two)).resolves.toMatchObject({ certain: false, reason: 'ambiguous_upcoming' });
+    await expect(serviceIdentityFor('When are you coming?', { upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }] })).resolves.toMatchObject({ serviceType: 'Lawn Care', certain: true });
+    await expect(serviceIdentityFor('The ants came back', { upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-01' }] })).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', certain: true });
+    await expect(serviceIdentityFor('When can you come?', { upcomingServices: [], serviceHistory: [] })).resolves.toMatchObject({ serviceType: null, certain: true, reason: 'engine_default' });
+    await expect(serviceIdentityFor('Can you add rodent exclusion Tuesday?', two)).resolves.toMatchObject({ serviceType: 'Rodent Exclusion Only', certain: true, reason: 'new_booking' });
+    // explicitly distinct work beside a same-family visit is NEW work (audit P1)
+    const monitoring = { upcomingServices: [{ type: 'Rodent Monitoring (Monthly)', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('We need rat trapping at the house', monitoring)).resolves.toMatchObject({ serviceType: 'Rodent Trapping', reason: 'new_booking' });
+    const termite = { upcomingServices: [{ type: 'Termite Bait Station System', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('Can I schedule a WDO inspection?', termite)).resolves.toMatchObject({ serviceType: 'WDO Inspection', reason: 'new_booking' });
+    // …but a reschedule of the existing visit in that family stays about the visit
+    await expect(serviceIdentityFor('Can we move my rodent trapping visit?', monitoring)).resolves.toMatchObject({ serviceType: 'Rodent Monitoring (Monthly)', reason: 'named_scheduled_visit' });
+    // a family-level request with a visit in that family is about the visit
+    await expect(serviceIdentityFor('What times do you have for pest control?', { upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }] })).resolves.toMatchObject({ serviceType: 'Quarterly Pest + Termite Bait Station', reason: 'named_scheduled_visit' });
+  });
+
+  test('an uncertain identity WITHHOLDS OPEN TIMES (no availability call, no section); an estimate pins it', async () => {
+    mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [{ fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Let me confirm and get right back to you.', intended_actions: [], missing_info: null }) }] }) } };
+    const two = { summary: 'x', upcomingServices: [{ type: 'Lawn Care', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }], customer: { id: 'c1' } };
+    const r = await drafter.generateGroundedDraft({ client, context: two, inboundMessage: 'When are you coming?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(r.factsBlock).not.toContain('OPEN TIMES (real');
+    await drafter.generateGroundedDraft({ client, context: two, inboundMessage: 'When are you coming?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice', estimateId: 'est-1' });
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', 'est-1', expect.any(Object));
+  });
+
+  test('explicit rodent exclusion / trapping resolves to the active exclusion row (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you book rodent exclusion Tuesday?')).resolves.toBe('Rodent Exclusion Only');
+    await expect(drafter.requestedServiceType('We need rat trapping at the house')).resolves.toBe('Rodent Trapping'); // trapping ≠ exclusion
+    await expect(drafter.requestedServiceType('We need rodent exclusion and trapping')).resolves.toBe('Rodent Exclusion & Trapping');
+  });
+
+  test('amount guard: an unparseable priced clause cannot ride along with a grounded figure ("balance is $95, and the fee is fifty dollars")', () => {
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 95, recentPayments: [] } };
+    expect(replyQuotesUngroundedAmount('Your balance is $95, and the fee is fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(false);
+    // r8 P1: the same clause — a readable figure cannot carry an unreadable one
+    expect(replyQuotesUngroundedAmount('Your balance is $95 plus a fee of fifty dollars.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your balance is $95 and the fee is 45.', context)).toBe(true);
+  });
+
+  test('SLA edit: the deadline follows the ORIGINAL promise — "tomorrow morning" edited to the now-current "this morning" before 9 AM still sends', () => {
+    const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
+    const promised = { intended_actions: [{ type: 'escalate', note: 'followup_promised' }] };
+    const original = 'A manager will reach out by 9 AM tomorrow morning.';
+    const edited = 'A manager will reach out by 9 AM this morning.';
+    const MON_NIGHT = new Date('2026-09-29T01:30:00Z');
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T11:30:00Z') })).toBeNull(); // Tue 07:30 ET
+    expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T14:00:00Z') })).toBe('sla_deadline_passed'); // Tue 10:00 ET
+  });
+});
+
+
+describe('#5194 round 5', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+  const CATALOG = { rodent_trapping: 'Rodent Trapping', rodent_inspection: 'Rodent Inspection', pest_general_quarterly: 'General Pest Control (Quarterly)', mosquito_one_time: 'One-Time Mosquito Treatment', lawn_care_one_time: 'One-Time Lawn Care Service' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('one-time lawn and mosquito work beside a scheduled recurring visit is a new booking (real keyword resolver)', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const monthly = { upcomingServices: [{ type: 'Mosquito Control (Monthly)', date: '2026-10-01' }, { type: 'Monthly Lawn Care Service', date: '2026-10-03' }] };
+    await expect(serviceIdentityFor('Can you add a one-time mosquito treatment for a party?', monthly)).resolves.toMatchObject({ serviceType: 'One-Time Mosquito Treatment', reason: 'new_booking' });
+    await expect(serviceIdentityFor('Can I get a one-time fungicide treatment?', monthly)).resolves.toMatchObject({ serviceType: 'One-Time Lawn Care Service', reason: 'new_booking' });
+    // moving the one-time visit itself still finds it
+    const both = { upcomingServices: [...monthly.upcomingServices, { type: 'One-Time Mosquito Treatment', date: '2026-10-05' }] };
+    await expect(serviceIdentityFor('Can we move the one-time mosquito treatment?', both)).resolves.toMatchObject({ serviceType: 'One-Time Mosquito Treatment', reason: 'named_scheduled_visit' });
+  });
+
+  test('a named service picks the visit booked as exactly that service, not the first visit of its family', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const both = { upcomingServices: [{ type: 'Rodent Monitoring', date: '2026-10-01' }, { type: 'rodent trapping', date: '2026-10-08' }] };
+    await expect(serviceIdentityFor('Can you reschedule my rodent trapping?', both)).resolves.toMatchObject({ serviceType: 'rodent trapping', certain: true, reason: 'named_scheduled_visit' });
+  });
+
+  test('a service matching several scheduled types, none exactly, is uncertain; the same type twice is not', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const twoPest = { upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('Can we move my pest control visit?', twoPest)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'ambiguous_named_visit' });
+    const sameTwice = { upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }, { type: 'Quarterly Pest', date: '2027-01-01' }] };
+    await expect(serviceIdentityFor('Can we move my pest control visit?', sameTwice)).resolves.toMatchObject({ serviceType: 'Quarterly Pest', certain: true });
+  });
+
+  test('the explicit-work table is ordered: an inspection wins over trapping words in the same message', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can someone do a rodent inspection before you set traps?')).resolves.toBe('Rodent Inspection');
+  });
+
+  test('billingAmountCents is the one definition of the owed and paid figures both amount guards use', () => {
+    const { billingAmountCents } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 0, openInvoice: { amountDue: 45.5 }, recentPayments: [{ amount: 95, status: 'paid' }, { amount: 60, status: 'failed' }, { amount: null }] } };
+    const { owed, paid } = billingAmountCents(context);
+    expect([...owed]).toEqual([4550]); // a zero balance is not owed; the open invoice is
+    expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]);
+    expect([...billingAmountCents(context, { settledOnly: true }).paid]).toEqual([9500]);
+    expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
+  });
+});
+
+
+describe('#5194 round 6', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.dontMock('../services/availability'); jest.resetModules();
+  });
+  const CATALOG = {
+    termite_bait: 'Termite Bait Station System Service', termite_liquid: 'Termite Liquid Treatment Service', termite_pretreatment: 'Termite Pretreatment Service',
+    termite_slab_pretreat: 'Slab Pre-Treat Termite Service', lawn_care_monthly: 'Monthly Lawn Care Service', lawn_care_one_time: 'One-Time Lawn Care Service',
+    mosquito_monthly: 'Mosquito Control Service (Monthly)', pest_general_quarterly: 'Quarterly Pest Control Service',
+  };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('a named termite treatment resolves to its own catalog service and is new work beside a bait visit (real keyword resolver)', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can you add liquid termite treatment Tuesday?')).resolves.toBe('Termite Liquid Treatment Service');
+    await expect(drafter.requestedServiceType('Do you do termite pre-treatment for new construction?')).resolves.toBe('Termite Pretreatment Service');
+    await expect(drafter.requestedServiceType('We need a slab pretreat before the pour')).resolves.toBe('Slab Pre-Treat Termite Service');
+    await expect(drafter.requestedServiceType('Can you add termite protection?')).resolves.toBe('Termite Bait Station System Service'); // the family default is unchanged
+    const bait = { upcomingServices: [{ type: 'Termite Bait Station System Service', date: '2026-10-01' }] };
+    await expect(drafter.serviceIdentityFor('Can you add liquid termite treatment Tuesday?', bait)).resolves.toMatchObject({ serviceType: 'Termite Liquid Treatment Service', reason: 'new_booking' });
+  });
+
+  test('complaint wording beside a service with no visit on file withholds OPEN TIMES instead of pricing the other visit', async () => {
+    mockCatalog();
+    const getAvailableSlots = jest.fn(async () => ({ days: [] }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const mosquitoOnly = { summary: 'x', upcomingServices: [{ type: 'Mosquito Control Service (Monthly)', date: '2026-10-01' }], customer: { id: 'c1' } };
+    const inbound = 'The mosquitoes came back, but can you add lawn service Tuesday?';
+    await expect(drafter.serviceIdentityFor(inbound, mosquitoOnly)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
+    const client = { messages: { create: async () => ({ content: [{ text: JSON.stringify({ reply: 'Let me check with the team and get right back to you.', intended_actions: [], missing_info: null }) }] }) } };
+    await drafter.generateGroundedDraft({ client, context: mosquitoOnly, inboundMessage: inbound, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice' });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    // a callback still finds the completed visit it names; one it does not name is uncertain
+    const history = (type) => ({ upcomingServices: [], serviceHistory: [{ type, date: '2026-09-01' }] });
+    await expect(drafter.serviceIdentityFor('The ants came back', history('Quarterly Pest Control Service'))).resolves.toMatchObject({ serviceType: 'Quarterly Pest Control Service', reason: 'named_completed_visit' });
+    await expect(drafter.serviceIdentityFor('The ants came back', history('Monthly Lawn Care Service'))).resolves.toMatchObject({ certain: false, reason: 'unmatched_named_service' });
+  });
+
+  test('several service families named: only one visit covering them all is certain; a new booking of several is not', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    await expect(serviceIdentityFor('Can you add mosquito and lawn service?', { upcomingServices: [] })).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'unmatched_named_service' });
+    const combined = { upcomingServices: [{ type: 'Lawn + Tree & Shrub', date: '2026-10-01' }, { type: 'Quarterly Pest Control Service', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('Can we move my lawn and shrub visit?', combined)).resolves.toMatchObject({ serviceType: 'Lawn + Tree & Shrub', certain: true });
+    // a city name is not a service: "Palmetto" never reads as palm work
+    await expect(serviceIdentityFor("I'm in Palmetto, can you add pest control?", { upcomingServices: [] })).resolves.toMatchObject({ serviceType: 'Quarterly Pest Control Service', reason: 'new_booking' });
+  });
+
+  test('routine lawn words the pricing resolver files as one-time stay about the scheduled lawn program', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const program = { upcomingServices: [{ type: 'Monthly Lawn Care Service', date: '2026-10-01' }] };
+    await expect(serviceIdentityFor('Can you do a weed treatment at my next visit?', program)).resolves.toMatchObject({ serviceType: 'Monthly Lawn Care Service', reason: 'named_scheduled_visit' });
+    await expect(serviceIdentityFor('Can I get a one-time weed treatment?', program)).resolves.toMatchObject({ serviceType: 'One-Time Lawn Care Service', reason: 'new_booking' });
+  });
+});

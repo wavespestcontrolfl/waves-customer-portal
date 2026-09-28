@@ -4945,24 +4945,28 @@ class GscOpportunityMiner {
            SET score = EXCLUDED.score,
                score_breakdown = EXCLUDED.score_breakdown,
                claim_id = CASE WHEN opportunity_queue.status = 'expired' THEN NULL ELSE opportunity_queue.claim_id END,
-               -- Preserve the runner's one-shot gate_retry marker across the
-               -- wholesale metadata refresh: a first hard-gate failure defers
-               -- the row with feedback recorded here, and the morning miner
-               -- runs BEFORE the engine — dropping the marker would turn the
-               -- intended single feedback-informed redraft into repeated
-               -- blind first attempts. jsonb_exists(), not the question-mark
+               -- Preserve the runner's one-shot content and infrastructure
+               -- retry markers across the wholesale metadata refresh. The
+               -- morning miner runs BEFORE the engine; dropping either marker
+               -- turns a bounded retry into repeated first attempts.
+               -- jsonb_exists(), not the question-mark
                -- operator — and this comment must never contain that literal
                -- character either: knex counts binding placeholders across
                -- the WHOLE raw string, SQL comments included, so a stray one
                -- here breaks every daily mine with a binding-count error
                -- (shipped 07-30, caught 07-31: "Expected 13 bindings, saw
                -- 15" — the two extras were in this very comment).
-               signal_metadata = CASE
-                 WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
-                 THEN EXCLUDED.signal_metadata
-                      || jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')
-                 ELSE EXCLUDED.signal_metadata
-               END,
+               signal_metadata = EXCLUDED.signal_metadata
+                 || CASE
+                   WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
+                   THEN jsonb_build_object('gate_retry', opportunity_queue.signal_metadata->'gate_retry')
+                   ELSE '{}'::jsonb
+                 END
+                 || CASE
+                   WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'infrastructure_retry')
+                   THEN jsonb_build_object('infrastructure_retry', opportunity_queue.signal_metadata->'infrastructure_retry')
+                   ELSE '{}'::jsonb
+                 END,
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,
