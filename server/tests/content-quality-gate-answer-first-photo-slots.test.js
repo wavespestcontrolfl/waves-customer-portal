@@ -447,6 +447,12 @@ describe('refresh classification uses the live post_type', () => {
     expect(checkVerdictBoxFirst(draft, refreshBrief(), {}).ok).toBe(false);
   });
 
+  test('a failed live frontmatter load fails CLOSED: the refresh is held to the identification checks', () => {
+    const draft = { frontmatter: { post_type: 'how-to' }, body: noBoxBody };
+    expect(checkVerdictBoxFirst(draft, refreshBrief(), { liveFrontmatterUnavailable: true }).ok).toBe(false);
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: '![x](https://example.com/ai.png)' }, refreshBrief(), { liveFrontmatterUnavailable: true }).ok).toBe(false);
+  });
+
   test('a new post ignores liveFrontmatter entirely', () => {
     const draft = { frontmatter: { post_type: 'how-to' }, body: noBoxBody };
     expect(checkVerdictBoxFirst(draft, brief(), { liveFrontmatter: { post_type: 'diagnostic' } }).ok).toBe(true);

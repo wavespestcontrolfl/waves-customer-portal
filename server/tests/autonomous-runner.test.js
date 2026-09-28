@@ -3842,5 +3842,38 @@ describe('refresh quality gate receives the live frontmatter', () => {
     expect(gateBrief.action_type).toBe('refresh_existing_page');
     expect(ctx.liveFrontmatter).toMatchObject({ post_type: 'diagnostic' });
     expect(ctx.previousVersion).toEqual({ body: 'Live body.' });
+    expect(ctx.liveFrontmatterUnavailable).toBeUndefined();
+  });
+
+  test('a failed live frontmatter load for the gate is flagged so the gate fails closed', async () => {
+    const claimedAt = new Date('2026-09-28T10:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({ id: 'opp_refresh_live_fail', action_type: 'refresh_existing_page', page_url: '/pest-control/fire-ant-id/', claimed_at: claimedAt }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'refresh_existing_page', page_type: 'refresh', target_url: '/pest-control/fire-ant-id/', human_review_required: false }) };
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { body: 'Refreshed body.', frontmatter: {} } }) };
+    const publisher = {
+      // Gate 3c's own (fail-closed) load succeeds; the quality gate's
+      // separate load then hits a transient failure.
+      getLiveFrontmatter: jest.fn()
+        .mockResolvedValueOnce({ post_type: 'diagnostic', _astro_source_path: 'src/content/blog/pest-control/fire-ant-id.mdx', domains: [] })
+        .mockRejectedValue(new Error('github 502')),
+      loadExistingPageBody: jest.fn().mockResolvedValue({ body: 'Live body.' }),
+      resolveExistingAstroFileForTarget: jest.fn().mockResolvedValue({ path: 'src/content/blog/pest-control/fire-ant-id.mdx' }),
+      isBlogTarget: jest.fn().mockReturnValue(true),
+    };
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['verdict_box_first'], soft_failures: [], total_score: 0, min_total_score: 80 }) };
+    const runner = loadRunnerWith({
+      queue, briefBuilder, dispatcher, publisher, qualityGate,
+      factsSufficiency: { check: jest.fn().mockResolvedValue({ applicable: false }) },
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      uniquenessGate: { evaluate: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }), evaluateBlog: jest.fn().mockReturnValue({ ok: true, failed_reasons: [] }) },
+    });
+    await runner.runNext();
+    const [, , ctx] = qualityGate.evaluate.mock.calls[0];
+    expect(ctx.liveFrontmatter).toBeUndefined();
+    expect(ctx.liveFrontmatterUnavailable).toBe(true);
   });
 });

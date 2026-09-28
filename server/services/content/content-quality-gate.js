@@ -1093,15 +1093,19 @@ function checkBodySyntaxSupported(draft, _brief, context = {}) {
 // freezes it), so a refresh is classified by the live post_type the runner
 // hands in as context.liveFrontmatter — never by whatever the refresh draft
 // happened to repeat (the refresh tool schema does not require post_type).
-// Without a live load the draft's own value is the fallback. The post_type
-// comparison itself is licensed-photo-library.isIdentificationPost — the
-// SAME predicate the publisher and the merge-time image check use.
+// When the runner reports the live load FAILED (liveFrontmatterUnavailable)
+// the refresh is held to the identification checks — fail closed, so an
+// unknown classification routes to review. A caller that supplies neither
+// (unit tests, older callers) falls back to the draft's own value. The
+// post_type comparison itself is licensed-photo-library.isIdentification
+// Post — the SAME predicate the publisher and the merge-time image check use.
 function effectiveFrontmatter(draft, brief, context) {
   const isRefresh = brief?.action_type === 'refresh_existing_page';
   if (isRefresh && context?.liveFrontmatter && typeof context.liveFrontmatter === 'object') return context.liveFrontmatter;
   return draft?.frontmatter || {};
 }
 function isIdentificationDraft(draft, brief, context) {
+  if (brief?.action_type === 'refresh_existing_page' && context?.liveFrontmatterUnavailable && !context?.liveFrontmatter) return true;
   return isIdentificationPost(effectiveFrontmatter(draft, brief, context));
 }
 function isIdentificationOrQuestionDraft(draft, brief, context) {
