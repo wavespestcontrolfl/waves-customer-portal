@@ -34,11 +34,14 @@ const LABELS = {
   taurus_sc: {
     // Manufacturer: "a non-repellent insecticide that is undetectable to
     // target pests, allowing them to touch, ingest and spread the
-    // insecticide throughout the entire colony". No time to control and no
-    // statement about how long pests stay visible, so no note.
+    // insecticide throughout the entire colony". The colony clause is left
+    // out: this phrase is rendered for roach visits too (templates PR
+    // #5277, whose wording this matches exactly), and cockroaches are not
+    // colony insects. No time to control and no statement about how long
+    // pests stay visible, so no note.
     name: ['taurus sc'], ai: ['fipronil'], source: 'Control Solutions, Taurus SC product page',
-    phrase: 'a non-repellent insecticide that target pests cannot detect, so they touch it, ingest it and spread it through the colony',
-    dryRule: null, notes: [], statesTimeline: false,
+    phrase: 'a non-repellent insecticide that target pests cannot detect, so they touch, ingest and spread it',
+    dryRule: null, notes: [],
     factSlugs: ['fact-taurus-sc-non-repellent'],
   },
   talak: {
@@ -51,28 +54,28 @@ const LABELS = {
     name: ['talak', 'talstar p', 'bifen i/t', 'bifen it'], ai: ['bifenthrin'], source: 'Talak 7.9 F label (EPA 91234-145)',
     phrase: null,
     dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talak 7.9 F label (EPA 91234-145)' },
-    notes: [], statesTimeline: false,
+    notes: [],
     factSlugs: ['fact-bifenthrin-talak-label'],
   },
   gentrol_igr: {
     // "Gentrol IGR" exactly — Gentrol Complete EC3 (pyriproxyfen +
     // permethrin + tetramethrin) and Gentrol Point Source are other labels.
     // Label: "Cockroaches and bedbugs exposed to the GENTROL IGR will become
-    // adults incapable of reproducing"; front panel "CONTINUOUS PROTECTION
-    // FOR 4 MONTHS". Never a claim that it sterilises adults.
+    // adults incapable of reproducing". Never a claim that it sterilises
+    // adults. The label's "4 months" protection is an efficacy timeline,
+    // which no product statement carries (owner ruling 2026-09-28).
     name: ['gentrol igr'], ai: ['hydroprene'], source: 'Gentrol IGR Concentrate label',
     phrase: 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce',
-    dryRule: null,
-    notes: [{ text: 'The Gentrol IGR label states continuous protection for 4 months.', source: 'Gentrol IGR Concentrate label' }],
-    statesTimeline: true,
+    dryRule: null, notes: [],
     factSlugs: ['fact-gentrol-igr-hydroprene'],
   },
 };
 
 // A family is a neutral class name only. It carries no fact slug (a slug
-// must point at a real register fact, and only a label has one); a product
-// with no label reports `noTimeline: true` — copy must state no timeline
-// for it.
+// must point at a real register fact, and only a label has one). Every
+// product reports `noTimeline: true`: owner ruling 2026-09-28 — no product
+// statement carries an efficacy timeline (no day/week/month window, no
+// "you may still see … for a while"), labeled or not.
 const FAMILIES = {
   non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', customerVisible: true, labels: ['taurus_sc'] },
   contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'bifen it', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', customerVisible: true, labels: ['talak'] },
@@ -188,7 +191,7 @@ async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
       phrase: def.customerVisible ? phrase : null, dryRule: label?.dryRule || null, notes: label?.notes || [],
       factSlugs: label ? label.factSlugs : [], customerVisible: def.customerVisible,
-      verified: Boolean(label), source: label?.source || null, noTimeline: !label?.statesTimeline,
+      verified: Boolean(label), source: label?.source || null, noTimeline: true,
       targets: asArray(row.targets).map((t) => String(t || '').trim()).filter(Boolean),
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
@@ -360,11 +363,23 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
  * history-filter.js) — an incomplete, inspection-only, or customer-declined
  * closeout can carry a selected rating but never represents a real
  * treatment outcome, and a report-suppressed row was never shown to this
- * customer either. */
+ * customer either.
+ *
+ * Only OUR measured data counts: a technician-entered rating
+ * (client_pest_rating_source = 'technician', written at closeout). A
+ * customer-submitted rating (reports-public.js writes 'customer') is not,
+ * and neither is a legacy row with no source — every canonical reader
+ * (pest-pressure/components/client-rating.js, customer-view.js) treats a
+ * missing source as the customer's. The min-20 cohort floor applies to this
+ * filtered set. An untouched first-visit prefill of 5 is NOT excluded: the
+ * completion request's clientPestRatingPrefilled flag is never persisted (it
+ * is stored as a plain client_pest_rating 5 / source 'technician', the same
+ * as a 5 the tech chose), so no stored field can tell the two apart. */
 async function getActivityRatingAverages({ conn = db } = {}) {
   const query = conn('service_records')
     .where('status', 'completed')
-    .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line');
+    .whereNotNull('client_pest_rating').whereNotNull('visit_number').whereNotNull('service_line')
+    .whereRaw("LOWER(COALESCE(client_pest_rating_source, '')) = 'technician'");
   applyCustomerVisibleServiceRecordFilter(query);
   query.whereRaw(
     `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,

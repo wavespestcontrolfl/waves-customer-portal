@@ -62,6 +62,9 @@ suite('email division against real Postgres', () => {
   async function makeVisits(customerId, count, overrides = {}) {
     for (let i = 0; i < count; i++) await makeVisit(customerId, overrides);
   }
+  async function makeTechRatedVisits(customerId, count, overrides = {}) {
+    return makeVisits(customerId, count, { client_pest_rating_source: 'technician', ...overrides });
+  }
   // `count` DISTINCT customers in `city`, each with exactly one matching
   // visit — the privacy floor is distinct customers, so area-intel tests
   // must never qualify a city from one customer's repeated visits.
@@ -195,7 +198,8 @@ suite('email division against real Postgres', () => {
     expect(complete).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [] });
     const hydroprene = products.find((p) => p.productName === 'Gentrol IGR');
     expect(hydroprene).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr-hydroprene'] });
-    expect(hydroprene.notes.map((n) => n.text)).toEqual(['The Gentrol IGR label states continuous protection for 4 months.']);
+    // Label-quoted phrase only; no efficacy-timeline note (owner ruling 2026-09-28).
+    expect(hydroprene).toMatchObject({ phrase: 'an insect growth regulator: cockroaches exposed to it become adults that cannot reproduce', notes: [], noTimeline: true });
     const nameOnly = products.find((p) => p.productName === 'Gentrol IGR Concentrate');
     expect(nameOnly).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr-hydroprene'] });
     const pointSource = products.find((p) => p.productName === 'Gentrol Point Source');
@@ -268,29 +272,49 @@ suite('email division against real Postgres', () => {
 
   test('getActivityRatingAverages: partitions by service_line and omits a cohort with fewer than 20 rated visits', async () => {
     const customerId = await makeCustomer();
+    // Every rating below is technician-entered (our measured data), so only
+    // the cohort/performed/visible predicates decide what is excluded here.
     // Pest visit #1: 25 ratings of 5 (>= 20 -> included).
-    await makeVisits(customerId, 25, { visit_number: 1, service_line: 'pest', client_pest_rating: 5, service_date: '2026-09-01' });
+    await makeTechRatedVisits(customerId, 25, { visit_number: 1, service_line: 'pest', client_pest_rating: 5, service_date: '2026-09-01' });
     // Pest visit #2: only 3 ratings (< 20 -> omitted).
-    await makeVisits(customerId, 3, { visit_number: 2, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-02' });
+    await makeTechRatedVisits(customerId, 3, { visit_number: 2, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-02' });
     // Mosquito visit #1: 15 ratings of 2 — same visit_number (1) as the pest
     // cohort above but a DIFFERENT program. 15 + 25 would clear the 20-visit
     // floor if wrongly combined; each service_line must clear it on its own,
     // so this cohort alone (15 < 20) stays omitted and never drags the pest
     // #1 average toward it.
-    await makeVisits(customerId, 15, { visit_number: 1, service_line: 'mosquito', client_pest_rating: 2, service_date: '2026-09-03' });
+    await makeTechRatedVisits(customerId, 15, { visit_number: 1, service_line: 'mosquito', client_pest_rating: 2, service_date: '2026-09-03' });
     // Non-performed/non-visible rows that carry a rating but must never
     // enter the pest #1 average or count — same predicate Pest Pressure's
     // first-visit history uses (server/services/pest-pressure/first-visit.js
     // + history-filter.js): 'incomplete' status, a completed-but-declined
     // visitOutcome, and a report-suppressed (not auto_send) closeout.
-    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-04', status: 'incomplete' });
-    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-05', structured_notes: { visitOutcome: 'customer_declined' } });
-    await makeVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-06', structured_notes: { typedReportDelivery: 'manual_review' } });
+    await makeTechRatedVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-04', status: 'incomplete' });
+    await makeTechRatedVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-05', structured_notes: { visitOutcome: 'customer_declined' } });
+    await makeTechRatedVisits(customerId, 5, { visit_number: 1, service_line: 'pest', client_pest_rating: 1, service_date: '2026-09-06', structured_notes: { typedReportDelivery: 'manual_review' } });
     const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
     expect(byVisit.pest[1]).toBe(5); // unmoved by the 15 excluded low ratings
     expect(counts.pest[1]).toBe(25); // still exactly the performed, visible visits
     expect(byVisit.pest[2]).toBeUndefined();
     expect(byVisit.mosquito?.[1]).toBeUndefined();
+  });
+
+  test('getActivityRatingAverages: counts technician-entered ratings only — never customer-submitted or unsourced ones — and floors the filtered set', async () => {
+    const customerId = await makeCustomer();
+    // 20 technician ratings of 4 -> exactly the floor.
+    await makeTechRatedVisits(customerId, 20, { visit_number: 1, service_line: 'pest', client_pest_rating: 4, service_date: '2026-09-01' });
+    // Customer-submitted (reports-public.js) and legacy unsourced ratings of
+    // 0: excluded — they would drag the average and pad the count.
+    await makeVisits(customerId, 10, { visit_number: 1, service_line: 'pest', client_pest_rating: 0, client_pest_rating_source: 'customer', service_date: '2026-09-02' });
+    await makeVisits(customerId, 10, { visit_number: 1, service_line: 'pest', client_pest_rating: 0, service_date: '2026-09-03' });
+    // Visit #2: 19 technician + 10 customer ratings — 29 raw, but only 19
+    // of ours, so it stays below the floor.
+    await makeTechRatedVisits(customerId, 19, { visit_number: 2, service_line: 'pest', client_pest_rating: 3, service_date: '2026-09-04' });
+    await makeVisits(customerId, 10, { visit_number: 2, service_line: 'pest', client_pest_rating: 3, client_pest_rating_source: 'customer', service_date: '2026-09-05' });
+    const { byVisit, counts } = await getActivityRatingAverages({ conn: trx });
+    expect(byVisit.pest[1]).toBe(4);
+    expect(counts.pest[1]).toBe(20);
+    expect(byVisit.pest[2]).toBeUndefined();
   });
 
   // Four cities, one recompute: Ellenton (4 visits, below the 5-visit floor
