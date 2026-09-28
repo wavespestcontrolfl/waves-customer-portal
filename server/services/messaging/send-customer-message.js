@@ -356,10 +356,15 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck: suppliedProviderPreSendCheck,
     onDispatchStart,
     onDispatchAbort,
+    // codex #5196 r4 P2: same shape as onDispatchAbort, fired instead when
+    // twilio.js's own messages.create() throws a definitive rejection —
+    // the phone lock is still held at that point (onDispatchAbort's own
+    // comment explains why).
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
     // INTO the handoff transaction (twilio.js's dispatch() reads this same
-    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort,
-    // through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort/
+    // onDispatchRejected, through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
     // Omitted (the default for every caller that doesn't name it), twilio.js
     // falls back to origin/main's own post-handoff, out-of-transaction insert.
     logInHandoff,
@@ -1078,9 +1083,14 @@ async function sendCustomerMessageCore(input) {
     // window has closed — otherwise a send that never reached
     // messages.create() would be misclassified as ambiguous forever.
     onDispatchAbort,
+    // codex #5196 r4 P2: fired instead of onDispatchAbort when
+    // messages.create() itself throws a definitive rejection — still
+    // inside the handoff, lock held. See twilio.js's dispatch().
+    onDispatchRejected,
     // codex #5018 structural fix (post-r7): threaded straight through, same
-    // as onDispatchStart/onDispatchAbort above — see this file's own
-    // destructure comment and twilio.js's dispatch() for what it gates.
+    // as onDispatchStart/onDispatchAbort/onDispatchRejected above — see
+    // this file's own destructure comment and twilio.js's dispatch() for
+    // what it gates.
     logInHandoff,
     providerHandoffReservation,
   });
