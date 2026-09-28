@@ -528,7 +528,9 @@ const customerSpecific = context => Boolean(context.targets?.length || context.n
 // Readers whose appointment selector is not named appointment_id: the
 // closeout readers take service_id and the gap reader tests candidate_service_id
 // (it loads that appointment's customer preferences, plan holds and location).
-const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
+// repair_closeout acts on that same service_id, so a customer-scoped task may
+// only repair its own customer's visit.
+const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', repair_closeout: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
 // Writers whose customer records ride under role-named ids: both halves of a
 // merge are customer records, read as the customer collection (readReferences
 // loads and version-stamps every one). The task must own ONE half directly;

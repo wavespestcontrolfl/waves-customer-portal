@@ -3352,6 +3352,40 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   );
 }
 
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS). Server-driven: renders only when the LIVE
+// payload carries upcomingVisitsCard.visits — property scoping (this
+// report's property only), the 90-day window, the excluded statuses, and
+// the ~6 cap all live server-side (report-data.js); the client renders
+// exactly what it is given. Distinct from the hero's "Next service" cell
+// above, which stays scoped to this report's own service line only.
+function UpcomingVisitsCard({ data, mode }) {
+  const visits = data?.upcomingVisitsCard?.visits;
+  if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
+  return (
+    <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
+      {/* h2, not .section-eyebrow (codex round-2 P2): the glass theme hides
+          EVERY .section-eyebrow outside the hero kicker
+          (html[data-glass-theme] .service-report-v1 .section-eyebrow), so
+          the title was invisible under glass. .report-card h2 already
+          carries real, deliberate styling (same pattern the companion
+          section heading and the generic .report-card/.sr-section rule
+          use) and the glass rule never targets headings. */}
+      <h2>Your upcoming visits</h2>
+      <div className="service-status-grid">
+        {visits.map((visit, index) => (
+          <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
+            <div className="sr-cell-value">
+              {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sr-cell-note">Dates and windows are subject to change</div>
+    </section>
+  );
+}
+
 // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
 // Server-driven: renders only when the LIVE payload carries `crossSell` — the
 // server computes the offer fail-closed (ownership, commercial, secondary-
@@ -3405,6 +3439,14 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
+          a findings/season-picked offer ("We noted roach activity today...").
+          Absent for the unchanged ladder pick. */}
+      {offer.reason && (
+        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
+          {offer.reason}
+        </p>
+      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -7353,6 +7395,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        /* Customer-facing body copy floor is 16px; 14px stays reserved for
+           labels (codex round-2 P2). Scoped to the upcoming-visits card only
+           — .sr-cell-value/.sr-cell-note are shared with other cards whose
+           existing 15px/14px sizing is unchanged here. */
+        .upcoming-visits-card .sr-cell-value,
+        .upcoming-visits-card .sr-cell-note {
+          font-size: 16px;
+        }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -8978,6 +9028,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             lawn timeline below; the two are exclusive on isV2LeadLayout so
             #tech-note never duplicates. Live only. */}
         {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
+
+        {/* Your upcoming visits (owner-approved 2026-09-27,
+            GATE_REPORT_UPCOMING_VISITS) — right beside the cross-sell offer,
+            same interwoven placement. Live-only; renders nothing unless the
+            payload carries upcomingVisitsCard. */}
+        <UpcomingVisitsCard data={data} mode={mode} />
 
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
