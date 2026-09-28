@@ -48,36 +48,38 @@ describe('buildRainExpectation', () => {
     expect(out.lines[0]).toMatch(/can vary/);
   });
 
-  it('states a specific rain-fast NUMBER only when a product supplies rainfastMinutes (synthetic — prod catalog is NULL today)', () => {
+  // Owner ruling 2026-09-28, revised: the rain-fast clause appears ONLY
+  // when the catalog has a sourced rainfast_minutes number for an applied
+  // product. There is NO generic fallback sentence — "rain-fast once it
+  // has dried" was itself an unsupported claim (most labels don't state
+  // rain-fastness at all, and some say to avoid rain within a window
+  // instead), so with no sourced number the clause is simply absent.
+  it('states the rain-fast clause ONLY when a product supplies rainfastMinutes (synthetic — prod catalog is NULL today)', () => {
     const withRainfast = buildRainExpectation({
       weekWeather: { rainInches: 0.5, rainConfidence: null },
       products: [{ rainfastMinutes: 30 }],
       serviceMonth: 2,
     });
-    expect(withRainfast.lines[0]).toMatch(/rain-fast once dry \(about 30 min, per the label\)/);
+    expect(withRainfast.lines[0]).toMatch(/rain-fast about 30 min after it dries, per the label\./);
   });
 
-  // Owner ruling 2026-09-28: never a hard-coded drying time not sourced
-  // from the catalog — but the clause still states the plain, generic
-  // "once it has dried" fact (no invented number) when products were
-  // applied and the catalog has no rainfast_minutes for any of them.
-  it('falls back to the generic "once it has dried" fact (no number) when no product supplies rainfastMinutes', () => {
+  it('no rainfast_minutes on any applied product: NO rain-fast wording anywhere (no generic fallback)', () => {
     const withoutRainfast = buildRainExpectation({
       weekWeather: { rainInches: 0.5, rainConfidence: null },
       products: [{ rainfastMinutes: null }],
       serviceMonth: 2,
     });
-    expect(withoutRainfast.lines[0]).toMatch(/rain-fast once it has dried\./);
-    expect(withoutRainfast.lines[0]).not.toMatch(/rain-fast once dry \(about/);
+    expect(withoutRainfast.lines[0]).not.toMatch(/rain-fast/i);
+    expect(withoutRainfast.lines[0]).not.toMatch(/dried/i);
   });
 
-  it('adds no rain-fast clause at all when no products were applied (nothing to claim rain-fast about)', () => {
+  it('adds no rain-fast clause at all when no products were applied', () => {
     const out = buildRainExpectation({
       weekWeather: { rainInches: 0.5, rainConfidence: null },
       products: [],
       serviceMonth: 2,
     });
-    expect(out.lines[0]).not.toMatch(/rain-fast/);
+    expect(out.lines[0]).not.toMatch(/rain-fast/i);
   });
 
   it('formats a >=60min rainfast time in hours', () => {

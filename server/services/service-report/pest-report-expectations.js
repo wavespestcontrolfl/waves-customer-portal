@@ -13,13 +13,14 @@
  * banned-copy guard (validateCustomerCopy) before it can render.
  *
  * Data-driven note: as of 2026-09-27 `products_catalog.rainfast_minutes` is
- * NULL for every currently-active pest product — the rain-fast clause below
- * always states the plain, generic "once it has dried" fact when products
- * were applied, and adds a SPECIFIC time number only when the catalog
- * actually has one for an applied product (owner ruling 2026-09-28: never a
- * hard-coded drying time that isn't sourced from label data). The
- * number-bearing branch is exercised by a synthetic-data test
- * (pest-report-expectations.test.js) since prod data doesn't reach it today.
+ * NULL for every currently-active pest product, so the rain-fast clause
+ * below never fires against real data today — it renders ONLY when the
+ * catalog has a sourced rainfast_minutes number for an applied product
+ * (owner ruling 2026-09-28, revised: no generic fallback sentence either —
+ * "rain-fast once it has dried" is itself an unsupported claim most labels
+ * don't make, and some say to avoid rain within a window instead). The
+ * branch is exercised by a synthetic-data test (pest-report-expectations.test.js)
+ * rather than left as dead code.
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
@@ -75,25 +76,23 @@ function antsRainThresholdInches(rainConfidence, rainySeason) {
   return rainySeason ? 0.5 : 1;
 }
 
-// Rain-fast clause text — owner ruling 2026-09-28: a specific TIME NUMBER is
-// rendered ONLY when the catalog actually has rainfast_minutes for an
-// applied product — never a hard-coded drying time (e.g. "about 2 hours")
-// that isn't sourced from label data. Without a sourced number, still states
-// the plain, generic, product-agnostic fact ("once it has dried") with no
-// invented duration. Returns '' when no products were applied at all (there
-// is then nothing to call "your treatment"). Extracted from
+// Rain-fast clause text — owner ruling 2026-09-28 (revised): the clause
+// appears ONLY when the catalog actually has rainfast_minutes for an
+// applied product. There is deliberately NO generic fallback sentence
+// ("...once it has dried.") — that phrasing was itself an unsupported claim:
+// most labels don't state rain-fastness at all, and some instead say to
+// avoid rain within a window after application. With no sourced number,
+// this returns '' — no rain-fast clause of any kind (today, since prod
+// rainfast_minutes is NULL everywhere, that means never). Extracted from
 // buildRainExpectation to keep the two independent decisions (the rain-fact
 // sentence vs. the rain-fast clause) from compounding into one function's
 // branch count.
 function rainfastClauseText(products) {
-  if (!products.length) return '';
   const rainfastMinutes = products
     .map((p) => finiteOrNull(p?.rainfastMinutes))
     .find((n) => n != null && n > 0);
   const rainfastLabel = rainfastMinutes != null ? formatRainfastMinutes(rainfastMinutes) : null;
-  return rainfastLabel
-    ? ` Your treatment is rain-fast once dry (about ${rainfastLabel}, per the label).`
-    : ' Your treatment is rain-fast once it has dried.';
+  return rainfastLabel ? ` Your treatment is rain-fast about ${rainfastLabel} after it dries, per the label.` : '';
 }
 
 // ── Rain and your treatment ──────────────────────────────────────────────

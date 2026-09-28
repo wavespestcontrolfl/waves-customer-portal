@@ -83,14 +83,17 @@ pest-report-expectations.js is the pure builder). `rain: { lines: [string] }`
 — one line stating the trailing 7-day rainfall at the property
 (`application-conditions.js` `fetchServiceWeekWeather`; low-confidence
 city-collective readings are hedged in the wording, never presented as an
-exact number), then, when at least one product was applied, a rain-fast
-clause: the plain, generic, product-agnostic fact ("...rain-fast once it has
-dried.") with NO invented duration, UPGRADED to a specific time ("...rain-fast
-once dry (about N, per the label).") only when `products_catalog.rainfast_minutes`
-is actually set for an applied product — NULL for every current pest product
-as of 2026-09-27, so the number-bearing form rarely fires against real data
-today; never a hard-coded drying time that isn't sourced from the catalog.
-Then, **live view only**, a forward-looking heavy-rain caveat
+exact number), then an OPTIONAL rain-fast clause ("...rain-fast about N
+after it dries, per the label.") that appears ONLY when
+`products_catalog.rainfast_minutes` is actually set for an applied product —
+NULL for every current pest product as of 2026-09-27, so this clause never
+fires against real data today. There is deliberately NO generic fallback
+sentence when the catalog has no number (revised 2026-09-28): a plain
+"rain-fast once it has dried" claim is itself unsupported — most labels
+don't state rain-fastness at all, and some instead say to avoid rain within
+a window after application — so with no sourced number the clause is simply
+absent, never a hard-coded or invented duration. Then, **live view only**,
+a forward-looking heavy-rain caveat
 sourced from the NWS forecast (`weather-forecast.js`
 `getDailyRainOutlookBounded`) — `reports-public.js` computes that forecast
 signal only when `mode === 'live'` and always passes `false` for the PDF and
