@@ -92,6 +92,19 @@ const RELATIVE_APPOINTMENT_DATE_RE = new RegExp(
   `\\b(?:tomorrow|tonight|next\\s+(?:day|week|month)|(?:(?:next|this)\\s+(?:coming\\s+)?|coming\\s+|following\\s+)(?:${WEEKDAY_NAMES})|(?:${WEEKDAY_NAMES})\\s+after\\s+next)\\b`,
   'gi',
 );
+// A relational date describes a visit only in terms of another date ("the
+// day after Monday", "the Tuesday after Labor Day", "a week after our last
+// visit"), never as the grounded date or weekday itself — unlike a bare
+// weekday or date, which might agree, this can never be the authoritative
+// visit's own rendering, so it is judged inside a visit claim like any other
+// relative date (codex P1 on #5055 followups: "the day after Monday" reads
+// as agreeing because the trailing weekday token alone matches). Timing
+// anchored on the visit itself ("mow the day before your next visit") is
+// preparation advice, not another date for the visit.
+const RELATIONAL_DATE_RE = new RegExp(
+  `\\b(?:(?:the|a)\\s+)?(?:${WEEKDAY_NAMES}|day|week|month)\\s+(?:after|before)\\s+(?!(?:your|the|our|this|each|every)\\s+(?:next\\s+)?(?:visit|appointment|service|treatment|application)\\b)(?:next\\b|${WEEKDAY_NAMES}\\b|[a-z]+(?:\\s+[a-z]+){0,2})`,
+  'gi',
+);
 // Every other relative date, judged inside a visit claim: "today" (not the
 // possessive "today's visit", which names the completed visit), "this
 // afternoon", "next weekend", "the following week".
@@ -147,6 +160,18 @@ const PROVIDER_SUBJECT = String.raw`(?:i|we|waves|someone|somebody|(?:(?:the|you
 // What a visit is, as a verb: returning, coming, arriving, stopping by,
 // checking back, following up, being back/there/out, re-treating, seeing you.
 const VISIT_VERB = String.raw`(?:return\w*|com(?:e|es|ing)|came|arriv\w*|visit\w*|back|(?:stop|swing|drop)\w*\s+by|check\w*\s+(?:back|in|on)|follow\w*[-\s]+up|head\w*\s+(?:out|over|back)|re-?treat\w*|re-?inspect\w*|re-?servic\w*|see\s+you|be\s+(?:there|out|over))`;
+// A clause coordinated onto a provider-subject clause with "and"/"but"/
+// "then" carries that subject forward when it names no subject of its own
+// ("we checked all traps and will return tomorrow", "...but will come back
+// next week"): the provider never stopped being the subject, only the
+// clause changed. Only auxiliaries and adverbs may sit between the
+// coordinator and the visit verb, so a clause with its own subject ("...but
+// activity may come back", "You can mow and water tomorrow") never claims a
+// visit through an earlier "we", and a bare "back" needs an auxiliary ("and
+// will be back") so "the front and back yard" is never a visit.
+const OTHER_CLAUSE_SUBJECT_RE = String.raw`\b(?:you|your|they|them|customers?|homeowners?|tenants?)\b`;
+const CLAUSE_COORDINATOR_RE = String.raw`(?:,\s*)?\b(?:and|but|then)\b\s*`;
+const CLAUSE_AUX = String.raw`(?:will|would|shall|should|can|could|may|might|must|also|then|soon|likely|definitely|be|is|are|am|plans?\s+to|planning\s+to|going\s+to|gonna|expect\s+to|intend\s+to)`;
 // [pattern, kind]: a "verb" claim is past when its own verb is; a "noun"
 // claim is past when a past word anchors it ("today's visit", "since our
 // visit"); "future" claims (openers, scheduling, "see you") never are.
@@ -155,6 +180,9 @@ const VISIT_CLAIMS = [
   // back", "we are returning", "the technician returns", "our team is
   // scheduled to come out", "the tech's return".
   [String.raw`\b${PROVIDER_SUBJECT}(?:[’'](?:ll|re|s|m|d|ve))?(?:\s+[a-z’']+){0,3}?\s+${VISIT_VERB}\b`, 'verb'],
+  // A coordinated clause with no subject of its own, carrying a provider
+  // subject named earlier in the same sentence (codex P1 on #5055 followups).
+  [String.raw`(?<=\b${PROVIDER_SUBJECT}\b(?:(?!${OTHER_CLAUSE_SUBJECT_RE}|[.!?])[\s\S]){0,60}?${CLAUSE_COORDINATOR_RE})(?:(?:${CLAUSE_AUX}\s+){1,3}${VISIT_VERB}|(?!back\b)${VISIT_VERB})\b`, 'verb'],
   // Subjectless openers: "Back Tuesday to check traps", "Returning tomorrow".
   [String.raw`^\s*(?:back|returning|coming\s+back|arriving|checking\s+back|following\s+up)\b`, 'future'],
   // The visit named as a thing: any visit, appointment, arrival, follow-up,
@@ -452,6 +480,14 @@ const TOKEN_RULES = [
     problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
   },
   {
+    // A relational date ("the day after Monday") is never the authoritative
+    // visit either, even when the weekday it names agrees — masked here so
+    // the plain-weekday rule below never separately re-checks that token.
+    claimOnly: true,
+    find: (text) => regexTokens(RELATIONAL_DATE_RE, text),
+    problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
+  },
+  {
     claimOnly: true,
     find: (text) => regexTokens(CLAIM_RELATIVE_DATE_RE, text),
     problem: ({ raw }) => `ungrounded_relative_date:${lower(raw)}`,
@@ -517,7 +553,16 @@ function expectedAppointment(facts, groundedCare) {
     day: date ? Number(date[3]) : null,
     window,
     periods: windowPeriods(window),
-    ratifiedSpans: groundedCare.flatMap((sentence) => durationSpans(normalizeTemporalText(sentence))),
+    // Only a duration from a sentence that is itself an appointment/visit
+    // claim can ground a relative-duration visit promise ("A follow-up
+    // visit in 10–14 days is recommended" grounds "in 14 days"). Outcome
+    // timing makes no visit claim ("Results should appear within 2 weeks")
+    // and must never ground one (codex P1 on #5055 followups): "We will be
+    // back within 2 weeks" would otherwise pass as if the technician had
+    // said so.
+    ratifiedSpans: groundedCare
+      .filter((sentence) => isVisitClaim(sentence))
+      .flatMap((sentence) => durationSpans(normalizeTemporalText(sentence))),
   };
 }
 

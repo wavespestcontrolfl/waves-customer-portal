@@ -684,6 +684,18 @@ describe('next-visit claims fixture table', () => {
     // care copy that makes no visit claim keeps its ordinary time words
     ['Keep pets inside this afternoon.', []],
     ['Water the lawn in the morning.', []],
+    // relational dates never agree, even when the weekday they name does
+    // (codex P1 on #5055 followups, ~L98)
+    ['Your next visit is the day after Monday, arriving 8–10 AM.', ['ungrounded_relative_date:the day after monday']],
+    ['Your next visit is the day before Monday, arriving 8–10 AM.', ['ungrounded_relative_date:the day before monday']],
+    ['We will be back the Tuesday after Labor Day.', ['ungrounded_relative_date:the tuesday after labor day']],
+    ['We will be back a week after Labor Day.', ['ungrounded_relative_date:a week after labor day']],
+    // a relational date outside any visit claim is ordinary prose
+    ['Mow the lawn the day after treatment.', []],
+    // timing anchored on the visit itself is preparation advice
+    ['Mow the lawn the day before your next visit.', []],
+    // provider prose joined by "and" is not a visit ("front and back")
+    ['We treated the front and back yard today.', []],
   ])('%s', (text, expected) => {
     expect(problemsFor(text)).toEqual(expected);
   });
@@ -711,6 +723,11 @@ describe('next-visit claims fixture table', () => {
     ['Please schedule your visit for Tuesday.', true],
     ["We'll do another visit Tuesday.", true],
     ['Water for 20 minutes at 6 AM before your next visit.', true],
+    // a provider subject carries into a later coordinated clause that names
+    // no subject of its own (codex P1 on #5055 followups, ~L157)
+    ['We checked all traps and will return tomorrow.', true],
+    ['Our technician checked traps but will come back next week.', true],
+    ['We inspected the property, then will follow up next week.', true],
     // non-appointment care instructions (codex P1 on #5055, L32)
     ['Contact us at 8 AM if activity returns.', false],
     ['Contact us tomorrow if activity returns.', false],
@@ -720,6 +737,18 @@ describe('next-visit claims fixture table', () => {
     ['Contact our team at 8 AM if activity returns.', false],
     ['Call us at 8 AM to book a visit.', false],
     ['We recommend watering at 6 AM on Tuesday.', false],
+    // a coordinated clause naming its own (customer) subject never inherits
+    // the provider's (codex P1 on #5055 followups, ~L157)
+    ['You can mow and water tomorrow.', false],
+    ['We treated the yard and noticed increased activity.', false],
+    // only auxiliaries may sit between the coordinator and the visit verb, so
+    // a clause with its own subject never inherits "we", and a bare "back"
+    // is not a visit verb in a coordinated clause
+    ['We sealed the entry points, but activity may come back after rain.', false],
+    ['We treated the yard and it will come back.', false],
+    ['We checked the front and back of the house.', false],
+    ['We serviced the bait stations and plan to return next week.', true],
+    ['We checked all traps, then will be back Friday.', true],
   ])('%s', (sentence, claim) => {
     expect(isVisitClaim(sentence)).toBe(claim);
     const text = `${sentence} Your next visit is Monday, August 3, arriving 8–10 AM.`;
@@ -735,6 +764,23 @@ describe('next-visit claims fixture table', () => {
     expect(problemsFor('A follow-up visit in fourteen days keeps you ahead of new activity.', [care])).toEqual([]);
     expect(problemsFor('Your next visit is in 7 days.', [care])).toEqual(['ungrounded_relative_date:in 7 days']);
     expect(problemsFor('We will be back in 14 weeks.', [care])).toEqual(['ungrounded_relative_date:in 14 weeks']);
+  });
+
+  // Only a duration from a sentence that is itself an appointment/visit
+  // claim can ground a relative-duration visit promise; outcome timing
+  // (results, drying, re-entry) never does (codex P1 on #5055 followups,
+  // ~L520).
+  test('a relative-duration visit claim is grounded only by another visit claim’s own span, never by outcome timing', () => {
+    const outcomeOnly = 'Results should appear within 2 weeks.';
+    const appointmentSpan = 'A follow-up visit in 10–14 days is recommended.';
+    expect(problemsFor('Results should appear within 2 weeks.', [outcomeOnly])).toEqual([]);
+    expect(problemsFor('We will be back within 2 weeks.', [outcomeOnly])).toEqual(['ungrounded_relative_date:within 2 weeks']);
+    expect(problemsFor('We will be back within 2 weeks.', [appointmentSpan, outcomeOnly]))
+      .toEqual(['ungrounded_relative_date:within 2 weeks']);
+    expect(problemsFor('We will be back in 14 days.', [appointmentSpan, outcomeOnly])).toEqual([]);
+    // a duration in a sentence that is itself outcome timing, not a visit
+    // claim, never grounds a coincidentally same-unit visit promise
+    expect(problemsFor('We will be back in 2 weeks.', [outcomeOnly])).toEqual(['ungrounded_relative_date:in 2 weeks']);
   });
 
   test('ratified copy loses only the visit claims the dated visit contradicts', () => {
