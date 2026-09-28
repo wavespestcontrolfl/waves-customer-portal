@@ -63,6 +63,9 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
+// Delivered statuses, the whitelist late-payment-checker.js's own candidate
+// query uses: a sequence is only revived on an invoice the customer has.
+const PUBLISHED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 
 // A dunning touch fires on its first ELIGIBLE send day or not at all (owner
 // ruling 2026-08-04, after the 07-29→08-04 cron outage left 17 sequences due).
@@ -583,6 +586,7 @@ async function runPending() {
 
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
+  if (latePaymentCheckerRetiredLive()) await reviveReopenedLowStepSequences();
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
@@ -671,24 +675,38 @@ async function runPending() {
 }
 
 /**
- * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
- * or Day 90 step on a still-open invoice picks up again at that step. That
- * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
- * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
- * A payment finish before Day 30 keeps its lower index and stays with the
- * legacy checker (hasActiveSequence). The same invoice guards as the send
- * batch apply. Each revival is guarded on the row still being that
- * finished sequence, and a step already past its send day is passed over by
- * the stale-touch pass in the same run, never sent late.
+ * Shared by both revival paths below: a 'completed' sequence in
+ * [minStepIndex, maxStepIndexExclusive) whose invoice is open again gets
+ * put back at the step it finished on (never advanced), guarded on the row
+ * still being that finished sequence. A step whose send day already passed
+ * is passed over by the stale-touch pass in the same run, never sent late —
+ * the same guarantee adoptOrphanInvoices' fresh rows rely on.
+ *
+ * `reanchorToNow` (reviveReopenedLowStepSequences only — Codex pre-push P0
+ * D): the OLD send-time anchor stays right for a Day 60/90 finish (its next
+ * touch is still measured from the original send), but a low-step finish
+ * reopened long after its own Day 90 would otherwise land back on the SAME
+ * already-exhausted timeline — computeNextTouchAt would return null, the
+ * row stale-completes without sending, and this function would try to
+ * revive it again on every future run, forever. Re-anchoring to NOW (the
+ * reopen IS a new debt event) guarantees a future next_touch_at, so it is
+ * picked up, sent, and NEVER re-selected as 'completed' by this query
+ * again — no loop.
+ *
+ * Delivered/published statuses only (PUBLISHED_INVOICE_STATUSES, the same
+ * whitelist late-payment-checker.js's own candidate query uses) — not the wider
+ * "not terminal" test, for the same reason: a sequence's invoice should
+ * never be draft/scheduled/sending by the time it HAS a finished sequence,
+ * but if one ever were, it has not reached the customer and must not be
+ * revived into an active reminder.
  */
-async function reviveLegacyFinishedSequences() {
-  const legacyCount = config.steps.length;
+async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { reanchorToNow = false } = {}) {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
     .where('s.status', 'completed')
-    .where('s.step_index', '>=', legacyCount)
-    .where('s.step_index', '<', followupSteps().length)
-    .whereNotIn('i.status', TERMINAL_INVOICE_STATUSES)
+    .where('s.step_index', '>=', minStepIndex)
+    .where('s.step_index', '<', maxStepIndexExclusive)
+    .whereIn('i.status', PUBLISHED_INVOICE_STATUSES)
     .whereNull('i.payer_id')
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
@@ -699,16 +717,71 @@ async function reviveLegacyFinishedSequences() {
     );
   let revived = 0;
   for (const row of rows) {
-    const nextAt = computeNextTouchAt(sequenceAnchor(row), row.step_index);
-    if (!nextAt) continue;
-    const updated = await db('invoice_followup_sequences')
-      .where({ id: row.id, status: 'completed', step_index: row.step_index })
-      .update({ updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt });
-    revived += Number(updated) || 0;
+    try {
+      const anchorAt = reanchorToNow ? new Date() : sequenceAnchor(row);
+      const nextAt = computeNextTouchAt(anchorAt, row.step_index);
+      if (!nextAt) continue;
+      const patch = {
+        updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt,
+        ...(reanchorToNow ? { anchor_at: anchorAt } : {}),
+      };
+      const updated = await db('invoice_followup_sequences')
+        .where({ id: row.id, status: 'completed', step_index: row.step_index })
+        .update(patch);
+      revived += Number(updated) || 0;
+    } catch (err) {
+      // One row's failure must never abort the whole revival pass (Fable
+      // pre-push P2 E) — the next run re-selects it fresh.
+      logger.error(`[invoice-followups] revival failed for sequence ${row.id}: ${err.message}`);
+    }
   }
+  return revived;
+}
+
+/**
+ * Day 90 ladder (GATE_DUNNING_LADDER_90): a sequence finished at the Day 60
+ * or Day 90 step on a still-open invoice picks up again at that step. That
+ * is a sequence that ran out of the legacy Day 3/7/14/30 steps, or one a
+ * payment finished at Day 60 or Day 90 whose invoice a dispute reopened.
+ * A payment finish before Day 30 keeps its lower index; see
+ * reviveReopenedLowStepSequences below for what owns THAT case once the
+ * legacy checker retires. The same invoice guards as the send batch apply.
+ */
+async function reviveLegacyFinishedSequences() {
+  const revived = await reviveFinishedSequences(config.steps.length, followupSteps().length);
   if (revived) logger.info(`[invoice-followups] Day 90 ladder: ${revived} finished sequence(s) resumed at Day 60 or Day 90`);
   return revived;
 }
+
+// GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'). A
+// sequence that finished BEFORE the legacy Day 30 end — an invoice paid
+// (stopOnPayment) after only its early touches fired, then reopened by a
+// dispute/refund reversal — has always relied on the legacy
+// late-payment-checker.js as its ONLY fallback: hasActiveSequence
+// deliberately excludes a low-step 'completed' row from "owned" (codex
+// #5126 r1) precisely so that checker picks it back up. Retiring the
+// checker removes that fallback with nothing to replace it (Codex pre-push
+// r1 P1) — this revives it here instead, at the step it finished on, so the
+// ladder owns the reopened invoice the same way it already owns a Day 60/90
+// finish above. Off (checker still running): unchanged, this never runs.
+// Retirement requires the Day 90 ladder to be live: with the ladder off the
+// follow-up cadence ends at Day 30 and the checker is the only sender of the
+// 60- and 90-day reminders (Codex on #5175).
+function latePaymentCheckerRetiredLive() {
+  return process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true' && ladderThrough90Live();
+}
+
+async function reviveReopenedLowStepSequences() {
+  // step_index === config.steps.length (exhausted the legacy cadence
+  // without ever being paid) sits OUTSIDE [0, config.steps.length) — never
+  // selected here, so it can never loop through this path either; that
+  // long-standing "hand off to the legacy checker" case is unrelated to a
+  // reopened invoice and out of this lane's scope.
+  const revived = await reviveFinishedSequences(0, config.steps.length, { reanchorToNow: true });
+  if (revived) logger.info(`[invoice-followups] retired checker: ${revived} reopened invoice(s) resumed on their follow-up sequence (re-anchored to the reopen)`);
+  return revived;
+}
+
 
 // Steps the two cadences time differently (Day 7 vs 10, Day 14 vs 17), and
 // the widest gap between them plus a day's margin.

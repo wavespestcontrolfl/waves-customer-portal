@@ -3208,6 +3208,18 @@ const gates = {
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
 
+  // Retire the legacy account-level late-payment checker (dunning
+  // unification, PR 3a): with the Day 90 ladder owning every overdue
+  // invoice through its final notice, the Mon–Fri 10:10 checker is
+  // redundant with, and can double-nag alongside, the per-invoice ladder.
+  // Ships DARK: off unless exactly 'true', and only honoured while
+  // GATE_DUNNING_LADDER_90 is also live (off, the ladder ends at Day 30 and
+  // the checker is the only 60/90-day sender). This entry is for
+  // logGateStatus only: services/late-payment-checker.js reads it at call
+  // time in checkAndNotify(), and services/invoice-followups.js in
+  // latePaymentCheckerRetiredLive() (reopened-invoice revival).
+  latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
+
   // Pre-visit balance reminder window widens from 3 to 5 days before the
   // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead
   // of the 72-hour appointment reminder. Ships DARK: off unless exactly
