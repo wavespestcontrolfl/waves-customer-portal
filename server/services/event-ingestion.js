@@ -293,9 +293,9 @@ function parseExtractedStartAt(raw) {
   }
   // Every naive form (T or space separator, optional seconds/fraction, or a
   // bare date) is an ET wall-clock time; a bare date is ET midnight.
-  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/);
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/);
   if (!m) return null; // free text ("Sept 19, 7:30 PM") would parse in server-local time: reject
-  const [, y, mo, dd, h = '00', mi = '00', s = '00'] = m;
+  const [, y, mo, dd, h = '00', mi = '00', s = '00', fraction = ''] = m;
   if (!isRealCalendarDateTime(+y, +mo, +dd, +h, +mi, +s)) return null;
   const d = parseETDateTime(`${y}-${mo}-${dd}T${h}:${mi}:${s}`);
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return null;
@@ -309,7 +309,9 @@ function parseExtractedStartAt(raw) {
   };
   if (!namesWallClock(d)) return null;
   if (namesWallClock(new Date(d.getTime() - HOUR_MS)) || namesWallClock(new Date(d.getTime() + HOUR_MS))) return null;
-  return d;
+  // Milliseconds survive (truncated, as new Date() does), so the pre-fix
+  // key of a "19:30:45.123" pull can still be reconstructed exactly.
+  return new Date(d.getTime() + Number(`${fraction}000`.slice(0, 3)));
 }
 
 // ET wall-clock 'HH:MM' for a given instant — minute precision, matching the
@@ -961,9 +963,11 @@ const TZ_SHIFT_QUARANTINE = 'tz_shift_quarantine';
 
 function shiftedLegacyKey(title, start, urlKey) {
   if (!start) return null;
-  // Seconds carry over: the old parser kept "19:30:45" as 19:30:45Z.
+  // Seconds and milliseconds carry over: the old parser kept "19:30:45.123"
+  // as 19:30:45.123Z.
   const seconds = String(etParts(start).second).padStart(2, '0');
-  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:${seconds}.000Z`;
+  const millis = String(start.getUTCMilliseconds()).padStart(3, '0');
+  const shiftedIso = `${etDateString(start)}T${etWallClockHHMM(start)}:${seconds}.${millis}Z`;
   if (shiftedIso === start.toISOString()) return null;
   return `${title.toLowerCase().slice(0, 80)}|${shiftedIso}|${urlKey}`.slice(0, 256);
 }

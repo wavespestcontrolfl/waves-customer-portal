@@ -397,15 +397,18 @@ describeOrSkip('upsertExtractedEvents — legacy dedup-key migration on real Pos
     expect(new Date(fresh[0].start_at).toISOString()).toBe(start.toISOString());
   });
 
-  test('a pre-fix row whose time carried seconds is quarantined too', async () => {
+  test.each([
+    ['whole seconds', ':00:45.000Z', 42],
+    ['fractional seconds', ':00:45.123Z', 43],
+  ])('a pre-fix row whose time carried %s is quarantined too', async (label, suffix, days) => {
     const source = { id: sourceId, coverage_geo: [] };
-    const title = 'TEST Shifted Pre Fix Row With Seconds';
-    const url = 'https://test.invalid/shifted-pre-fix-row-seconds/';
-    const startIso = daysFromNowIso(42, 23).replace(':00:00.000Z', ':00:45.000Z');
+    const title = `TEST Shifted Pre Fix Row With ${label}`;
+    const url = `https://test.invalid/shifted-pre-fix-row-${days}/`;
+    const startIso = daysFromNowIso(days, 23).replace(':00:00.000Z', suffix);
     const start = parseExtractedStartAt(startIso);
     const shifted = start.toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T');
-    const shiftedIso = `${shifted}.000Z`; // the old parser kept the seconds
-    expect(shiftedIso).toMatch(/:45\.000Z$/);
+    const shiftedIso = `${shifted}${suffix.slice(6)}`; // the old parser kept seconds and milliseconds
+    expect(shiftedIso.endsWith(suffix.slice(3))).toBe(true);
     const [stale] = await db('events_raw').insert({
       source_id: sourceId, external_id: `${title.toLowerCase()}|${shiftedIso}|${url}`, title,
       start_at: new Date(shiftedIso), event_url: url, admin_status: 'pending',

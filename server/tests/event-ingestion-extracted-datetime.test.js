@@ -86,6 +86,12 @@ describe('parseExtractedStartAt — ET wall-clock parsing for Claude-extracted s
     expect(parseExtractedStartAt('2028-02-29T10:00').toISOString()).toBe('2028-02-29T15:00:00.000Z');
   });
 
+  test('fractional seconds are kept to the millisecond, as the old parser kept them', () => {
+    expect(parseExtractedStartAt('2026-09-19T19:30:45.123').toISOString()).toBe('2026-09-19T23:30:45.123Z');
+    expect(parseExtractedStartAt('2026-09-19T19:30:45.5').toISOString()).toBe('2026-09-19T23:30:45.500Z');
+    expect(parseExtractedStartAt('2026-09-19T19:30:45.1239').toISOString()).toBe('2026-09-19T23:30:45.123Z');
+  });
+
   test('a trailing Z is honored as UTC, not re-interpreted as ET', () => {
     const d = parseExtractedStartAt('2026-06-01T12:00:00Z');
     expect(d.toISOString()).toBe('2026-06-01T12:00:00.000Z');
