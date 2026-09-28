@@ -455,19 +455,22 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // serviceKeyFromText → service-library resolveServiceType). Null when the
 // message names no service, or on any resolver error (fail-safe: the
 // caller falls back to the customer's own visit).
-// Pricing-family key → exact catalog service_key (Codex #5194 r1): the
-// pricing resolver's families are not catalog keys, and a partial match on
-// "termite" lands on the lowest-sorted termite row, not the bait system.
-const PRICING_KEY_TO_CATALOG_KEY = Object.freeze({
-  pest_control: 'pest_control',
-  lawn_care: 'lawn_care',
-  one_time_lawn: 'lawn_care',
-  mosquito: 'mosquito',
-  one_time_mosquito: 'mosquito_one_time',
-  tree_shrub: 'tree_shrub',
-  palm: 'palm_injection',
-  termite: 'termite_bait',
-  rodent_bait: 'rodent_bait',
+// Pricing-family key → the catalog service_keys that family books as, in
+// preference order (Codex #5194 r1): the pricing resolver's families are not
+// catalog keys, and a partial match on "termite" lands on the lowest-sorted
+// termite row, not the bait system. Keys come from the service-library and
+// inspection-catalog migrations; the first that resolves to a real row wins,
+// so a catalog that predates a later key still resolves.
+const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
+  pest_control: ['pest_general_quarterly', 'pest_control'],
+  lawn_care: ['lawn_fertilization', 'lawn_care'],
+  one_time_lawn: ['lawn_fertilization', 'lawn_care'],
+  mosquito: ['mosquito_monthly', 'mosquito_seasonal', 'mosquito'],
+  one_time_mosquito: ['mosquito_event', 'mosquito_one_time'],
+  tree_shrub: ['tree_shrub_program', 'tree_shrub'],
+  palm: ['palm_injection', 'palm_treatment'],
+  termite: ['termite_bait'],
+  rodent_bait: ['rodent_monitoring', 'rodent_bait'],
 });
 async function requestedServiceType(inboundMessage) {
   const text = String(inboundMessage || '').trim();
@@ -482,11 +485,14 @@ async function requestedServiceType(inboundMessage) {
           : null;
     const { serviceKeyFromText } = require('./customer-pricing-ai');
     const key = inspection ? null : serviceKeyFromText(text);
-    const catalogKey = inspection || (key ? PRICING_KEY_TO_CATALOG_KEY[key] : null);
-    if (!catalogKey) return null;
+    const candidates = inspection ? [inspection] : (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
+    if (!candidates || !candidates.length) return null;
     const { resolveServiceType } = require('./service-library');
-    const row = await resolveServiceType(catalogKey);
-    return row?.name ? String(row.name) : null;
+    for (const catalogKey of candidates) {
+      const row = await resolveServiceType(catalogKey);
+      if (row?.name) return String(row.name);
+    }
+    return null;
   } catch (err) {
     logger.warn(`[sms-shadow] requested-service resolution failed (${err.message}); using the customer's own visit`);
     return null;

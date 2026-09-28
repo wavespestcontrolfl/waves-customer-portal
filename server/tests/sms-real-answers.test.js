@@ -1818,11 +1818,13 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
 
   test('requestedServiceType resolves the message through the existing catalog resolvers; no service named → null; resolver error → null', async () => {
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
-    const resolveServiceType = jest.fn(async (key) => (key === 'lawn_care' ? { name: 'Lawn Care' } : null));
+    // realistic catalog: only the seeded service_keys resolve (service_library migration)
+    const CATALOG = { lawn_fertilization: 'Lawn Fertilization & Weed Control', pest_general_quarterly: 'General Pest Control (Quarterly)', mosquito_monthly: 'Mosquito Control (Monthly)', termite_bait: 'Termite Bait Station System', palm_injection: 'Palm Injection Service', wdo_inspection: 'WDO Inspection (Termite Letter)' };
+    const resolveServiceType = jest.fn(async (key) => (CATALOG[key] ? { name: CATALOG[key] } : null));
     jest.doMock('../services/service-library', () => ({ resolveServiceType }));
     const drafter = require('../services/sms-shadow-drafter');
-    await expect(drafter.requestedServiceType('Can you add lawn service for me?')).resolves.toBe('Lawn Care');
-    expect(resolveServiceType).toHaveBeenCalledWith('lawn_care'); // the exact catalog key, never a partial-match phrase
+    await expect(drafter.requestedServiceType('Can you add lawn service for me?')).resolves.toBe('Lawn Fertilization & Weed Control');
+    expect(resolveServiceType).toHaveBeenCalledWith('lawn_fertilization'); // a real catalog key, never a partial-match phrase
     await expect(drafter.requestedServiceType('When are you coming next?')).resolves.toBeNull();
     resolveServiceType.mockRejectedValueOnce(new Error('boom'));
     await expect(drafter.requestedServiceType('lawn please')).resolves.toBeNull();
@@ -1830,7 +1832,7 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
 
   test('a RESCHEDULE of a combined visit keeps the visit\'s own service; a service already on the calendar is not a new booking (audit P1)', async () => {
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
-    jest.doMock('../services/service-library', () => ({ resolveServiceType: async () => ({ name: 'Lawn Care' }) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'lawn_fertilization' ? { name: 'Lawn Care' } : null) }));
     const getAvailableSlots = jest.fn(async () => ({ days: [] }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = require('../services/sms-shadow-drafter');
@@ -1852,7 +1854,7 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
 
   test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/lawn/i.test(t) ? 'lawn_care' : null) }));
-    jest.doMock('../services/service-library', () => ({ resolveServiceType: async () => ({ name: 'Lawn Care' }) }));
+    jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'lawn_fertilization' ? { name: 'Lawn Care' } : null) }));
     const getAvailableSlots = jest.fn(async () => ({ days: [] }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     const drafter = require('../services/sms-shadow-drafter');
@@ -1910,7 +1912,7 @@ describe('#5194 round 1', () => {
     jest.resetModules();
   });
   const mockCatalog = () => {
-    const resolveServiceType = jest.fn(async (key) => ({ termite_bait: { name: 'Termite Bait Station System' }, palm_injection: { name: 'Palm Injection' }, mosquito: { name: 'Mosquito Control' } }[key] || null));
+    const resolveServiceType = jest.fn(async (key) => ({ termite_bait: { name: 'Termite Bait Station System' }, palm_injection: { name: 'Palm Injection' }, mosquito_monthly: { name: 'Mosquito Control' } }[key] || null));
     jest.doMock('../services/customer-pricing-ai', () => ({ serviceKeyFromText: (t) => (/termite/i.test(t) ? 'termite' : /palm/i.test(t) ? 'palm' : /mosquito/i.test(t) ? 'mosquito' : null) }));
     jest.doMock('../services/service-library', () => ({ resolveServiceType }));
     return resolveServiceType;
@@ -1928,6 +1930,8 @@ describe('#5194 round 1', () => {
   test('explicit inspection intent wins over the pricing family, using the REAL keyword resolver (audit P1: WDO ≠ termite bait)', async () => {
     jest.dontMock('../services/customer-pricing-ai');
     const resolveServiceType = jest.fn(async (key) => ({ wdo_inspection: { name: 'WDO Inspection' }, termite_inspection: { name: 'Termite Inspection' }, termite_bait: { name: 'Termite Bait Station System' }, rodent_inspection: { name: 'Rodent Inspection' } }[key] || null));
+    // a key list falls through to the next real row: an older catalog without palm_injection still resolves palms
+    
     jest.doMock('../services/service-library', () => ({ resolveServiceType }));
     const drafter = require('../services/sms-shadow-drafter');
     await expect(drafter.requestedServiceType('Can I schedule a WDO inspection?')).resolves.toBe('WDO Inspection');
