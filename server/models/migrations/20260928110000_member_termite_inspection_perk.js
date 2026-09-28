@@ -38,7 +38,7 @@ exports.up = async function (knex) {
 exports.down = async function (knex) {
   await knex('discounts').where({ discount_key: 'waveguard_member_wdo' }).update({
     name: 'WaveGuard Member Discount (Termite Inspection)',
-    description: 'Free WDO / termite inspection for any active WaveGuard member. Maps Square "WaveGuard Member Discount (Termite Inspection)" at 100%.',
+    description: 'Free WDO / termite inspection for any active WaveGuard member.',
     service_key_filter: 'wdo_inspection',
     updated_at: new Date(),
   });
