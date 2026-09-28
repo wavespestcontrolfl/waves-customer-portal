@@ -438,11 +438,40 @@ function titleAnchorWordIndex(rawTitle) {
     if (packMatch && Number(packMatch[1]) > 0 && packMatch.index < cutoff) cutoff = packMatch.index;
   }
   const titleWords = normalizeForMatch(title).split(' ').filter(Boolean);
+  // A recognized category phrase ("Caterpillar Control", "Weed Killer",
+  // "Insecticide") closes off the identity portion the same way a size
+  // does: "Southern Ag Thuricide BT Caterpillar Control, 16oz" anchors on
+  // "BT", never "Caterpillar". Only when some identity word precedes it —
+  // otherwise the title's anchor is read as if no phrase were there.
+  const categoryCut = categoryPhraseStart(title);
+  if (categoryCut != null && categoryCut < cutoff) {
+    const anchored = lastIdentityWordBefore(title, categoryCut, titleWords);
+    if (anchored != null) return anchored;
+  }
+  return lastIdentityWordBefore(title, cutoff, titleWords);
+}
+
+function lastIdentityWordBefore(title, cutoff, titleWords) {
   const wordsBeforeCutoff = normalizeForMatch(title.slice(0, cutoff)).split(' ').filter(Boolean).length;
   for (let i = Math.min(wordsBeforeCutoff, titleWords.length) - 1; i >= 0; i -= 1) {
     if (isIdentityWord(titleWords[i])) return i;
   }
   return null;
+}
+
+// The character index where the title's earliest category wording (literal
+// or plain-language, CANONICAL_CATEGORIES) starts, or null. Read on the
+// separator-folded text, whose folding keeps every character position.
+function categoryPhraseStart(title) {
+  const folded = String(title || '').replace(/[_/|.,:;+]/g, ' ').replace(/(?<!\d)-|-(?!\d)/g, ' ');
+  let earliest = null;
+  for (const c of CANONICAL_CATEGORIES) {
+    for (const re of [c.statedBy, c.plainPhrase].filter(Boolean)) {
+      const at = folded.search(re);
+      if (at >= 0 && (earliest == null || at < earliest)) earliest = at;
+    }
+  }
+  return earliest;
 }
 
 // The candidate's container_size normalized to ONE shape, so
@@ -889,7 +918,10 @@ function unsureDirectAnswer(raw, ctx) {
   // The deterministic match, when there is one, outranks whatever candidate
   // the model left in product_id (existingGuess) — a bare "unsure" never
   // steers a person away from the stronger catalog match.
-  const candidate = (ctx.candidates || []).find((c) => c.id === raw?.product_id);
+  // The prompt tells the model to leave product_id null on "unsure", so a
+  // matched line falls straight back to the matcher's own product.
+  const candidate = (ctx.candidates || []).find((c) => c.id === raw?.product_id)
+    || (ctx.matchedProductId ? { id: ctx.matchedProductId } : null);
   const guess = candidate ? existingGuess(candidate, ctx) : null;
   return guess ? { kind: 'unsure', status: 'agent_unsure', reason, suggestion: guess } : { kind: 'unsure', status: 'agent_unsure', reason };
 }

@@ -316,6 +316,11 @@ describe('classifyDecision — a new product\'s category must be one the listing
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'cleaner', count)).toMatchObject({ kind: 'unsure' });
   });
 
+  test('the real replay title creates "Southern Ag Thuricide BT" — the category phrase is never the name\'s anchor', () => {
+    expect(decide('Southern Ag Thuricide BT Caterpillar Control, 16oz - Pint', 'Southern Ag Thuricide BT', 'insecticide', oz(16)))
+      .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { name: 'Southern Ag Thuricide BT', category: 'insecticide' } });
+  });
+
   test('"Southern Ag Thuricide BT Caterpillar Control 16 oz" states Insecticide via the stating phrase, not the word "Insecticide" itself', () => {
     expect(decide('Southern Ag Thuricide BT Caterpillar Control 16 oz', 'Southern Ag Thuricide BT Caterpillar', 'insecticide', oz(16)))
       .toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'insecticide' } });
@@ -899,6 +904,13 @@ describe('classifyDecision — equipment / not_stock / unsure routing', () => {
     const candidate = { id: 'p-taurus', name: 'Taurus SC' };
     const decision = classifyDecision({ kind: 'unsure', reason: 'not confident', product_id: 'p-taurus' }, ctx({ rawTitle: 'Taurus SC Termiticide 78 oz', candidates: [candidate] }));
     expect(decision).toMatchObject({ kind: 'unsure', suggestion: { type: 'existing', productId: 'p-taurus', productName: 'Taurus SC' } });
+  });
+
+  test('a bare "unsure" on a matched line (product_id null, as the prompt says) suggests the matcher\'s product', () => {
+    const decision = classifyDecision({ kind: 'unsure', reason: 'x', product_id: null }, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', candidates: [{ id: 'p-taurus', name: 'Taurus SC' }], matchedProductId: 'p-taurus',
+    }));
+    expect(decision.suggestion).toEqual({ type: 'existing', productId: 'p-taurus', productName: 'Taurus SC' });
   });
 
   test('a candidate the title does not NAME (shared token only) is never the closest guess', () => {
