@@ -119,8 +119,8 @@ const SPANISH_CALLER_DESTINATION_RE = /\b(?:(?:a|para|con)\s+(?:ti|usted(?:es)?|
 const SPANISH_TITLED_DESTINATION_RE = /\b(?:a|para|con)\s+(?:el|la)\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)|\bal\s+([a-záéíóúñü]+)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
 const SPANISH_NONPERSON_TITLE_HEAD_RE = /^(?:correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|servicio|mensajería|mañana|tarde|noche|mediodía|medianoche)$/i;
 const SPANISH_POSSESSIVE_DESTINATION_RE = /\b(?:a|para|con)\s+(?:mi|tu|su|nuestro|nuestra)\s+[a-záéíóúñü]+\b/i;
-const SPANISH_BARE_DESTINATION_RE = /\b(?:a|para|con)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con|y)\b|[.,;!?]|$)/i;
-const SPANISH_COORDINATED_RECIPIENT_RE = /^\s*y\s+([^.!?;,]+?)(?=\s+y\s+(?=(?:a|al|para|con)\b)|\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
+const SPANISH_BARE_DESTINATION_RE = /\b(?:a|para|con|y)\s+([^.!?;,]+?)(?=\s+(?:a|para|por|con|y)\b|[.,;!?]|$)/i;
+const SPANISH_COORDINATED_RECIPIENT_RE = /^\s*y\s+([^.!?;,]+?)(?=\s+y\s+|\s+(?:a|para|por|con)\b|[.,;!?]|$)/i;
 const SPANISH_COORDINATED_DESCRIBED_RECIPIENT_RE = new RegExp(`\\by\\s+((?:(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR})|(?:usted(?:es)?|vosotr[oa]s?))\\b`, 'i');
 const SPANISH_NONPERSON_DESTINATION_RE = /\b(?:a|para|con)\s+(?:(?:mi|tu|su|nuestro|nuestra)\s+)?(?:que|correo|email|direcci[oó]n|buz[oó]n|archivo|registro|confirmaci[oó]n|revisi[oó]n|informaci[oó]n|cita|visita|solicitud|reserva|continuaci[oó]n|(?:el\s+)?servicio|mensajería|(?:primera|[uú]ltima)\s+hora|(?:confirm|coordin|inform|revis|comprob|habl|pon|envi|mand|entreg|llam|contact|comunic|escrib|dar|devolv|recib|hac|lleg)[a-záéíóúñü]*)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
@@ -273,7 +273,8 @@ function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
   const destinations = roleEvidence.matchAll(new RegExp(SPANISH_BARE_DESTINATION_RE.source, 'gi'));
   for (const destination of destinations) {
     if (SPANISH_CALLER_DESTINATION_RE.test(destination[0]) || SPANISH_NONPERSON_DESTINATION_RE.test(destination[0])) continue;
-    const destinationName = destination[1].normalize('NFC').toLocaleLowerCase('es');
+    const destinationName = destination[1].replace(/^(?:a|al|para|con)\s+/i, '')
+      .normalize('NFC').toLocaleLowerCase('es');
     if (!spanishProperNamePhrase(destinationName)) continue;
     if (!spanishCallerNameMatches(destinationName, callerNames)) return false;
   }
@@ -914,11 +915,12 @@ const SCHEDULE_PREDICATES = Object.freeze({
 const NEW_OR_CHANGED_VISIT_RE = /\b(?:(?:new|another|replacement|rescheduled|rebooked)\s+(?:visit|appointment|service|treatment)|(?:visit|appointment|service|treatment)\s+(?:is\s+|was\s+|will be\s+|has been\s+)?(?:new|rescheduled|rebooked)|(?:nuev[oa]|otra|reprogramad[oa]|reservad[oa] de nuevo)\s+(?:visita|cita|servicio|tratamiento)|(?:visita|cita|servicio|tratamiento)\s+(?:nuev[oa]|reprogramad[oa]|reservad[oa] de nuevo))\b/i;
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero|aunque)\b/i;
+const SPANISH_VISIT_PURPOSE_RE = /\bpara\s+[a-záéíóúñü]+(?:ar|er|ir)(?:le|les|nos|se)?\s+(?:(?!que\b)[a-záéíóúñü]+\s+){0,3}(?:(?:la|el|su)\s+)?(?:visita|cita|servicio|tratamiento)\b/gi;
 function spanishQualitativeTimeEvidence(text, subject) {
   return String(text || '').replace(new RegExp(SPANISH_QUALITATIVE_VISIT_TIME_RE.source, 'gi'), (match, offset, source) => {
     const before = source.slice(0, offset).split(CLAUSE_SPLIT_RE).pop();
     const after = source.slice(offset + match.length).split(CLAUSE_SPLIT_RE)[0];
-    const clause = `${before}${match}${after}`;
+    const clause = `${before}${match}${after}`.replace(SPANISH_VISIT_PURPOSE_RE, ' ');
     return subject.test(clause) && !clauseIsNegated(clause) ? match : ' ';
   });
 }
