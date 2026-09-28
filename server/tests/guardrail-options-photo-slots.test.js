@@ -79,4 +79,19 @@ describe('deriveSyncGuardrailOptions — photo_slots requiredSourceUrls allowanc
     const externalLinkFailures = result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
     expect(externalLinkFailures).toEqual([]);
   });
+
+  test('requiredSourceUrls is allowance-only: a draft that never embeds any photo_slots photo is never penalized for skipping them (Codex P1 double-check)', () => {
+    // Photo slots ride on EVERY supporting-blog/customer-question brief
+    // unconditionally (the writer decides post_type, not the composer) — a
+    // non-diagnostic draft, or one where every slot came back flagged, must
+    // never be treated as though it owed a citation to an unused photo URL.
+    const opts = deriveSyncGuardrailOptions(
+      { id: 'opp-1', bucket: 'customer_need', service: 'pest' },
+      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', service: 'pest', voice_constraints: { photo_slots: PHOTO_SLOTS } },
+    );
+    const body = 'Fire ants build loose sandy mounds in open, sunny Florida yards. Learn more on the Waves blog.';
+    const result = evaluate({ frontmatter: { post_type: 'decision' }, body }, opts);
+    const photoRelatedFailures = result.findings.filter((f) => /photo|MISSING_SOURCE|REQUIRED_SOURCE/i.test(`${f.code} ${f.message}`));
+    expect(photoRelatedFailures).toEqual([]);
+  });
 });

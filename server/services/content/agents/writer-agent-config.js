@@ -484,8 +484,14 @@ look_alike — see licensed-photo-library.js).
   license text, never drop either link. Do not caption a licensed photo as
   anything other than what its 'alt' says it is.
 - This section governs ONLY the pest/sign/look-alike identification roles.
-  It does not change the general in-body-image rule below (an unrelated
-  in-body image on a non-identification post, or a hero image, is unaffected).
+  It does not change the general in-body-image rule below for a
+  non-identification post, or the hero image (rendered from frontmatter, not
+  the body) on ANY post — both are unaffected. But a post_type "diagnostic"
+  draft's BODY carries NO in-body image beyond these three slots — the
+  publish gate treats every body image on a diagnostic post as one of them,
+  so an unrelated fourth image, even a brief-approved one, has nowhere to go
+  and hard-fails. If a diagnostic draft genuinely needs a non-slot visual,
+  use an MDX component from the catalog above (never a raw Markdown image).
 
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
 FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail

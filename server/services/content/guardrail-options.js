@@ -98,6 +98,13 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   // (upload.wikimedia.org / commons.wikimedia.org / creativecommons.org
   // are not on the trusted-host allowlist). Exact URLs only, never the
   // whole host — the same posture requiredSourceUrls already applies.
+  // Confirmed ALLOWANCE-ONLY (Codex/Claude-fallback P1 double-check): in
+  // content-guardrails.js, requiredSourceUrls feeds ONLY
+  // allowedExactSourceUrls, consumed by externalLinkFinding (an external
+  // URL IS permitted) and priceParagraphIsSourced (a competitor price MAY
+  // cite it) — neither is a must-appear/must-cite check, so a brief whose
+  // writer lands on a non-diagnostic post_type, or omits a slot, is never
+  // penalized for not embedding a photo it was never obliged to use.
   const photoSlots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
   const photoSlotSourceUrls = photoSlots
     .flatMap((s) => [s?.photo?.url, s?.photo?.source_page, s?.photo?.license_url])
