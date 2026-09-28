@@ -6889,7 +6889,7 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
-  // annual-prepay payment reminders/sweeps that ride the same run.
+  // annual-prepay covered-term sweep that rides the same run.
   // =========================================================================
   cron.schedule('12 10 * * *', async () => {
     logger.info('Running: renewal reminders');
