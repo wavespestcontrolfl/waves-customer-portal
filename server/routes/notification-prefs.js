@@ -79,6 +79,9 @@ router.put('/', async (req, res, next) => {
       referralNudge: 'referral_nudge',
       marketingOffers: 'marketing_offers',
       weatherAlerts: 'weather_alerts',
+      // Customers cannot turn payment receipts off (owner ruling 2026-09-26,
+      // payment emails always send): only true is written (below), which
+      // clears a legacy opt-out. paymentReceiptChannel still routes delivery.
       paymentReceipt: 'payment_receipt',
       serviceReminderChannel: 'service_reminder_channel',
       enRouteChannel: 'en_route_channel',
@@ -95,6 +98,7 @@ router.put('/', async (req, res, next) => {
     };
 
     for (const [camel, snake] of Object.entries(fieldMap)) {
+      if (snake === 'payment_receipt' && b[camel] !== true) continue;
       if (b[camel] !== undefined) {
         // Validate channel values
         if (snake.endsWith('_channel') && !['sms', 'email', 'both'].includes(b[camel])) continue;
