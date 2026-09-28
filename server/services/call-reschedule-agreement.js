@@ -502,10 +502,11 @@ function commitsToSlot(quote, words, hour24, turns) {
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
-    // The agent need not repeat the day ("Yep, we'll see them at 9"), but a
-    // day it does name must be the recorded one, and a same-day change's
-    // commitment names none.
-    && (namesAnyDay(around) ? typeof words.day === 'string' && holds(around, words.day) : true)
+    // The agent need not repeat the day when its sentence is plain
+    // commitment ("Yep, we'll see them at 9", plainCommitment); otherwise it
+    // must say the recorded day, and a same-day change's commitment names
+    // none.
+    && (typeof words.day === 'string' ? holds(around, words.day) || plainCommitment(around, words) : !namesAnyDay(around))
     // An hour read as business hours must be said exactly by the agent too
     // ("we should arrive around two" fails).
     && (!unstatedHour || saidExactly(quote, words, turns))
@@ -523,6 +524,22 @@ const DAY_WORDS = new Set([
   'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
   'today', 'tonight', 'tomorrow',
 ]);
+// A commitment that leaves the day to the caller's words may say nothing
+// but these (plus the hour and its period words): "Yep, we'll see them at
+// 9". Anything else ("in two days", "May 3", "9/25", a weekday) and it must
+// say the recorded day itself.
+const PLAIN_COMMIT_WORDS = new Set([
+  'we', 'll', 'will', 'i', 'ill', 'see', 'you', 'them', 'him', 'her', 'guys', 'at', 'to', 'for', 'be', 'there', 'come',
+  'out', 'pop', 'in', 'put', 'down', 'switch', 'it', 'move', 'moved', 'make', 'mark', 'get', 'have', 'the', 'a',
+  'tech', 'technician', 'okay', 'ok', 'yep', 'yes', 'yeah', 'sure', 'sounds', 'good', 'great', 'perfect', 'then',
+  'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'right', 'now', 'over',
+  'o', 'clock', 'oclock', '00', 'thank', 'thanks', 'awesome', 'alright',
+]);
+function plainCommitment(text, words) {
+  const allowed = new Set([...normalize(words.hour).split(' '), ...normalize(words.period || '').split(' ').filter(Boolean)]);
+  return normalize(text).split(' ').every((t) => PLAIN_COMMIT_WORDS.has(t) || allowed.has(t));
+}
+
 // Words that say a day relatively ("in two days", "the day after", "next
 // week"): a commitment using them names a day too.
 const RELATIVE_DAY_WORDS = new Set(['day', 'days', 'week', 'weeks', 'weekend', 'next', 'following', 'after', 'yesterday']);
