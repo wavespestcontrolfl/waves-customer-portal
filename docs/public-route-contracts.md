@@ -75,17 +75,20 @@ unless exactly `true`, read at startup). On, the LIVE service-report payload
 or carries it) may carry `planSummary: { year, visitsThisYear,
 reservicesThisYear }` for the token's own customer, only when that customer
 is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
-with at least one completed visit this year; anyone else gets no field and no
+with at least one performed visit this year; anyone else gets no field and no
 plan wording on the page. The plan is account-level, so the counts cover the
-account's visits, not only this property's. `visitsThisYear` counts completed
-visits in the current ET calendar year; `reservicesThisYear` counts how many
-of those were callbacks (the persisted `is_callback` flag, a `pest_re_service`
-/ `lawn_re_service` key, or a "Re-Service" service name when neither is
-stamped; a rodent-program visit, such as the included trapping follow-up,
-never counts, by its key or its rodent-line name). Counts only: no price, no
-"at no charge" claim (a callback can be billed; see `reservice-report.js`), no
-dates, address, technician, or token. Upcoming visits belong to the separate
-upcoming-visits card, not this field. `stripLiveOnlyScheduleFields` also
+account's visits, not only this property's. `visitsThisYear` counts PERFORMED
+visits in the current ET calendar year: completed, customer-visible service
+records whose outcome is not inspection-only, customer-declined or incomplete
+(the Pest Pressure prior-visit rule, `pest-pressure/first-visit.js`), never a
+schedule row's status alone. `reservicesThisYear` counts how many of those
+were callbacks (the booking's persisted `is_callback` flag, a
+`pest_re_service` / `lawn_re_service` key, or a "Re-Service" service name when
+neither is stamped; a rodent-program visit, such as the included trapping
+follow-up, never counts, by its key or its rodent line). Counts only: no
+price, no "at no charge" claim (a callback can be billed; see
+`reservice-report.js`), no upcoming visits, dates, address, technician, or
+token. `stripLiveOnlyScheduleFields` also
 deletes it from every non-live render (PDF, static, sms_preview), the same
 staleness rule as `nextAppointment`. No new route and no write; auth, headers
 and rate limits are unchanged.

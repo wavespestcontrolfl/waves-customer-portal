@@ -66,6 +66,8 @@ const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/servi
 const PLAN_CALLBACK_RESERVICE_KEYS = new Set(['pest_re_service', 'lawn_re_service']);
 const { isReService } = require('../re-service');
 const { isActivePlanCustomer } = require('../waveguard-existing-services');
+const { isPerformedVisitOutcome } = require('../pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts } = require('../pest-pressure/history-filter');
 
 let PhotoService = null;
 try {
@@ -4789,10 +4791,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   let cockroachProgramPosition;
   let cockroachRenderedSignature;
   // "Your plan" section (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
-  // this year's completed-visit + re-service COUNTS — never a price, owner
-  // rule that prices live on estimate pages only. Upcoming visits are NOT
-  // listed here: the upcoming-visits card (GATE_REPORT_UPCOMING_VISITS) owns
-  // that list. Live-view only (stripLiveOnlyScheduleFields), like
+  // this year's performed-visit + re-service COUNTS — never a price, owner
+  // rule that prices live on estimate pages only. It lists no upcoming
+  // visits. Live-view only (stripLiveOnlyScheduleFields), like
   // nextAppointment.
   let planSummary = null;
   try {
@@ -5008,29 +5009,50 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // Counts only, never "at no charge": a member's callback can still be
       // billed, and that money claim needs per-visit proof (reservice-report.js).
       const member = await isActivePlanCustomer(knex, service.customer_id);
-      const completedRows = member
-        ? await knex('scheduled_services')
-          .where({ customer_id: service.customer_id, status: 'completed' })
-          .andWhere('scheduled_date', '>=', `${yearEt}-01-01`)
-          .andWhere('scheduled_date', '<', `${yearEt + 1}-01-01`)
-          .select('service_key_snapshot', 'service_type', 'is_callback')
+      // A visit counts only when it was PERFORMED — the same rule Pest
+      // Pressure uses for prior visits (pest-pressure/first-visit.js): a
+      // completed, customer-visible service record whose outcome is not
+      // inspection-only, customer-declined or incomplete. The schedule row's
+      // status alone is not proof: an incomplete or declined closeout still
+      // leaves it 'completed'. The booking joins in only for its service key
+      // and canonical callback flag.
+      const recordRows = member
+        ? await knex('service_records')
+          .leftJoin('scheduled_services', 'scheduled_services.id', 'service_records.scheduled_service_id')
+          .where('service_records.customer_id', service.customer_id)
+          .where('service_records.status', 'completed')
+          .andWhere('service_records.service_date', '>=', `${yearEt}-01-01`)
+          .andWhere('service_records.service_date', '<', `${yearEt + 1}-01-01`)
+          .select(
+            'service_records.service_line',
+            'service_records.service_type',
+            'service_records.structured_notes',
+            { record_is_callback: 'service_records.is_callback' },
+            'scheduled_services.service_key_snapshot',
+            { scheduled_is_callback: 'scheduled_services.is_callback' },
+          )
           .catch(() => null)
         : null;
-      if (Array.isArray(completedRows) && completedRows.length) {
-        const visitsThisYear = completedRows.length;
-        const reservicesThisYear = completedRows
+      const performedRows = Array.isArray(recordRows)
+        ? recordRows.filter((row) => !serviceRecordSuppressesCustomerArtifacts(row)
+          && isPerformedVisitOutcome(parseJsonObject(row.structured_notes).visitOutcome))
+        : [];
+      if (performedRows.length) {
+        const visitsThisYear = performedRows.length;
+        const reservicesThisYear = performedRows
           // A rodent-program visit (the included trapping follow-up, a trap
           // check) is a program step, never a re-service, whatever its flags
-          // say: excluded by its key or by a rodent-line name, keyed or not.
-          // Then the booking's persisted is_callback flag is the
-          // canonical callback fact (record creation copies it to
-          // service_records), then a stamped callback key, then, for a
-          // free-text booking with neither, the canonical "Re-Service" match.
+          // say: excluded by its key or by its rodent line, keyed or not.
+          // Then the booking's persisted is_callback flag is the canonical
+          // callback fact (the record's copy stands in when no booking is
+          // linked), then a stamped callback key, then, for a free-text
+          // booking with neither, the canonical "Re-Service" match.
           .filter((row) => {
-            const key = row?.service_key_snapshot || null;
-            if (key === 'rodent_trapping_followup' || detectServiceLine(row?.service_type) === 'rodent') return false;
-            if (row?.is_callback === true) return true;
-            return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row?.service_type });
+            const key = row.service_key_snapshot || null;
+            if (key === 'rodent_trapping_followup'
+              || (row.service_line || detectServiceLine(row.service_type)) === 'rodent') return false;
+            if ((row.scheduled_is_callback ?? row.record_is_callback) === true) return true;
+            return key ? PLAN_CALLBACK_RESERVICE_KEYS.has(key) : isReService({ serviceType: row.service_type });
           })
           .length;
         planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };

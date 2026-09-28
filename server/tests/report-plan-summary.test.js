@@ -1,9 +1,10 @@
 // "Your plan" section payload (owner ask 2026-09-28, GATE_REPORT_PLAN_SUMMARY):
 // buildReportV1Data adds planSummary { year, visitsThisYear,
 // reservicesThisYear } for an active plan member, on live builds only, when
-// the gate is on and the member has a completed visit this year. Counts are
-// COUNTS, never a price (owner rule: prices only ever appear on estimate
-// pages). Upcoming visits are the upcoming-visits card's job, not this one.
+// the gate is on and the member has a PERFORMED visit this year (a completed,
+// customer-visible service record whose outcome counts as performed). Counts
+// are COUNTS, never a price (owner rule: prices only ever appear on estimate
+// pages), and no upcoming visits.
 // stripLiveOnlyScheduleFields removes it for every non-live render, same
 // staleness rule as nextAppointment.
 
@@ -26,6 +27,9 @@ function requireWithGateOn() {
 // where/andWhere/whereIn/whereNot(modify)/orderBy/limit/select chain the
 // next-appointment AND plan-summary lookups use, plus the object-criteria
 // `where` the rest of the builder calls.
+// "service_records.customer_id" -> "customer_id": fixture rows use bare keys.
+const bare = (column) => String(column).split('.').pop();
+
 function makeKnex(fixtures, reads = []) {
   const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
@@ -33,15 +37,17 @@ function makeKnex(fixtures, reads = []) {
     const query = {
       where(criteria, value) {
         if (criteria && typeof criteria === 'object') {
-          reads.push([table, criteria]);
+          reads.push([table, 'where', criteria]);
           rows = rows.filter((row) => Object.entries(criteria)
             .every(([key, val]) => row[key] === val));
         } else if (typeof criteria === 'string' && arguments.length === 2) {
-          rows = rows.filter((row) => row[criteria] === value);
+          const column = bare(criteria);
+          rows = rows.filter((row) => row[column] === value);
         }
         return query;
       },
-      andWhere(column, op, value) {
+      andWhere(qualified, op, value) {
+        const column = bare(qualified);
         if (op === '>=') rows = rows.filter((row) => String(row[column]) >= String(value));
         if (op === '<') rows = rows.filter((row) => String(row[column]) < String(value));
         if (op === '>') rows = rows.filter((row) => String(row[column]) > String(value));
@@ -76,8 +82,10 @@ function makeKnex(fixtures, reads = []) {
         });
         return query;
       },
+      // Joins are not modelled: a fixture row carries the joined columns
+      // itself, under the select's alias names.
       leftJoin: () => query,
-      select: () => query,
+      select: (...args) => { reads.push([table, 'select', args]); return query; },
       first: () => Promise.resolve(rows[0] || null),
       catch: () => Promise.resolve(rows),
       then: (resolve) => Promise.resolve(rows).then(resolve),
@@ -133,42 +141,64 @@ test('gate off: payload carries no planSummary key at all', async () => {
   expect(data).not.toHaveProperty('planSummary');
 });
 
-test('gate on: counts only COMPLETED visits in the current ET calendar year, and counts re-services by service_key_snapshot', async () => {
+// A completed, performed, customer-visible service record for the plan
+// customer, carrying the joined booking columns under the select's aliases.
+const record = (id, overrides = {}) => ({
+  id,
+  customer_id: 'customer-plan',
+  status: 'completed',
+  service_date: `${YEAR}-01-16`,
+  service_line: 'pest',
+  service_type: 'Quarterly Pest Control Service',
+  structured_notes: '{}',
+  record_is_callback: false,
+  service_key_snapshot: null,
+  scheduled_is_callback: null,
+  ...overrides,
+});
+
+test('gate on: counts PERFORMED visits in the current ET calendar year, and which of them were re-services', async () => {
   const build = requireWithGateOn();
   const knex = makeKnex({
     ...BASE_FIXTURES,
-    scheduled_services: [
-      // this year, completed — counts
-      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'Quarterly Pest Control Service' },
-      // this year, completed, a re-service — counts toward both totals
-      { id: 'scheduled-reservice', customer_id: 'customer-plan', scheduled_date: `${YEAR}-03-01`, status: 'completed', service_type: 'Pest Re-Service', service_key_snapshot: 'pest_re_service' },
-      // this year, completed, an included trapping follow-up — a visit, but
-      // not a re-service to the customer
-      { id: 'scheduled-trap-followup', customer_id: 'customer-plan', scheduled_date: `${YEAR}-03-08`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup' },
-      // this year, completed, a free-text re-service booking with no key —
-      // the name fallback counts it
-      { id: 'scheduled-freetext-reservice', customer_id: 'customer-plan', scheduled_date: `${YEAR}-03-15`, status: 'completed', service_type: 'Pest Re-Service', service_key_snapshot: null },
-      // this year, completed, an unkeyed trapping follow-up — still not a
-      // re-service by name
-      { id: 'scheduled-freetext-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-03-22`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: null },
-      // this year, completed, a persisted callback whose key and name no
-      // longer say re-service — the flag counts it
-      { id: 'scheduled-flagged-callback', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-05`, status: 'completed', service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', is_callback: true },
-      // this year, completed, a flagged trapping follow-up — never a re-service
-      { id: 'scheduled-flagged-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-12`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', is_callback: true },
-      // this year, completed, a flagged trapping follow-up with NO key — the
+    service_records: [
+      // a performed visit — counts
+      record('record-current'),
+      // a keyed re-service — counts toward both totals
+      record('record-reservice', { service_date: `${YEAR}-03-01`, service_type: 'Pest Re-Service', service_key_snapshot: 'pest_re_service', scheduled_is_callback: false }),
+      // an included trapping follow-up — a visit, never a re-service
+      record('record-trap-followup', { service_date: `${YEAR}-03-08`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', scheduled_is_callback: false }),
+      // a free-text re-service booking with no key — the name fallback counts it
+      record('record-freetext-reservice', { service_date: `${YEAR}-03-15`, service_type: 'Pest Re-Service', scheduled_is_callback: false }),
+      // an unkeyed trapping follow-up with no stamped line — still not a
+      // re-service, by its rodent-line name
+      record('record-freetext-trap', { service_date: `${YEAR}-03-22`, service_line: null, service_type: 'Rodent Trapping Follow-Up', scheduled_is_callback: false }),
+      // a callback flagged on its booking whose key and name no longer say
+      // re-service — the flag counts it
+      record('record-flagged-callback', { service_date: `${YEAR}-04-05`, service_type: 'Pest Control Service', service_key_snapshot: 'pest_general_quarterly', scheduled_is_callback: true }),
+      // a flagged trapping follow-up, keyed — never a re-service
+      record('record-flagged-trap', { service_date: `${YEAR}-04-12`, service_line: 'rodent', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: 'rodent_trapping_followup', scheduled_is_callback: true }),
+      // a flagged trapping follow-up with NO key and no stamped line — the
       // rodent-line name excludes it before the callback flag is read
-      { id: 'scheduled-flagged-unkeyed-trap', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-19`, status: 'completed', service_type: 'Rodent Trapping Follow-Up', service_key_snapshot: null, is_callback: true },
-      // this year, but NOT completed — excluded
-      { id: 'scheduled-pending', customer_id: 'customer-plan', scheduled_date: `${YEAR}-04-01`, status: 'pending', service_type: 'Quarterly Pest Control Service' },
-      // last calendar year — excluded even though completed
-      { id: 'scheduled-last-year', customer_id: 'customer-plan', scheduled_date: `${YEAR - 1}-12-31`, status: 'completed', service_type: 'Quarterly Pest Control Service' },
-      // next calendar year — excluded
-      { id: 'scheduled-next-year', customer_id: 'customer-plan', scheduled_date: `${YEAR + 1}-01-01`, status: 'completed', service_type: 'Quarterly Pest Control Service' },
+      record('record-flagged-unkeyed-trap', { service_date: `${YEAR}-04-19`, service_line: null, service_type: 'Rodent Trapping Follow-Up', scheduled_is_callback: true }),
+      // no linked booking: the record's own callback copy stands in
+      record('record-unlinked-callback', { service_date: `${YEAR}-04-26`, service_type: 'Pest Control Service', record_is_callback: true }),
+      // NOT performed — each excluded from both totals, even when flagged
+      record('record-incomplete-status', { service_date: `${YEAR}-05-01`, status: 'incomplete' }),
+      record('record-outcome-incomplete', { service_date: `${YEAR}-05-02`, structured_notes: JSON.stringify({ visitOutcome: 'incomplete' }) }),
+      record('record-declined-callback', { service_date: `${YEAR}-05-03`, structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }), scheduled_is_callback: true }),
+      record('record-inspection-only', { service_date: `${YEAR}-05-04`, structured_notes: JSON.stringify({ visitOutcome: 'inspection_only' }) }),
+      // an internal-only record the customer never sees — excluded
+      record('record-internal', { service_date: `${YEAR}-05-05`, structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }) }),
+      // another customer — excluded
+      record('record-other-customer', { customer_id: 'customer-other' }),
+      // last and next calendar year — excluded
+      record('record-last-year', { service_date: `${YEAR - 1}-12-31` }),
+      record('record-next-year', { service_date: `${YEAR + 1}-01-01` }),
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, { mode: 'live' });
-  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 8, reservicesThisYear: 3 });
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 9, reservicesThisYear: 4 });
 });
 
 test('a non-member gets no planSummary, even with completed visits and visits coming up', async () => {
@@ -178,8 +208,8 @@ test('a non-member gets no planSummary, even with completed visits and visits co
     ...BASE_FIXTURES,
     // One-time customer: no tier, no monthly rate.
     customers: [{ id: 'customer-plan', waveguard_tier: null, monthly_rate: 0, active: true }],
+    service_records: [record('record-current', { service_type: 'One-Time Pest Control' })],
     scheduled_services: [
-      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'One-Time Pest Control' },
       { id: 'scheduled-next', customer_id: 'customer-plan', scheduled_date: addDays(10), status: 'confirmed', service_type: 'Mosquito Event Spray' },
     ],
   });
@@ -192,22 +222,30 @@ test.each(['pdf', 'static', undefined])('a non-live build (mode %s) skips the co
   const reads = [];
   const knex = makeKnex({
     ...BASE_FIXTURES,
-    scheduled_services: [
-      { id: 'scheduled-current', customer_id: 'customer-plan', scheduled_date: `${YEAR}-01-16`, status: 'completed', service_type: 'Quarterly Pest Control Service' },
-    ],
+    service_records: [record('record-current')],
   }, reads);
   const data = await build(BASE_SERVICE, `token-plan-${mode || 'default'}`, knex, mode ? { mode } : {});
   expect(data).not.toHaveProperty('planSummary');
-  expect(reads.some(([table, criteria]) => table === 'scheduled_services' && criteria.status === 'completed')).toBe(false);
+  // The plan-summary history read is the only select carrying these aliases.
+  const planHistoryRead = ([table, kind, args]) => table === 'service_records' && kind === 'select'
+    && JSON.stringify(args).includes('record_is_callback');
+  expect(reads.some(planHistoryRead)).toBe(false);
 });
 
-test('omitted when there is no customer, or when the member has no completed visit this year', async () => {
+test('omitted when there is no customer, or when the member has no performed visit this year', async () => {
   const build = requireWithGateOn();
   const noCustomer = await build({ ...BASE_SERVICE, customer_id: null }, 'token-plan-no-customer', makeKnex({ ...BASE_FIXTURES, scheduled_services: [] }), { mode: 'live' });
   expect(noCustomer).not.toHaveProperty('planSummary');
 
-  const nothingToShow = await build(BASE_SERVICE, 'token-plan-empty', makeKnex({ ...BASE_FIXTURES, scheduled_services: [] }), { mode: 'live' });
+  const nothingToShow = await build(BASE_SERVICE, 'token-plan-empty', makeKnex({ ...BASE_FIXTURES, service_records: [] }), { mode: 'live' });
   expect(nothingToShow).not.toHaveProperty('planSummary');
+
+  // Completed on the schedule but declined at the door: not a performed visit.
+  const onlyDeclined = await build(BASE_SERVICE, 'token-plan-declined', makeKnex({
+    ...BASE_FIXTURES,
+    service_records: [record('record-declined', { structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }) })],
+  }), { mode: 'live' });
+  expect(onlyDeclined).not.toHaveProperty('planSummary');
 });
 
 test('stripLiveOnlyScheduleFields removes planSummary the same way it removes nextAppointment', () => {
