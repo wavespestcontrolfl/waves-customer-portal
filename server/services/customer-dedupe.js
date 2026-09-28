@@ -686,6 +686,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     // Choice provenance follows its channel below; it is not SMS consent
     // and must not pass through the generic boolean AND rule.
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
+    // Customers cannot turn payment receipts off (owner ruling 2026-09-26):
+    // a duplicate's legacy false must not carry onto the kept profile.
+    if (table === 'notification_prefs' && col === 'payment_receipt') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;

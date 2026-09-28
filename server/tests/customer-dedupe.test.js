@@ -547,6 +547,16 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it('notification_prefs: a duplicate\'s payment_receipt=false never carries onto the kept profile', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, payment_receipt: true, created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: false, payment_receipt: false, created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated.sms_enabled).toBe(false);
+    expect(state.updated).not.toHaveProperty('payment_receipt');
+  });
+
   it('notification_prefs: billing arrays stay native and incompatible choices refuse before writes', async () => {
     const rows = { winnerRow: { customer_id: 'W', invoice_channels: null },
       loserRow: { customer_id: 'L', invoice_channels: ['email', 'push'] } };
