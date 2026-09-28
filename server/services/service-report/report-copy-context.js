@@ -18,8 +18,9 @@ const { etDateString } = require('../../utils/datetime-et');
 const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
-const { loadLinkedLawnAssessment } = require('./report-data');
+const { loadLinkedLawnAssessment, resolvePestWeekWeather } = require('./report-data');
 const { redactAccessCodes } = require('../context-aggregator');
+const { stampedDivergesSql } = require('../stamped-address');
 const {
   pestReportExpectationsGateOn, buildRainExpectation, buildWhatToExpect, toExpectationProduct,
 } = require('./pest-report-expectations');
@@ -127,6 +128,94 @@ async function loadCustomer(customerId, knex) {
       .first('id', 'first_name', 'last_name', 'city', 'state', 'latitude', 'longitude', 'lawn_type', 'waveguard_tier');
   } catch (err) {
     logger.warn(`[report-copy-context] customer load failed: ${err.message}`);
+    return null;
+  }
+}
+
+// The SERVICED PARCEL's own coordinates — the stamped scheduled_services
+// address when it diverges from the customer's primary home, else the
+// primary — mirroring EXACTLY the COALESCE/divergence rule report-data.js
+// and reports-public.js already use for the deterministic customer-facing
+// card's own week-weather fetch (codex P2 2026-09-29 round 3): the pest
+// EXPECTATIONS grounding below used to read the customer's PRIMARY
+// coordinates unconditionally (via loadCustomer/weekWeather above), so a
+// visit at a stamped alternate property (e.g. a rental) could claim
+// rain/ant behavior for the WRONG home.
+//
+// No scheduledServiceId at all means there is no visit-linked parcel to
+// possibly diverge from — the customer's own primary IS the serviced
+// parcel in that case (same "no stamp => primary is correct" rule
+// stamped-address.js documents), so we use the already-loaded primary
+// coordinates directly rather than treating it as unresolvable.
+//
+// A scheduledServiceId that IS present but resolves to no matching row, or
+// no coordinates on either side, is genuinely unresolvable — a rental
+// might be the true parcel and we cannot tell — so THAT case fails closed
+// (no pest weekWeather at all) rather than falling back to the primary.
+async function resolveServicedParcelCoordinates(scheduledServiceId, primaryLat, primaryLng, knex) {
+  if (!scheduledServiceId) {
+    return (primaryLat != null && primaryLng != null) ? { lat: primaryLat, lng: primaryLng } : null;
+  }
+  try {
+    const row = await knex('scheduled_services as ss')
+      .leftJoin('customers', 'ss.customer_id', 'customers.id')
+      .where('ss.id', scheduledServiceId)
+      .select(
+        knex.raw(`COALESCE(ss.lat, CASE WHEN NOT (${stampedDivergesSql('ss', 'customers')}) THEN customers.latitude END) as lat`),
+        knex.raw(`COALESCE(ss.lng, CASE WHEN NOT (${stampedDivergesSql('ss', 'customers')}) THEN customers.longitude END) as lng`),
+      )
+      .first();
+    const lat = finiteOrNull(row?.lat);
+    const lng = finiteOrNull(row?.lng);
+    return (lat != null && lng != null) ? { lat, lng } : null;
+  } catch (err) {
+    logger.warn(`[report-copy-context] serviced-parcel coordinate lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
+// A service_records row may already exist for this visit (regenerating
+// copy on an already-completed visit; a report render that already froze
+// the week) — its structured_notes carries any already-PINNED week
+// (report-data.js's storedPestWeekFor), which resolvePestWeekWeather below
+// prefers over a fresh fetch, so the grounding and the customer-facing
+// card can never disagree once either one has rendered. Absent (the
+// common pre-completion draft-generation case) is fine — resolvePestWeekWeather
+// still fetches fresh with no service record to freeze onto (a no-op
+// freeze attempt, never an error).
+async function loadExistingServiceRecordForFreeze(scheduledServiceId, knex) {
+  if (!scheduledServiceId) return null;
+  try {
+    return await knex('service_records')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .orderBy('created_at', 'desc')
+      .first('id', 'structured_notes');
+  } catch {
+    return null;
+  }
+}
+
+// Resolves the pest EXPECTATIONS grounding's own week-weather — SEPARATE
+// from the general `weekWeather` above (which feeds the WEATHER section
+// for every service line and is unrelated to this fix's scope) — through
+// the SAME resolvePestWeekWeather path (report-data.js) the customer-facing
+// card itself uses, with the visit's OWN serviced-parcel coordinates.
+async function resolvePestGroundingWeekWeather({ scheduledServiceId, serviceYmd, line, primaryLat, primaryLng, knex }) {
+  if (line !== 'pest' || !pestReportExpectationsGateOn()) return null;
+  const parcel = await resolveServicedParcelCoordinates(scheduledServiceId, primaryLat, primaryLng, knex);
+  if (!parcel) return null;
+  const existingRecord = await loadExistingServiceRecordForFreeze(scheduledServiceId, knex);
+  try {
+    const { weekWeather } = await resolvePestWeekWeather({
+      id: existingRecord?.id || null,
+      service_line: 'pest',
+      customer_latitude: parcel.lat,
+      customer_longitude: parcel.lng,
+      service_date: serviceYmd,
+      structured_notes: existingRecord?.structured_notes || {},
+    }, 'pest', knex);
+    return weekWeather;
+  } catch {
     return null;
   }
 }
@@ -528,7 +617,7 @@ async function buildReportCopyContext({
   const lng = finiteOrNull(customer?.longitude);
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
-  const [priorVisits, productEvidence, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
+  const [priorVisits, productEvidence, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments, pestGroundingWeekWeather] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
@@ -549,6 +638,13 @@ async function buildReportCopyContext({
     line === 'lawn'
       ? loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex })
       : Promise.resolve({ today: null, prior: null }),
+    // SEPARATE from `weekWeather` above (which feeds the general WEATHER
+    // section for every service line and keeps its existing primary-home
+    // coordinates, out of this fix's scope) — the pest EXPECTATIONS section
+    // below uses ONLY this serviced-parcel-resolved value.
+    resolvePestGroundingWeekWeather({
+      scheduledServiceId, serviceYmd, line, primaryLat: lat, primaryLng: lng, knex,
+    }),
   ]);
   const productSafety = productEvidence.safetyFacts;
 
@@ -707,9 +803,19 @@ async function buildReportCopyContext({
   // deliberately NOT re-derived here (a second live NWS fetch just for
   // grounding); the deterministic weekly-rain + rainy-season facts still
   // ground the model honestly.
+  //
+  // pestGroundingWeekWeather, NOT the general `weekWeather` above (codex P2
+  // 2026-09-29 round 3): `weekWeather` is fetched from the customer's
+  // PRIMARY coordinates and feeds the WEATHER section for every service
+  // line — for a visit at a stamped alternate property (a rental), that is
+  // the WRONG home for a rain/ant claim. pestGroundingWeekWeather resolves
+  // through the SAME serviced-parcel coordinates and the SAME
+  // resolvePestWeekWeather pin the customer-facing card itself uses, and is
+  // null (fail closed, no rain/ants lines) whenever those coordinates
+  // cannot be resolved — never falling back to the primary.
   if (line === 'pest' && pestReportExpectationsGateOn()) {
     const expectationProducts = productSafety.map(toExpectationProduct);
-    const rainExpectation = buildRainExpectation({ weekWeather, products: expectationProducts, serviceMonth: monthNum });
+    const rainExpectation = buildRainExpectation({ weekWeather: pestGroundingWeekWeather, products: expectationProducts, serviceMonth: monthNum });
     const whatToExpect = buildWhatToExpect({ products: expectationProducts });
     const expectationLines = [...(rainExpectation?.lines || []), ...(whatToExpect?.lines || [])];
     if (expectationLines.length) {

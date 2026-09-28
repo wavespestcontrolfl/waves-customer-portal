@@ -280,13 +280,28 @@ function buildPestReportV2({
   // guard) — an unscreenable concern drops the card rather than the report.
   const concernCard = buildCustomerConcernCard(customerConcern);
 
+  // Rain / spiders / what-to-expect — dark behind GATE_PEST_REPORT_EXPECTATIONS.
+  // Gate off => expectations is null, same always-present-but-possibly-null
+  // convention as `defense` / `aiSummary` / `forecast` above — and built
+  // BEFORE the emptiness checks below (codex P2 2026-09-29 round 3: a
+  // sparse callback report — suppressDefense, no primary move, metric, AI
+  // summary or concern — used to return null before expectations was ever
+  // computed, discarding a recorded rain / eave-sweeping / product
+  // expectation exactly where it would have been the ONLY content).
+  const expectations = pestReportExpectationsGateOn()
+    ? buildPestExpectations({
+      weekWeather, applications, actionLabels, actionEntries, serviceMonth, forecastHeavyRain,
+    })
+    : null;
+
   // Nothing meaningful to show → don't render an empty V2 shell. Under
   // suppressDefense the DELIBERATE removal of the schematic must not be
   // what empties the shell (codex P1 r1): a callback whose remaining
   // content is the concern card, the tech-reviewed summary, the receipt,
   // or the weather call keeps the dashboard — on a complaint visit those
   // are exactly the customer-issue content. Regular visits keep the
-  // original predicate unchanged.
+  // original predicate unchanged. `expectations` now counts too (gate off
+  // ⇒ always null ⇒ byte-identical to the pre-fix predicate).
   if (suppressDefense) {
     // Callback emptiness counts ONLY fields the composed section MOUNTS
     // (codex P2 r4 + r5): the hero (supportingMetric + aiSummary), the
@@ -294,10 +309,10 @@ function buildPestReportV2({
     // receipt, and the weather call were removed from the composed section
     // 2026-07-09 — counting them kept an empty status-hero shell alive
     // that also suppressed the legacy summary/coverage sections.
-    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard) {
+    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard && !expectations) {
       return null;
     }
-  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard && !expectations) {
     // Nothing meaningful to show → don't render an empty V2 shell
     // (regular visits keep the original predicate unchanged).
     return null;
@@ -309,15 +324,6 @@ function buildPestReportV2({
     defenseStatus?.summary,
     'Your service is complete and your protection plan is on track.',
   );
-
-  // Rain / spiders / what-to-expect — dark behind GATE_PEST_REPORT_EXPECTATIONS.
-  // Gate off => expectations is null, same always-present-but-possibly-null
-  // convention as `defense` / `aiSummary` / `forecast` below.
-  const expectations = pestReportExpectationsGateOn()
-    ? buildPestExpectations({
-      weekWeather, applications, actionLabels, actionEntries, serviceMonth, forecastHeavyRain,
-    })
-    : null;
 
   return {
     status,

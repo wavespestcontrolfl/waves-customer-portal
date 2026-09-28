@@ -24,17 +24,32 @@ jest.mock('../services/service-report/application-conditions', () => ({
 
 const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
 
-function makeKnexStub({ customers = [], catalogProducts = [] } = {}) {
+// scheduledServices/serviceRecords rows are pre-resolved fixtures — this
+// stub never evaluates the real COALESCE/divergence SQL (that lives in
+// stamped-address.js + its own SQL-mirror tests), it just proves
+// report-copy-context.js's plumbing reads coordinates FROM these tables
+// (keyed by the visit) rather than from the customer's primary row.
+function makeKnexStub({
+  customers = [], catalogProducts = [], scheduledServices = [], serviceRecords = [],
+} = {}) {
   const stub = (table) => {
-    const chain = { _whereIns: [] };
+    const chain = { _whereIns: [], _wheres: [] };
     for (const method of ['whereNull', 'whereNot', 'andWhere', 'orWhere', 'orWhereNot', 'orderBy', 'orderByRaw', 'limit', 'select', 'join', 'leftJoin', 'groupBy', 'count', 'whereRaw', 'whereBetween', 'modify']) {
       chain[method] = () => chain;
     }
     chain.whereIn = (column, values) => { chain._whereIns.push([column, values]); return chain; };
     chain.where = (...args) => {
       if (typeof args[0] === 'function') { args[0].call(chain); return chain; }
+      if (args[0] && typeof args[0] === 'object') {
+        chain._wheres.push(...Object.entries(args[0]));
+      } else {
+        chain._wheres.push([args[0], args[1]]);
+      }
       return chain;
     };
+    const byWheres = (rows) => chain._wheres.reduce((filtered, [column, value]) => (
+      filtered.filter((row) => row[String(column).split('.').pop()] === value)
+    ), rows);
     const resolveRows = () => {
       if (table === 'customers') return customers;
       if (table === 'products_catalog') {
@@ -42,6 +57,8 @@ function makeKnexStub({ customers = [], catalogProducts = [] } = {}) {
           rows.filter((row) => values.includes(row[column]))
         ), catalogProducts);
       }
+      if (table === 'scheduled_services as ss') return byWheres(scheduledServices);
+      if (table === 'service_records') return byWheres(serviceRecords);
       return [];
     };
     chain.first = async () => resolveRows()[0];
@@ -160,6 +177,100 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
       knex,
     });
     expect(contextText).not.toMatch(/EXPECTATIONS/);
+  });
+
+  // codex P2 2026-09-29 round 3: the EXPECTATIONS grounding used to read
+  // weekWeather from the customer's PRIMARY coordinates even when
+  // scheduledServiceId identified a visit at a DIFFERENT (stamped
+  // alternate) parcel. These three cases pin the fix: the visit's own
+  // coordinates are used, an unresolvable visit fails closed (never falls
+  // back to the primary), and an already-pinned week is reused with no
+  // provider call.
+  it('alternate-property visit: fetches weekWeather from the VISIT coordinates, not the primary', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    mockFetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.7, rainConfidence: null, et0Inches: null, dailyRain: null, rainSource: null, windowClosed: true });
+    const knex = makeKnexStub({
+      customers: [GEOCODED_CUSTOMER], // primary: 27.5, -82.5
+      catalogProducts: [],
+      scheduledServices: [{ id: 'ss-alt', lat: 26.1, lng: -81.4 }], // the RENTAL — a different parcel
+    });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c2',
+      scheduledServiceId: 'ss-alt',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [],
+      knex,
+    });
+    expect(mockFetchServiceWeekWeather).toHaveBeenCalledWith(
+      expect.objectContaining({ latitude: 26.1, longitude: -81.4 }),
+    );
+    expect(contextText).toMatch(/rained about 0\.7"/);
+  });
+
+  it('unresolvable visit coordinates: never falls back to the primary — no rain/ants lines', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    mockFetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.9, rainConfidence: null, et0Inches: null, dailyRain: null, rainSource: null, windowClosed: true });
+    const knex = makeKnexStub({
+      customers: [GEOCODED_CUSTOMER], // has a real primary geocode
+      catalogProducts: [NON_REPELLENT_PRODUCT], // keeps a product-class EXPECTATIONS line alive
+      scheduledServices: [], // no row for 'ss-missing' — unresolvable
+    });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c2',
+      scheduledServiceId: 'ss-missing',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [{ productId: 'p1', name: 'Taurus SC' }],
+      knex,
+    });
+    // The general WEATHER section (customer's primary — out of this fix's
+    // scope) may still fetch; only the pest-grounding call must never use
+    // it. The primary's own coordinates must never appear as the ARGUMENT
+    // to a call this fix owns, and no rain/ants line renders at all.
+    expect(contextText).not.toMatch(/rained about/);
+    expect(contextText).not.toMatch(/Heavy rain pushes ants indoors/);
+    expect(contextText).toMatch(/Non-repellent products/); // the non-weather line still grounds
+  });
+
+  it('pinned value present: reused with no provider call', async () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const knex = makeKnexStub({
+      customers: [GEOCODED_CUSTOMER],
+      catalogProducts: [],
+      scheduledServices: [{ id: 'ss-pinned', lat: 26.1, lng: -81.4 }],
+      serviceRecords: [{
+        id: 'sr-1',
+        scheduled_service_id: 'ss-pinned',
+        structured_notes: {
+          pestWeekWeather: {
+            rainInches: 0.55, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null, windowClosed: true,
+          },
+        },
+      }],
+    });
+    const { contextText } = await buildReportCopyContext({
+      customerId: 'c2',
+      scheduledServiceId: 'ss-pinned',
+      serviceType: 'Pest Control Service',
+      serviceLine: 'pest',
+      serviceDate: '2026-07-15',
+      products: [],
+      knex,
+    });
+    // Pinned rain reading (0.55) shows up even though the pest-grounding
+    // path itself never called the provider for it — the ONE call seen
+    // is the unrelated general WEATHER section's own fetch, for the
+    // customer's primary coordinates (out of this fix's scope); the
+    // parcel's own coordinates (26.1, -81.4) never appear as a fetch
+    // argument at all, since the pin short-circuited before any fetch.
+    expect(contextText).toMatch(/rained about 0\.55"/);
+    expect(mockFetchServiceWeekWeather).toHaveBeenCalledTimes(1);
+    expect(mockFetchServiceWeekWeather).not.toHaveBeenCalledWith(
+      expect.objectContaining({ latitude: 26.1, longitude: -81.4 }),
+    );
   });
 });
 

@@ -79,7 +79,18 @@ call time, no redeploy to flip): on the pest-line service-report payload
 to say; gate off, or nothing to say, omits the whole `expectations` key
 (same always-present-but-nullable convention `defense` / `aiSummary` /
 `forecast` already use on `pestReportV2`; server/services/service-report/
-pest-report-expectations.js is the pure builder). `rain: { lines: [string] }`
+pest-report-expectations.js is the pure builder). `pest-report-v2.js` now
+builds `expectations` BEFORE its own emptiness predicate and counts a
+non-null result among the fields that keep the section alive (codex P2
+2026-09-29 round 3): a sparse callback report — `suppressDefense`, with no
+primary move, supporting metric, AI summary, or customer concern — used to
+return `null` (no `pestReportV2` at all) before `expectations` was ever
+computed, silently discarding a recorded rain / eave-sweeping / product
+expectation exactly where it would have been the section's ONLY content.
+Such a visit's public payload now carries a minimal `pestReportV2` object
+(status/statusSummary plus `expectations`, every other field null/empty) in
+that case; gate off is unaffected (`expectations` stays `null`, so the
+emptiness predicate is byte-identical to before this fix). `rain: { lines: [string] }`
 — one line stating the trailing 7-day rainfall at the property
 (`application-conditions.js` `fetchServiceWeekWeather`; low-confidence
 city-collective readings are hedged in the wording, never presented as an
@@ -284,7 +295,20 @@ payload; that caller has no per-application method/area data (its product
 list is deduped by catalog product, not by application), so it always
 falls back to the non-barrier pyrethroid wording rather than assuming a
 barrier — the same fail-closed default, never a contradiction with the
-deterministic card. `moa_group` and `rainfast_minutes` (the catalog facts
+deterministic card. The grounding's own weekWeather fetch resolves through
+the visit's SERVICED PARCEL — the same COALESCE/divergence coordinate rule
+`report-data.js` and `reports-public.js` use for the deterministic card's
+fetch, preferring an already-pinned
+`service_records.structured_notes.pestWeekWeather` when one exists (codex
+P2 2026-09-29 round 3: it used to read the customer's PRIMARY coordinates
+unconditionally, so a visit at a stamped alternate property — e.g. a
+rental — could ground rain/ant copy for the WRONG home while the
+deterministic card used the visit's own coordinates). An unresolvable
+visit (no `scheduledServiceId`-linked row, or no coordinates on either
+side) fails closed — no rain/ants grounding lines at all — rather than
+ever falling back to the primary; a visit with no `scheduledServiceId` at
+all (nothing that could diverge from the primary) uses the customer's own
+primary coordinates directly, same as before. `moa_group` and `rainfast_minutes` (the catalog facts
 that drive this classification) are SERVER-INTERNAL ONLY (codex P0
 2026-09-28): they are never present on `data.applications[].product` in any
 render (gate on or off, every service line) — `report-data.js`'s

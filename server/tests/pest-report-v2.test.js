@@ -343,6 +343,51 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     expect(out.expectations).toBeNull();
   });
 
+  // codex P2 2026-09-29 round 3: a sparse callback report (suppressDefense,
+  // no primary move / metric / AI summary / concern) used to hit the
+  // emptiness predicate and return null BEFORE the expectations builder
+  // ever ran — discarding a recorded rain / eave-sweeping / product
+  // expectation exactly where it would have been the section's ONLY
+  // content.
+  it('sparse callback: expectations alone keeps the section alive (gate on)', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const sparsePremium = premium({
+      primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null, aiSummaryPersonality: null,
+    });
+    const out = buildPestReportV2({
+      premiumExperience: sparsePremium,
+      suppressDefense: true,
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    expect(out).not.toBeNull();
+    expect(out.expectations).toBeTruthy();
+    expect(out.expectations.rain.lines.length).toBeGreaterThan(0);
+    // Confirm nothing else kept the shell alive — expectations alone did.
+    expect(out.primaryMove).toBeNull();
+    expect(out.supportingMetric).toBeFalsy();
+    expect(out.aiSummary).toBeNull();
+    expect(out.customerConcern).toBeNull();
+  });
+
+  it('sparse callback: the same payload returns null with the gate off (old emptiness behavior, unchanged)', () => {
+    delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
+    const sparsePremium = premium({
+      primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null, aiSummaryPersonality: null,
+    });
+    const out = buildPestReportV2({
+      premiumExperience: sparsePremium,
+      suppressDefense: true,
+      applications: APPLICATIONS,
+      actionLabels: ACTION_LABELS,
+      weekWeather: { rainInches: 2, rainConfidence: null },
+      serviceMonth: 7,
+    });
+    expect(out).toBeNull();
+  });
+
   it('forecastHeavyRain never reaches the payload unless the caller passes it (PDF/static safety)', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const out = buildPestReportV2({

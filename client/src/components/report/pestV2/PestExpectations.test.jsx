@@ -100,4 +100,39 @@ describe('PestReportV2Section — expectations composition', () => {
     expect(screen.queryByText('Spiders')).toBeNull();
     expect(screen.queryByText('What to expect')).toBeNull();
   });
+
+  // codex P2 2026-09-29 round 3: a sparse callback report (suppressDefense,
+  // no primary move / metric / AI summary / concern) now returns from the
+  // server with expectations as its ONLY real content — mirrors that exact
+  // payload shape (every other field null/undefined, same as
+  // buildPestReportV2 actually returns) and confirms the section still
+  // mounts, shows the status hero + expectations, and never crashes on the
+  // missing sibling fields.
+  it('mounts correctly when expectations is the ONLY content (sparse callback payload)', () => {
+    const EXPECTATIONS_ONLY_DATA = {
+      status: { key: 'watching', label: 'We’re watching', tone: 'watch' },
+      statusSummary: 'Your service is complete and your protection plan is on track.',
+      supportingMetric: null,
+      defense: null,
+      primaryMove: null,
+      customerConcern: null,
+      bugFiles: [],
+      pressureReceipt: null,
+      weatherCall: null,
+      aiSummary: null,
+      forecast: null,
+      expectations: {
+        rain: { lines: ['It rained about 1" this week.'] },
+        spiders: null,
+        whatToExpect: { lines: ['Ants may show up more for a few days.'] },
+      },
+    };
+    expect(() => render(<PestReportV2Section data={EXPECTATIONS_ONLY_DATA} />)).not.toThrow();
+    expect(screen.getByText('Today’s protection status')).toBeTruthy();
+    expect(screen.getByText('We’re watching')).toBeTruthy();
+    expect(screen.getByText('Rain and your treatment')).toBeTruthy();
+    expect(screen.getByText('What to expect')).toBeTruthy();
+    // The unrelated cards this sparse payload carries nothing for stay out.
+    expect(screen.queryByText('Spiders')).toBeNull();
+  });
 });
