@@ -898,9 +898,18 @@ async function writeRiderPlan(trx, {
       // insert/move probes. On a clash, skip this ONE pairing: log and move
       // on, same posture the cancel loop below already takes on a race —
       // the row is left where it is and a later sync re-diffs and retries.
-      const standaloneTechId = await assignableRecurringTemplateTechnicianId(trx, row, to);
-      if (standaloneTechId !== row.technician_id) updates.technician_id = standaloneTechId;
-      const clashProbe = 'technician_id' in updates ? { ...row, technician_id: updates.technician_id } : row;
+      // A standalone date is the rider's OWN visit, so tech and window come
+      // from the series template, exactly as a standalone insert's do. The
+      // moved row may still carry a host stop's borrowed window/tech, which
+      // would otherwise stick (a kept standalone row is never refreshed) and
+      // would feed the clash probe the wrong window.
+      const standaloneTechId = await assignableRecurringTemplateTechnicianId(trx, template, to);
+      updates.technician_id = standaloneTechId;
+      updates.window_start = template.window_start;
+      updates.window_end = template.window_end;
+      const clashProbe = {
+        ...row, technician_id: standaloneTechId, window_start: template.window_start, window_end: template.window_end,
+      };
       if (await seriesCandidateDateClashes(trx, clashProbe, to)) {
         logger.warn(`[rider-series] parent=${riderParentId} standalone move of row ${id} to ${to} clashes with an existing visit — skipped this sync, retried next pass`);
         continue;

@@ -1360,6 +1360,41 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
   });
 
   // --- P1 fix #5: standalone-date conflict + tech-absence -----------------
+  test('a rider row MOVED onto a standalone date takes the series template window and tech, never a borrowed host window', async () => {
+    const hostTechId = randomUUID();
+    await trx('technicians').insert({ id: hostTechId, name: 'Synthetic Host Tech', employment_status: 'active', field_dispatchable: true });
+    const pestTechId = randomUUID();
+    await trx('technicians').insert({ id: pestTechId, name: 'Synthetic Pest Tech', employment_status: 'active', field_dispatchable: true });
+    // Host with no live future row: every rider date is standalone.
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: hostTechId });
+    await trx('scheduled_services').where({ id: lawnParent.id }).update({ status: 'completed', completed_at: new Date() });
+    const pestParent = await makeParent({
+      pattern: 'quarterly', scheduledDate: PEST_START, technicianId: pestTechId, windowStart: '08:00', windowEnd: '10:00',
+    });
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+    // An off-plan rider row still carrying a host stop's borrowed window/tech.
+    const [stale] = await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, service_type: 'Pest Control', status: 'pending',
+      scheduled_date: addDays(PEST_START, 60), window_start: '13:00', window_end: '15:00',
+      technician_id: hostTechId, is_recurring: true, recurring_pattern: 'quarterly',
+      recurring_parent_id: pestParent.id, recurring_ongoing: true, source: 'admin',
+      estimated_duration_minutes: 120, estimated_price: pestParent.estimated_price,
+    }).returning('*');
+    await trx('scheduled_services')
+      .where((q) => { q.where('id', pestParent.id).orWhere('recurring_parent_id', pestParent.id); })
+      .update({ property_id: null });
+    await disablePropertyAnchoring();
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.move.some((m) => m.id === stale.id)).toBe(true);
+    const moved = await trx('scheduled_services').where({ id: stale.id }).first();
+    expect(moved.scheduled_date.toISOString().slice(0, 10)).not.toBe(addDays(PEST_START, 60));
+    expect(String(moved.window_start)).toBe('08:00:00');
+    expect(String(moved.window_end)).toBe('10:00:00');
+    expect(moved.technician_id).toBe(pestTechId);
+  });
+
   test('a standalone insert date that clashes with an existing visit is skipped this sync rather than double-booked (P1 fix #5)', async () => {
     const lawnTechId = randomUUID();
     await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech', employment_status: 'active', field_dispatchable: true });
