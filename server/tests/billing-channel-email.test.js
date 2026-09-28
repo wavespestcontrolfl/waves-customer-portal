@@ -487,3 +487,24 @@ describe('billing channel email adapter', () => {
     });
   });
 });
+
+const previsitReplayContext = {
+  schema_version: 1, customer_id: 'cust-1', category: 'billing', source_entry_point: 'previsit_balance_reminder',
+  notificationEventKey: 'previsit-balance:visit-1', appointment_id: 'visit-1', appointment_date: '2026-09-29',
+  appointment_service_type: 'Pest Control', appointment_rendered_on: '2026-09-27', collections_ledger_id: 'ledger-email-1',
+  rendered_amount: '96.60', invoice_ids: ['inv-1'], invoice_quotes: [{ id: 'inv-1', dueCents: 9660 }],
+  dues_cents: 0, selected_channels: ['email'],
+};
+
+test('complete previsit replay context preserves the exact per-invoice quote and obligation pins', () => {
+  expect(sanitizeBillingReplayContext(previsitReplayContext)).toEqual(previsitReplayContext);
+});
+
+test.each([
+  { invoice_ids: undefined }, { invoice_ids: ['inv-1', 'inv-1'] }, { invoice_quotes: undefined },
+  { invoice_quotes: [{ id: 'different', dueCents: 9660 }] }, { invoice_quotes: [{ id: 'inv-1', dueCents: 9600 }] },
+  { dues_cents: 10 }, { dues_cents: -1 }, { selected_channels: [] }, { selected_channels: ['email', 'email'] },
+  { collections_ledger_id: undefined }, { notificationEventKey: 'previsit-balance:other' },
+])('incomplete or mismatched previsit replay context cannot be stored: %j', (change) => {
+  expect(sanitizeBillingReplayContext({ ...previsitReplayContext, ...change })).toBeNull();
+});
