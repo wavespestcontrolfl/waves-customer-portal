@@ -55,10 +55,15 @@ const HOUR_WORDS = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
 };
 // Words that state a half of the day, and the half each states.
-// A window ending at noon starts in the morning ("between 10 and noon"),
-// and one ending at midnight starts in the evening.
-const PERIOD_WORDS = {
-  am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm', noon: 'am', midnight: 'pm',
+// The whole phrases that state a half of the day, and the half each states.
+// Closed: period words that are anything else ("pm-ish", "pm or so") state
+// none. A window ending at noon starts in the morning ("between 10 and
+// noon"), and one ending at midnight starts in the evening.
+const PERIOD_PHRASES = {
+  am: 'am', morning: 'am', 'in the morning': 'am', 'this morning': 'am',
+  pm: 'pm', afternoon: 'pm', 'in the afternoon': 'pm', 'this afternoon': 'pm',
+  evening: 'pm', 'in the evening': 'pm', 'this evening': 'pm', tonight: 'pm', 'at night': 'pm',
+  noon: 'am', midnight: 'pm',
 };
 
 function padded(s) { return ` ${s} `; }
@@ -160,13 +165,13 @@ function statedHour(hourWords, periodWords) {
   if (!(n >= 1 && n <= 12)) return null;
   const periodToks = normalize(periodWords).split(' ');
   // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
-  // or midnight is a window's end (see PERIOD_WORDS). Twelve beside a
+  // or midnight is a window's end (see PERIOD_PHRASES). Twelve beside a
   // named end ("between 12 and midnight") is told apart by the slot quote,
   // which must then say the two words together (see twelveNamed).
   if (twelveNamed(n, periodToks)) return periodToks[0] === 'noon' ? 12 : 0;
-  const halves = new Set(periodToks.filter((t) => Object.hasOwn(PERIOD_WORDS, t)).map((t) => PERIOD_WORDS[t]));
-  if (halves.size !== 1) return null;
-  return (n % 12) + (halves.has('pm') ? 12 : 0);
+  const phrase = periodToks.join(' ');
+  if (!Object.hasOwn(PERIOD_PHRASES, phrase)) return null;
+  return (n % 12) + (PERIOD_PHRASES[phrase] === 'pm' ? 12 : 0);
 }
 
 // "Next Thursday" / "this coming Thursday" read as the weekday (both are
@@ -251,6 +256,32 @@ function isPlain(holding, quote, fieldPath) {
   return holding.length > 0 && holding.every((turn) => plainlySaid(turn, quote, ASKING_FAILS.has(fieldPath)));
 }
 
+// Is a number a clock hour or a named one?
+function isHourToken(t) {
+  return /^\d+$/.test(t) || Object.hasOwn(HOUR_WORDS, t) || t === 'noon' || t === 'midnight';
+}
+
+// Every token span where `words` sits in `toks`.
+function spans(toks, words) {
+  const w = normalize(words).split(' ');
+  const out = [];
+  for (let i = 0; i + w.length <= toks.length; i += 1) if (w.every((x, k) => toks[i + k] === x)) out.push([i, i + w.length]);
+  return out;
+}
+
+// Do the period words belong to the recorded hour in this quote? Some
+// occurrence of each must sit with no other hour between them, so the PM of
+// "between 10 and 2 PM" is never lent to the 10. No period words: nothing
+// to check.
+function periodIsTheHours(quote, words) {
+  if (typeof words.period !== 'string') return true;
+  const toks = normalize(quote).split(' ');
+  return spans(toks, words.hour).some(([ha, hb]) => spans(toks, words.period).some(([pa, pb]) => {
+    const between = pa >= hb ? toks.slice(hb, pa) : toks.slice(pb, ha);
+    return !between.some(isHourToken);
+  }));
+}
+
 // The recorded words the slot quote must hold. "12 noon" must be said as
 // such, not read off "between 12 and noon".
 function slotPhrases(words) {
@@ -292,7 +323,7 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
   const said = slotPhrases(words);
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)))) {
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => said.every((w) => holds(q, w)) && periodIsTheHours(q, words))) {
     return fail('agreed_slot_ungrounded');
   }
   return { ok: true, reason: 'agreement_grounded', movedDate };

@@ -135,7 +135,11 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you Thursday at noon.', { day: 'Thursday', hour: 'noon', period: null }).ok).toBe(true);
     expect(agreedAt('2026-09-24T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' }); // "tonight" is the call's own day, not Thursday
-    expect(agreedAt('2026-09-23T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }).ok).toBe(true);
+    expect(agreedAt('2026-09-23T20:00:00-04:00', 'We will be there tonight between eight and nine.', { day: 'tonight', hour: 'eight', period: 'tonight' }).ok).toBe(true);
+    // A period said only after the window's end cannot be told from one
+    // belonging to the end ("between 10 and 2 PM"), so it fails closed.
+    expect(agreedAt('2026-09-23T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // Codex #5092 r5: "this evening" is the call's day, and a window ending at
     // noon puts its start in the morning.
     expect(agreedAt('2026-09-23T18:00:00-04:00', 'We can come by at six this evening.', { day: 'this evening', hour: 'six', period: 'this evening' }).ok).toBe(true);
@@ -149,6 +153,15 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T12:00:00-04:00', 'We will see you tomorrow at twelve noon.', { day: 'tomorrow', hour: 'twelve', period: 'noon' }).ok).toBe(true);
     expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will see you tomorrow at 12 noon.', { day: 'tomorrow', hour: '12', period: 'noon' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    // Codex #5092 r11: period words are one whole phrase from a closed list,
+    // and belong to the recorded hour (no other hour between them).
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at two pm-ish.', { day: 'Thursday', hour: 'two', period: 'pm-ish' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(agreedAt('2026-09-24T22:00:00-04:00', 'We will be there Thursday between 10 and 2 PM.', { day: 'Thursday', hour: '10', period: 'PM' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will be there Thursday between 10 and 2 PM.', { day: 'Thursday', hour: '10', period: 'PM' }))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday afternoon at two.', { day: 'Thursday', hour: 'two', period: 'afternoon' }).ok).toBe(true);
     // Codex #5092 r9: twelve beside a window's named end is not "12 midnight".
     expect(agreedAt('2026-09-24T00:00:00-04:00', 'We will be there between 12 and midnight tomorrow.', { day: 'tomorrow', hour: '12', period: 'midnight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
