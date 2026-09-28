@@ -12,8 +12,9 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
-      "notes": ""
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "25b8b90d3e49c4787573b43593a4369d703e6c0f83868e47b94d57bcc816e709"
     },
     "slug": "white-grub",
     "common_name": "White Grub",
@@ -121,7 +122,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "bbb750d4b3cf4c323723be8457ea5c2a942194ddba434787ce0c4a9913be0d8a"
     },
     "slug": "sri-lankan-weevil",
     "common_name": "Sri Lankan Weevil",
@@ -213,6 +215,1612 @@
     "risk": "low",
     "action": "monitor",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "asian-lady-beetle",
+    "kind": "organism",
+    "common_name": "Asian Lady Beetle",
+    "aka": [
+      "Multicolored Asian Lady Beetle",
+      "Halloween Lady Beetle"
+    ],
+    "aliases": [
+      "asian lady beetle",
+      "asian lady beetles",
+      "asian ladybug",
+      "asian ladybugs",
+      "multicolored asian lady beetle",
+      "halloween beetle",
+      "harmonia axyridis"
+    ],
+    "scientific_name": "Harmonia axyridis",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": "allergen-lady-beetles",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult",
+      "overwintering cluster"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Round, domed body about the size of a small pea, orange to red with 0 to 19 black spots",
+      "A black marking shaped like an 'M' or 'W' sits just behind the head",
+      "Shows up by the dozens or hundreds on sunny walls or squeezes indoors during cool fronts",
+      "Releases a yellow, foul-smelling fluid that can stain when crushed or handled"
+    ],
+    "look_alikes": [
+      {
+        "slug": "lady-beetle",
+        "difference": "Asian lady beetle has a black 'M' or 'W' mark behind the head; native lady beetles lack that marking",
+        "next_photo": "From a safe distance, zoom in looking straight down at the head and the area just behind it.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "mealybug-destroyer",
+        "difference": "Mealybug destroyer adults are solid black with an orange-tan head and tail patch and have no spots at all",
+        "next_photo": "From a safe distance, zoom in from directly above showing the whole back, checking for spots vs. solid black.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "living-areas",
+      "lanai-patio",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "safety_line": "Can give a light pinch-bite and its yellow defense fluid stains fabric; large indoor clusters occasionally bother people with allergies or asthma.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      12,
+      1,
+      2
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A beneficial aphid-eater that becomes a nuisance when cool fronts push it indoors by the dozens to overwinter. It doesn't damage homes or belongings, but large clusters and their staining defense fluid can be unpleasant to live with.",
+      "fact": "It was brought to the US on purpose decades ago to eat crop aphids, and it still does that job well outdoors most of the year."
+    },
+    "tech_notes": "Confirm the black M/W marking behind the head and color-morph variability to rule out native Coccinellidae. Exterior perimeter treatment around entry points reduces indoor invasion; avoid interior application near food/aggregation sites.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN361"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Re-read UF/IFAS EDIS IN361/EENY204 (Mizell) directly and confirmed: overwintering movement indoors happens progressively later moving south (October in Michigan, November-January in north Florida); the document never separately characterizes south/southwest Florida's aggregation frequency. Range stays 'occasional' and peak_months (Dec-Feb) is used only as a reasonable extension of that same documented north-to-south gradient further south -- neither is claimed as a confirmed SWFL figure. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "56b067ef6f474a61c0c71a41b028784c8f5c0d3464be60944c65d6994624c509"
+    },
+    "role": "nuisance",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "lady-beetle",
+    "kind": "organism",
+    "common_name": "Native Lady Beetles",
+    "aka": [
+      "Native Ladybug",
+      "Native Ladybird Beetle"
+    ],
+    "aliases": [
+      "native lady beetle",
+      "native lady beetles",
+      "native ladybug",
+      "native ladybugs",
+      "native ladybird beetle",
+      "native ladybird beetles"
+    ],
+    "scientific_name": "Coccinellidae",
+    "rank": "family",
+    "group": "beetles",
+    "subgroup": "lady-beetles",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "pupa",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, domed, oval beetle, usually red, orange or yellow with black spots (pattern varies by species)",
+      "No black 'M'/'W' marking behind the head the way an Asian lady beetle has",
+      "Found on leaves and stems with aphids nearby, rather than swarming walls or windows",
+      "Larvae are spiky, alligator-shaped, and gray or black with orange markings, also hunting aphids"
+    ],
+    "look_alikes": [
+      {
+        "slug": "asian-lady-beetle",
+        "difference": "Native lady beetles lack the black 'M'/'W' mark behind the head, and don't gather indoors by the hundreds",
+        "next_photo": "From a safe distance, zoom in looking straight down at the head and the area just behind it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "lanai-patio"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      10,
+      11
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A garden ally that eats aphids and other soft-bodied plant pests. Seeing them on your plants is a good sign, not a pest problem, and they're worth leaving alone.",
+      "fact": "A single lady beetle can eat thousands of aphids over its lifetime, larva and adult stage combined."
+    },
+    "tech_notes": "Confirm absence of the black M/W head marking and lack of large indoor aggregations to rule out Harmonia axyridis. No treatment indicated; flag as beneficial if seen during an inspection.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN327"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look. Generic ladybug/ladybird names resolve to the shared lady-beetles subgroup; this entry requires a native qualifier. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "af6ca4785ca618b2914793f540cb8d00a3824e632fa1f0e75b31c044965941d2"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "mealybug-destroyer",
+    "kind": "organism",
+    "common_name": "Mealybug Destroyer",
+    "aka": [
+      "Australian Ladybird"
+    ],
+    "aliases": [
+      "mealybug destroyer",
+      "mealybug destroyers",
+      "mealybug destroyer larva",
+      "mealybug destroyer larvae",
+      "cryptolaemus montrouzieri",
+      "australian ladybird"
+    ],
+    "scientific_name": "Cryptolaemus montrouzieri",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": "lady-beetles",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Adult is solid black with an orange-tan head and rear wing-tip patch, no spots at all",
+      "Larvae are covered in long white waxy filaments and look bigger and fuzzier than the mealybugs nearby",
+      "Found moving through mealybug colonies on stems, leaf axils and citrus twigs",
+      "Larvae move noticeably faster than the slow, stationary mealybugs they're feeding on"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mealybug",
+        "difference": "Destroyer larvae are larger, move quickly, and have longer waxy filaments; mealybugs are slower, smaller, and stay clustered in place",
+        "next_photo": "A close-up of one insect actually walking, showing its speed and the length of its waxy strands",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "asian-lady-beetle",
+        "difference": "Mealybug destroyer adults are solid black with an orange-tan head/tail and have no spots; Asian lady beetles are orange or red with black spots",
+        "next_photo": "From a safe distance, zoom in from directly above showing the whole back, checking for spots vs. solid black.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "trees-shrubs",
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A predatory beetle that feeds specifically on mealybugs, larva and adult alike. Finding it on a mealybug-infested plant is a good sign the pest population is already being knocked back naturally.",
+      "fact": "Its larvae disguise themselves in white wax so well that they're often mistaken for the very mealybugs they're eating."
+    },
+    "tech_notes": "Confirm larva speed and filament length against static mealybug colonies before recommending any treatment; avoid broad-spectrum sprays on plants hosting active destroyer populations.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN156"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Range in SWFL marked occasional; it's naturally present and also released commercially, but homeowners rarely notice or report it, so confidence is moderate. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "36acc4d2c10a779d7959689ea5271248ad6fb80d8e559d7da689af55ef1c6562"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "june-beetle",
+    "kind": "organism",
+    "common_name": "June Beetle (May beetle)",
+    "aka": [
+      "May Beetle",
+      "June Bug"
+    ],
+    "aliases": [
+      "june beetle",
+      "june beetles",
+      "may beetle",
+      "may beetles",
+      "june bug",
+      "june bugs",
+      "phyllophaga"
+    ],
+    "scientific_name": "Phyllophaga spp.",
+    "rank": "genus",
+    "group": "beetles",
+    "subgroup": "scarabs-grubs",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "grub (white grub)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Chunky, oval, shiny beetle about 1/2 to 1 inch long, tan to reddish-brown or black",
+      "Bangs repeatedly against porch lights, windows and screens on warm nights",
+      "Smooth, rounded back with no horns, spots or eyespots",
+      "Larvae are fat, white, C-shaped grubs found in the soil under thinning or dying lawn"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ox-beetle",
+        "difference": "Ox beetle males have three long curved horns on the head and front of the back; June beetles have a smooth, hornless back",
+        "next_photo": "A photo from the side showing the head and the front of the back for horns",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lights-windows",
+      "lawn-garden"
+    ],
+    "looks": [
+      "beetle",
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The clumsy beetle that thumps into porch lights on spring evenings is basically harmless. Its grub stage (a white grub in the soil) is the one worth watching, since heavy grub numbers can thin out lawn roots and cause dead patches.",
+      "fact": "There are well over 100 Phyllophaga species in Florida, which is why 'June beetle' really covers a whole group rather than just one insect."
+    },
+    "tech_notes": "Confirm white C-shaped grubs in soil samples under damaged turf before treating; adult flights to light are not themselves treatment triggers.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ufdcimages.uflib.ufl.edu/IR/00/00/84/08/00001/LH03700.pdf"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Entry covers the Phyllophaga genus as a group (common name 'June/May beetle'); exact species present in SWFL vary and weren't individually confirmed.",
+      "approval_hash": "ab4d0b36c3d331fba756995166bb9d11f8cdd4ca3ae72990abd9ece6328f123f"
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "ox-beetle",
+    "kind": "organism",
+    "common_name": "Ox Beetle (rhinoceros beetle)",
+    "aka": [
+      "Rhinoceros Beetle"
+    ],
+    "aliases": [
+      "ox beetle",
+      "ox beetles",
+      "rhinoceros beetle",
+      "rhinoceros beetles",
+      "strategus"
+    ],
+    "scientific_name": "Strategus spp.",
+    "rank": "genus",
+    "group": "beetles",
+    "subgroup": "scarabs-grubs",
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "grub",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, heavy-bodied black to dark brown beetle, often over 1 inch long",
+      "Males have three curved horns on the head and front of the back; females are hornless with small bumps instead",
+      "Found on the ground near outdoor lights or in mulch/soil, moves slowly",
+      "Doesn't bite, sting or fly at people despite its intimidating size"
+    ],
+    "look_alikes": [
+      {
+        "slug": "june-beetle",
+        "difference": "June beetles are smaller and completely hornless with a smooth back; ox beetle males carry three curved horns",
+        "next_photo": "A photo from the side showing the head and front of the back for horns",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "eyed-click-beetle",
+        "difference": "Eyed click beetle has two large false eyespots on its back and clicks itself upright when flipped; ox beetle has horns and no eyespots or click",
+        "next_photo": "A top-down close-up of the area just behind the head, plus flip the beetle to see if it clicks",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lights-windows"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "An impressively large but harmless beetle. Its grubs live in decaying wood, mulch and compost and aren't a threat to a healthy lawn or garden, so this one is a look-don't-treat situation.",
+      "fact": "Males use their curved horns to wrestle rival males, more like tiny bulls than biting insects."
+    },
+    "tech_notes": "No treatment indicated; reassure on size/horns, this genus does not damage living plants or structures in a way that warrants control.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN759"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Re-checked UF/IFAS EDIS IN759 directly this session: it covers appearance, horns and handling but gives no Florida regional frequency or abundance data for Strategus species at all -- not even statewide. Range is kept at 'occasional', this catalog's standard cautious default when no frequency source exists, rather than asserted as a confirmed figure. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "6c66f1d2ca150490964f61fb7cfd411bd0133bc35fcea7013073a933fc090cb5"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "eyed-click-beetle",
+    "kind": "organism",
+    "common_name": "Eyed Click Beetle",
+    "aka": [
+      "Eyed Elater"
+    ],
+    "aliases": [
+      "eyed click beetle",
+      "eyed click beetles",
+      "eyed elater",
+      "alaus oculatus"
+    ],
+    "scientific_name": "Alaus oculatus",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, elongated, mottled black-and-white beetle, often 1 to 1.75 inches long",
+      "Two big black false eyespots ringed in white sit on the back of the beetle, just behind the head",
+      "Flips itself upright with an audible click if placed or found on its back",
+      "Found on tree bark, firewood piles and rotting logs, especially near hardwoods"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ox-beetle",
+        "difference": "Eyed click beetle has two large false eyespots behind the head and clicks when flipped; ox beetle has horns instead of eyespots and does not click",
+        "next_photo": "A top-down close-up of the area just behind the head, plus flip the beetle to see if it clicks",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs",
+      "garage-storage"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A harmless, even helpful beetle whose fake 'eyes' are just a bluff to startle predators. Its larvae hunt other wood-boring insect grubs in rotting logs, so it's a natural check on those pests, not a pest itself.",
+      "fact": "Its clicking trick is actually a spring-loaded mechanism it uses to flip itself right-side up if it lands on its back."
+    },
+    "tech_notes": "No treatment indicated; beneficial predator of wood-boring larvae. Reassure on size and eyespots.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN242"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Re-fetched UF/IFAS EDIS IN242 directly this session: it confirms the species occurs in Florida and documents a real late-May Florida collection record, though not a peak-month range. peak_months (May-Jul) anchors on that Florida record, broadly corroborated (not confirmed) by a general, non-Florida-specific source (Animal Diversity Web) describing June-July adult abundance. No SWFL-specific data exists, but this is the best Florida-anchored basis available, so season_basis moves from 'unverified' to 'observed' rather than being left fully unresolved. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "ebe64c2b8fa29dca478f13c2c144310f344ba404639e47418a815b5fd94adde4"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "bess-beetle",
+    "kind": "organism",
+    "common_name": "Bess Beetle",
+    "aka": [
+      "Betsy Beetle",
+      "Horned Passalus",
+      "Patent Leather Beetle"
+    ],
+    "aliases": [
+      "bess beetle",
+      "bess beetles",
+      "betsy beetle",
+      "bess bug",
+      "horned passalus",
+      "patent leather beetle",
+      "odontotaenius disjunctus"
+    ],
+    "scientific_name": "Odontotaenius disjunctus",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Large, shiny black beetle over 1 inch long with deeply grooved, ridged wing covers",
+      "A single small curved horn on the head",
+      "Found in groups tunneling inside rotting logs and stumps, not in dry structural wood",
+      "Makes an audible squeaking or hissing sound when picked up or handled"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-woods-roach",
+        "difference": "Bess beetle has hard, deeply grooved wing covers and one head horn; Florida woods roach has a smooth, unridged shell and no horn",
+        "next_photo": "From a safe distance, zoom in looking straight down at the back, checking for grooves/ridges vs. a smooth shell.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A wood decomposer, not a wood destroyer. It only works on already-rotting logs and stumps and has no interest in sound lumber or living trees, so finding one in a mulch pile or old firewood is nothing to worry about.",
+      "fact": "Bess beetles live in small family groups inside their log and actually communicate with each other using at least 14 distinct squeaking sounds."
+    },
+    "tech_notes": "No treatment indicated; if found near a structure, confirm it's associated with decaying wood/mulch, not sound structural timber, to distinguish from a wood-destroying pest inquiry.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/118865"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "d8189366e1efa8a45ce70cac6b55dc5321d298b3bad824a0f4b270abf3953be9"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "ground-beetle",
+    "kind": "organism",
+    "common_name": "Ground Beetle",
+    "aka": [],
+    "aliases": [
+      "ground beetle",
+      "ground beetles",
+      "carabid beetle",
+      "carabid beetles",
+      "carabidae"
+    ],
+    "scientific_name": "Carabidae",
+    "rank": "family",
+    "group": "beetles",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Shiny black or dark metallic beetle, fast-moving on long legs",
+      "Narrow head with prominent jaws, no horns, no colorful spots",
+      "Found scurrying under stones, mulch, pots or logs, usually after dark",
+      "Runs to hide rather than fly when a light or hand disturbs it"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-cockroach",
+        "difference": "Ground beetles have hard wing covers meeting in a straight line; cockroaches have softer, overlapping wings and longer antennae",
+        "next_photo": "From a safe distance, zoom in from above on the back and the antennae length.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "beetle"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Its jaws can pinch if it's picked up, but this isn't a beetle that bites people unprovoked.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A fast-moving nighttime predator that eats caterpillars, slugs and other garden pests. Seeing one scurry under a pot or mulch is a good sign for your garden, not a reason for concern.",
+      "fact": "Some ground beetles can outrun almost anything else their size, covering many times their own body length per second."
+    },
+    "tech_notes": "No treatment indicated; beneficial predator. Distinguish from small roach species if the report is from indoors. Per BRIEF Revision 3 rule 5, safety.bites is true as a capability flag (prominent jaws can pinch if handled).",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/topics/carabidae"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Generic family-level entry; Florida hosts many ground beetle species with varied size/color, so traits describe the common pattern homeowners see rather than one species. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "f146f784ef70a6a86123dd8cd51375cab99300b788a6b6d028052d202ec026c2"
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "powderpost-beetle",
+    "kind": "organism",
+    "common_name": "Powderpost Beetle",
+    "aka": [
+      "Lyctid Beetle"
+    ],
+    "aliases": [
+      "powderpost beetle",
+      "powderpost beetles",
+      "powder post beetle",
+      "lyctid beetle",
+      "lyctid beetles",
+      "southern lyctus beetle"
+    ],
+    "scientific_name": "Lyctinae",
+    "rank": "subfamily",
+    "group": "beetles",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tiny (under 1/4 inch), narrow, reddish-brown to dark brown beetle",
+      "Round exit holes about 1/16 to 1/8 inch across scattered over bare or finished wood",
+      "Fine, flour-like powder packed tightly inside the wood and sifting out of the holes",
+      "Found in untreated hardwood furniture, flooring, moldings or lumber, not in soil-contact wood"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drywood-termite-frass",
+        "difference": "Powderpost powder is fine and packed tight behind small round holes; termite pellets are loose, hard pellets pushed out separate 'kick-out' holes",
+        "next_photo": "A close-up of the hole and the loose material beneath it, next to a coin for scale",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "beetle",
+      "sign"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "No risk to people or pets; the concern is only for untreated hardwood furniture, flooring and structural lumber.",
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A small beetle that can quietly hollow out hardwood furniture, flooring or lumber over months to years, leaving pinholes and fine powder behind. It's worth an inspection to confirm which wood-boring insect is active and whether it's still emerging.",
+      "fact": "Powderpost beetles can re-infest the same piece of wood for generations, since females often lay eggs right back into old exit holes."
+    },
+    "tech_notes": "Confirm active infestation (fresh, light-colored frass and clean-edged holes) vs. old, inactive damage before recommending treatment. Distinguish Lyctinae frass/hole size from Bostrichidae and drywood termite pellets per label references.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG119"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "",
+      "approval_hash": "c02cb5eec3fbb7d7e95859fae79fcde40398c787c2ba10d833dc52605ece2417"
+    },
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "diaprepes-root-weevil",
+    "kind": "organism",
+    "common_name": "Diaprepes Root Weevil",
+    "aka": [
+      "Citrus Root Weevil"
+    ],
+    "aliases": [
+      "diaprepes root weevil",
+      "diaprepes root weevils",
+      "citrus root weevil",
+      "diaprepes weevil",
+      "diaprepes abbreviatus"
+    ],
+    "scientific_name": "Diaprepes abbreviatus",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva (root-feeding)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small oval weevil, black body overlaid with a mottled pattern of white, yellow, orange or red scales",
+      "Distinctive squared-off notches chewed from the edges of young leaves in a scalloped pattern",
+      "Found on citrus and ornamental leaves, especially after rain, no long curved snout",
+      "Legless white larvae feed unseen on roots below ground, causing decline that shows up above ground later"
+    ],
+    "look_alikes": [
+      {
+        "slug": "palmetto-weevil",
+        "difference": "Diaprepes weevil is small and mottled, feeding on citrus/ornamental leaves; palmetto weevil is much larger, plain black-to-red, on palms only",
+        "next_photo": "A close-up next to a coin showing size and color pattern, plus a photo of what plant it's on",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "beetle",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": true,
+      "irritant": false
+    },
+    "safety_line": "Florida regulates this pest under nursery/citrus quarantine rules; a suspected find on nursery stock should be reported rather than moved off-site.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "The leaf notching is only half the story; the damage that really hurts citrus and ornamentals happens underground, where the larvae chew on roots for months. Leaf notching on a valued tree or shrub is worth a look before root damage adds up.",
+      "fact": "A single female can lay thousands of eggs in her lifetime, folded and glued inside pairs of leaves."
+    },
+    "tech_notes": "Confirm adult scale-pattern and leaf notching, then inspect root zone/soil for larvae and decline symptoms; multiple overlapping generations are typical in Florida's climate.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN151",
+      "https://www.law.cornell.edu/regulations/florida/Fla-Admin-Code-Ann-R-5B-3-0038"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "regulated confirmed true: Florida Administrative Code 5B-3.0038 (Quarantine Action) lists Diaprepes abbreviatus as a Florida plant pest of limited distribution, subject to immediate quarantine of infested nursery stock. safety_line added accordingly.",
+      "approval_hash": "2656ef3ab215d49729f5874f7ac7f912b1828fb897da55c17d736f40206ee430"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "palmetto-weevil",
+    "kind": "organism",
+    "common_name": "Palmetto Weevil",
+    "aka": [],
+    "aliases": [
+      "palmetto weevil",
+      "palmetto weevils",
+      "rhynchophorus cruentatus"
+    ],
+    "scientific_name": "Rhynchophorus cruentatus",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva (grub)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Largest weevil in North America, adults 3/4 to 1.2 inches long, black to reddish with a long curved snout",
+      "Found on stressed, wounded or recently transplanted palms, especially cabbage palm",
+      "Newest leaves in the crown wilt and droop first, then the whole top of the palm can collapse ('popped neck')",
+      "Larvae are large, legless, cream-colored grubs found inside the trunk or crown when a palm is cut open"
+    ],
+    "look_alikes": [
+      {
+        "slug": "south-american-palm-weevil",
+        "difference": "South American palm weevil runs larger and darker with an even longer snout; both attack palm crowns, so size and snout length matter more than color alone",
+        "next_photo": "A side-on close-up of the weevil next to a coin, plus a photo of the palm species it was found on",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "diaprepes-root-weevil",
+        "difference": "Palmetto weevil is much larger and found only on palms; diaprepes root weevil is small, mottled, and feeds on citrus/ornamental leaves, not palm crowns",
+        "next_photo": "A close-up next to a coin showing size and color pattern, plus a photo of what plant it's on",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "royal-palm-bug",
+        "difference": "Palmetto weevil grubs kill the growing point and the whole crown can collapse (\"popped neck\"); royal palm bug only scars new fronds cosmetically.",
+        "next_photo": "A wide shot of the whole crown: drooping/collapsing older fronds and a wilting or fallen crown (weevil) versus frizzled new fronds only (bug).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "beetle",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This native weevil targets palms that are already stressed, wounded or freshly transplanted, and by the time the crown visibly droops the damage inside is often already done. A recently transplanted or storm-damaged palm showing crown wilt is worth a prompt look.",
+      "fact": "Despite being North America's largest weevil, it's native to Florida and mostly goes after palms that are already struggling rather than healthy ones."
+    },
+    "tech_notes": "Confirm crown symptoms (wilting newest fronds, 'popped neck') and check for grubs/frass in the crown or trunk; recent transplant or storm/pruning wounds are the key risk factor to note.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN139"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Peak months set to hurricane/storm season when transplanting and wind damage stress palms; not a directly cited seasonal-activity figure. Per audit item 54: added a reciprocal look-alike to royal-palm-bug (B/true-bugs) since UF/IFAS EDIS IN139 documents royal palm as a host, and the cosmetic-vs-potentially-fatal distinction is useful triage information.",
+      "approval_hash": "ef06ccf9566369586d251bc7975b23ce87e64da882708f6a846b91ca30389795"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "south-american-palm-weevil",
+    "kind": "organism",
+    "common_name": "South American Palm Weevil",
+    "aka": [
+      "Giant Palm Weevil"
+    ],
+    "aliases": [
+      "south american palm weevil",
+      "south american palm weevils",
+      "giant palm weevil",
+      "rhynchophorus palmarum"
+    ],
+    "scientific_name": "Rhynchophorus palmarum",
+    "rank": "species",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva (grub)",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Very large weevil, often 1.5 to 2 inches long, black with a long, downward-curved snout",
+      "Found boring into the crown of palms, especially date, coconut and Canary Island date palms",
+      "Palm crown collapses ('popped neck') and fronds droop and die from the top down",
+      "Larger overall than the native palmetto weevil, with an even longer snout"
+    ],
+    "look_alikes": [
+      {
+        "slug": "palmetto-weevil",
+        "difference": "Palmetto weevil is native, somewhat smaller, black-to-red; South American palm weevil runs larger, more uniformly dark, with a longer snout",
+        "next_photo": "A side-on close-up of the weevil next to a coin, plus a photo of the palm species it was found on",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "beetle",
+      "plant-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": true,
+      "irritant": false
+    },
+    "safety_line": "This is a regulated pest of concern for Florida palms; note where you saw it and avoid moving cut palm material off-site while it's confirmed.",
+    "range": "rare",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": "report_fdacs"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A large palm-killing weevil not yet known to be established in Florida, monitored closely because of how much damage it does elsewhere and how easily it can spread in palm material. A suspected find on a declining palm is worth a professional look and a report so the sighting can be tracked.",
+      "fact": "It can also carry a nematode that causes red-ring disease in coconut and oil palms, adding a second way it harms palms beyond direct feeding."
+    },
+    "tech_notes": "Confirm size and snout length against native palmetto weevil; if suspected, photograph in place, avoid moving material, and follow current agency reporting guidance for this species of concern.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ccmedia.fdacs.gov/content/download/66344/file/pest_alert_-_giant_palm_weevils_of_the_genus_rhynchophorus.pdf",
+      "https://gd.eppo.int/taxon/RHYCPA/datasheet",
+      "https://www.law.cornell.edu/regulations/florida/Fla-Admin-Code-Ann-R-5B-65-003"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Both verification items resolved this session. Established/present in FL: not established — EDDMapS shows no Florida point data (checked live), the EPPO datasheet (gd.eppo.int/taxon/RHYCPA) documents established US populations only in California (since 2015), Texas and Arizona (trapped adults, no established population as of 2020), and the 2010 FDACS pest alert (DACS-P-01719) lists it only as a threat, not present. Regulated status: confirmed regulated — Florida Administrative Code 5B-65.003 (Wood Boring Pests, Wood Inhabiting Pests, and Plant Pests) explicitly lists 'Rhynchophorus palmarum, American palm weevil' as a regulated pest; safety.regulated changed back to true and safety_line updated accordingly. range/action/referral (rare, report, report_fdacs) already matched a not-yet-established, regulated species of concern, so left as-is.",
+      "approval_hash": "79d528661ada641c5b8bd42c6ecd586695d70144877430275eadc7e4f1952b85"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "report",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "hunting-billbug",
+    "kind": "organism",
+    "common_name": "Hunting Billbug",
+    "aka": [
+      "Zoysia Billbug"
+    ],
+    "aliases": [
+      "hunting billbug",
+      "hunting billbugs",
+      "zoysia billbug",
+      "sphenophorus venatus"
+    ],
+    "scientific_name": "Sphenophorus venatus vestitus",
+    "rank": "subspecies",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Lawn",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (under 1/2 inch) dark brown to black weevil with a short curved snout",
+      "Often seen walking on sidewalks or driveways near the lawn rather than flying",
+      "Sawdust-like frass packed tightly inside chewed grass stems near the soil line",
+      "Damaged zoysia or bermuda grass pulls up easily in irregular, spreading dead patches"
+    ],
+    "look_alikes": [
+      {
+        "slug": "mole-cricket",
+        "difference": "Billbug is a small weevil with a curved snout, seen on pavement; mole cricket is much larger with shovel-like front legs, stays in soil",
+        "next_photo": "A close-up next to a coin showing either the weevil's snout or the cricket's shovel-shaped front legs",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "beetle",
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "This weevil chews through grass stems at the base, and by the time patches of turf pull up easily by hand, both adults and larvae are usually already at work below. Spreading irregular dead patches in zoysia or bermuda grass are worth a lawn inspection.",
+      "fact": "A quick way to check is the 'tug test': damaged grass in a billbug patch pulls free from the soil with almost no resistance."
+    },
+    "tech_notes": "Confirm with tug test and look for sawdust-like frass in stems plus legless larvae in the top two inches of soil; damage often misread as drought or dormancy stress.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/112502"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Returned to draft after removing the generic 'billbug' and 'billbugs' aliases, which cannot identify this hunting billbug subspecies; owner re-approval is required. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "217f9e14cd8d7397c8b4ea31ff53afe8a158dd3fdce1fbb5d5e5e058e23827f1"
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": []
+  },
+  {
+    "slug": "tortoise-beetle",
+    "kind": "organism",
+    "common_name": "Tortoise Beetle",
+    "aka": [],
+    "aliases": [
+      "tortoise beetle",
+      "tortoise beetles",
+      "cassidinae"
+    ],
+    "scientific_name": "Cassidinae",
+    "rank": "subfamily",
+    "group": "beetles",
+    "subgroup": null,
+    "site_category": "Beetles & bugs",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small, flattened, disc- or shield-shaped beetle with edges that flare out past its legs",
+      "Often shiny gold, green or amber, and some can shift color when disturbed",
+      "Found feeding on morning glory, sweet potato or other related vine leaves",
+      "Leaves show small round or irregular chewed holes rather than notched edges"
+    ],
+    "look_alikes": [
+      {
+        "slug": "lady-beetle",
+        "difference": "Tortoise beetle is flat with edges flaring past its legs like a shield; lady beetles are domed, curving straight down to the legs",
+        "next_photo": "A close-up from the side showing whether the edges flare out flat or curve down to meet the legs",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "trees-shrubs"
+    ],
+    "looks": [
+      "beetle",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A small, oddly shield-shaped beetle that nibbles holes in morning glory and sweet potato leaves. The feeding is usually light and cosmetic, so it's mostly a matter of keeping an eye on numbers rather than treating.",
+      "fact": "Some tortoise beetles can shift color when they're handled or disturbed, going from shiny gold to a duller shade in seconds."
+    },
+    "tech_notes": "No treatment usually needed at low numbers; monitor host vines (morning glory/sweet potato family) if leaf damage is spreading.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/in246"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Generic subfamily-level entry; several tortoise beetle species occur in Florida with varying color, so traits describe the common shield shape rather than one exact species.",
+      "approval_hash": "9c3c5f17673a7cd6fef139768e6a974dd1633a3cd414045376cb5000673e9fa6"
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
     "verification": []
   }
 ]

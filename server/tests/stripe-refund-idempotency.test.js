@@ -26,6 +26,8 @@ describe('StripeService.refund', () => {
   let dbMock;
   let paymentRow;
   let updatePayments;
+  let mockGateForCharge;
+  let mockSessionGate;
 
   function loadService() {
      
@@ -45,6 +47,8 @@ describe('StripeService.refund', () => {
       status: 'paid',
     };
     updatePayments = jest.fn().mockResolvedValue(1);
+    mockGateForCharge = jest.fn(async () => []);
+    mockSessionGate = jest.fn(async (_keys, fn) => fn());
 
     stripeClient = {
       refunds: {
@@ -86,6 +90,8 @@ describe('StripeService.refund', () => {
     }));
     jest.doMock('../services/annual-prepay-renewals', () => ({
       syncTermForRefundedPayment: jest.fn(async () => undefined),
+      acquireTermiteGateForCharge: mockGateForCharge,
+      withTermiteGateForCharge: mockSessionGate,
     }));
     jest.doMock('../services/customer-credit', () => ({
       returnAppliedCreditOnRefund: jest.fn(async () => undefined),
@@ -254,6 +260,17 @@ describe('StripeService.refund', () => {
       status: 'refunded',
       refund_amount: 100,
     }));
+    // Codex #4971 r4 P1: the refunded stamp runs inside a transaction whose
+    // FIRST lock is the renewal parent-decision gate (keyed off this
+    // payment), so it can never land mid-way through a renewal charge's
+    // re-check-then-submit window.
+    expect(mockGateForCharge).toHaveBeenCalledWith(dbMock, { paymentIds: ['pay-1'] });
+    // Codex #4971 r6 P1: the session gate is taken BEFORE the provider call.
+    expect(mockSessionGate).toHaveBeenCalledWith({ paymentIds: ['pay-1'] }, expect.any(Function));
+    expect(mockSessionGate.mock.invocationCallOrder[0]).toBeLessThan(stripeClient.refunds.create.mock.invocationCallOrder[0]);
+    const stampCall = updatePayments.mock.calls.findIndex(([patch]) => patch.status === 'refunded');
+    expect(mockGateForCharge.mock.invocationCallOrder[0])
+      .toBeLessThan(updatePayments.mock.invocationCallOrder[stampCall]);
   });
 
   test('omitted-amount refund is fully refunded by definition (out-of-band partials included)', async () => {

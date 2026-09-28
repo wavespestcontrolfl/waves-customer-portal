@@ -6,6 +6,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -15,7 +16,7 @@ import TermiteReportV2Section from '../components/report/termiteV2/TermiteReport
 import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
-import { isProductApplication } from '../lib/product-application';
+import { isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { isLawnFindingSelection } from '../lib/lawn-completion';
 import { serviceCompletionChoicesFor } from '../lib/service-completion-choices';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -61,6 +62,7 @@ import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
+import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -2638,6 +2640,56 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   );
 }
 
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year — never a price, owner rule that prices
+// only ever appear on estimate pages. The server sends it for members only.
+// Live view only; the payload field itself is stripped from
+// pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
+// so `mode` is a belt-and-braces check here, same as the other live-only
+// cards on this page.
+function PlanSummaryCard({ data, mode }) {
+  const plan = data.planSummary;
+  if (mode !== 'live' || !plan) return null;
+  const visits = Number(plan.visitsThisYear) || 0;
+  if (visits <= 0) return null;
+  const reservices = Number(plan.reservicesThisYear) || 0;
+  const visitWord = visits === 1 ? 'visit' : 'visits';
+  const reserviceWord = reservices === 1 ? 're-service' : 're-services';
+  const yearLine = reservices > 0
+    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
+    : `This year: ${visits} ${visitWord}`;
+  return (
+    <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
+      <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
+// "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
+// GATE_REPORT_NEAR_YOU): the lawn pest most often found around the
+// customer's city this past month. The server sends it only for a live lawn
+// report once enough other customers there had that pest, and strips it from
+// pdf/static/sms_preview renders; `mode` is the same belt-and-braces check
+// as PlanSummaryCard.
+function NearYouCard({ data, mode }) {
+  const nearYou = data.nearYou;
+  if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
+  return (
+    <section data-glass="card" className="sr-section near-you-section" id="near-you">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
+      <p className="map-context-copy">
+        Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
+      </p>
+    </section>
+  );
+}
+
 // Shown to staff viewing an internal-only (shadow) report in place of the
 // download/share bar: no PDF is rendered for these records and the public
 // link 404s for customers, so every control there would dead-end. Customers
@@ -2899,10 +2951,18 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     if (!q || asking) return;
     setAsking(true);
     setAnswer('');
+    // Staff browsers send their portal JWT, as on the /data read, so the
+    // server can leave a staff QA question out of customer engagement.
+    // Guarded like that read: sandboxed webviews can throw on localStorage.
+    let staffToken = null;
+    try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     try {
       const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(staffToken ? { Authorization: `Bearer ${staffToken}` } : {}),
+        },
         body: JSON.stringify({ question: q }),
       });
       const payload = await response.json();
@@ -2962,7 +3022,11 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
       </div>
       {answer && (
         <div className="waves-ask-answer" role="status">
-          <span>{answer}</span>
+          {/* AW-06 line-break fix: several answer builders (e.g. answerAppliedToday,
+              answerNextSteps, answerFindings) join recorded facts / next actions
+              with "\n" so they read as separate lines, not one run-on paragraph —
+              this class preserves those breaks without dangerouslySetInnerHTML. */}
+          <span className="waves-ask-answer-text">{answer}</span>
           <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer"><Icon name="close" size={16} strokeWidth={2} /></button>
         </div>
       )}
@@ -3320,6 +3384,40 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   );
 }
 
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS). Server-driven: renders only when the LIVE
+// payload carries upcomingVisitsCard.visits — property scoping (this
+// report's property only), the 90-day window, the excluded statuses, and
+// the ~6 cap all live server-side (report-data.js); the client renders
+// exactly what it is given. Distinct from the hero's "Next service" cell
+// above, which stays scoped to this report's own service line only.
+function UpcomingVisitsCard({ data, mode }) {
+  const visits = data?.upcomingVisitsCard?.visits;
+  if (mode !== 'live' || !Array.isArray(visits) || !visits.length) return null;
+  return (
+    <section data-glass="card" className="report-card upcoming-visits-card" data-section="upcoming-visits">
+      {/* h2, not .section-eyebrow (codex round-2 P2): the glass theme hides
+          EVERY .section-eyebrow outside the hero kicker
+          (html[data-glass-theme] .service-report-v1 .section-eyebrow), so
+          the title was invisible under glass. .report-card h2 already
+          carries real, deliberate styling (same pattern the companion
+          section heading and the generic .report-card/.sr-section rule
+          use) and the glass rule never targets headings. */}
+      <h2>Your upcoming visits</h2>
+      <div className="service-status-grid">
+        {visits.map((visit, index) => (
+          <div className="sr-cell" key={`${index}-${visit.scheduledDate || ''}-${visit.serviceType || ''}`}>
+            <div className="sr-cell-value">
+              {formatNextAppointmentLabel(visit) || nextServiceName(visit.serviceType) || 'Scheduled visit'}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sr-cell-note">Dates and windows are subject to change</div>
+    </section>
+  );
+}
+
 // Cross-sell offer card (owner-approved 2026-08-11, GATE_REPORT_CROSS_SELL).
 // Server-driven: renders only when the LIVE payload carries `crossSell` — the
 // server computes the offer fail-closed (ownership, commercial, secondary-
@@ -3373,6 +3471,14 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      {/* GATE_REPORT_CROSS_SELL_V2 only: short, honest, reason-tied copy for
+          a findings/season-picked offer ("We noted roach activity today...").
+          Absent for the unchanged ladder pick. */}
+      {offer.reason && (
+        <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14, lineHeight: 1.5, textAlign: 'center' }}>
+          {offer.reason}
+        </p>
+      )}
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3488,7 +3594,23 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   // monitoring devices (stations, cartridges) are checks, not products
   // applied (codex P2 #3600 r23).
   const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
-  if (!applications.length) return null;
+  if (!applications.length) {
+    // No product rows, yet something went down: the server's applicationMade
+    // verdict from typed / specialty treatment evidence (product rows are
+    // optional there — Codex r1 #5032), an UNKNOWN verdict (null: the product
+    // read failed, so fail toward the safety line — Codex r4), or rodenticide
+    // in bait stations, which servicing does not count as an application
+    // (owner 2026-09-26). Poison Control prints on its own; this mount is the
+    // one slot both layouts share. The applicator is named only on real
+    // application evidence — a station check applied nothing (Codex r4).
+    if (data.applicationMade !== true && data.applicationMade !== null && !reportHasRodenticide(data)) return null;
+    return (
+      <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
+        <h2>Poison Control</h2>
+        <PoisonControlNote data={data} titled showApplicator={data.applicationMade === true} />
+      </section>
+    );
+  }
   const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
@@ -3623,7 +3745,23 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           })}
         </div>
       )}
+      {/* Poison Control rides the product list: this section only mounts
+          when something was actually applied, so WDO, assessment and
+          monitoring-only visits never carry it (owner 2026-09-26). */}
+      <PoisonControlNote data={data} listsProducts showApplicator />
     </section>
+  );
+}
+
+// titled: the standalone section already heads it "Poison Control".
+// showApplicator: the visit recorded an actual application.
+function PoisonControlNote({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
+  return (
+    <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
+      {!titled && <><strong>Poison Control.</strong>{' '}</>}<PoisonControlCopy listsProducts={listsProducts} />
+      {applicator && <div className="poison-control-applicator">{applicator}</div>}
+    </div>
   );
 }
 
@@ -5610,6 +5748,13 @@ function LegacyReport({ data, token, glass = false }) {
             }}
             style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
+          {/* Owner ask 2026-09-28: legacy (pre-v1) reports carry the Products
+              & Safety link too; they never mount the v1 footer. */}
+          <p style={{ fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>
+            <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+              See every product we use and our safety protocol
+            </a>
+          </p>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
@@ -5680,9 +5825,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const customerSafeObservationLabels = new Set(
     serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
   );
+  const hasServerValidatedObservationSnapshot = data.protocol?.structuredObservationsProvenance
+    === 'completion_form_snapshot';
   const routineFindings = [...new Set(
     (Array.isArray(data.protocol?.structuredObservations) ? data.protocol.structuredObservations : [])
-      .filter((value) => customerSafeObservationLabels.has(value)
+      .filter((value) => typeof value === 'string' && value.trim())
+      .filter((value) => hasServerValidatedObservationSnapshot
+        || customerSafeObservationLabels.has(value)
         || (data.serviceLine === 'lawn' && isLawnFindingSelection(value))),
   )];
   const recordedFindingsList = routineFindings.length > 0 ? (
@@ -7278,6 +7427,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        /* Customer-facing body copy floor is 16px; 14px stays reserved for
+           labels (codex round-2 P2). Scoped to the upcoming-visits card only
+           — .sr-cell-value/.sr-cell-note are shared with other cards whose
+           existing 15px/14px sizing is unchanged here. */
+        .upcoming-visits-card .sr-cell-value,
+        .upcoming-visits-card .sr-cell-note {
+          font-size: 16px;
+        }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -7451,6 +7608,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .manufacturer-guideline-note strong {
           color: var(--text);
           font-weight: 700;
+        }
+        .poison-control-note {
+          margin: 16px 0 0;
+        }
+        .poison-control-note a {
+          color: var(--text);
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .poison-control-applicator {
+          margin-top: 8px;
+          font-weight: 600;
         }
         .applied-product-maker {
           margin: -2px 0 8px;
@@ -8838,6 +9007,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
+        <PlanSummaryCard data={data} mode={mode} />
+
+        <NearYouCard data={data} mode={mode} />
+
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
@@ -8889,6 +9062,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             lawn timeline below; the two are exclusive on isV2LeadLayout so
             #tech-note never duplicates. Live only. */}
         {!isV2LeadLayout && <TechNoteCard data={data} mode={mode} />}
+
+        {/* Your upcoming visits (owner-approved 2026-09-27,
+            GATE_REPORT_UPCOMING_VISITS) — right beside the cross-sell offer,
+            same interwoven placement. Live-only; renders nothing unless the
+            payload carries upcomingVisitsCard. */}
+        <UpcomingVisitsCard data={data} mode={mode} />
 
         {/* Cross-sell offer — INTERWOVEN placement (owner 2026-08-11: spaced
             through the report, not stacked at the bottom): after the visit
@@ -9427,6 +9606,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
+          {/* Owner ask 2026-09-28: every report links to the public Products &
+              Safety page. The footer renders on every report, so assessment-
+              and inspection-only visits get it too. */}
+          {' '}
+          <a href={`${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol`} target="_blank" rel="noopener noreferrer" style={{ color: '#04395E', fontWeight: 600 }}>
+            See every product we use and our safety protocol
+          </a>.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
           {/* Pair the sentence with a "book it" path. Server-gated boolean
               only (reserviceEligible) — the standing reservice_token must

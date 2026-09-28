@@ -137,8 +137,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.14.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.14.0');
+  test('schema version is 1.17.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.17.0');
   });
 
   describe('model-output schema', () => {
@@ -193,6 +193,100 @@ describe('schema validation', () => {
       data.caller.relationship_to_property = 'neighbor';
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(false);
+    });
+
+    test('1.15.0: a home_buyer caller validates in both schemas', () => {
+      const out = validModelOutput();
+      out.caller.relationship_to_property = 'home_buyer';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const persisted = validPersisted();
+      persisted.meta.schema_version = '1.15.0';
+      persisted.caller.relationship_to_property = 'home_buyer';
+      expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.16.0: a reschedule agreement and the appointment it moves survive validation, normalization and flattening', () => {
+      const out = validModelOutput();
+      out.scheduling.status = 'reschedule_requested';
+      out.scheduling.confirmed_start_at = '2026-11-09T14:00:00-05:00';
+      out.scheduling.agent_committed_booking = true;
+      out.scheduling.caller_accepted_slot = true;
+      out.scheduling.moved_appointment_date = '2026-11-09';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      Object.assign(data.scheduling, out.scheduling);
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.scheduling).toMatchObject({ caller_accepted_slot: true, moved_appointment_date: '2026-11-09' });
+      expect(flatView(normalized)).toMatchObject({ caller_accepted_slot: true, moved_appointment_date: '2026-11-09' });
+    });
+
+    test('1.16.0: a moved date that is not a date is refused, and older rows without the fields still validate', () => {
+      const out = validModelOutput();
+      out.scheduling.moved_appointment_date = 'the Thursday one';
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.moved_appointment_date = null;
+      out.scheduling.caller_accepted_slot = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.15.0';
+      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
+      expect(flatView(old)).toMatchObject({ caller_accepted_slot: false, moved_appointment_date: null });
+    });
+
+    test('1.17.0: agreed_slot_words and moved_appointment_words survive validation, normalization and flattening', () => {
+      const out = validModelOutput();
+      out.scheduling.status = 'reschedule_requested';
+      out.scheduling.confirmed_start_at = '2026-11-09T14:00:00-05:00';
+      out.scheduling.agent_committed_booking = true;
+      out.scheduling.caller_accepted_slot = true;
+      out.scheduling.moved_appointment_date = '2026-11-02';
+      out.scheduling.agreed_slot_words = { day: 'the 9th', hour: 'two', period: null };
+      out.scheduling.moved_appointment_words = 'the 2nd';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      Object.assign(data.scheduling, out.scheduling);
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.scheduling).toMatchObject({
+        agreed_slot_words: { day: 'the 9th', hour: 'two', period: null },
+        moved_appointment_words: 'the 2nd',
+      });
+      expect(flatView(normalized)).toMatchObject({
+        agreed_slot_words: { day: 'the 9th', hour: 'two', period: null },
+        moved_appointment_words: 'the 2nd',
+      });
+    });
+
+    test('1.17.0: agreed_slot_words and moved_appointment_words are null by default, and older rows without the fields still validate', () => {
+      const out = validModelOutput();
+      out.scheduling.agreed_slot_words = null;
+      out.scheduling.moved_appointment_words = null;
+      expect(validateModelOutput(out).valid).toBe(true);
+      const old = validPersisted();
+      old.meta.schema_version = '1.16.0';
+      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
+      expect(flatView(old)).toMatchObject({ agreed_slot_words: null, moved_appointment_words: null });
+    });
+
+    test('1.17.0: agreed_slot_words rejects extra keys, a missing key, and empty strings', () => {
+      const out = validModelOutput();
+      out.scheduling.agreed_slot_words = { day: 'Thursday', hour: 'two', period: 'pm', extra: 'nope' };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: 'Thursday', hour: 'two' };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: '', hour: 'two', period: null };
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.agreed_slot_words = { day: null, hour: '', period: null };
+      expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    test('1.17.0: moved_appointment_words rejects an empty string', () => {
+      const out = validModelOutput();
+      out.scheduling.moved_appointment_words = '';
+      expect(validateModelOutput(out).valid).toBe(false);
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {

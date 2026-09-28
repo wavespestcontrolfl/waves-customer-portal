@@ -23,6 +23,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { etDateString } = require('../utils/datetime-et');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const visitRuns = require('./lawn-visit-runs');
+const { resolvePropertyCoordinates } = require('./property-coordinates');
 
 // Structured-output contract for the photo-quality gate (llm/call.js
 // jsonSchema). The weighted score and the usable flag decide the verdict.
@@ -67,14 +68,15 @@ function invalidPhotoQualityJson(json) {
 // 1. FAWN WEATHER CONTEXT
 // ══════════════════════════════════════════════════════════════
 
-async function fetchFawnWeather() {
+async function fetchFawnWeather(coordinates) {
   // Delegate to the canonical FAWN service (cached, station-selected, and
   // null-safe). The previous local fetcher coerced missing readings to 0 via
   // `parseFloat(x || 0)`, which persisted 0°F / 0in into lawn_assessments and
   // polluted downstream efficacy/seasonal aggregation. getCurrent() uses
   // numberOrNull, so absent fields stay null.
   const FawnWeather = require('./fawn-weather');
-  const snapshot = await FawnWeather.getCurrent();
+  if (!coordinates) return null;
+  const snapshot = await FawnWeather.getCurrent(coordinates);
   if (!snapshot || snapshot.station === 'unavailable') return null;
   return {
     temp_f: snapshot.temp_f,
@@ -264,7 +266,10 @@ const LawnIntelligence = {
 
   // ── Attach FAWN weather to an assessment ────────────────────
   async attachWeather(assessmentId) {
-    const weather = await fetchFawnWeather();
+    const assessment = await db('lawn_assessments').where({ id: assessmentId }).first('customer_id', 'property_id');
+    if (!assessment) return null;
+    const coordinates = await resolvePropertyCoordinates(assessment.customer_id, assessment.property_id);
+    const weather = await fetchFawnWeather(coordinates);
     if (!weather) return null;
     await db('lawn_assessments').where({ id: assessmentId }).update({
       fawn_temp_f: weather.temp_f,

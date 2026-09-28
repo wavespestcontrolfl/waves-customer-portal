@@ -47,21 +47,31 @@ function providerFailureStatus(err, error) {
   return match ? Number(match[1]) : null;
 }
 
+// Permanent Twilio rejections. Nothing was sent. The sender-side ones are
+// OUR configuration's problem, not the recipient's: fixing the sender or
+// account makes a later send to the same number viable, so a lane holding
+// a permanent one-text-per-number claim releases it for these instead of
+// consuming it (missed-call-text-back.js). The rest are about the
+// recipient.
+const SENDER_SIDE_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21408', // permission denied for destination region
+  '21606', // From number cannot send SMS
+  '21608', // unverified trial destination
+]);
+const RECIPIENT_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21211', // invalid To number
+  '21610', // recipient unsubscribed
+  '21612', // no route available
+  '21614', // number is not mobile/SMS-capable
+]);
+
 function classifyProviderFailure(err, fallbackError) {
   const error = err ? formatProviderError(err) : (sanitizeProviderError(fallbackError) || 'twilio rejected');
   const twilioCode = providerFailureCode(err, error);
   const httpStatus = providerFailureStatus(err, error);
   const lc = String(error || fallbackError || '').toLowerCase();
 
-  const terminalTwilioCodes = new Set([
-    '21211', // invalid To number
-    '21408', // permission denied for destination region
-    '21606', // From number cannot send SMS
-    '21608', // unverified trial destination
-    '21610', // recipient unsubscribed
-    '21612', // no route available
-    '21614', // number is not mobile/SMS-capable
-  ]);
+  const terminalTwilioCodes = new Set([...SENDER_SIDE_TERMINAL_TWILIO_CODES, ...RECIPIENT_TERMINAL_TWILIO_CODES]);
   const retryableTwilioCodes = new Set([
     '20429', // Twilio rate limit
   ]);
@@ -93,8 +103,23 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input, {
-  preSendCheck, providerPreSendCheck, withSmsHandoff, providerHandoffReservation,
+// Explicit billing Text legs (metadata.billingDeliveryLeg === 'sms') get an
+// idempotency check before they reach Twilio at all — see
+// billing-text-leg-dedupe.js for why (Email/App already dedupe an explicit
+// billing leg on the same notificationEventKey; Text had no such guard).
+// Every other caller (legacy SMS with no billingDeliveryLeg, non-billing
+// sends, the push leg) short-circuits withBillingTextLegLock's own guard
+// and reaches sendViaTwilioOnce completely unchanged.
+async function sendViaTwilio(input, hooks = {}) {
+  const { withBillingTextLegLock } = require('../billing-text-leg-dedupe');
+  return withBillingTextLegLock(input, () => sendViaTwilioOnce(input, hooks));
+}
+
+async function sendViaTwilioOnce(input, {
+  preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, withSmsHandoff, providerHandoffReservation,
+  // codex #5018 structural fix (post-r7): threaded straight through, same
+  // as onDispatchStart/onDispatchAbort above.
+  logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
   const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
@@ -128,6 +153,11 @@ async function sendViaTwilio(input, {
       skipPushRouting: Boolean(input.metadata?.appFallbackReason || input.metadata?.billingDeliveryLeg),
       notificationEventKey: input.metadata?.notificationEventKey,
       invoiceId: input.invoiceId,
+      // Persisted on the accepted sms_log row (services/twilio.js) so a
+      // later replay's dedupe lookup (billing-text-leg-dedupe.js) can scope
+      // its notificationEventKey match to an explicit billing Text leg —
+      // never a legacy send or another producer's own unrelated key.
+      billingDeliveryLeg: input.metadata?.billingDeliveryLeg || undefined,
       billingDeliveryCategory: input.metadata?.billingDeliveryLeg
         ? require('../billing-channel-routing').billingDeliveryCategory(input) : undefined,
       requestNotification: input.metadata?.appOnly ? { id: input.metadata.service_request_id,
@@ -180,7 +210,20 @@ async function sendViaTwilio(input, {
       // template lookup, customer/location query).
       preSendCheck,
       providerPreSendCheck,
+      // The REAL attempt boundary (codex #5018 r15 P1) — awaited by
+      // twilio.js immediately before dispatchStarted flips true and
+      // messages.create() runs, AFTER providerPreSendCheck's own refusal
+      // path has already cleared.
+      onDispatchStart,
+      // codex #5018 r15 pre-push P1: lets the caller undo its own marker
+      // when twilio.js's post-onDispatchStart window recheck refuses.
+      onDispatchAbort,
       withSmsHandoff,
+      // codex #5018 structural fix (post-r7): gates twilio.js's in-
+      // transaction sms_log insert (dispatch()'s own comment there).
+      // Omitted (the default), twilio.js falls back to origin/main's
+      // post-handoff, out-of-transaction insert.
+      logInHandoff,
       providerHandoffReservation: internalProviderReservation,
       // The opaque owner token is issued only from the complete canonical
       // input and callback contract. Raw Twilio callers cannot bypass the
@@ -211,18 +254,18 @@ async function sendViaTwilio(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable' };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.eventVisibleAt ? { eventVisibleAt: result.eventVisibleAt } : {}), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appRetryable) {
       if (Number.isFinite(result.retryAfterMs)) {
         const retryAfterMs = Math.max(60000, result.retryAfterMs);
         return { sent: false, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_PROVIDER_RETRY', error: result.error,
-          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString() };
+          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
       }
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
@@ -369,6 +412,7 @@ module.exports = {
   // definitive-vs-ambiguous split decides whether a failed calls.create()
   // may still have reached Twilio.
   classifyProviderFailure,
+  SENDER_SIDE_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

@@ -18,6 +18,8 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn();
+  // claimNext runs its lock + claim in one transaction; the trx is the db.
+  fn.transaction = jest.fn((cb) => cb(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -583,6 +585,68 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
     expect(historicalQuery.where).toHaveBeenCalledWith('queue_claim_id', 'claim-new');
   });
 });
+
+describe('aeo_question_gap lane fence (kill-switch contract)', () => {
+  // GATE_AEO_QUESTION_GAP_MINING is the no-redeploy kill switch: gate off
+  // must make already-queued question rows unclaimable too (they stay
+  // pending, so re-enabling resumes them). Real env gate, read at call time.
+  const OLD = process.env.GATE_AEO_QUESTION_GAP_MINING;
+  afterEach(() => {
+    if (OLD === undefined) delete process.env.GATE_AEO_QUESTION_GAP_MINING; else process.env.GATE_AEO_QUESTION_GAP_MINING = OLD;
+  });
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('gate off: a pending question row is neither claimed nor peeked', async () => {
+    delete process.env.GATE_AEO_QUESTION_GAP_MINING;
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).toContain(`AND bucket <> 'aeo_question_gap'`);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).toEqual(expect.arrayContaining([['not', 'bucket', 'aeo_question_gap']]));
+  });
+
+  test('claimNext and peek both carry the question route fence (real-Postgres proof: aeo-question-claim-fence-postgres)', async () => {
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    const [sql] = db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s));
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM opportunity_queue route_fence/);
+    expect(sql).toMatch(/route_fence\.bucket = 'aeo_question_gap' OR opportunity_queue\.bucket = 'aeo_question_gap'/);
+    expect(sql).toContain("intercept_brief'->>'slug'");
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters.some((f) => f[0] === 'raw' && /route_fence/.test(f[1]))).toBe(true);
+  });
+
+  test('gate on: question rows are claimable and peekable', async () => {
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+    await queue.claimNext({});
+    expect(db.raw.mock.calls.find(([s]) => /UPDATE opportunity_queue/.test(s))[0]).not.toContain(`AND bucket <> 'aeo_question_gap'`);
+    const q = peekChain();
+    db.mockImplementation(() => q);
+    await queue.peek({});
+    expect(q._filters).not.toEqual(expect.arrayContaining([['not', 'bucket', 'aeo_question_gap']]));
+  });
+});
+
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
   test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
     const q = chain({ updateResult: 1 });

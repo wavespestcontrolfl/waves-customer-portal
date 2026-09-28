@@ -69,6 +69,13 @@ const reportParamUrl = (reportId) => `${ACA_BASE}ReportParameter.aspx?module=&re
 const reportShowUrl = (reportId) => `${ACA_BASE}ShowReport.aspx?module=&reportID=${reportId}&reportType=LINK_REPORT_LIST`;
 
 const DEFAULT_TIMEOUT_MS = 60000;
+// ACA intermittently accepts a request and never answers it (job_health:
+// permit-sync failed 7 straight Mondays, each section's FIRST request
+// aborting at the timeout while the next request on a fresh connection
+// answered in seconds). One hung request used to sink a whole section, so a
+// report window now retries on a fresh session before giving up.
+const DEFAULT_ATTEMPTS = 3;
+const DEFAULT_RETRY_DELAY_MS = 15000;
 const BACKFILL_CHUNK_MONTHS = 6;
 // Full-range sync starts (env-overridable — tests use a near date for a
 // single window; ops can trim history without a deploy).
@@ -76,10 +83,18 @@ const poolSyncStartIso = () => process.env.POOL_PERMIT_SYNC_START || '2023-01-01
 const constructionSyncStartIso = () => process.env.CONSTRUCTION_PERMIT_SYNC_START || '2024-01-01';
 const USER_AGENT = 'Mozilla/5.0 (WavesPortal pool-permit-sync)';
 
-function syncTimeoutMs() {
-  const n = Number(process.env.POOL_PERMIT_SYNC_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_TIMEOUT_MS;
+function positiveIntEnv(name, fallback, { allowZero = false } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && (n > 0 || (allowZero && n === 0)) ? Math.floor(n) : fallback;
 }
+
+function syncTimeoutMs() {
+  return positiveIntEnv('POOL_PERMIT_SYNC_TIMEOUT_MS', DEFAULT_TIMEOUT_MS);
+}
+const syncAttempts = () => positiveIntEnv('POOL_PERMIT_SYNC_ATTEMPTS', DEFAULT_ATTEMPTS);
+const retryDelayMs = () => positiveIntEnv('POOL_PERMIT_SYNC_RETRY_DELAY_MS', DEFAULT_RETRY_DELAY_MS, { allowZero: true });
 
 /** MM/DD/YYYY (the form's expected format) from a Date, UTC-based. */
 function mdy(date) {
@@ -95,7 +110,19 @@ function hiddenValue(html, name) {
   return m ? m[1] : '';
 }
 
-async function fetchWithSession(url, { cookies, body, timeoutMs, referer }) {
+/** A request failure worth a fresh-session retry (vs. a report/schema break). */
+class TransientAcaError extends Error {}
+
+// Node fetch wraps socket errors as TypeError('fetch failed') + cause.code.
+const networkErrorCode = (err) => err?.cause?.code || err?.code || err?.name || 'network_error';
+
+/**
+ * One ACA request → { res, text }. The timeout covers the BODY read too: a
+ * response whose body stalls must not hang the sync (and the runExclusive
+ * lock) forever. Timeouts, network errors, and 429/5xx throw
+ * TransientAcaError; the message names the step, never a URL param value.
+ */
+async function fetchWithSession(url, { cookies, body, timeoutMs, referer, step }) {
   const headers = {
     'User-Agent': USER_AGENT,
     Referer: referer,
@@ -106,34 +133,45 @@ async function fetchWithSession(url, { cookies, body, timeoutMs, referer }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      method: body ? 'POST' : 'GET',
-      headers,
-      body,
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    let res;
+    let text;
+    try {
+      res = await fetch(url, {
+        method: body ? 'POST' : 'GET',
+        headers,
+        body,
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (res.ok) text = await res.text();
+    } catch (err) {
+      throw controller.signal.aborted
+        ? new TransientAcaError(`${step} request timed out after ${timeoutMs}ms`)
+        : new TransientAcaError(`${step} request failed: ${networkErrorCode(err)}`);
+    }
+    if (!res.ok) {
+      const msg = `${step} request HTTP ${res.status}`;
+      throw res.status === 429 || res.status >= 500 ? new TransientAcaError(msg) : new Error(msg);
+    }
     // Node fetch folds duplicate Set-Cookie into getSetCookie().
     for (const c of res.headers.getSetCookie?.() || []) {
       const pair = c.split(';')[0];
       if (pair) cookies.push(pair);
     }
-    return res;
+    return { res, text };
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * One report window → raw CSV text. Throws on any failure (callers decide
- * whether a window failure aborts the sync).
+ * One report window, one ACA session → raw CSV text. Throws on any failure.
  */
-async function fetchAcaReportCsv({ reportId, dateFromField, dateToField }, fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
+async function fetchAcaReportCsvOnce({ reportId, dateFromField, dateToField }, fromMdy, toMdy, timeoutMs) {
   const cookies = [];
   const paramUrl = reportParamUrl(reportId);
   const referer = paramUrl;
-  const paramPage = await (await fetchWithSession(paramUrl, { cookies, timeoutMs, referer })).text();
+  const { text: paramPage } = await fetchWithSession(paramUrl, { cookies, timeoutMs, referer, step: 'report form' });
   const form = new URLSearchParams({
     __EVENTTARGET: 'btnSave',
     __EVENTARGUMENT: '',
@@ -147,16 +185,44 @@ async function fetchAcaReportCsv({ reportId, dateFromField, dateToField }, fromM
     [dateToField]: toMdy,
     [`${dateToField}_ext_ClientState`]: '',
   });
-  const submit = await fetchWithSession(paramUrl, { cookies, body: form.toString(), timeoutMs, referer });
-  const submitBody = await submit.text();
+  const { text: submitBody } = await fetchWithSession(paramUrl, { cookies, body: form.toString(), timeoutMs, referer, step: 'report submit' });
   if (!submitBody.includes('ShowReport.aspx')) {
     throw new Error('report submit did not yield a ShowReport redirect');
   }
-  const report = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer });
+  const { res: report, text } = await fetchWithSession(reportShowUrl(reportId), { cookies, timeoutMs, referer, step: 'report download' });
   const ctype = String(report.headers.get('content-type') || '');
-  const text = await report.text();
   if (!/csv/i.test(ctype)) throw new Error(`report output is not CSV (${ctype || 'no content-type'})`);
   return text;
+}
+
+/**
+ * One report window → raw CSV text, retrying transient failures (hung or
+ * dropped requests, 429/5xx) on a FRESH session — ASP.NET view state and
+ * the session cookie don't survive a half-finished flow. Deterministic
+ * failures (non-CSV output, no ShowReport redirect, 4xx) throw at once:
+ * retrying a report the county renamed only triples the run.
+ */
+async function fetchAcaReportCsv(report, fromMdy, toMdy, timeoutMs = syncTimeoutMs()) {
+  const attempts = syncAttempts();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fetchAcaReportCsvOnce(report, fromMdy, toMdy, timeoutMs);
+    } catch (err) {
+      if (!(err instanceof TransientAcaError) || attempt >= attempts) {
+        if (err instanceof TransientAcaError) {
+          throw new Error(`report ${report.reportId}: ${err.message} (${attempt} attempt${attempt === 1 ? '' : 's'})`);
+        }
+        throw err;
+      }
+      logger.warn('[permit-sync] transient ACA failure, retrying on a fresh session', {
+        reportId: report.reportId,
+        attempt,
+        error: err.message,
+      });
+      const delay = retryDelayMs() * attempt;
+      if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });
+    }
+  }
 }
 
 /** Pool-report window (kept as the named entry the tests and docs pin). */

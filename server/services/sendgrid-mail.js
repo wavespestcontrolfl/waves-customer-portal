@@ -224,7 +224,11 @@ async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey
  * { messageId } where messageId is read from the X-Message-Id response header
  * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy, database }) {
+async function sendOne({
+  to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
+  customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
+  database, providerBoundaryCheck = async () => ({ ok: true }),
+}) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
@@ -232,6 +236,10 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
   });
 
   await runAnnualOfferGuard({ estimateIds: sendEstimateIds, html: sendHtml, text: sendText, database });
+
+  // Run caller authority after all asynchronous provider preparation. Once
+  // this resolves, payload construction stays synchronous until fetch starts.
+  await providerBoundaryCheck({ database });
 
   const payload = {
     personalizations: [{

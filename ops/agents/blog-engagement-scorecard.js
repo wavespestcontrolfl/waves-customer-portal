@@ -15,13 +15,47 @@
 // approximate. Baseline 2026-07-17 → 2026-09-23: ~8,220 post views, ~100
 // onward views (1.2% per post view).
 //
+// Read depth (research item E2, counting since 2026-09-27 10:37 AM ET): when
+// DATABASE_PUBLIC_URL is in the environment too, the report adds each post's
+// cookie-free read-depth counts from blog_read_depth_daily (hub rows; the
+// portal's POST /api/public/blog-read-depth) for the same Eastern days: how
+// many page loads reached 25/50/75/100% of the article and the "keep reading"
+// row — loads, not people: with no visitor identifier a reload counts again —
+// plus the half-read and keep-reading rates per page load that runs the
+// counter (reloads included, bfcache restores not). Rates are left out of a
+// window that began before counting did, since its loads include uncounted
+// days. Beacon counts are exact while Cloudflare loads are sampled, so a small
+// post's rates are rough.
+//
+// Traffic-source breakdown (research item E3): every fresh navigation onto a
+// blog post from outside the site gets classified by its referrer host —
+// Google (any google.* host, including news.google.com and google.co.uk, so
+// both organic search and other Google properties count; a lookalike like
+// notgoogle.com does not), Facebook (facebook.com, www.facebook.com,
+// m.facebook.com, l.facebook.com, lm.facebook.com, fb.me), Other (any other
+// external host), or Direct/none (no referrer at all) — with its page-load
+// count and share of all blog landings. Cloudflare RUM carries no visitor
+// id, so an onward click can't be traced back to the referrer that landed
+// that reader: the breakdown reports volume only, never a per-source
+// engagement rate (an estimate from per-post rates would present post mix
+// as source behavior).
+// Investigated and not used: the Facebook in-app browser
+// is not its own `userAgentBrowser` value in this account's RUM data — it
+// reports the underlying rendering engine (MobileSafari, ChromeMobileWebview,
+// …), same as any other embedded browser — so it is classified by referrer
+// host like everything else, with no separate bucket.
+//
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
-// from the environment; CF_RUM_SITE_TAG overrides the site lookup.
+// from the environment; CF_RUM_SITE_TAG overrides the site lookup. Read depth
+// also needs DATABASE_PUBLIC_URL (the Postgres service's public proxy; the
+// query runs in a read-only transaction). Without it the report says so.
 //
 // Usage (repo root):
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js --days 28 --end 2026-09-26 --top 30
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js --json
+//   # with read depth (outer run adds DATABASE_PUBLIC_URL, inner adds the Cloudflare credentials):
+//   railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js
 //
 // Flags:
 //   --days=N      window length in days, default 7
@@ -114,8 +148,84 @@ function countsAsPageView(navigationType) {
   return COUNTED_NAVIGATION_TYPES.has(key);
 }
 
+// Navigation types that do NOT run a page's scripts from scratch: a bfcache
+// restore brings the page (and the read-depth milestones it already sent)
+// back as it was, and in-page route changes load nothing. Every other type —
+// reloads and ordinary back/forward loads included — runs the read-depth
+// counter again, so those loads belong in the denominator of read-depth
+// rates even though summarize() leaves them out of fresh views.
+const NON_LOADING_NAVIGATION_TYPES = new Set(['back-forward-cache', 'routing-apis', 'soft-navigation']);
+
+function runsPageScripts(navigationType) {
+  if (navigationType == null || navigationType === '') return true;
+  const key = String(navigationType).trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return !NON_LOADING_NAVIGATION_TYPES.has(key);
+}
+
+/** Per blog post, the page loads that can send read-depth beacons. */
+function blogPostLoads(groups) {
+  const byPath = new Map();
+  let total = 0;
+  for (const g of groups || []) {
+    const n = toCount(g.views);
+    if (!n || !runsPageScripts(g.navigationType)) continue;
+    const path = normalizePath(g.path);
+    if (classifyPath(path) !== 'blog-post') continue;
+    byPath.set(path, (byPath.get(path) || 0) + n);
+    total += n;
+  }
+  return { byPath, total };
+}
+
 function isInternalHost(host) {
   return HUB_HOSTS.has(String(host || '').trim().toLowerCase());
+}
+
+// Facebook's own web + link-shim hosts (owner-supplied list); the in-app
+// browser is not separately detectable (see the file header) so it is not
+// included here.
+const FACEBOOK_HOSTS = new Set([
+  'facebook.com',
+  'www.facebook.com',
+  'm.facebook.com',
+  'l.facebook.com',
+  'lm.facebook.com',
+  'fb.me',
+]);
+
+const TRAFFIC_SOURCE_LABELS = {
+  google: 'Google',
+  facebook: 'Facebook',
+  other: 'Other',
+  direct: 'Direct/none',
+};
+
+/**
+ * True for any google.* host — google.com, google.co.uk, news.google.com,
+ * etc. — using the Public Suffix List so the registrable domain must be
+ * exactly "google" + a real public suffix. Lookalikes (notgoogle.com,
+ * googleusercontent.com) and hosts with "google" only as a subdomain label
+ * (google.example.com, google.com.evil.example) are not Google.
+ */
+function isGoogleHost(host) {
+  const h = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!h) return false;
+  const parsed = psl.parse(h);
+  return Boolean(parsed && !parsed.error && parsed.listed && parsed.sld === 'google');
+}
+
+/**
+ * Which traffic-source bucket an EXTERNAL referrer host belongs to: 'google',
+ * 'facebook', 'other', or 'direct' for no referrer at all. Only meaningful
+ * for a non-internal host — call isInternalHost first for on-site referrals,
+ * which are not a traffic source.
+ */
+function classifyTrafficSource(host) {
+  const h = String(host || '').trim();
+  if (!h) return 'direct';
+  if (isGoogleHost(h)) return 'google';
+  if (FACEBOOK_HOSTS.has(h.toLowerCase())) return 'facebook';
+  return 'other';
 }
 
 function toCount(value) {
@@ -137,6 +247,8 @@ function toCount(value) {
 function summarize(groups) {
   const posts = new Map();
   const destinations = new Map();
+  // External blog-post landings by traffic source (volume only).
+  const sourceViews = { google: 0, facebook: 0, other: 0, direct: 0 };
   let blogEntries = 0;
   let blogViews = 0;
   let onwardClicks = 0;
@@ -163,6 +275,8 @@ function summarize(groups) {
       if (!internal) {
         target.entries += views;
         blogEntries += views;
+        const source = classifyTrafficSource(g.refererHost);
+        sourceViews[source] += views;
       }
     }
     if (!internal || classifyPath(from) !== 'blog-post') continue;
@@ -177,6 +291,14 @@ function summarize(groups) {
     .map((p) => ({ ...p, rate: p.views > 0 ? p.onward / p.views : null }))
     .sort((a, b) => b.views - a.views || b.onward - a.onward || a.path.localeCompare(b.path));
 
+  // Volume by source only: no visitor id ties an onward click back to the
+  // referrer that landed that reader, so there is no per-source rate.
+  const landingTotal = Object.values(sourceViews).reduce((n, v) => n + v, 0);
+  const sources = Object.keys(sourceViews).map((key) => {
+    const views = sourceViews[key];
+    return { source: key, label: TRAFFIC_SOURCE_LABELS[key], views, share: landingTotal > 0 ? views / landingTotal : null };
+  });
+
   return {
     totals: {
       blogEntries,
@@ -188,6 +310,7 @@ function summarize(groups) {
       .map(([cls, views]) => ({ cls, label: CLASS_LABELS[cls] || cls, views }))
       .sort((a, b) => b.views - a.views || a.cls.localeCompare(b.cls)),
     posts: rows,
+    sources,
   };
 }
 
@@ -195,8 +318,101 @@ function pct(rate) {
   return rate == null ? '—' : `${(rate * 100).toFixed(1)}%`;
 }
 
-function formatMarkdown(summary, { start, end, top = 20 } = {}) {
-  const { totals, destinations, posts } = summary;
+const READ_DEPTH_SITE = 'wavespestcontrol.com';
+// First Eastern day with read-depth counts (counting began mid-morning).
+const READ_DEPTH_LIVE_SINCE = '2026-09-27';
+const MILESTONE_KEYS = { 25: 'r25', 50: 'r50', 75: 'r75', 100: 'r100', next: 'next' };
+
+function emptyDepth() {
+  return { r25: 0, r50: 0, r75: 0, r100: 0, next: 0 };
+}
+
+/**
+ * Joins the window's read-depth counts — rows of { path, milestone, count }
+ * summed from blog_read_depth_daily (hub only) — onto the posts from
+ * summarize(). Rates are per page load that runs the counter (`loads` from
+ * blogPostLoads: reloads included, bfcache restores not), so both sides count
+ * the same population; beacon counts are exact while Cloudflare loads are
+ * sampled, so a small post's rates are still rough. Counts for posts
+ * Cloudflare did not sample still reach the count totals, never the rates. `start`/`end` are the
+ * window's Eastern days (`end` exclusive): a window that ends on or before
+ * the first counted day has no coverage at all, never zeros, and one that
+ * starts on or before it gets counts but no rates.
+ */
+function addReadDepth(summary, depthRows, { start, end, loads } = {}) {
+  let coverage = 'full';
+  if (end != null && end <= READ_DEPTH_LIVE_SINCE) coverage = 'none';
+  else if (start != null && start <= READ_DEPTH_LIVE_SINCE) coverage = 'partial';
+  if (coverage === 'none') return { liveSince: READ_DEPTH_LIVE_SINCE, coverage, totals: null, posts: [] };
+
+  const byPath = new Map();
+  const totals = emptyDepth();
+  for (const row of depthRows || []) {
+    const key = MILESTONE_KEYS[row.milestone];
+    const count = toCount(row.count);
+    if (!key || !count) continue;
+    const path = normalizePath(row.path);
+    if (!byPath.has(path)) byPath.set(path, emptyDepth());
+    byPath.get(path)[key] += count;
+    totals[key] += count;
+  }
+  // A partly covered window's loads include days before counting began, so
+  // its rates would read low: counts only.
+  const rate = (n, d) => (coverage === 'full' && d > 0 ? n / d : null);
+  const postLoads = (p) => (loads ? loads.byPath.get(p.path) || 0 : p.views);
+  const totalLoads = loads ? loads.total : summary.totals.blogViews;
+  // Rate numerators come only from posts that have loads in the denominator:
+  // a post Cloudflare did not sample keeps its counts in the totals but
+  // cannot lift the rates (codex r3).
+  const sampledPaths = loads ? new Set(loads.byPath.keys()) : new Set(summary.posts.map((p) => p.path));
+  const rated = emptyDepth();
+  for (const [path, d] of byPath) {
+    if (!sampledPaths.has(path)) continue;
+    for (const k of Object.keys(rated)) rated[k] += d[k];
+  }
+  return {
+    liveSince: READ_DEPTH_LIVE_SINCE,
+    coverage,
+    totals: { ...totals, loads: totalLoads, halfRate: rate(rated.r50, totalLoads), nextRate: rate(rated.next, totalLoads) },
+    posts: summary.posts.map((p) => {
+      const d = byPath.get(p.path) || emptyDepth();
+      const n = postLoads(p);
+      return { path: p.path, loads: n, ...d, halfRate: rate(d.r50, n), nextRate: rate(d.next, n) };
+    }),
+  };
+}
+
+function formatReadDepth(lines, readDepth, top) {
+  lines.push('');
+  if (!readDepth) {
+    lines.push('Read depth: not included (needs DATABASE_PUBLIC_URL; see the usage header).');
+    return;
+  }
+  if (readDepth.coverage === 'none') {
+    lines.push(`Read depth: none for this window (counting began ${readDepth.liveSince}, Eastern).`);
+    return;
+  }
+  const t = readDepth.totals;
+  lines.push('### Read depth (cookie-free counts, hub)');
+  lines.push('');
+  if (readDepth.coverage === 'partial') {
+    lines.push(`- Counting began ${readDepth.liveSince} (Eastern), partway through this window: counts cover only the days since, and rates are left out.`);
+  }
+  lines.push(`- Page loads reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next} (loads, not people: a reload counts again)`);
+  if (readDepth.coverage === 'full') {
+    lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (over the posts Cloudflare sampled, so approximate)`);
+  }
+  lines.push('');
+  lines.push(`| Post (top ${top} by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |`);
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|');
+  for (const p of readDepth.posts.slice(0, top)) {
+    lines.push(`| ${p.path} | ${p.loads} | ${p.r25} | ${p.r50} | ${p.r75} | ${p.r100} | ${p.next} | ${pct(p.halfRate)} | ${pct(p.nextRate)} |`);
+  }
+}
+
+function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
+  const { totals, destinations, posts, sources } = summary;
+  const googleSource = (sources || []).find((s) => s.source === 'google') || { views: 0, share: null };
   const lines = [];
   lines.push(`## Blog engagement scorecard, ${start} to ${end}`);
   lines.push('');
@@ -204,6 +420,7 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   lines.push('');
   lines.push(`- Blog post views (fresh navigations): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
   lines.push(`- Onward page views referred by a post: ${totals.onwardClicks} (${pct(totals.onwardRate)} per post view)`);
+  lines.push(`- Blog landings from Google: ${googleSource.views} (${pct(googleSource.share)} of blog landings)`);
   lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 onward views per 8,220 post views)');
   lines.push('');
   lines.push('| Where onward clicks went | Views |');
@@ -211,14 +428,26 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   if (destinations.length === 0) lines.push('| (none) | 0 |');
   for (const d of destinations) lines.push(`| ${d.label} | ${d.views} |`);
   lines.push('');
+  lines.push('### Traffic source (blog-post landings)');
+  lines.push('');
+  lines.push('| Source | Page loads | Share |');
+  lines.push('|---|---:|---:|');
+  for (const s of sources || []) lines.push(`| ${s.label} | ${s.views} | ${pct(s.share)} |`);
+  lines.push('');
+  lines.push("Volume only: Cloudflare RUM carries no visitor id, so onward clicks can't be attributed to the source that landed the reader.");
+  lines.push('');
   lines.push(`| Post (top ${top} by views) | Views | Entries | Onward | Rate | To estimate/service |`);
   lines.push('|---|---:|---:|---:|---:|---:|');
   for (const p of posts.slice(0, top)) {
     lines.push(`| ${p.path} | ${p.views} | ${p.entries} | ${p.onward} | ${pct(p.rate)} | ${p.toEstimateOrService} |`);
   }
+  // undefined: the caller didn't ask for read depth (section omitted);
+  // null: asked but unavailable (one line says how to include it).
+  if (readDepth !== undefined) formatReadDepth(lines, readDepth, top);
   return `${lines.join('\n')}\n`;
 }
 
+const psl = require('psl');
 const { cfRequest } = require('../../server/services/intelligence-bar/cloudflare-ops-tools');
 const {
   addETDays,
@@ -332,6 +561,28 @@ async function fetchGroups(accountId, siteTag, slices) {
   return groups;
 }
 
+// Read-only: the window's read-depth rows, or null when DATABASE_PUBLIC_URL is
+// not in the environment. Same Eastern days as the Cloudflare window.
+async function fetchReadDepth(window) {
+  if (!process.env.DATABASE_PUBLIC_URL) return null;
+  const { Client } = require('pg');
+  const client = new Client({ connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query('SET default_transaction_read_only = on');
+    const { rows } = await client.query(
+      `SELECT path, milestone, SUM(count)::int AS count
+         FROM blog_read_depth_daily
+        WHERE site = $1 AND day >= $2::date AND day < $3::date
+        GROUP BY path, milestone`,
+      [READ_DEPTH_SITE, window.startStr, window.endStr],
+    );
+    return rows;
+  } finally {
+    await client.end();
+  }
+}
+
 async function main() {
   const args = parseArgs();
   const accountId = process.env.CF_ACCOUNT_ID;
@@ -340,11 +591,20 @@ async function main() {
   }
   const window = resolveWindow({ days: positiveInt(args.days, 7), end: args.end });
   const siteTag = await hubSiteTag(accountId);
-  const summary = summarize(await fetchGroups(accountId, siteTag, window.slices));
+  const groups = await fetchGroups(accountId, siteTag, window.slices);
+  const summary = summarize(groups);
+  let readDepth = null;
+  try {
+    const depthRows = await fetchReadDepth(window);
+    if (depthRows) readDepth = addReadDepth(summary, depthRows, { start: window.startStr, end: window.endStr, loads: blogPostLoads(groups) });
+  } catch (err) {
+    // The Cloudflare half still prints; say why read depth is missing.
+    console.warn(`warning: read depth unavailable (${err.code || err.message})`);
+  }
   if (args.json) {
-    process.stdout.write(`${JSON.stringify({ start: window.startStr, end: window.lastDayStr, timezone: 'America/New_York', ...summary }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ start: window.startStr, end: window.lastDayStr, timezone: 'America/New_York', ...summary, readDepth }, null, 2)}\n`);
   } else {
-    process.stdout.write(formatMarkdown(summary, { start: window.startStr, end: window.lastDayStr, top: positiveInt(args.top, 20) }));
+    process.stdout.write(formatMarkdown(summary, { start: window.startStr, end: window.lastDayStr, top: positiveInt(args.top, 20), readDepth }));
   }
 }
 
@@ -356,7 +616,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  addReadDepth,
+  blogPostLoads,
   classifyPath,
+  classifyTrafficSource,
   countsAsPageView,
   formatMarkdown,
   isInternalHost,

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
@@ -7,6 +8,7 @@ import { isNativeApp, nativePushConnectionState, requestNativePushPermission } f
 import api, { sameRequestSession, tokenSessionIdentity } from '../utils/api';
 import { captureNativeBadgeUpdate } from '../native/nativeBadge';
 import { UNREAD_CHANGED_EVENT } from '../hooks/useUnreadConversations';
+import { CUSTOMER_SURFACE } from '../theme-customer';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PUSH_RECEIVED_MESSAGE = 'waves:push-received';
@@ -89,7 +91,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const pushPromptRequested = useRef(false);
   const bellRef = useRef(null);
   const panelRef = useRef(null);
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  // The customer shell keeps its bottom navigation through 899px, including
+  // 844px iPhone landscape. Match that breakpoint so the notification sheet
+  // clears the nav; admin retains its existing 768px layout breakpoint.
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < (type === 'customer' ? 900 : 768);
 
   const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
   const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';
@@ -182,14 +187,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // Lock the page scroll while the customer panel is open — on iOS a touch
-  // scroll on the panel otherwise chains to the page behind it.
-  useEffect(() => {
-    if (!open || type === 'admin') return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
-  }, [open, type]);
+  // Preserve the page's scroll offset while the customer panel is open.
+  // A bare body overflow lock turns body into a new iOS scroll container and
+  // can make the sticky portal header disappear when opened mid-scroll.
+  useLockBodyScroll(open && type !== 'admin', { preserveSticky: true });
 
   // Self-heal the push link on load and on PWA resume (admin only). iOS
   // Safari rotates/drops push endpoints, and the server deactivates a
@@ -411,7 +412,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     ? { bg: '#FFFFFF', border: '#E2E8F0', text: '#334155', muted: '#64748B', teal: '#0A7EC2', unreadBg: '#F0F7FC', white: '#0F172A', badge: '#C0392B' }
     // Customer palette = glass tokens (#04395E ink, #0A7EC2 accent) — the
     // old marketing navy/#009CDE rendered inside the glassed portal panel.
-    : { bg: '#FFFFFF', border: 'rgba(4,57,94,0.14)', text: '#04395E', muted: '#64748B', teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
+    : { bg: CUSTOMER_SURFACE.surface, border: CUSTOMER_SURFACE.border, text: CUSTOMER_SURFACE.text, muted: CUSTOMER_SURFACE.muted, teal: '#0A7EC2', unreadBg: 'rgba(10,126,194,0.10)', white: '#FFFFFF', badge: '#C8102E' };
 
   const moreControl = type === 'admin' && !loading && !loadFailed && hasMore && (
     <div style={{ padding: '16px 20px', textAlign: 'center' }}>
@@ -478,9 +479,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             // 52px matches AdminLayoutV2's mobile top bar (calc(52px + safe-area));
             // 56 left a 4px strip of page showing between header and panel.
             top: isDark ? 'calc(52px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
-            left: isDark ? 0 : 10,
-            right: isDark ? 0 : 10,
-            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
+            left: isDark ? 0 : 'calc(10px + env(safe-area-inset-left, 0px))',
+            right: isDark ? 0 : 'calc(10px + env(safe-area-inset-right, 0px))',
+            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(var(--portal-bottom-nav-height, calc(70px + env(safe-area-inset-bottom, 0px))) + 8px)',
             background: '#FFFFFF', zIndex: 9999,
             borderRadius: isDark ? 0 : 24,
             border: isDark ? 'none' : '1px solid #E7E2D7',
@@ -489,18 +490,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           }}>
             {/* Header: close + "Notifications" title + mark-all */}
             <div style={{ padding: '16px 20px 8px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <div style={{ fontSize: 24, fontWeight: 700, color: '#18181B', letterSpacing: '-0.01em' }}>Notifications</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, letterSpacing: '-0.01em' }}>Notifications</div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {unreadCount > 0 && (
                   <button onClick={markAllRead} style={{
-                    background: 'none', border: 'none', color: '#52525B',
-                    fontSize: 13, fontWeight: 500, cursor: 'pointer', padding: '4px 8px',
+                    background: 'none', border: 'none', color: isDark ? '#52525B' : CUSTOMER_SURFACE.text,
+                    fontSize: isDark ? 13 : 14, fontWeight: 500, cursor: 'pointer', padding: isDark ? '4px 8px' : '0 8px',
+                    minHeight: isDark ? undefined : 44,
                   }}>Mark all read</button>
                 )}
                 <button onClick={() => setOpen(false)} aria-label="Close" style={{
-                  width: 36, height: 36, borderRadius: 18, border: 'none',
+                  width: isDark ? 36 : 44, height: isDark ? 36 : 44, borderRadius: isDark ? 18 : 22, border: 'none',
                   background: isDark ? '#F4F4F5' : 'rgba(255,255,255,0.6)',
-                  color: '#18181B', fontSize: 18, lineHeight: 1,
+                  color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>&#x2715;</button>
               </div>
@@ -526,9 +528,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                       style={{
                         padding: '8px 20px', borderRadius: 999, border: 'none',
                         background: active ? '#FFFFFF' : 'transparent',
-                        color: active ? '#18181B' : '#71717A',
+                        color: isDark ? (active ? '#18181B' : '#71717A') : (active ? CUSTOMER_SURFACE.text : CUSTOMER_SURFACE.muted),
                         fontSize: 14, fontWeight: type === 'admin' ? 500 : 600, cursor: 'pointer',
                         boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+                        minHeight: isDark ? undefined : 44,
                       }}
                     >{label}</button>
                   );
@@ -551,25 +554,25 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             {/* Notification list — overscroll containment keeps the sheet's
                 scroll from chaining to the page behind it on iOS. */}
             <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
-              {loading && <div style={{ padding: 40, textAlign: 'center', color: '#71717A', fontSize: 14 }}>Loading…</div>}
+              {loading && <div style={{ padding: 40, textAlign: 'center', color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted, fontSize: 14 }}>Loading…</div>}
               {!loading && loadFailed && tab === 'account' && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
-                  <div style={{ fontSize: 14, color: '#71717A' }}>Notifications couldn&apos;t be loaded.</div>
+                  <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Notifications couldn&apos;t be loaded.</div>
                   <button type="button" onClick={loadNotifications} style={{
                     marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
-                    background: '#fff', color: '#04395E', fontSize: 14,
+                    background: '#fff', color: isDark ? '#04395E' : CUSTOMER_SURFACE.text, fontSize: 14,
                     fontWeight: 700, cursor: 'pointer',
                   }}>Try again</button>
                 </div>
               )}
               {!loading && !loadFailed && tab === 'account' && notifications.length === 0 && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
-                  <div style={{ fontSize: 14, color: '#71717A' }}>No notifications yet</div>
+                  <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>No notifications yet</div>
                 </div>
               )}
               {!loading && tab === 'whats_new' && (
                 <div style={{ padding: 60, textAlign: 'center' }}>
-                  <div style={{ fontSize: 14, color: '#71717A' }}>Nothing new right now</div>
+                  <div style={{ fontSize: 14, color: isDark ? '#71717A' : CUSTOMER_SURFACE.muted }}>Nothing new right now</div>
                 </div>
               )}
               {!loading && !loadFailed && tab === 'account' && notifications.map(n => (
@@ -604,19 +607,19 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{
-                      fontSize: 15, fontWeight: 700, color: '#18181B', lineHeight: 1.3,
+                      fontSize: 15, fontWeight: 700, color: isDark ? '#18181B' : CUSTOMER_SURFACE.text, lineHeight: 1.3,
                     }}>{n.title}</div>
                     {n.body && (
                       <div style={{
-                        fontSize: 14, color: '#52525B', marginTop: 4, lineHeight: 1.4,
+                        fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
                       }}>{n.body}</div>
                     )}
-                    <div style={{ fontSize: 12, color: '#A1A1AA', marginTop: 6 }}>
+                    <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
                       {timeAgo(n.created_at)}
                     </div>
                   </div>
                   {n.link && (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#18181B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={isDark ? '#18181B' : CUSTOMER_SURFACE.text} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
                       <path d="M7 17L17 7M17 7H8M17 7V16"/>
                     </svg>
                   )}
@@ -631,7 +634,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
-            position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
+            position: 'fixed',
+            top: isDark ? 56 : 'calc(12px + env(safe-area-inset-top, 0px))',
+            right: isDark ? 0 : 'calc(12px + env(safe-area-inset-right, 0px))',
+            bottom: isDark ? 0 : 'calc(12px + env(safe-area-inset-bottom, 0px))',
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
             borderRadius: isDark ? 0 : 24,

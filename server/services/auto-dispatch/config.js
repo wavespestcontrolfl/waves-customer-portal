@@ -38,6 +38,19 @@ function isRouteTiersEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_FLEX_TIER — same call-time/fail-closed convention as
+// isRouteTiersEnabled above (the flip swaps which day-move window the run
+// uses, so it must never be an ambient dev default and never crash the
+// config resolution). See feature-gates.js for the full rationale.
+function isFlexTierEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER');
+  } catch (_) {
+    return false;
+  }
+}
+
 const VALID_MODES = new Set(['dry_run', 'apply']);
 
 /**
@@ -76,6 +89,9 @@ function getAutoDispatchConfig(overrides = {}) {
   const applyBlocked = mode === 'apply' && !applyAllowed;
   if (applyBlocked) mode = 'dry_run'; // hard safety: never mutate without the gate
 
+  const routeTiersEnabled = overrides.routeTiersEnabled ?? isRouteTiersEnabled();
+  const flexTierEnabled = overrides.flexTierEnabled ?? isFlexTierEnabled();
+
   return {
     mode,
     applyAllowed,
@@ -111,8 +127,23 @@ function getAutoDispatchConfig(overrides = {}) {
     // tier ladder in ./route-tiers.js (radius by days-out + drift budget +
     // destination floor + reminder freeze). When false, NOTHING tier-related
     // runs — behavior is the legacy flat lock, byte for byte.
-    routeTiersEnabled: overrides.routeTiersEnabled ?? isRouteTiersEnabled(),
+    routeTiersEnabled,
+    // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
+    // tier (flex-tier.js: 73h freeze, fixed ±5-day radius clamped by the
+    // series' adjacent occurrence) instead of the route-tiers days-out
+    // ladder. Independent of routeTiersEnabled; guardMode below gives this
+    // one precedence when both are somehow on.
+    flexTierEnabled,
+    // The ONE resolved day-move guard for this run/config — 'flex' | 'tiers'
+    // | 'legacy'. Derived here (not re-derived per caller) so it is the
+    // SINGLE source of truth for every consumer: the orchestrator's per-visit
+    // guard (index.js) AND apply.js's grouped-member guard, which receives
+    // this same config object — a grouped move's siblings are always
+    // checked under the identical mode as the tapped row that triggered it.
+    guardMode: flexTierEnabled ? 'flex' : (routeTiersEnabled ? 'tiers' : 'legacy'),
   };
 }
 
-module.exports = { getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES };
+module.exports = {
+  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
+};

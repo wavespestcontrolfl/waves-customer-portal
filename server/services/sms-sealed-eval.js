@@ -108,6 +108,27 @@ const EXAM_LEGS = Object.freeze(Object.keys(EXAM_LEG_ROUTES));
 // auto-baselines these (and only these). The gemini leg runs manually.
 const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 
+// Codex r3: existing active sealed items were frozen before GATE_SMS_REAL_
+// ANSWERS existed and therefore lack the v12-only OPEN TIMES / FOLLOW-UP SLA
+// RIGHT NOW facts — replaying those frozen (inbound, facts_block) pairs
+// through the CURRENT v12 prompt and grading the result as v12 evidence
+// scores scheduling/cancellation/handoff items under instructions whose
+// required inputs are simply absent. FOLLOW-UP SLA RIGHT NOW is the marker:
+// buildFactsBlock (sms-shadow-drafter.js) stamps that line into EVERY gate-on
+// facts block unconditionally, so its absence means the item predates the
+// gate. v11 runs never carry this line either (the gate was off when they
+// drafted) and are unaffected — this only excludes items being graded AS v12
+// evidence that were never given v12 facts.
+const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+
+function isV12PromptVersion(promptVersion) {
+  return typeof promptVersion === 'string' && promptVersion.startsWith('house_voice_v12');
+}
+
+function hasFollowupSlaFact(factsBlock) {
+  return String(factsBlock || '').includes(V12_FACTS_MARKER);
+}
+
 /* ── Freezer ──────────────────────────────────────────────────────────── */
 
 /**
@@ -117,18 +138,56 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
  * recent first within each intent) so one chatty intent can't crowd out the
  * exam's coverage of the others.
  */
+// Retire (active=false, never delete) the OLDEST pre-v12 items beyond the
+// target; rows and every historical result stay. Returns the count retired.
+async function retireDisplacedPreV12Items({ dbi, overflow }) {
+  if (!(overflow > 0)) return 0;
+  const retired = await dbi('sms_sealed_eval_items')
+    .whereIn('id', dbi('sms_sealed_eval_items')
+      .select('id')
+      .where('active', true)
+      .whereRaw("COALESCE(facts_block, '') NOT LIKE ?", [`%${V12_FACTS_MARKER}%`])
+      .orderBy('sealed_at', 'asc')
+      .limit(overflow))
+    .update({ active: false });
+  if (retired) logger.info(`[sealed-eval] seal: retired ${retired} pre-v12 item(s) displaced by v12-compatible ones`);
+  return Number(retired) || 0;
+}
+
 async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const startedAt = Date.now();
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
     .where('active', true)
     .count('* as count');
-  const remaining = target - Number(activeCount);
+  // Compatibility-aware replenishment (pre-push audit P1 on Codex r3): once
+  // GATE_SMS_REAL_ANSWERS is live the exam grades under a v12 prompt, and
+  // examOneItem excludes every item frozen without the v12 facts. A pool
+  // already full of pre-v12 items would otherwise never top up — the target
+  // then counts only COMPATIBLE items, only compatible drafts are sealed,
+  // and the oldest pre-v12 items beyond the target are retired
+  // (active=false; rows and every historical result stay put). v11: unchanged.
+  const v12 = isV12PromptVersion(require('./sms-shadow-drafter').currentPromptVersion());
+  let compatibleCount = Number(activeCount);
+  if (v12) {
+    const [{ count }] = await dbi('sms_sealed_eval_items')
+      .where('active', true)
+      .whereRaw("COALESCE(facts_block, '') LIKE ?", [`%${V12_FACTS_MARKER}%`])
+      .count('* as count');
+    compatibleCount = Number(count);
+  }
+  const remaining = target - compatibleCount;
   if (remaining <= 0) {
-    return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
+    // Codex r4: a prior run may have inserted compatible rows and then
+    // failed before retiring the displaced pre-v12 ones, leaving an
+    // oversized active pool that would otherwise never shrink (and trips
+    // the auto-exam spend cap). Prune here too, so the two steps need not
+    // be atomic to converge.
+    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) - target }) : 0;
+    return { sealed: 0, retired, activeCount: Number(activeCount) - retired, ms: Date.now() - startedAt };
   }
 
   const cutoff = new Date(Date.now() - SEALED_EVAL_MIN_AGE_DAYS * 86400 * 1000);
-  const candidates = await dbi({ md: 'message_drafts' })
+  let candidateQuery = dbi({ md: 'message_drafts' })
     .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
     .leftJoin({ si: 'sms_sealed_eval_items' }, 'si.source_draft_id', 'md.id')
     .leftJoin({ inbound_sms: 'sms_log' }, 'md.sms_log_id', 'inbound_sms.id')
@@ -141,7 +200,10 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     // ...and must NOT be a backfill row: backfill facts are TODAY's context
     // pasted onto a months-old inbound — sealing one would freeze the drift.
     .whereRaw("md.prompt_version NOT LIKE '%backfill'")
-    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''")
+    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''");
+  // v12: only drafts frozen WITH the v12 facts are representative
+  if (v12) candidateQuery = candidateQuery.whereRaw("md.facts_block LIKE ?", [`%${V12_FACTS_MARKER}%`]);
+  const candidates = await candidateQuery
     .where('md.created_at', '<', cutoff)
     .select(
       'md.id as source_draft_id', 'md.customer_id', 'md.intent',
@@ -188,8 +250,11 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     schema_version: SCHEMA_VERSION,
   }));
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
+  // Keep the active pool at the target: retire the OLDEST pre-v12 items that
+  // the new compatible ones displaced (never delete — results reference them).
+  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) + rows.length - target }) : 0;
 
-  const summary = { sealed: rows.length, activeCount: Number(activeCount) + rows.length, ms: Date.now() - startedAt };
+  const summary = { sealed: rows.length, retired, activeCount: Number(activeCount) + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
   return summary;
 }
@@ -300,8 +365,30 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   const drafter = require('./sms-shadow-drafter');
   const judge = require('./sms-shadow-judge');
 
+  // Codex r3: a run pinned to a v12 real-answers prompt version replaying an
+  // item frozen BEFORE that prompt existed would grade it against
+  // instructions (OPEN TIMES, the FOLLOW-UP SLA RIGHT NOW handoff wording)
+  // whose facts the frozen snapshot never carries — never call the drafter
+  // or judge for it; record it as excluded (an 'ungradable' sentinel, same
+  // shape as the terminal no-progress rule above) so it holds the item's
+  // completion slot without counting as a pass, a fail, or staying pending
+  // forever. v11 runs (isV12PromptVersion false) never take this branch.
+  if (isV12PromptVersion(run.prompt_version) && !hasFollowupSlaFact(item.facts_block)) {
+    await dbi('sms_sealed_eval_results')
+      .insert({
+        run_id: run.id,
+        item_id: item.id,
+        verdict: 'ungradable',
+        notes: `excluded: frozen facts_block predates GATE_SMS_REAL_ANSWERS (no ${V12_FACTS_MARKER} line) — not representative of ${run.prompt_version} (Codex r3)`,
+      })
+      .onConflict(['run_id', 'item_id'])
+      .ignore();
+    logger.warn(`[sealed-eval] item ${String(item.id).slice(0, 8)} excluded from run ${String(run.id).slice(0, 8)}: frozen pre-v12 facts_block replayed under ${run.prompt_version}`);
+    return true;
+  }
+
   const intent = { intent: item.intent || 'GENERAL' };
-  const { parsed, passes, converged, model, voiceProfileVersion } = await drafter.generateGroundedDraft({
+  const { parsed, passes, converged, model, voiceProfileVersion, promptVersion } = await drafter.generateGroundedDraft({
     client,
     inboundMessage: item.inbound_message,
     intent,
@@ -322,6 +409,20 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // text is static per run, so this fails the sitting fast rather than mixing.
   if ((voiceProfileVersion ?? null) !== (run.voice_profile_version ?? null)) {
     logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under profile ${voiceProfileVersion ?? 'none'} but run ${String(run.id).slice(0, 8)} is pinned to ${run.voice_profile_version ?? 'none'} — refusing result`);
+    return false;
+  }
+  // Same "static per run" rule, for the prompt version itself (pre-push
+  // audit P1): generateGroundedDraft reads GATE_SMS_REAL_ANSWERS LIVE on
+  // every call, so a gate flip mid-sitting (rare, but the createExamRun/
+  // resume guards above already treat it as a real event) could otherwise
+  // draft a later item under a DIFFERENT version than the run's own stamped
+  // `prompt_version` — mixing v11 and v12 evidence inside one run, which is
+  // exactly "counting an exam pass as evidence for the wrong version," just
+  // at the per-item grain instead of the whole-run grain. Refuse rather
+  // than record a mismatched result; the item stays pending for a resume,
+  // which (via the same guard) retires the run instead of continuing to mix.
+  if (promptVersion !== run.prompt_version) {
+    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under prompt ${promptVersion} but run ${String(run.id).slice(0, 8)} is pinned to ${run.prompt_version} — refusing result`);
     return false;
   }
 
@@ -439,7 +540,11 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 
 /**
  * Create one exam-run row (no processing). Stamps the RUNNING drafter's
- * PROMPT_VERSION — an exam always examines the code that is live; "comparing
+ * EFFECTIVE prompt version (currentPromptVersion(), not the static
+ * PROMPT_VERSION — see that function's own comment: PROMPT_VERSION stays
+ * house_voice_v11 forever once GATE_SMS_REAL_ANSWERS goes live, so pinning
+ * to it would stamp every run "v11" even while the drafter is actually
+ * examining v12) — an exam always examines the code that is live; "comparing
  * versions" means comparing two runs recorded before and after a prompt
  * bump, on the same frozen items. Refuses while any run is status='running':
  * exam processing is serialized behind one advisory lock, so a second row
@@ -449,6 +554,10 @@ async function finalizeRun({ runId, dbi = db } = {}) {
 async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
   if (!EXAM_LEG_ROUTES[providerLeg]) throw new Error(`unknown sealed-eval provider leg: ${providerLeg}`);
   const drafter = require('./sms-shadow-drafter');
+  // The version THIS run examines — currentPromptVersion(), not the static
+  // PROMPT_VERSION (see the docstring above and currentPromptVersion's own
+  // comment in sms-shadow-drafter.js).
+  const currentVersion = drafter.currentPromptVersion();
 
   const inFlight = await dbi('sms_sealed_eval_runs').where({ status: 'running' }).first('id', 'provider_leg');
   if (inFlight) {
@@ -459,6 +568,26 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   }
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   if (!Number(activeCount)) throw new Error('no active sealed items — seal the eval set first');
+  // Codex r3: fail fast rather than start a run that will grade nothing —
+  // every active item pre-dating GATE_SMS_REAL_ANSWERS gets excluded item by
+  // item in examOneItem, so a v12 run with zero v12-compatible items would
+  // otherwise sit at 'running' with every item landing as an 'ungradable'
+  // sentinel and finish with no evidence at all. The pool is small (sealed
+  // to SEALED_EVAL_TARGET, ~100) so this reads facts_block in JS rather than
+  // pushing a LIKE clause down — same cost, one shared check with examOneItem.
+  if (isV12PromptVersion(currentVersion)) {
+    const activeItems = await dbi('sms_sealed_eval_items').where('active', true).select('facts_block');
+    // Same bar the exam gate applies to a finished run (evaluateExamGate:
+    // at least half the pool graded). Starting below it would complete a
+    // run that can never pass, and the nightly sweep would then report the
+    // version already examined while the pool is still replenishing
+    // (pre-push audit P1) — so refuse until the freezer has caught up.
+    const compatible = activeItems.filter((i) => hasFollowupSlaFact(i.facts_block)).length;
+    const needed = Math.max(1, Math.ceil(activeItems.length / 2));
+    if (compatible < needed) {
+      throw new Error(`no v12-compatible sealed coverage — only ${compatible} of ${activeItems.length} active items carry "${V12_FACTS_MARKER}" (need ${needed}); the rest predate GATE_SMS_REAL_ANSWERS. Seal fresh items under ${currentVersion} before running this exam`);
+    }
+  }
 
   // Baseline: an explicit baselineRunId must identify a COMPLETE run on the
   // SAME leg — a failed/partial baseline would compare against a fragment,
@@ -488,7 +617,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
       .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
-      .whereNot('prompt_version', drafter.PROMPT_VERSION)
+      .whereNot('prompt_version', currentVersion)
       .orderBy('started_at', 'desc')
       .first('id');
     baseline = prior?.id || null;
@@ -514,7 +643,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
-        prompt_version: drafter.PROMPT_VERSION,
+        prompt_version: currentVersion,
         provider_leg: providerLeg,
         status: 'running',
         items_total: Number(activeCount),
@@ -661,9 +790,11 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       throw new Error(`sealed-eval run ${runId} is ${run.status}, not resumable`);
     }
     // A run only ever contains ONE drafter version. Resuming after a prompt
-    // bump would draft the remaining items under the NEW code and record
-    // them beneath the old label — refuse and start a fresh run instead.
-    const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+    // bump — OR a GATE_SMS_REAL_ANSWERS flip, which currentPromptVersion()
+    // reflects the same way a code-level bump would — would draft the
+    // remaining items under the NEW version and record them beneath the old
+    // label; refuse and start a fresh run instead.
+    const currentVersion = require('./sms-shadow-drafter').currentPromptVersion();
     if (run.prompt_version !== currentVersion) {
       // A run stranded 'running' across the prompt-bump deploy must be
       // retired here, not just refused: the one-running unique index blocks
@@ -877,7 +1008,12 @@ function shapeRun(run) {
  */
 async function getSealedExamSummary({ dbi = db } = {}) {
   const drafter = require('./sms-shadow-drafter');
-  const currentVersion = drafter.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): the headline run this function picks out per leg — the one
+  // evaluateExamGate accepts as GRAD_REQUIRE_SEALED_EXAM evidence — must
+  // match whichever prompt is ACTUALLY live, or a stale v11 run would keep
+  // satisfying the gate forever after GATE_SMS_REAL_ANSWERS flips to v12.
+  const currentVersion = drafter.currentPromptVersion();
   // Voice-profile pin (Codex r2): a leg's HEADLINE run — the one
   // evaluateExamGate accepts and the auto-sweep short-circuits on — must
   // have been drafted under the CURRENTLY effective profile, not merely the
@@ -987,7 +1123,12 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
   const drafterMod = require('./sms-shadow-drafter');
-  const currentVersion = drafterMod.PROMPT_VERSION;
+  // currentPromptVersion(), not the static PROMPT_VERSION (pre-push audit
+  // P1): with it pinned to v11, this sweep would keep confirming v11 is
+  // "already examined" forever and never create a v12 exam once
+  // GATE_SMS_REAL_ANSWERS goes live — the live version would simply never
+  // get swept.
+  const currentVersion = drafterMod.currentPromptVersion();
   // Profile-aware coverage (Codex r2): "already examined" means a complete
   // run under the current (version, effective-profile) pair — after a weekly
   // profile approval the sweep re-baselines both legs under the new profile,

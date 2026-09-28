@@ -337,3 +337,54 @@ postgres('r2-completion-panel-client-contract-1: declined / inspection-only clos
     } finally { await cleanup(f); }
   });
 });
+
+// Owner ruling 2026-09-26 (#5037): termite_bait_station's activity gauge is
+// derive-mapped (termite_activity), so the panel no longer shows it and the
+// findings field is the ONLY activity input. A tab loaded before that
+// change can still post a pinned activityScore — the server must ignore it
+// and store the derived score (Codex r1 P2 / pre-push audit on #5037). This
+// runs the real completeScheduledService path end to end.
+postgres('#5037: derive-mapped activity score — findings win over an obsolete submitted pin', () => {
+  beforeAll(async () => {
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
+  });
+  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+
+  async function completeWithScore(f, extra) {
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    return completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null },
+      body: { ...body(f, 'completed'), ...extra } });
+  }
+  async function scoreRowFor(f) {
+    return mockPg('service_activity_scores').where({ customer_id: f.customerId }).first('score', 'source', 'indicator_key');
+  }
+  async function cleanupScores(f) {
+    await mockPg('service_activity_scores').where({ customer_id: f.customerId }).del().catch(() => {});
+  }
+
+  test('a pinned technician score from a pre-deploy tab is ignored — the stored score is derived from termite_activity', async () => {
+    const f = await seedTermiteVisit();
+    try {
+      // termite_activity 'None observed' derives 0; the stale tab pins 5.
+      const out = await completeWithScore(f, { activityScore: 5, activityScoreSource: 'technician' });
+      expect(out).toMatchObject({ status: 200 });
+      const row = await scoreRowFor(f);
+      expect(row).toBeTruthy();
+      expect(Number(row.score)).toBe(0);
+      expect(row.source).toBe('derived');
+    } finally { await cleanupScores(f); await cleanup(f); }
+  });
+
+  test('with no submitted score the derived score is stored (the panel\'s normal path after #5037)', async () => {
+    const f = await seedTermiteVisit();
+    try {
+      const out = await completeWithScore(f, {});
+      expect(out).toMatchObject({ status: 200 });
+      const row = await scoreRowFor(f);
+      expect(Number(row.score)).toBe(0);
+      expect(row.source).toBe('derived');
+    } finally { await cleanupScores(f); await cleanup(f); }
+  });
+});
