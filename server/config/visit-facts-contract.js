@@ -210,6 +210,7 @@ const ADMIN_DISPATCH = 'server/routes/admin-dispatch.js';
 const INTERIOR_REENTRY_BACKFILL = 'server/scripts/backfill-interior-reentry-advisory.js';
 const TRACE_ELIGIBILITY = 'server/services/service-report/trace-eligibility.js';
 const VISIT_TIMELINE = 'server/services/service-report/visit-timeline.js';
+const COMPANION_COMPLETIONS = 'server/services/service-report/companion-completions.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -575,6 +576,7 @@ function genericCompletionFacts(opts = {}) {
       readers: withExtra('visit_duration_allocation', [
         { file: METRICS_BAND, section: 'computeOnSiteMin (fallback source when visit_time_on_site is absent)' },
         { file: REPORT_DATA, section: 'visitTiming.onSiteMinutes (fallback source)' },
+        { file: REPORT_VIEW_PAGE, section: '"Time on site" line, when this fallback supplied the minutes', readerSymbol: 'onSiteMinutes' },
       ]),
       whenMissing: 'fallback',
       notes: 'Server-computed multi-visit-packet duration allocation ({ version: 1, allocatedMinutes, ... }); feeds the SAME customer-visible "Time on site" line as visit_time_on_site (never rendered on its own) only when that fact is absent.',
@@ -1091,6 +1093,10 @@ function typedActivityScoreFacts(typedForm) {
       via(SCHEDULE_PAGE, 'activityScore'),
       via(COMPLETE_SERVICE, 'companionReportSnapshots'),
       via(SCHEDULE_PAGE, 'companionFindings'),
+      // A derive-mapped companion (ACTIVITY_INDICATORS.derive, e.g. flea,
+      // cockroach): SchedulePage omits activityScore and the server derives
+      // finalScore from the findings field instead.
+      via(COMPANION_COMPLETIONS, 'finalScore'),
     ],
     readers: [{
       file: ACTIVITY_SCORES_STORE,

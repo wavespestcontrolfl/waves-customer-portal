@@ -516,8 +516,8 @@ describe('visit facts contract registry', () => {
         problems.push(`${line}.typed_activity_score: companionStorage missing/incorrect (expected ${expectedCompanionStorage})`);
       }
       const hasSymbol = (sym) => fact.writers.some((w) => w && typeof w === 'object' && w.writerSymbol === sym);
-      if (!hasSymbol('companionReportSnapshots') || !hasSymbol('companionFindings')) {
-        problems.push(`${line}.typed_activity_score: missing companion writer edges (companionReportSnapshots / companionFindings)`);
+      if (!hasSymbol('companionReportSnapshots') || !hasSymbol('companionFindings') || !hasSymbol('finalScore')) {
+        problems.push(`${line}.typed_activity_score: missing companion writer edges (companionReportSnapshots / companionFindings / finalScore)`);
       }
     }
     expect(problems).toEqual([]);
@@ -545,6 +545,14 @@ describe('visit facts contract registry', () => {
       }
     }
     expect(problems).toEqual([]);
+  });
+
+  test('the flea work-sentence reader is pinned to the field WORK_PHRASE_FIELDS.flea actually reads', () => {
+    const src = readRepoFile('server/services/service-report/activity-indicators.js') || '';
+    const block = src.slice(src.indexOf('const WORK_PHRASE_FIELDS = {'));
+    const flea = /\n\s{2}flea:\s*\{\s*field:\s*'([a-z_]+)'/.exec(block);
+    const fact = VISIT_FACTS_CONTRACT.flea.facts.find((f) => f.readers.some((r) => /WORK_PHRASE_FIELDS\.flea/.test(r.section || '')));
+    expect(flea && flea[1]).toBe(fact && fact.key);
   });
 
   test('bora_care registers no pest activity rating (never captured for a termite-classified service)', () => {
