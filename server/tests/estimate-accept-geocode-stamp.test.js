@@ -1,0 +1,141 @@
+/**
+ * stampAcceptedVisitCoordinates (Codex P1, PR #5064, estimate-public.js:12606
+ * "Stamp accepted visits with the authoritative reviewed pin") — extracted
+ * from the accept route's post-commit, fire-and-forget geocode stamp so it
+ * can be driven directly without the whole accept transaction.
+ *
+ * The bug: when GATE_GEOCODE_REVIEW is on and the customer has a verified
+ * review (or a matching pinned primary property), excludeCustomerAutomaticGeocodeForId
+ * fenced the scheduled_services UPDATE itself, making it affect ZERO rows
+ * for exactly the customers this lane exists to serve — their accepted
+ * visits stayed coordless and invisible to route scoring. The fix drops
+ * that fence from the visit write (it already stamps the AUTHORITATIVE
+ * reviewed pin, proven same-place as the estimate address, never an
+ * automatic overwrite) while keeping it on the customers-table repair
+ * write.
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'estimate-geocode-stamp-test-secret';
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const mockGeocodeAddress = jest.fn();
+jest.mock('../services/geocoder', () => ({
+  geocodeAddress: (...args) => mockGeocodeAddress(...args),
+  buildAddress: (c) => [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', '),
+}));
+
+const mockHaversine = jest.fn();
+jest.mock('../services/route-optimizer', () => ({
+  haversine: (...args) => mockHaversine(...args),
+}));
+
+const { stampAcceptedVisitCoordinates } = require('../routes/estimate-public');
+
+const ESTIMATE = { id: 'est-1', address: '1 Main St, Bradenton, FL 34205' };
+const CUSTOMER_ID = 'cust-1';
+
+// A tiny fake knex: records every update, answers `first()` from a fixed
+// customer row, and runs `transaction`/withCustomerReviewWriteFence's
+// callback against itself (same "no separate connection" convention the
+// bigger fixtures in this suite use).
+function makeFakeDb({ customerRow, reviewRow = null, primaryRow = null } = {}) {
+  const updateCalls = [];
+  const chain = (table) => {
+    const q = { table, conds: {} };
+    q.where = (cond) => { if (cond && typeof cond === 'object') Object.assign(q.conds, cond); return q; };
+    q.whereNull = () => q;
+    q.orderBy = () => q;
+    q.forUpdate = () => q;
+    q.forShare = () => q;
+    q.noWait = () => q;
+    q.select = () => q;
+    q.whereNotExists = () => q;
+    q.first = async () => {
+      if (table === 'customers') return customerRow;
+      if (table === 'customer_geocode_reviews') return reviewRow;
+      if (table === 'customer_properties') return primaryRow;
+      return null;
+    };
+    q.update = async (payload) => { updateCalls.push({ table, conds: { ...q.conds }, payload }); return 1; };
+    return q;
+  };
+  const dbFn = (table) => chain(table);
+  dbFn.updateCalls = updateCalls;
+  dbFn.transaction = async (fn) => fn(dbFn);
+  return dbFn;
+}
+
+beforeEach(() => {
+  process.env.GATE_GEOCODE_REVIEW = 'true';
+  mockGeocodeAddress.mockReset();
+  mockHaversine.mockReset();
+  mockHaversine.mockReturnValue(0); // "same place" by default
+});
+
+afterEach(() => {
+  delete process.env.GATE_GEOCODE_REVIEW;
+});
+
+test('a customer whose PRIMARY property mirrors an authoritative pin (different from the raw stored one) gets their accepted visit stamped with THAT pin, not fenced to zero rows', async () => {
+  // No customer_geocode_reviews row — the "authoritative" pin here comes
+  // from the mirrored primary property (effectiveCustomer), same as
+  // reviewedCustomerLocation's other non-review-backed callers. This is
+  // exactly the shape excludeCustomerAutomaticGeocodeForId's SECOND clause
+  // (the "matching primary pin" exclusion) fences — before the fix, the
+  // scheduled_services UPDATE below would have matched ZERO rows.
+  const customerRow = {
+    address_line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: 27.40, longitude: -82.40, // stale raw pin
+  };
+  const primaryRow = {
+    customer_id: CUSTOMER_ID, active: true, is_primary: true,
+    address_line1: '1 Main St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: 27.51, longitude: -82.52, // authoritative mirrored pin
+  };
+  const db = makeFakeDb({ customerRow, primaryRow });
+  mockGeocodeAddress.mockResolvedValueOnce({ lat: 27.4, lng: -82.5 }); // the estimate address
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  const visitUpdate = db.updateCalls.find((c) => c.table === 'scheduled_services');
+  expect(visitUpdate).toBeTruthy();
+  expect(visitUpdate.conds).toEqual({ source_estimate_id: ESTIMATE.id });
+  // The AUTHORITATIVE reviewed pin (27.51/-82.52), never the estimate's own
+  // freshly geocoded coordinates (27.4/-82.5) — Codex's "use the pin
+  // returned by reviewedCustomerLocation for the visit stamp".
+  expect(visitUpdate.payload).toEqual({ lat: 27.51, lng: -82.52 });
+});
+
+test('reviewedCustomerLocation blocked (e.g. needs_pin) → no visit write at all, fail-soft', async () => {
+  const customerRow = {
+    address_line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: null, longitude: null,
+  };
+  const reviewRow = {
+    customer_id: CUSTOMER_ID, status: 'needs_pin',
+    address_snapshot: ['1 Main St', null, 'Bradenton', 'FL', '34205'],
+    latitude: null, longitude: null, updated_at: new Date(),
+  };
+  const db = makeFakeDb({ customerRow, reviewRow });
+  mockGeocodeAddress.mockResolvedValueOnce({ lat: 27.4, lng: -82.5 });
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  expect(db.updateCalls).toEqual([]);
+});
+
+test('an ordinary customer (no review at all) still gets stamped — GATE_GEOCODE_REVIEW off is unaffected', async () => {
+  process.env.GATE_GEOCODE_REVIEW = 'false';
+  const customerRow = {
+    address_line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205',
+    latitude: 27.4, longitude: -82.5,
+  };
+  const db = makeFakeDb({ customerRow });
+  mockGeocodeAddress.mockResolvedValueOnce({ lat: 27.4, lng: -82.5 });
+
+  await stampAcceptedVisitCoordinates({ estimate: ESTIMATE, customerId: CUSTOMER_ID, db });
+
+  const visitUpdate = db.updateCalls.find((c) => c.table === 'scheduled_services');
+  expect(visitUpdate.payload).toEqual({ lat: 27.4, lng: -82.5 });
+});

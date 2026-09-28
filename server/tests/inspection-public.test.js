@@ -2151,6 +2151,47 @@ describe('POST /:token commit', () => {
       });
     });
 
+    // Codex P1 (PR #5064, :1773 "Retain coordinates only when backed by a
+    // review"): reviewedCustomerLocation returns the primary property's
+    // ORDINARY mirrored pin here too, with no customer_geocode_reviews row
+    // at all — never staff-reviewed. Before the fix, retainReviewedLocation
+    // did not distinguish that from a verified review and silently kept the
+    // stale pin; a customer's explicit correction to the same street+ZIP
+    // must instead win.
+    test('a supplied copy of an address with NO review row does not retain a stale mirrored pin', async () => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101', address_line1: '5 Palm Ave', address_line2: '',
+        city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null,
+      };
+      firstResults.customer_properties = {
+        id: 'property-1', customer_id: 'cust-1', active: true, is_primary: true,
+        address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209',
+        latitude: 27.51, longitude: -82.52,
+      };
+      // Deliberately no firstResults.customer_geocode_reviews — this pin was
+      // never staff-verified, only mirrored from the primary property.
+      listResults.scheduled_services = [];
+      mockGeocode.mockResolvedValueOnce({ location: { lat: 27.6, lng: -82.6 } });
+      mockBuildAvailability.mockResolvedValue({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
+        date: FUTURE_DATE, time: '09:00', address: '5 Palm Ave, Bradenton, FL 34209',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls).toContainEqual(expect.objectContaining({
+        table: 'customers', payload: expect.objectContaining({ latitude: 27.6, longitude: -82.6 }),
+      }));
+      expect(mockCreateSelfBooking.mock.calls[0][0]).toMatchObject({
+        authedCustomer: { latitude: 27.6, longitude: -82.6 },
+        callbackVisit: { expectedLocation: { lat: 27.6, lng: -82.6 } },
+      });
+    });
+
     // Codex #4737 r5 P1: a retry with a CORRECTED address books there, even
     // though the failed first attempt already persisted its own address.
     test('an explicitly supplied address wins over stored coordinates (a corrected retry)', async () => {
@@ -2861,6 +2902,109 @@ describe('leadContactVerified unit coverage (P1 :585, round 11; phone-bound Code
     const lead = { first_contact_channel: 'form', phone: '9415550101' };
     expect(await leadContactVerified(lead, { leadId: 'x' }, db)).toBe(false);
     expect(await leadContactVerified(lead, { leadId: 'x', channel: 'email' }, db)).toBe(false);
+  });
+});
+
+describe('profileAffirmativelyDiffers unit coverage (Codex P2, PR #5064, :1168 "Compare complete localities")', () => {
+  const { profileAffirmativelyDiffers } = inspectionPublicRouter._test;
+  const row = { address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209' };
+
+  test('same street, different complete localities (city+state), no ZIP on either side → affirmatively differs', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Sarasota', state: 'FL', zip: null })).toBe(true);
+  });
+
+  test('same street, same complete locality, no ZIP → does NOT differ (same property)', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Bradenton', state: 'FL', zip: null })).toBe(false);
+  });
+
+  test('missing locality on one side is never treated as a difference (an incomplete copy is not proof)', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: null, state: null, zip: null })).toBe(false);
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Sarasota', state: null, zip: null })).toBe(false);
+  });
+
+  test('matching ZIPs still short-circuit to "not different" even with a different city (postal-city alias)', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Palma Sola', state: 'FL', zip: '34209' })).toBe(false);
+  });
+
+  test('a genuinely different street still differs regardless of locality', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '9 Rental Ln', city: 'Bradenton', state: 'FL', zip: null })).toBe(true);
+  });
+
+  test('a different state with the same city still differs', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Bradenton', state: 'GA', zip: null })).toBe(true);
+  });
+
+  // Guards the OTHER direction of the same finding: an unrecognized local
+  // community name (never a ZIP_TO_CITY primary city anywhere) must not be
+  // mistaken for a genuinely different, distant city when no ZIP is
+  // supplied — see the sibling full-route regression test below
+  // ('a supplied copy with %s cannot bypass an outside-area review').
+  test('an unrecognized community name, no ZIP → NOT proven different (unlike a known distinct city such as Sarasota)', () => {
+    expect(profileAffirmativelyDiffers(row, { line1: '5 Palm Ave', city: 'Palma Sola', state: 'FL', zip: null })).toBe(false);
+  });
+});
+
+// Codex P1 (PR #5064, :1446 "Fail closed when the reviewed pin cannot be
+// mirrored"): reuseMatchedProfile's comms-fence-busy fallback used to always
+// return the raw matched profile + the provider-resolved location, even
+// when reviewedCustomerLocation had already proven the raw pin was stale
+// (an authoritative pin exists and differs). Direct unit coverage — the
+// global mock `db` stands in for `trx` (same convention the file's other
+// direct _test calls use), and reuseMatchedProfile's own reviewedCustomerLocation
+// call runs against the REAL customer-geocode-review service (not mocked
+// in this file), reading the same firstResults fixtures the full-route
+// geocode-review tests above already rely on.
+describe('reuseMatchedProfile — comms fence busy vs a reviewed pin (Codex P1, PR #5064)', () => {
+  const { reuseMatchedProfile } = inspectionPublicRouter._test;
+  const OPEN_LEAD = { id: LEAD_ID, status: 'new', converted_at: null };
+  const MATCHED = {
+    id: 'cust-1', account_id: 'acct-1',
+    address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209',
+    latitude: 27.40, longitude: -82.40, // stale raw pin
+  };
+  const RESOLVED = {
+    location: { lat: 27.40, lng: -82.40 }, // the provider AGREES with the stale raw pin
+    address: { line1: '5 Palm Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34209' },
+    source: 'supplied',
+  };
+
+  test('a mirrored primary pin differs from the raw stored pin, comms fence busy → fails closed, never falls back to the stale raw pin', async () => {
+    gateState.reviewLive = true;
+    firstResults.leads = OPEN_LEAD;
+    firstResults.customer_geocode_reviews = null; // no review row — the mismatch comes from the primary mirror
+    firstResults.customer_properties = {
+      id: 'property-1', customer_id: 'cust-1', active: true, is_primary: true,
+      address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209',
+      latitude: 27.51, longitude: -82.52, // the AUTHORITATIVE mirrored pin — different from MATCHED's raw pin
+    };
+    listResults.scheduled_services = [];
+    db.raw.mockImplementation((sql) => (
+      String(sql).includes('pg_try_advisory_xact_lock') ? Promise.resolve({ rows: [{ locked: false }] }) : sql
+    ));
+
+    const result = await reuseMatchedProfile(db, OPEN_LEAD, MATCHED, RESOLVED);
+
+    expect(result).toEqual({ locationFailure: 'address_unresolved' });
+  });
+
+  test('no mirrored/reviewed pin at all, comms fence busy → the prior fall-back behavior is unchanged', async () => {
+    gateState.reviewLive = true;
+    firstResults.leads = OPEN_LEAD;
+    firstResults.customer_geocode_reviews = null;
+    firstResults.customer_properties = null; // nothing to mirror — reviewedCustomerLocation returns MATCHED's own coords
+    listResults.scheduled_services = [];
+    db.raw.mockImplementation((sql) => (
+      String(sql).includes('pg_try_advisory_xact_lock') ? Promise.resolve({ rows: [{ locked: false }] }) : sql
+    ));
+
+    const result = await reuseMatchedProfile(db, OPEN_LEAD, MATCHED, RESOLVED);
+
+    // reviewed.latitude/longitude here equal MATCHED's own (no primary to
+    // mirror), which also equals RESOLVED.location, so this actually takes
+    // the EARLIER same-pin short-circuit rather than ever reaching the
+    // comms-fence branch — proving the fix's added check is reached ONLY
+    // when there is a genuine mismatch to protect.
+    expect(result).toEqual({ customer: expect.objectContaining({ latitude: 27.40, longitude: -82.40 }), location: { lat: 27.40, lng: -82.40 } });
   });
 });
 

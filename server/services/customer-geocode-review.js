@@ -170,7 +170,13 @@ async function reviewedCustomerLocation(customer, conn = db) {
       ? { ...customer, latitude: null, longitude: null, geocode_review_blocked: true }
       : effective;
   }
-  if (review.status === 'verified' && samePin(effective, review)) return effective;
+  // verified_by_review distinguishes a pin backed by a matching, staff-
+  // verified review from ordinary stored coordinates `effective` returns
+  // for every other non-blocked case below (Codex P1: a caller that treats
+  // ANY returned pin as review-authoritative would wrongly retain a
+  // customer's plain stored coordinates — never reviewed at all — over a
+  // freshly supplied correction).
+  if (review.status === 'verified' && samePin(effective, review)) return { ...effective, verified_by_review: true };
   if (['verified', 'needs_details', 'needs_pin', 'outside_area'].includes(review.status)) {
     return { ...customer, latitude: null, longitude: null, geocode_review_blocked: true };
   }

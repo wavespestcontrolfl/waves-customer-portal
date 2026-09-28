@@ -1163,9 +1163,43 @@ function profileAffirmativelyDiffers(row, address) {
   if (premiseDiffers) return true;
   const zip = normalizeZip(row.zip);
   const suppliedZip = normalizeZip(address?.zip);
-  // The ordinary profile matcher treats matching ZIPs as the same property,
-  // regardless of postal-city aliases. The quarantine boundary must agree.
-  return Boolean(zip && suppliedZip && zip !== suppliedZip);
+  if (zip && suppliedZip) {
+    // The ordinary profile matcher treats matching ZIPs as the same
+    // property, regardless of postal-city aliases — a decisive ZIP match
+    // (or mismatch) is the quarantine boundary's answer and short-circuits
+    // the locality check below.
+    return zip !== suppliedZip;
+  }
+  // ZIP comparison is inconclusive (missing on at least one side). A
+  // ZIP-less supplied address can still affirmatively differ (Codex P2):
+  // "5 Palm Ave, Bradenton" vs a supplied "5 Palm Ave, Sarasota" with no
+  // ZIP shares a street key and has no ZIP to compare, so without this the
+  // supplied address was treated as the SAME (quarantined) property and a
+  // genuinely different property could never be booked. Compare the
+  // locality as ONE complete value — city AND state, never city alone —
+  // only when BOTH sides provide BOTH fields, the same "both sides must be
+  // complete" rule this function already applies to ZIP.
+  const normalizeLocality = (value) => String(value || '').trim().toLowerCase();
+  const storedCity = normalizeLocality(row.city);
+  const suppliedCity = normalizeLocality(address?.city);
+  const storedState = normalizeLocality(row.state);
+  const suppliedState = normalizeLocality(address?.state);
+  if (!storedCity || !suppliedCity || !storedState || !suppliedState) return false;
+  if (storedState !== suppliedState) return true;
+  if (storedCity === suppliedCity) return false;
+  // A bare city-name mismatch is trusted as proof ONLY when the supplied
+  // name is a RECOGNIZED distinct place in the service area — a primary
+  // city value somewhere in zip-to-city.js's ZIP_TO_CITY table. An
+  // unlisted community/neighborhood name (e.g. "Palma Sola", itself never
+  // a primary city anywhere in that table) is exactly the kind of informal
+  // local alias cityAcceptedForZip already treats charitably for a known
+  // ZIP — this function has no ZIP here to check it against, so it must
+  // not bounce a review quarantine on a guess that an unrecognized name
+  // means a genuinely different, distant city rather than the same
+  // property under a neighborhood name.
+  const { ZIP_TO_CITY } = require('../utils/zip-to-city');
+  const knownCities = new Set(Object.values(ZIP_TO_CITY).map((c) => c.toLowerCase()));
+  return knownCities.has(suppliedCity);
 }
 
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
@@ -1442,6 +1476,19 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   const { tryLockCustomerComms } = require('../utils/customer-comms-lock');
 
   if (!(await tryLockCustomerComms(trx, matched.id))) {
+    // Fail closed, recoverable, when there IS an authoritative reviewed pin
+    // this branch cannot mirror (Codex P1): `matched`'s raw coordinates
+    // already proved different from `reviewed`'s above (the samePin check
+    // that would have returned early), so falling back to `matched` +
+    // the provider-resolved `resolved.location` can silently agree with
+    // the stale, rejected point staff verification was meant to correct,
+    // passing the booking's expected-location check at the wrong address.
+    // With no reviewed pin to lose (a fresh/no-review case), the prior
+    // fall-back behavior is unchanged.
+    if (reviewed.latitude != null && reviewed.longitude != null) {
+      logger.warn(`[inspection-public] comms fence busy for ${matched.id}; reviewed pin could not be mirrored`);
+      return { locationFailure: 'address_unresolved' };
+    }
     logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
     return { customer: matched, location: resolved.location };
   }
@@ -1763,7 +1810,15 @@ async function provisionLinkedCustomer(trx, {
     if (other.locationFailure) return { locationFailure: other.locationFailure };
     return { custRow: other.customer, location: other.location || resolved.location };
   }
-  const reviewedLocation = freshCustRow.latitude != null && freshCustRow.longitude != null
+  // verified_by_review (Codex P1): loadTrustedCustomer's reviewedCustomerLocation
+  // call returns freshCustRow.latitude/longitude for ANY stored pin, review
+  // row or not — without this flag, a customer with no customer_geocode_reviews
+  // row at all still counted as "retainReviewedLocation" below, so a caller
+  // who explicitly supplied the same normalized street+ZIP to correct a bad
+  // pin had their correction silently discarded for an old, never-reviewed
+  // point.
+  const reviewedLocation = freshCustRow.verified_by_review
+    && freshCustRow.latitude != null && freshCustRow.longitude != null
     ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
     : null;
   const retainReviewedLocation = [
@@ -2552,6 +2607,10 @@ router._test = {
   loadLead,
   LEAD_ROW_FIELDS,
   COMMIT_LOCK_NS,
+  // Test hooks (geocode review fence P1/P2, PR #5064).
+  profileAffirmativelyDiffers,
+  reuseMatchedProfile,
+  provisionLinkedCustomer,
 };
 
 module.exports = router;
