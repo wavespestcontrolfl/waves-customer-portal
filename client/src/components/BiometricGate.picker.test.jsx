@@ -23,6 +23,7 @@ vi.mock('@capacitor/app', () => ({
 }));
 
 import BiometricGate from './BiometricGate';
+import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { authenticateBiometric } from '../native/biometric';
 
 let visibility = 'visible';
@@ -152,4 +153,35 @@ it('discards a Face ID success when a picker opened but a real background hid th
   await act(async () => { finish(true); });
 
   expect(lockShown()).toBeInTheDocument();
+});
+
+function nativePicker(open) {
+  act(() => { document.dispatchEvent(new CustomEvent(NATIVE_PICKER_EVENT, { detail: { open } })); });
+}
+
+it('does not lock while the native camera sheet covers the page', async () => {
+  await renderUnlocked();
+  nativePicker(true);
+
+  setVisibility('hidden');
+  nativePicker(false);
+  setVisibility('visible');
+
+  expect(lockShown()).not.toBeInTheDocument();
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the deferred Face ID prompt when the pick lands before the page is visible', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  setVisibility('hidden');
+  appState(false); // real app switch under the picker
+  appState(true);
+
+  fireEvent.change(screen.getByTestId('camera')); // picked while still hidden
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  setVisibility('visible');
+  await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(2);
 });

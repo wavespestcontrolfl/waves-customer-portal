@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
+import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { COLORS, FONTS } from '../theme-brand';
 import '../glass/glass-theme.css';
 
@@ -81,7 +82,8 @@ export default function BiometricGate({ children }) {
   const suppressStateRef = useRef(false);  // ignore app-state churn our own prompt causes
   const lockedRef = useRef(false);         // latest lock state for the stable listener closure
   const suppressTimerRef = useRef(null);   // pending timer that clears suppressStateRef
-  // Our own camera / photo picker (an <input type="file">, e.g. Photo ID) covers the
+  // Our own camera / photo picker (the native camera sheet or an <input type="file">,
+  // e.g. Photo ID) covers the
   // webview with a native sheet. That hides the document, which looked like a real
   // background: the app locked under the camera, and every Face ID success was then
   // discarded as "not foreground" (the camera still hid the page), so the prompt
@@ -169,17 +171,22 @@ export default function BiometricGate({ children }) {
     };
     document.addEventListener('visibilitychange', onVisibility);
     const isFileInput = (el) => el?.tagName === 'INPUT' && el.type === 'file';
-    const onPickerOpen = (e) => {
-      if (isFileInput(e.target)) pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS;
+    const pickerOpened = () => { pickerOpenUntilRef.current = Date.now() + PICKER_GRACE_MS; };
+    // A pick/cancel can land while the sheet is still hiding the page: stop excusing
+    // new hides, but keep the coverage and any deferred unlock until it's visible.
+    const pickerDone = () => {
+      pickerOpenUntilRef.current = 0;
+      if (document.visibilityState === 'visible') pickerClosed();
     };
-    const onPickerDone = (e) => {
-      if (isFileInput(e.target)) pickerClosed();
-    };
+    const onPickerOpen = (e) => { if (isFileInput(e.target)) pickerOpened(); };
+    const onPickerDone = (e) => { if (isFileInput(e.target)) pickerDone(); };
+    const onNativePicker = (e) => { if (e.detail?.open) pickerOpened(); else pickerDone(); };
     // Capture phase: the picker's input is usually hidden and clicked from code, and
     // `cancel` doesn't bubble.
     document.addEventListener('click', onPickerOpen, true);
     document.addEventListener('change', onPickerDone, true);
     document.addEventListener('cancel', onPickerDone, true);
+    document.addEventListener(NATIVE_PICKER_EVENT, onNativePicker);
     let listener;
     import('@capacitor/app')
       .then(({ App }) => App.addListener('appStateChange', ({ isActive }) => {
@@ -208,6 +215,7 @@ export default function BiometricGate({ children }) {
       document.removeEventListener('click', onPickerOpen, true);
       document.removeEventListener('change', onPickerDone, true);
       document.removeEventListener('cancel', onPickerDone, true);
+      document.removeEventListener(NATIVE_PICKER_EVENT, onNativePicker);
       try { listener?.remove?.(); } catch { /* noop */ }
     };
   }, [attempt]);
