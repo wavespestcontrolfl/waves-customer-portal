@@ -269,9 +269,17 @@ function parseDateOrNull(raw) {
 // parseDateOrNull's behavior exactly in those cases.
 function parseExtractedStartAt(raw) {
   if (!raw || typeof raw !== 'string') return null;
-  // parseETDateTime only reads a naive string as ET without fractional
-  // seconds; "…T19:30:00.000" would otherwise fall through to UTC parsing.
-  const d = parseETDateTime(raw.trim().replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+$/, '$1'));
+  const text = raw.trim();
+  // An explicit offset or Z is unambiguous.
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text)) {
+    const d = new Date(text.replace(' ', 'T'));
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  // Every naive form (T or space separator, optional seconds/fraction, or a
+  // bare date) is an ET wall-clock time; a bare date is ET midnight.
+  const m = text.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/);
+  if (!m) return null; // free text ("Sept 19, 7:30 PM") would parse in server-local time: reject
+  const d = parseETDateTime(`${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}`);
   return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
 }
 
@@ -728,13 +736,15 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents, requi
 
 // An extracted event in the prompt's shape: an object with a non-blank
 // string title; every other field a string or null; a startAt, when given,
-// that parses as a date.
+// that parses unambiguously.
 const EXTRACTED_EVENT_TEXT_FIELDS = ['startAt', 'venueName', 'city', 'description', 'eventUrl', 'imageUrl'];
 function isWellFormedExtractedEvent(ev) {
   if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return false;
   if (typeof ev.title !== 'string' || !ev.title.trim()) return false;
   if (!EXTRACTED_EVENT_TEXT_FIELDS.every((k) => ev[k] === undefined || ev[k] === null || typeof ev[k] === 'string')) return false;
-  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseDateOrNull(ev.startAt));
+  // Same parser normalization uses, so an accepted startAt is one that reads
+  // unambiguously (ISO with offset, or a naive ET date/time).
+  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseExtractedStartAt(ev.startAt));
 }
 
 /**

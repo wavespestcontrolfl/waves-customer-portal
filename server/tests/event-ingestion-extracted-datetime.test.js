@@ -102,6 +102,15 @@ describe('extractedEventDedupKeys — stable dedup key across TZ-format drift', 
     expect(legacyExternalId).toBe(`boat parade|${start.toISOString()}|https://x.co/parade`);
   });
 
+  test('every naive form reads as Eastern; free text is rejected', () => {
+    expect(parseExtractedStartAt('2026-09-19 19:30:00').toISOString()).toBe('2026-09-19T23:30:00.000Z');
+    expect(parseExtractedStartAt('2026-09-19T19:30').toISOString()).toBe('2026-09-19T23:30:00.000Z');
+    expect(parseExtractedStartAt('2026-12-19 19:30').toISOString()).toBe('2026-12-20T00:30:00.000Z');
+    expect(parseExtractedStartAt('2026-09-19').toISOString()).toBe('2026-09-19T04:00:00.000Z');
+    expect(parseExtractedStartAt('2026-09-19 19:30:00+00:00').toISOString()).toBe('2026-09-19T19:30:00.000Z');
+    expect(parseExtractedStartAt('September 19, 2026 7:30 PM')).toBeNull();
+  });
+
   test('a null start produces an empty startKey segment in both shapes (undated events)', () => {
     const { externalId, legacyExternalId } = extractedEventDedupKeys('Ongoing Market', null, '');
     expect(externalId).toBe('ongoing market||');

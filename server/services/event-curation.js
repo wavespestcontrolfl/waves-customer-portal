@@ -239,8 +239,14 @@ async function runCurationEligibilityPipeline(rows, { reference = new Date(), kn
   return { nonRepeatedRows, historicallyNewRows, candidates };
 }
 
+// The SQL window is wider than the per-run cap: the identity/history
+// pipeline can drop many rows (repeat occurrences of a seasonal or annual
+// identity), and those must not use up the slots of valid later events. The
+// cap applies to the candidates that survive.
+const CURATION_FETCH_WINDOW = 500;
+
 async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
-  const rows = await buildCurationCandidateQuery(limit);
+  const rows = await buildCurationCandidateQuery(Math.max(limit, CURATION_FETCH_WINDOW));
   const { nonRepeatedRows, historicallyNewRows, candidates } = await runCurationEligibilityPipeline(rows);
 
   // Rows dropped by the PERMANENT identity filters must be marked
@@ -274,7 +280,7 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
         : 'Excluded by policy: identity already featured in a prior issue',
     }));
 
-  return { candidates, policyDrops };
+  return { candidates: candidates.slice(0, limit), policyDrops };
 }
 
 function buildCurationPrompt(events, todayIso) {
