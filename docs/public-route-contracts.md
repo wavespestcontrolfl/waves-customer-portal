@@ -389,10 +389,12 @@ LIVE service-report payload (`/api/reports/:token/data` only — the one caller
 that opts in with `nearYou: true`; the `/ask` Q&A build and every other build
 neither read nor carry it) may carry `nearYou: { city, pest }` on a LAWN report
 only: the lawn pest most often recorded among OTHER lawn customers in this
-report's own service city over the last 30 ET days. The city is the visit's
-stamped service address city, else the customer's (the same
-`COALESCE(ss.service_address_city, customers.city)` the report query uses),
-compared trimmed and case-blind. Records count only when completed, performed
+report's own service city over the last 30 ET days. A visit's city is the one
+its own report shows: the frozen `reportIdentitySnapshot` city when the record
+has one, else the stamped service address city, else the customer's (the
+report query's `COALESCE(ss.service_address_city, customers.city)`), so a
+customer who later moved never carries old findings to the new city; compared
+trimmed and case-blind. Records count only when completed, performed
 (not inspection-only, customer-declined or incomplete) and customer-visible;
 the pest comes only from each visit's closeout form snapshot
 (`structured_notes.formObservations`, server-allowlisted at completion), matched

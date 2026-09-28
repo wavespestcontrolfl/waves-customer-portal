@@ -1936,7 +1936,11 @@ function structuredCustomerConcern(structured = {}) {
 // report's own service city over the last 30 ET days, named only once
 // NEAR_YOU_MIN_CUSTOMERS distinct customers had it (the "Near you" line,
 // GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records only
-// (the Pest Pressure prior-visit rule). The pest comes only from each visit's
+// (the Pest Pressure prior-visit rule). A visit's city is the one its own
+// report shows: the frozen reportIdentitySnapshot city when the record has
+// one (applyReportIdentitySnapshot), else the stamped service address city,
+// else the customer's, so a customer who later moved never carries old
+// findings to the new city (codex P2 on #5177). The pest comes only from each visit's
 // completion-form snapshot (structured_notes.formObservations: server-
 // allowlisted values, the provenance buildProtocolPayload trusts), matched
 // exactly to a definite-live-pest observation. Never from service_findings
@@ -1948,7 +1952,10 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   const todayEt = etDateString(now);
   const sinceEt = etDateString(addETDays(now, -29));
   const { rows } = await knex.raw(`
-    SELECT sr.customer_id, sr.structured_notes->'formObservations' AS form_observations
+    SELECT sr.customer_id,
+           sr.structured_notes->'formObservations' AS form_observations,
+           COALESCE(ss.service_address_city, c.city) AS live_city,
+           sr.service_data->'reportIdentitySnapshot' AS identity_snapshot
     FROM service_records sr
     LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
     JOIN customers c ON c.id = sr.customer_id
@@ -1956,13 +1963,23 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
       AND sr.service_line = 'lawn'
       AND sr.customer_id <> ?
       AND sr.service_date >= ?::date AND sr.service_date <= ?::date
-      AND LOWER(TRIM(COALESCE(ss.service_address_city, c.city))) = LOWER(?)
+      AND (
+        LOWER(TRIM(COALESCE(ss.service_address_city, c.city))) = LOWER(?)
+        OR LOWER(TRIM(sr.service_data->'reportIdentitySnapshot'->'address'->>'city')) = LOWER(?)
+      )
       AND ${customerVisibleServiceRecordPredicate('sr')}
       AND COALESCE(sr.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
-  `, [customerId, sinceEt, todayEt, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
+  `, [customerId, sinceEt, todayEt, nearYouCity, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
+  const cityKey = nearYouCity.toLowerCase();
   const customersByLabel = new Map();
   for (const row of rows || []) {
     if (!row.customer_id) continue;
+    // The SQL keeps either city; the report's own rule picks the one that counts.
+    const visitCity = applyReportIdentitySnapshot({
+      city: row.live_city,
+      service_data: { reportIdentitySnapshot: row.identity_snapshot },
+    }).city;
+    if (String(visitCity || '').trim().toLowerCase() !== cityKey) continue;
     for (const observation of parseJsonArray(row.form_observations)) {
       const label = lawnDefiniteLivePestLabelForObservation(observation);
       if (!label) continue;

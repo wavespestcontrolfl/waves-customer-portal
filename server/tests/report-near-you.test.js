@@ -25,8 +25,10 @@ const CHINCH = 'Chinch bugs — observed';
 const ARMY = 'Armyworms';
 
 // The same builder fake as report-plan-summary.test.js, plus knex.raw: the
-// near-you read (one row per visit: customer_id + form_observations) answers
-// with `nearYouRows`, every other raw query with none.
+// near-you read (one row per visit: customer_id + form_observations, plus the
+// visit's live_city and identity_snapshot) answers with `nearYouRows`, every
+// other raw query with none. A row's live_city defaults to the report's own
+// city (Parrish); the city tests set it, and the snapshot, explicitly.
 function makeKnex(fixtures, nearYouRows, rawCalls) {
   const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
@@ -59,7 +61,7 @@ function makeKnex(fixtures, nearYouRows, rawCalls) {
   knex.raw = (sql, bindings) => {
     const isNearYou = /AS form_observations/.test(String(sql));
     if (isNearYou) rawCalls.push({ sql, bindings });
-    return Promise.resolve({ rows: isNearYou ? nearYouRows : [] });
+    return Promise.resolve({ rows: isNearYou ? nearYouRows.map((row) => ({ live_city: 'Parrish', ...row })) : [] });
   };
   return knex;
 }
@@ -117,9 +119,10 @@ test('names the top pest at the 3-customer floor, with the trimmed report city, 
   ]);
   expect(data.nearYou).toEqual({ city: 'Parrish', pest: 'chinch bugs' });
   const [call] = rawCalls;
-  // own customer excluded, then the ET window, then the city
+  // own customer excluded, then the ET window, then the city (live, then frozen)
   expect(call.bindings[0]).toBe('customer-ny');
   expect(call.bindings[3]).toBe('Parrish');
+  expect(call.bindings[4]).toBe('Parrish');
   expect(call.sql).toMatch(/sr\.customer_id <> \?/);
   expect(call.sql).toMatch(/sr\.service_line = 'lawn'/);
   // The closeout form snapshot is the only pest source (codex P0 on #5177).
@@ -163,6 +166,24 @@ test('only an exact allowlisted observation counts, never text that merely start
     ],
   })));
   expect(data).not.toHaveProperty('nearYou');
+});
+
+test("a visit counts in the city its own report shows: the frozen report city beats the customer's current address (codex P2 on #5177)", async () => {
+  const snapshotCity = (city) => ({ version: 1, address: { city } });
+  // c3 has since moved to Sarasota, but the visit happened in Parrish.
+  const movedAway = await buildWith([
+    { customer_id: 'c1', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c2', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c3', form_observations: [observation(CHINCH)], live_city: 'Sarasota', identity_snapshot: snapshotCity('Parrish') },
+  ]);
+  expect(movedAway.data.nearYou).toEqual({ city: 'Parrish', pest: 'chinch bugs' });
+  // c3 lives in Parrish now, but the visit happened in Bradenton.
+  const movedIn = await buildWith([
+    { customer_id: 'c1', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c2', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c3', form_observations: [observation(CHINCH)], identity_snapshot: snapshotCity('Bradenton') },
+  ]);
+  expect(movedIn.data).not.toHaveProperty('nearYou');
 });
 
 test.each([
