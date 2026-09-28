@@ -220,7 +220,31 @@ const AI_CITATION_SOURCE = 'ai_citation';
 const AUTO_TO_OWNER_ON_DISCOVERY = Object.freeze({
   AUTO_FREE: 'OWNER_FREE', AUTO_ACCOUNT: 'OWNER_ACCOUNT', AUTO_OUTREACH: 'OWNER_OUTREACH', AUTO_PAID_WITHIN_POLICY: 'OWNER_PAYMENT',
 });
-const isDiscoveryOnlyDomain = (domain) => Boolean(domain) && domain.source === AI_CITATION_SOURCE;
+// The `enrichment` marker key a source-widening migration rollback stamps
+// (20260928060000_link_source_ai_citation_rollback_safety.js's down()) before
+// relabeling `source` away from 'ai_citation' to keep the narrowed CHECK
+// satisfiable (Codex P1 2026-09-28, second round): `source` is exactly what
+// gets relabeled to `legacy_unknown` on such a rollback, so a guard keyed on
+// it alone would silently stop protecting those domains the moment a
+// rollback (and any later reapply) happened. `enrichment` is an ordinary
+// seo_link_domains jsonb column neither that migration's up() nor
+// 20260928050000's touches, so once stamped it survives any number of
+// down()/up() cycles — an INDEPENDENT, durable discovery-only guard, exactly
+// as durable as the `source` check for a domain that never gets relabeled.
+const AI_CITATION_ENRICHMENT_MARKER = 'ai_citation_discovered';
+function parsedEnrichment(domain) {
+  const e = domain && domain.enrichment;
+  if (!e) return null;
+  if (typeof e === 'object') return e;
+  if (typeof e === 'string') { try { return JSON.parse(e); } catch { return null; } }
+  return null;
+}
+const isDiscoveryOnlyDomain = (domain) => {
+  if (!domain) return false;
+  if (domain.source === AI_CITATION_SOURCE) return true;
+  const enrichment = parsedEnrichment(domain);
+  return Boolean(enrichment && enrichment[AI_CITATION_ENRICHMENT_MARKER] === true);
+};
 
 const isLiteralBoolean = (v) => v === true || v === false;
 const validLegalTermsHash = (h) => typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);

@@ -525,6 +525,24 @@ describe('owner-queue safety guard: ai_citation-discovered domains never read AU
     expect(P.isDiscoveryOnlyDomain(undefined)).toBe(false);
   });
 
+  // Codex P1 2026-09-28 (second round): a rollback of the source-widening
+  // migration pair relabels `source` away from 'ai_citation' to keep the
+  // narrowed CHECK satisfiable — the marker migration
+  // (20260928080000_link_source_ai_citation_rollback_marker.js) stamps this
+  // enrichment key first, so the guard survives on the marker ALONE even
+  // once `source` no longer says ai_citation.
+  test('isDiscoveryOnlyDomain also honors the rollback-safety enrichment marker, independent of `source`', () => {
+    const relabeled = domain({ source: 'legacy_unknown', enrichment: { ai_citation_discovered: true } });
+    expect(P.isDiscoveryOnlyDomain(relabeled)).toBe(true);
+    // a JSON-STRING enrichment (a raw pg read that wasn't auto-parsed) is honored too
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'legacy_unknown', enrichment: '{"ai_citation_discovered":true}' }))).toBe(true);
+    // an ordinary domain's own unrelated enrichment never false-positives
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', enrichment: { domain_rating: 40 } }))).toBe(false);
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', enrichment: null }))).toBe(false);
+    // malformed JSON string never throws, never false-positives
+    expect(P.isDiscoveryOnlyDomain(domain({ source: 'legacy_unknown', enrichment: 'not json' }))).toBe(false);
+  });
+
   test('AI_CITATION_SOURCE is the registry enum value', () => {
     expect(R.LINK_SOURCES).toContain(P.AI_CITATION_SOURCE);
     expect(P.AI_CITATION_SOURCE).toBe('ai_citation');
