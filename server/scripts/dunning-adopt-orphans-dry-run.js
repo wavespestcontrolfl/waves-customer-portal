@@ -15,6 +15,8 @@
 // Prints invoice/customer ids only — never a customer name.
 //
 // Usage (repo root):
+//   (export the web service's GATE_DUNNING_LADDER_90 / GATE_LATE_PAYMENT_CHECKER_OFF first —
+//   railway run --service Postgres does not carry them; the script warns when unset)
 //   railway run --service Postgres -- node server/scripts/dunning-adopt-orphans-dry-run.js            # dry run
 //   railway run --service Postgres -- node server/scripts/dunning-adopt-orphans-dry-run.js --execute
 
@@ -41,6 +43,16 @@ const { adoptOrphanInvoices } = require(path.join(__dirname, '..', 'services', '
 const execute = process.argv.includes('--execute');
 
 (async () => {
+  // Landing days (and past_final_step) follow GATE_DUNNING_LADDER_90 as read
+  // from THIS process's env; `railway run --service Postgres` injects the
+  // database's variables, not the web service's gates, so say which cadence
+  // this count used and warn when it may not match production.
+  const gate = (name) => process.env[name] === 'true';
+  console.log(`[dunning-adopt-orphans] gates in this run: GATE_DUNNING_LADDER_90=${gate('GATE_DUNNING_LADDER_90')} GATE_LATE_PAYMENT_CHECKER_OFF=${gate('GATE_LATE_PAYMENT_CHECKER_OFF')}`);
+  if (!gate('GATE_DUNNING_LADDER_90') || !gate('GATE_LATE_PAYMENT_CHECKER_OFF')) {
+    console.warn('[dunning-adopt-orphans] WARNING: a gate is unset here — this count uses the legacy Day 30 cadence and may not match production. '
+      + 'Export the web service\'s values for the run, e.g. GATE_DUNNING_LADDER_90=true GATE_LATE_PAYMENT_CHECKER_OFF=true railway run --service Postgres -- node …');
+  }
   const { candidates, skipped = [] } = await adoptOrphanInvoices({ dryRun: true });
   console.log(`[dunning-adopt-orphans] ${execute ? 'EXECUTE' : 'DRY RUN'} — ${candidates.length} orphan invoice(s) with no follow-up sequence row, ${skipped.length} skipped`);
   for (const s of skipped) console.log(`  skipped invoice ${s.invoice_id}  customer ${s.customer_id}  reason ${s.reason}`);
