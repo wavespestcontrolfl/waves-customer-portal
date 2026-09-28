@@ -34,6 +34,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { approvalContentHash, isApproved } = require('./species-catalog-approval');
 
 const DATA_DIR = path.join(__dirname, '..', 'data', 'species-catalog-v1');
 
@@ -141,16 +142,37 @@ function getNode(id) {
 }
 
 function listEntries(filter = {}) {
-  const { group, subgroup, kind } = filter || {};
+  const { group, subgroup, kind, section } = filter || {};
   let list = group ? (CATALOG.entriesByGroup.get(group) || []) : Array.from(CATALOG.entries.values());
   if (subgroup) list = list.filter((e) => e.subgroup === subgroup);
   if (kind) list = list.filter((e) => e.kind === kind);
+  if (section) list = list.filter((e) => sectionOf(e) === section);
   return list;
 }
 
 /**
- * Ordered ladder from category down to `id`: category → group → subgroup
- * (if any) → entry (if `id` is an entry). Each rung is
+ * The section (`'pest' | 'plant' | 'condition'`) a catalog node lives under,
+ * climbing entry/subgroup → group → category the same way `lineage` does.
+ * Accepts either a node object (as returned by `getNode`/`listEntries`) or a
+ * bare id/slug. Returns `null` for an unknown node. A category with no
+ * declared `section` (shouldn't happen post-migration, but keeps this
+ * defensive rather than throwing) defaults to `'pest'` — every category this
+ * catalog shipped with before the plant/condition sections existed.
+ */
+function sectionOf(nodeOrSlug) {
+  const node = (nodeOrSlug && typeof nodeOrSlug === 'object' && nodeOrSlug.level)
+    ? nodeOrSlug
+    : getNode(nodeOrSlug);
+  if (!node) return null;
+  if (node.level === 'category') return node.section || 'pest';
+  const group = node.level === 'group' ? node : getGroup(node.group);
+  const category = group ? getCategory(group.category) : null;
+  return category ? (category.section || 'pest') : null;
+}
+
+/**
+ * Ordered ladder from category down to `id`: category → group → every
+ * parent subgroup → subgroup → entry (if `id` is an entry). Each rung is
  * `{ level, id, label, generic }`. Returns [] if `id` is unknown.
  */
 function lineage(id) {
@@ -182,27 +204,28 @@ function lineage(id) {
     if (category) rungs.push({ level: 'category', id: category.id, label: category.label, generic: category.generic });
     rungs.push({ level: 'group', id: group.id, label: group.label, generic: group.generic });
   }
-  if (subgroup) rungs.push({ level: 'subgroup', id: subgroup.id, label: subgroup.label, generic: subgroup.generic });
+  if (subgroup) {
+    const chain = [];
+    const seen = new Set();
+    for (let current = subgroup; current;) {
+      if (seen.has(current.id)) throw new Error(`species-catalog: subgroup parent cycle at "${current.id}"`);
+      seen.add(current.id);
+      chain.unshift(current);
+      const parent = current.parent ? getSubgroup(current.parent) : null;
+      if (current.parent && !parent) {
+        throw new Error(`species-catalog: subgroup "${current.id}" has unknown parent "${current.parent}"`);
+      }
+      current = parent;
+    }
+    for (const rung of chain) {
+      if (rung.group !== group?.id) {
+        throw new Error(`species-catalog: subgroup "${rung.id}" is outside group "${group?.id || ''}"`);
+      }
+      rungs.push({ level: 'subgroup', id: rung.id, label: rung.label, generic: rung.generic });
+    }
+  }
   if (entry) rungs.push({ level: 'entry', id: entry.slug, label: entry.common_name, generic: null });
   return rungs;
-}
-
-/**
- * The one photo that would narrow this node further.
- * Groups and subgroups carry their own `next_photo` (authored in
- * index.json). An entry has no top-level `next_photo` in the BRIEF schema —
- * its closest equivalent is the `next_photo` on its first look-alike pair,
- * which is what this falls back to. Returns null if neither is available.
- */
-function nextPhoto(id) {
-  const node = getNode(id);
-  if (!node) return null;
-  if (node.next_photo) return { ...node.next_photo, photo_can_confirm: node.next_photo.photo_can_confirm !== false };
-  if (node.level === 'entry' && Array.isArray(node.look_alikes) && node.look_alikes[0]) {
-    const pair = node.look_alikes[0];
-    return { ask: pair.next_photo, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
-  }
-  return null;
 }
 
 /**
@@ -255,6 +278,30 @@ function normalizeName(value) {
 // their article.
 function withoutArticle(value) {
   return normalizeName(value).replace(/^(a|an|the) /, '');
+}
+
+// Whether a nickname identifies the entry itself: it spells one of the
+// entry's OWN names (the common name with or without its parenthetical, a
+// name inside that parenthetical, or a scientific name — case, spaces,
+// hyphens and a plural ending never matter), or it is a qualified form of
+// the common name that keeps every one of its words ("tomato hornworm" for
+// Hornworm). A nickname that drops or swaps words ("velvet ant" for Eastern
+// Velvet Ant, "palmetto bug") can't be told apart from a name several
+// species share, so it never identifies one.
+function identifiesEntry(entry, name) {
+  const key = (value) => normalizeName(value).replace(/ /g, '');
+  const common = String(entry.common_name || '');
+  const bare = common.replace(/\([^)]*\)/g, '');
+  const own = [common, bare, ...(common.match(/\(([^)]*)\)/g) || []),
+    ...String(entry.scientific_name || '').split('/').map((part) => part.replace(/\([^)]*\)/g, ''))]
+    .map(key).filter(Boolean);
+  const candidate = key(name);
+  if (own.some((o) => [o, `${o}s`, `${o}es`].includes(candidate) || [candidate, `${candidate}s`, `${candidate}es`].includes(o))) {
+    return true;
+  }
+  const words = new Set(normalizeName(name).split(' ').filter(Boolean).map(singularName));
+  const commonWords = normalizeName(bare).split(' ').filter(Boolean).map(singularName);
+  return commonWords.length > 0 && commonWords.every((w) => words.has(w));
 }
 
 // The deepest node every id's ladder passes through, or null when they only
@@ -367,22 +414,76 @@ function fuzzyScanAcross(normalized, indexed) {
   return deeper || best;
 }
 
+function representativeTaxonPair(name, slug) {
+  const match = name.match(/^([A-Z][a-z]+ [a-z][a-z-]+) and others$/);
+  return [match ? match[1] : null, slug];
+}
+
+// A bare genus names the deepest node holding EVERY catalog entry of that
+// genus, computed from the entries' own scientific names — so one subgroup's
+// taxon can't claim a genus that also lives elsewhere (Solenopsis: fire ants
+// and the thief ant). A genus never names one species; an entry that IS the
+// genus ("Phyllophaga spp.") may.
+function bareGenusPairs() {
+  const members = new Map();
+  for (const e of CATALOG.entries.values()) {
+    if (e.kind === 'sign') continue;
+    for (const part of String(e.scientific_name || '').split('/')) {
+      const genus = part.trim().match(/^([A-Z][a-z]+)(?: [a-z]| spp?\.?$)/);
+      if (!genus) continue;
+      if (!members.has(genus[1])) members.set(genus[1], new Set());
+      members.get(genus[1]).add(e.slug);
+    }
+  }
+  const pairs = [];
+  for (const [genus, slugs] of members) {
+    const list = [...slugs];
+    const only = list.length === 1 ? getEntry(list[0]) : null;
+    let target = commonAncestor(list);
+    if (only) target = ['species', 'subspecies'].includes(only.rank) ? (only.subgroup || only.group) : only.slug;
+    if (target) pairs.push([genus, target]);
+  }
+  return pairs;
+}
+
 function buildNameIndices() {
   const scientificPairs = [];
   const aliasPairs = [];
   const commonPairs = [];
   const nodePairs = [];
   for (const e of CATALOG.entries.values()) {
-    for (const part of String(e.scientific_name || '').split('/')) {
+    // A sign's "scientific name" describes the sign ("Rattus / Mus (sign)"),
+    // not a taxon, so it never answers a genus or species query — those
+    // resolve to the organism (Codex #4974 r8).
+    const taxonNames = e.kind === 'sign' ? '' : String(e.scientific_name || '');
+    for (const part of taxonNames.split('/')) {
+      // buildWholeWordIndex centrally discards blank names from every source.
       scientificPairs.push([part, e.slug]);
-      // "Phyllophaga spp." also answers to its bare genus.
-      const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);
-      if (genus) scientificPairs.push([genus[1], e.slug]);
+      // A stage annotation is still the same taxon. Index its bare binomial
+      // too, so an adult and larval entry sharing one species resolve the
+      // unqualified name to their common ancestor. Keep explicit stage
+      // names pointed at the corresponding entry.
+      const binomial = part.trim().replace(/ \((?:adult|larva|larvae|nymph)\)$/, '');
+      scientificPairs.push([binomial, e.slug]);
+      scientificPairs.push(...e.stages
+        .filter((stage) => /^[A-Z][a-z]+ [a-z][a-z-]+$/.test(binomial) && /^(adult|larva|larvae|nymph)$/.test(stage))
+        .map((stage) => [`${binomial} ${stage}`, e.slug]));
+      // A grouped entry may name one representative species followed by
+      // "and others". The leading binomial is still an exact taxon name.
+      scientificPairs.push(representativeTaxonPair(part.trim(), e.slug));
     }
-    for (const alias of e.aliases || []) aliasPairs.push([alias, e.slug]);
+    // A nickname names THIS species only when it identifies it (see
+    // identifiesEntry). Any other nickname ("palmetto bug", "tree
+    // squirrel") resolves to the entry's GROUP — never a subgroup, which may
+    // itself claim a risk class ("venomous snakes") the nickname never
+    // established. One rule, instead of deciding species by species which
+    // nicknames are specific.
+    const nicknameTarget = (name) => (identifiesEntry(e, name) ? e.slug : e.group);
+    for (const alias of e.aliases || []) aliasPairs.push([alias, nicknameTarget(alias)]);
     commonPairs.push([e.common_name, e.slug]);
-    for (const a of e.aka || []) commonPairs.push([a, e.slug]);
+    for (const a of e.aka || []) commonPairs.push([a, nicknameTarget(a)]);
   }
+  scientificPairs.push(...bareGenusPairs());
   // Category names ("insect", "arachnid") name the category itself; a group
   // whose generic is just its category's name ("an insect") must not claim it.
   const categoryNames = new Set();
@@ -397,15 +498,29 @@ function buildNameIndices() {
   // Only a taxon ("Solenopsis", "Latrodectus mactans") indexes as a
   // scientific name — never descriptive text like "several families".
   const TAXON = /^[A-Z][a-z]+( [a-z]+)?$/;
-  for (const g of CATALOG.groups.values()) {
-    nodePairs.push([g.label, g.id], [g.id, g.id]);
-    if (generic(g.generic)) nodePairs.push([generic(g.generic), g.id]);
+  for (const node of [...CATALOG.groups.values(), ...CATALOG.subgroups.values()]) {
+    // The shared index builder already drops blank/category-only generics.
+    nodePairs.push([node.label, node.id], [node.id, node.id], [generic(node.generic), node.id]);
+    for (const alias of node.aliases || []) nodePairs.push([alias, node.id]);
   }
   for (const sg of CATALOG.subgroups.values()) {
-    nodePairs.push([sg.label, sg.id], [sg.id, sg.id]);
-    if (generic(sg.generic)) nodePairs.push([generic(sg.generic), sg.id]);
-    for (const part of String(sg.scientific || '').split('/')) {
-      if (TAXON.test(part.trim())) nodePairs.push([part.trim(), sg.id]);
+    // Species-level situation nodes must not shadow their exact entry taxon.
+    // Multiple entries for that taxon already resolve to their shared ancestor.
+    if (sg.rank === 'species') continue;
+    const taxa = String(sg.scientific || '').split('/').map((part) => part.trim()).filter((part) => TAXON.test(part));
+    for (const taxon of taxa) {
+      const taxonMembers = [...CATALOG.entries.values()].filter((entry) => entry.kind !== 'sign'
+        && String(entry.scientific_name || '').split('/')
+          .some((name) => name.trim() === taxon || name.trim().startsWith(`${taxon} `)))
+        .map((entry) => entry.slug);
+      // A subgroup may contain only part of a taxon. Include every known
+      // member before assigning the unqualified query to that subgroup.
+      const target = commonAncestor([sg.id, ...taxonMembers]);
+      if (!target) continue;
+      nodePairs.push([taxon, target]);
+      // An entry belonging to this same named family/genus must not
+      // claim the whole taxon (for example, native vs Asian lady beetles).
+      scientificPairs.push([taxon, target]);
     }
   }
   return {
@@ -439,9 +554,15 @@ function resolveName(text) {
   const normalized = normalizeName(text);
   if (!normalized) return null;
 
+  // An entry can list phrases that name something else despite containing
+  // its name ("plaster bagworm" is an indoor casebearer, not the outdoor
+  // bagworm): such text never resolves to it (Codex #4974 r10).
+  const allowed = (node) => !(node && Array.isArray(node.not_matches)
+    && node.not_matches.some((phrase) => new RegExp(`\\b${normalizeName(phrase)}(?:s|es)?\\b`).test(normalized)));
+
   for (const via of NAME_ORDER) {
     const exact = exactMatch(normalized, NAME_INDICES[via].index);
-    if (exact) return { node: getNode(exact), via };
+    if (exact) return allowed(getNode(exact)) ? { node: getNode(exact), via } : null;
   }
 
   // On an equal-length fuzzy tie an entry's own common name ("drywood
@@ -449,7 +570,7 @@ function resolveName(text) {
   // ("drywood termites"), while a group still beats a bare generic alias
   // on one species ("termite" on subterranean termite).
   const fuzzy = fuzzyScanAcross(normalized, FUZZY_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
-  return fuzzy ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
+  return fuzzy && allowed(getNode(fuzzy.id)) ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
 }
 
 /** Every name claimed by two or more nodes while building the indices, with
@@ -479,12 +600,14 @@ module.exports = {
   getCategory,
   getNode,
   listEntries,
+  sectionOf,
   lineage,
-  nextPhoto,
   lookAlikes,
   resolveName,
   resolveLegacySlug,
   nameIndexCollisions,
+  approvalContentHash,
+  isApproved,
   // Test-only escape hatch: the full merged index data, for cross-checks
   // (planned_slugs, look_alike_groups) that don't warrant their own getter.
   _index: () => readJson('index.json'),

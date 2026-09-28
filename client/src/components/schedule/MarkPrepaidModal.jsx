@@ -78,11 +78,35 @@ const RECEIPT_REASON_TEXT = {
     'The prepayment was recorded, but a new card payment session started for this visit, so no receipt was sent. Try again.',
   not_collectible:
     'This visit’s invoice can’t be marked paid right now, so no receipt was sent — the prepayment was recorded.',
+  // Codex pre-push P2 (round 3): resolveScheduledServiceCharge's
+  // sibling-coverage refusals (admin-schedule.js) — the prepayment always
+  // saves first, so these tell the operator what to do next rather than
+  // leave them on the generic fallback below.
+  sibling_invoice_needs_review:
+    'The prepayment was recorded, but this visit’s combined-trip invoice needs a human look before a receipt goes out — reconcile it from Customer 360, then resend the receipt.',
+  sibling_lookup_failed:
+    'The prepayment was recorded, but we couldn’t confirm whether this visit’s combined-trip invoice already covers it, so no receipt was sent yet — refresh and try again in a moment.',
+  // Round-8 P1 (owner decision — narrow + fail closed): a DEFINITIVE
+  // 'covered' verdict now refuses the mint too, so this visit never gets
+  // its own invoice/receipt at all — collect on the combined trip invoice
+  // instead.
+  sibling_invoice_covered:
+    'The prepayment was recorded, but this visit is billed on the combined trip invoice — collect there, not here.',
+  // Codex pre-push P1 (round 13): an unpriced per_application visit bills
+  // its acceptance fee at completion, not here — resolveScheduledServiceCharge
+  // refuses this mint outright (never an extras-only invoice that would
+  // strand the fee) so no receipt/invoice exists for this visit yet.
+  // Codex r14 P2: never promise a receipt "once the visit completes" —
+  // when the recorded prepayment covers the fee, completion's prepaidCovered
+  // path (complete-scheduled-service.js shouldAutoInvoiceCompletion)
+  // suppresses the invoice entirely, so nothing is ever minted or sent.
+  per_application_fee_at_completion:
+    'The prepayment was recorded, but this visit bills its application fee at completion and has no invoice yet, so no receipt was sent. If the prepayment covers that fee, completion records it without a receipt — send one by hand if the customer needs it.',
   send_failed:
     'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
   error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',
 };
-function receiptReasonText(receipt) {
+export function receiptReasonText(receipt) {
   const base = RECEIPT_REASON_TEXT[receipt?.reason]
     || 'The prepayment was recorded, but no receipt was sent.';
   if (receipt?.reason === 'not_paid_in_full' && receipt?.balance != null) {

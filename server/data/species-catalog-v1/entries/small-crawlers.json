@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "dd8cac539f9a16d2635d6c13d5eb6279587a1fa92c40ac71ff42075c648013f5"
     },
     "slug": "silverfish",
     "common_name": "Silverfish",
@@ -114,7 +115,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
+      "approval_hash": "a427cac1bc5441b7699d9ff4aee0355ac2f482505f8b92f3b34684e1d1a26eef"
     },
     "slug": "earwig",
     "common_name": "Earwig",
@@ -139,7 +141,7 @@
       {
         "slug": "silverfish",
         "difference": "Earwigs have rear pincers and a beetle-like body; silverfish have three tail bristles instead of pincers and a tapered, scaly body.",
-        "next_photo": "A close-up of the tail end — pincers versus bristles.",
+        "next_photo": "From a safe distance, zoom in on the tail end — pincers versus bristles.",
         "photo_can_confirm": true
       }
     ],
@@ -211,6 +213,458 @@
     "risk": "defensive",
     "action": "fix_conditions",
     "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "firebrat",
+    "kind": "organism",
+    "common_name": "Firebrat",
+    "aka": [],
+    "aliases": [
+      "firebrat",
+      "firebrats",
+      "thermobia domestica"
+    ],
+    "scientific_name": "Thermobia domestica",
+    "rank": "species",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Small (1/3 to 1/2 inch), flattened, wingless insect with a mottled gray-brown, scaly body",
+      "Long antennae in front and three long tail-like filaments at the rear",
+      "Darts in quick bursts, especially when a light suddenly comes on",
+      "Found in hot, dry spots near furnaces, water heaters, attics or kitchen appliances"
+    ],
+    "look_alikes": [
+      {
+        "slug": "silverfish",
+        "difference": "Firebrat has a mottled gray-brown body and lives near heat sources like water heaters; silverfish has a uniform silvery sheen and prefers cooler, damp spots",
+        "next_photo": "A close-up of the body color/pattern plus a note of where in the home it was found (hot vs. damp area)",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "kitchen",
+      "attic-walls",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Doesn't bite and rarely causes real damage, but can stain fabric and nibble at paper goods, cereal boxes or wallpaper paste near the warm spots it favors. Numbers near a water heater or attic are worth a general pest visit if they're becoming a nuisance.",
+      "fact": "It seeks out some of the hottest, driest spots in a house on purpose, often living right next to furnaces and water heaters."
+    },
+    "tech_notes": "Confirm mottled coloring and proximity to heat sources to distinguish from silverfish; reducing paper/cardboard clutter and moisture near warm equipment helps alongside any treatment.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Firebrat",
+      "https://ask.ifas.ufl.edu/publication/IG094"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found a dedicated UF/IFAS Featured Creatures page this session covering firebrats directly: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms size (1/3 to 1/2 inch), mottled gray/brown scaly body, long antennae plus three tail filaments, and habitat in hot, dark spots like furnaces/fireplaces/heated pipes, feeding on starch/protein/sugar materials including paper — matching this entry's traits (size corrected from 1/2-3/4in to the source's 1/3-1/2in). The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate rather than a cited figure — general traits are the resolved part of this claim.",
+      "approval_hash": "6b5b912ec9f2a4242be8109f4bcac24fa2dc420693dd50d12659b09af629b1c6"
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "springtails",
+    "kind": "organism",
+    "common_name": "Springtails",
+    "aka": [],
+    "aliases": [
+      "springtail",
+      "springtails",
+      "collembola"
+    ],
+    "scientific_name": "Collembola",
+    "rank": "order",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely tiny (under 1/4 inch), gray, white or brown, sometimes with no visible eyes",
+      "Springs several inches into the air using a tail-like spring folded under its body",
+      "Found by the dozens or hundreds in damp soil, mulch, leaf litter, or around a pool deck or leaking pipe",
+      "Doesn't bite, sting, or damage anything; just very good at finding moisture"
+    ],
+    "look_alikes": [
+      {
+        "slug": "booklice",
+        "difference": "Springtails jump away instantly when disturbed; booklice walk slowly and don't jump at all",
+        "next_photo": "A close-up video or a few photos in a row showing whether it jumps out of frame or just walks away",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lanai-patio",
+      "lawn-garden",
+      "pool-water",
+      "bathroom"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Large numbers of springtails almost always point to a damp spot nearby rather than a pest problem to spray for. Drying out the moisture source, such as a slow leak or overwatered mulch bed, is usually all it takes to clear them out.",
+      "fact": "Some soil scientists consider springtails one of the most abundant animals on Earth, with populations in the hundreds of thousands per square yard in the right conditions."
+    },
+    "tech_notes": "Trace and correct the moisture source (irrigation overspray, leaks, over-mulched beds); residual pesticide treatments are generally not effective against this group.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Springtail",
+      "https://edis.ifas.ufl.edu/publication/IG124"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-228/IG124, \"Springtails\" (Koehler, Aparicio & Pfiester, rev. 2022). It confirms wingless, tiny (0.25-6mm, normally ~1mm) insects in white/yellow/gray/blue-gray, the furcula-and-tenaculum spring mechanism (jump up to 4 inches), moist-soil/high-humidity/mold habitat, appearance in swimming pools, mulch and potted plants, and that they don't bite or transmit disease — all matching this entry's traits. It states breeding \"can be year-round\" in general (supporting active_months as year-round) but gives no Florida-specific peak-month curve, so peak_months remains a reasonable estimate rather than a cited figure; the core traits claim is resolved.",
+      "approval_hash": "4bd3f76253b54e0d6dbc553278af7cb13e2e99e53ed4197fd40f242642b801d8"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "booklice",
+    "kind": "organism",
+    "common_name": "Booklice",
+    "aka": [
+      "Psocids"
+    ],
+    "aliases": [
+      "booklice",
+      "booklouse",
+      "psocid",
+      "psocids",
+      "liposcelis"
+    ],
+    "scientific_name": "Liposcelis spp.",
+    "rank": "genus",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Extremely tiny (1/32 to 1/16 inch), soft-bodied, pale tan to grayish, and wingless",
+      "Found in small groups in damp, undisturbed spots: old books, stored papers, or dry pantry goods",
+      "Moves with a slow, halting walk rather than jumping or flying",
+      "A magnifying glass shows a swollen forehead and large eyes for such a tiny insect"
+    ],
+    "look_alikes": [
+      {
+        "slug": "springtails",
+        "difference": "Booklice walk slowly and don't jump; springtails spring several inches into the air the instant they're disturbed",
+        "next_photo": "A close-up video or a few photos in a row showing whether it jumps out of frame or just walks away",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "attic-walls",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A sign of dampness or mold more than a pest problem on its own; booklice feed on tiny bits of mold and starch in paper and stored food. Drying out the closet, cabinet or box they're in usually solves it without any treatment.",
+      "fact": "They get their name from a taste for the paste and mold that can grow on the bindings of old, slightly damp books."
+    },
+    "tech_notes": "Check for elevated humidity or a mold source in the affected cabinet/closet/pantry area; discard heavily infested stored paper or dry goods and reduce moisture rather than treating chemically.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Psocoptera",
+      "https://ask.ifas.ufl.edu/publication/IG094"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms small, soft-bodied insects under 1/16 inch, translucent white to gray to light brown, long filamentous antennae, indoor habitat in warm/high-humidity areas feeding on fungi/starch/paper (matching the 'damp, undisturbed spots' and paper-paste feeding in traits), and the 'booklice' vs. 'barklice' indoor/outdoor naming split used in this entry's aka. The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate; the core traits claim is resolved.",
+      "approval_hash": "1dd4be82a2a7638aceec92aad840cf6393b0d5a320f533d142f8e70269073738"
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "slug": "bark-lice",
+    "kind": "organism",
+    "common_name": "Bark Lice (tree cattle)",
+    "aka": [
+      "Tree Cattle"
+    ],
+    "aliases": [
+      "bark lice",
+      "barklice",
+      "tree cattle"
+    ],
+    "scientific_name": "Archipsocus nomas",
+    "rank": "species",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "A thin, silky gray webbing or sheet stretched flat over tree bark, trunks and larger branches",
+      "Tiny, soft-bodied insects clustered together under the webbing, moving as a group when disturbed",
+      "Most noticeable on live oaks and other rough-barked trees, especially after rain",
+      "The bark and leaves underneath look completely normal; nothing is dying or being eaten"
+    ],
+    "look_alikes": [
+      {
+        "slug": "golden-silk-orbweaver",
+        "difference": "Bark lice webbing lies flat on the bark with no spider present; an orb-weaver's web is large and open, strung between branches with a spider in it",
+        "next_photo": "From a safe distance, photograph whether the webbing lies flat against the bark or hangs open in the air, and whether a spider is visible in it.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "This webbing looks alarming but the insects underneath are only grazing on the algae, lichen and fungus growing on the bark, not feeding on the tree itself. It's a cosmetic, temporary sight, not a reason to treat the tree.",
+      "fact": "These insects live in dense, moving colonies under their own silk sheet, which is why the whole patch of webbing seems to shift when you touch it."
+    },
+    "tech_notes": "No treatment indicated; confirm webbing lies flat against bark with no leaf/twig damage to rule out a caterpillar web or true pest issue.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://en.wikipedia.org/wiki/Archipsocus",
+      "https://edis.ifas.ufl.edu/publication/IN553"
+    ],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: EENY275/IN553, \"A Webbing Barklouse, A Psocid, Archipsocus nomas Gurney\" (Donald W. Hall, Entomology & Nematology Dept.). It directly states \"the webs are unsightly, but neither the barklice nor the webs cause any harm to the trees\" and that they feed primarily on lichens (bark grazers, not tree feeders) — confirming both the webbing behavior and the harmless-to-the-tree claim. It also gives real Florida phenology: colonies rare Dec-Feb (central FL), more frequent March-June, rapidly increasing July-October; peak_months tightened to 7-10 and season_basis changed to observed accordingly. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
+      "approval_hash": "4d04582d5e3fb15aa3292a9d8c6fb5f7ff516595b5e7f741519033735d93456a"
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "observed",
     "verification": []
   }
 ]

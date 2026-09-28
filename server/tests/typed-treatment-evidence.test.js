@@ -1,7 +1,10 @@
 'use strict';
 
 const { PROJECT_TYPES } = require('../services/project-types');
-const { TYPED_TREATMENT_OPTIONS, typedTreatmentEvidence, typedTreatmentEvidenceForRecord } = require('../services/service-report/activity-indicators');
+const {
+  TYPED_TREATMENT_OPTIONS, typedTreatmentEvidence, typedTreatmentEvidenceForRecord, projectPoisonControl,
+  projectPrimaryApplication,
+} = require('../services/service-report/activity-indicators');
 
 describe('typed treatment evidence', () => {
   test('every classified option exists in its typed field and no field is double-classified', () => {
@@ -77,5 +80,62 @@ describe('typed treatment evidence', () => {
       companionReportSnapshots: [{ type: 'tree_shrub', values: { treatments_completed: 'Inspection only' } }],
     }) })).toEqual({ applied: false, performed: false, dryDown: false, reentryWait: false, declared: true, noWork: true });
     expect(typedTreatmentEvidenceForRecord({ service_data: {} })).toEqual({ applied: false, performed: false, dryDown: false, reentryWait: false, declared: false, noWork: false });
+  });
+});
+
+describe('project Poison Control eligibility (activity-indicators.projectPoisonControl)', () => {
+  test('device-only termite work is never eligible, even with an EPA reg. no. on file', () => {
+    // admin-projects.js requires epa_registration for EVERY termite_treatment
+    // send, including device-only visits — recording it is not itself a
+    // treatment signal (the bug this replaces read it as one).
+    expect(projectPoisonControl('termite_treatment', { treatment_method: 'Cartridge replacement', epa_registration: '12345-6' })).toBe(false);
+    expect(projectPoisonControl('termite_treatment', { treatment_method: 'Bait station setup', epa_registration: '12345-6' })).toBe(false);
+  });
+
+  test('a liquid termite method is eligible', () => {
+    expect(projectPoisonControl('termite_treatment', { treatment_method: 'Trenching', epa_registration: '12345-6' })).toBe(true);
+  });
+
+  test('flea "Inspection only" is never eligible', () => {
+    expect(projectPoisonControl('flea', { treatment_completed: 'Inspection only' })).toBe(false);
+  });
+
+  test('flea with an applied treatment is eligible', () => {
+    expect(projectPoisonControl('flea', { treatment_completed: 'Exterior flea treatment' })).toBe(true);
+  });
+
+  test('rodent_bait_station is always eligible — stations hold rodenticide though servicing one is not an "application"', () => {
+    expect(projectPoisonControl('rodent_bait_station', {}, null)).toBe(true);
+    expect(projectPoisonControl('rodent_bait_station', null, null)).toBe(true);
+  });
+
+  test('wdo_inspection and pre_treatment_termite_certificate are never eligible', () => {
+    expect(projectPoisonControl('wdo_inspection', { wdo_finding: 'Live termites observed' })).toBe(false);
+    expect(projectPoisonControl('pre_treatment_termite_certificate', { treatment_method: 'Soil barrier (chemical)' })).toBe(false);
+  });
+
+  test('a bed-bug primary visit with no application still counts eligible from its follow-up', () => {
+    const findings = { treatment_method: 'Inspection / monitoring only' };
+    const followupFindings = { treatment_method: 'Chemical only' };
+    expect(projectPoisonControl('bed_bug', findings, null)).toBe(false);
+    expect(projectPoisonControl('bed_bug', findings, followupFindings)).toBe(true);
+  });
+
+  test('sanitation is outside the canonical application verdict, so it never qualifies', () => {
+    expect(projectPoisonControl('rodent_sanitation', { sanitation_work_completed: 'Disinfected / sanitized affected areas' })).toBe(false);
+  });
+
+  test('the applicator belongs to the primary visit: a follow-up-only application is not a primary one', () => {
+    expect(projectPrimaryApplication('bed_bug', { treatment_method: 'Heat only' })).toBe(false);
+    expect(projectPrimaryApplication('bed_bug', { treatment_method: 'Chemical only' })).toBe(true);
+    // a bait-station check keeps Poison Control but applied nothing, so it
+    // names no applicator (codex r4)
+    expect(projectPoisonControl('rodent_bait_station', {})).toBe(true);
+    expect(projectPrimaryApplication('rodent_bait_station', { bait_replaced: 'Yes' })).toBe(false);
+  });
+
+  test('accepts findings/followup_findings as JSON strings (jsonb round-trip)', () => {
+    expect(projectPoisonControl('flea', JSON.stringify({ treatment_completed: 'Exterior flea treatment' }))).toBe(true);
+    expect(projectPoisonControl('flea', 'not json', JSON.stringify({ treatment_completed: 'Exterior flea treatment' }))).toBe(true);
   });
 });

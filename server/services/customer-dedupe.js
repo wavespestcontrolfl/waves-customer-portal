@@ -656,7 +656,10 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   if (!loserRow) return 'no loser row';
   const winnerRow = lockedRows.get(winnerId);
   if (!winnerRow) {
-    const count = await trx(table).where(column, loserId).update({ [column]: winnerId });
+    // A moved row sheds a legacy receipts-off flag too (see the merge below).
+    const receiptsOn = table === 'notification_prefs' && loserRow.payment_receipt === false
+      ? { payment_receipt: true } : {};
+    const count = await trx(table).where(column, loserId).update({ [column]: winnerId, ...receiptsOn });
     return count;
   }
   const booleanMode = SINGLETON_BOOLEAN_SEMANTICS[table] || 'and';
@@ -678,6 +681,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const forUpdate = (v) => (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object))
     ? JSON.stringify(v) : v;
   const updates = table === 'notification_prefs' ? mergedBillingChannelUpdates(winnerRow, loserRow) : {};
+  // Customers cannot turn payment receipts off (owner ruling 2026-09-26): a
+  // legacy payment_receipt=false never survives on the kept row.
+  if (table === 'notification_prefs' && winnerRow.payment_receipt === false) updates.payment_receipt = true;
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
     // These columns are native text[], not JSONB. The shared merge rule
@@ -686,6 +692,8 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
     // Choice provenance follows its channel below; it is not SMS consent
     // and must not pass through the generic boolean AND rule.
     if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
+    // Settled above: receipts are always on after a merge.
+    if (table === 'notification_prefs' && col === 'payment_receipt') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -2318,6 +2326,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }
       }
+    }
+    // Customers cannot turn payment receipts off (owner ruling 2026-09-26).
+    // When the sweep moved a duplicate's prefs row whole (no collision, so
+    // mergeSingletonPrefRow never ran), clear a legacy opt-out it carried.
+    if (typeof repointed['notification_prefs.customer_id'] === 'number') {
+      await trx('notification_prefs').where({ customer_id: winnerId, payment_receipt: false })
+        .update({ payment_receipt: true });
     }
     // An operator's customer link on a call (call_log.metadata.
     // customer_link_override — admin relink) embeds the customer id in

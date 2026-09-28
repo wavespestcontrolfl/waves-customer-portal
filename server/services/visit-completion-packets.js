@@ -943,13 +943,26 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
 // homeowner with debt that now belongs to AP.
 // `payerId` covers the activation writer: a send in flight for any customer
 // or billed member that references the payer would resolve to it once active.
+// Codex #4971 r5 P1: a termite annual-plan RENEWAL invoice (the prepay
+// invoice of a renewal successor term) is the other self-pay bill claimed
+// under a Bill-To fence (invoice.js claimBillToFencedSend re-resolves the
+// customer default payer under the same held rows), so it counts as in
+// flight in the same states — sending, or a captured debit still
+// processing — for its customer and for the payer that customer names.
+// The renewal test is an EXISTS on annual_prepay_terms' unique
+// prepay_invoice_id index.
 async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null, payerId = null } = {}, database = db) {
   if (!customerId && !scheduledServiceId && !payerId) return false;
   // A send claim ('sending'), or the coordinator's automatic collection
   // claim (the visit_payment effect held within its lease) — a saved-card
   // charge or credit settlement in flight is the same window for a payer.
   const VisitGroups = require('./visit-groups');
-  const query = database('invoices').whereNotNull('visit_completion_packet_id').whereNull('payer_id')
+  const query = database('invoices').whereNull('payer_id')
+    .where((owned) => owned.whereNotNull('visit_completion_packet_id')
+      .orWhereExists(database('annual_prepay_terms as renewal')
+        .whereRaw('renewal.prepay_invoice_id = invoices.id')
+        .whereNotNull('renewal.renewed_from_term_id')
+        .whereNotNull('renewal.annual_plan_version')))
     // A bank debit already CAPTURED on a packet invoice is the same window
     // (Codex #4311 r27 P1): settlement never re-resolves ownership, so an
     // ownership transition taken while the homeowner's money is moving

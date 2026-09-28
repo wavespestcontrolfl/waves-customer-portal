@@ -368,4 +368,7 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
 }
 
 module.exports = { findContact, fetchPageText, fetchPage };
-module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, fetchText, fetchPage, CONTACT_PATHS };
+// rejectingLookup is exported for other SSRF-safe fetchers in this codebase
+// (owned-url-health.js) that need the same private-IP pin tied to the real
+// socket connection, with their own redirect/allowlist handling on top.
+module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, rejectingLookup, fetchText, fetchPage, CONTACT_PATHS };

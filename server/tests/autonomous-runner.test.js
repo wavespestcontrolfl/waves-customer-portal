@@ -88,6 +88,33 @@ describe('internal-link dry-run queue helpers', () => {
     }));
   });
 
+  test('a replan never re-queues a link the reader check or Codex rejected', async () => {
+    const insertChain = {
+      insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([]) })) })) })),
+    };
+    const lookupChain = {
+      select: jest.fn(() => lookupChain),
+      where: jest.fn(() => lookupChain),
+      whereIn: jest.fn(() => lookupChain),
+      first: jest.fn().mockResolvedValue(undefined),
+    };
+    db.mockImplementationOnce(() => insertChain).mockImplementationOnce(() => lookupChain);
+
+    await expect(queueInternalLinkTaskForDryRun({
+      source_file: 'src/content/blog/source.md',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+    }, 'opp_new')).resolves.toBeNull();
+
+    // Render the grouped condition the lookup applied against real knex SQL.
+    const grouped = lookupChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const knex = require('knex')({ client: 'pg' });
+    const sql = knex('content_internal_link_tasks').where(grouped).toString();
+    expect(sql).toContain('"skip_reason" is null');
+    expect(sql).toContain('"skip_reason" not like \'llm_judge_rejected%\'');
+    expect(sql).toContain('"skip_reason" not like \'codex_findings%\'');
+  });
+
   test('does not dry-run duplicates that leave retryable state before refresh update', async () => {
     const insertReturning = jest.fn().mockResolvedValue([]);
     const insertChain = {
@@ -1923,6 +1950,30 @@ describe('protected-page guard', () => {
     expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 
+  test('add_internal_links is never blocked by target protection (the target page is not edited)', async () => {
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({ protected: true, reason: 'money_page', source: 'pattern' }),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    expect(await runner._checkProtectedPage({
+      action_type: 'add_internal_links',
+      page_url: '/pest-control-sarasota-fl/',
+    })).toBeNull();
+    expect(await runner._checkProtectedPage(
+      { action_type: 'refresh_existing_page', page_url: '/pest-control-sarasota-fl/' },
+      { action_type: 'add_internal_links', target_url: '/pest-control-sarasota-fl/' },
+    )).toBeNull();
+    expect(protectedPages.isProtected).not.toHaveBeenCalled();
+
+    // Page-editing action types still get the guard.
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'refresh_existing_page',
+      page_url: '/pest-control-sarasota-fl/',
+    });
+    expect(verdict).toMatchObject({ protected: true, reason: 'money_page' });
+  });
+
   test('a thrown protected-page check fails closed and is tagged is_error (not a routine skip)', async () => {
     const protectedPages = {
       isProtected: jest.fn().mockRejectedValue(new Error('db timeout')),
@@ -2188,7 +2239,7 @@ describe('runNext Astro corpus loading', () => {
     }
   });
 
-  test('optional GitHub corpus load failures degrade to an empty corpus for internal-link runs', async () => {
+  test('a live internal-link run releases the claim when the corpus cannot load (retry, not "no candidates")', async () => {
     const previousAstroDir = process.env.ASTRO_REPO_DIR;
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     delete process.env.ASTRO_REPO_DIR;
@@ -2203,6 +2254,7 @@ describe('runNext Astro corpus loading', () => {
           claimed_at: claimedAt,
         }),
         pendingReview: jest.fn().mockResolvedValue(true),
+        skip: jest.fn().mockResolvedValue(true),
         release: jest.fn().mockResolvedValue(true),
       };
       const briefBuilder = {
@@ -2222,15 +2274,12 @@ describe('runNext Astro corpus loading', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_dry_run');
-      expect(result.link_tasks_queued).toBe(0);
-      expect(linkPlanner.planForTarget).toHaveBeenCalledWith(
-        expect.objectContaining({ url: '/blog/ghost-ants/' }),
-        { corpus: [], opportunityId: 'opp_links_optional_1' }
-      );
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_optional_1', 'internal_links_dry_run', { claimToken: claimedAt });
-      expect(queue.release).not.toHaveBeenCalled();
+      expect(result.outcome).toBe('failed');
+      expect(result.failure_message).toContain('GitHub token missing');
+      expect(linkPlanner.planForTarget).not.toHaveBeenCalled();
+      expect(queue.release).toHaveBeenCalledWith('opp_links_optional_1', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
@@ -2359,7 +2408,34 @@ describe('runNext internal-link shadow behavior', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('opens review-only internal-link PRs when the lane is unshadowed', async () => {
+  test('a dry-run that only hit transient load failures releases the claim for retry', async () => {
+    const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    try {
+      const claimedAt = new Date('2026-05-23T05:10:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_links_transient', action_type: 'add_internal_links', claimed_at: claimedAt }),
+        complete: jest.fn(), pendingReview: jest.fn(), skip: jest.fn(),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = { compose: jest.fn().mockResolvedValue({ id: 'b', action_type: 'add_internal_links', page_type: 'internal-link', target_url: '/x/', target_keyword: 'x' }) };
+      const linkPlanner = { planForTarget: jest.fn().mockReturnValue([{ source_file: 's.md', target_url: '/x/', anchor_text: 'x' }]) };
+      const internalLinkExecutor = {
+        runDryRun: jest.fn().mockResolvedValue({ count: 1, results: [{ task_id: 'run_1', status: 'failed', failure_reason: 'GitHub 502' }] }),
+        isTransientLoadFailure: (r) => r === 'GitHub 502',
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
+      const result = await runner.runNext();
+      expect(result.outcome).toBe('deferred_gate_retry');
+      expect(queue.release).toHaveBeenCalledWith('opp_links_transient', { claimToken: claimedAt });
+      expect(queue.skip).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
+      else process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = previousShadow;
+    }
+  });
+
+  test('an unshadowed run plans candidates and completes; it never opens or waits on a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     try {
@@ -2404,18 +2480,21 @@ describe('runNext internal-link shadow behavior', () => {
           count: 1,
           pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88',
         }),
+        requeueTransientDryRunFailures: jest.fn(async () => 0),
       };
       const runner = loadRunnerWith({ queue, briefBuilder, linkPlanner, internalLinkExecutor });
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('internal_links_pr_pending_merge');
-      expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/88');
+      // Mixed results: transient failures are requeued before completing.
+      expect(internalLinkExecutor.requeueTransientDryRunFailures).toHaveBeenCalledWith([{ task_id: 'run_1', status: 'patch_candidate' }]);
+      // Shipping is the candidate sweep's job alone (one PR path).
+      expect(result.outcome).toBe('completed_planned');
+      expect(result.astro_pr_url).toBeUndefined();
       expect(internalLinkExecutor.runDryRun).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 1 });
-      expect(internalLinkExecutor.runPrBatch).toHaveBeenCalledWith({ taskIds: ['run_1'], limit: 3 });
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_links_live_1', 'internal_links_pr_pending_merge', { claimToken: claimedAt });
-      expect(queue.complete).not.toHaveBeenCalled();
+      expect(internalLinkExecutor.runPrBatch).not.toHaveBeenCalled();
+      expect(queue.complete).toHaveBeenCalledWith('opp_links_live_1', expect.objectContaining({ claimToken: claimedAt }));
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_ADD_INTERNAL_LINKS;

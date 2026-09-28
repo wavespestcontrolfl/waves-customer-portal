@@ -37,53 +37,15 @@ const DEFAULT_POLICY = Object.freeze({
   coverage: Object.freeze({ counties: ['Manatee', 'Sarasota'], partial: ['Charlotte'] }),
 });
 
-// Service-area cities → county, for customers whose turf profile carries no
-// county. Only cities that sit wholly in one county; a city that straddles
-// counties (Lakewood Ranch, Longboat Key, Englewood — and the Sarasota
-// POSTAL city, which reaches Manatee County through shared ZIP 34243) is
-// deliberately absent → unknown → no plan (fail closed) until an
-// address-level lane exists (codex gh-r38).
-const CITY_COUNTY = Object.freeze({
-  bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
-  'anna maria': 'Manatee', 'holmes beach': 'Manatee',
-  'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
-  venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
-  osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
-  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
-});
-
 /**
  * The county a customer's watering restriction is judged in: the turf
  * profile's county (same source the WaveGuard plan engine uses for
  * fertilizer ordinances), else a whole-county service city, else null
  * (coverage cannot be established).
  */
-const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, SERVICE_AREA_COUNTY_ZIPS } = require('./county-zips');
-// Watering jurisdiction by ZIP. A ZIP the service-area map lists under MORE
-// THAN ONE county straddles a line (34228 Longboat Key, 34243 University
-// Park / SRQ, 34223–34224 Englewood): NOTHING address-level may decide it —
-// not the tax map (a filing convention, not a jurisdiction: 34228 files as
-// Sarasota while its north end is Manatee's) and not the city map either,
-// because the USPS city spans the same line ("Sarasota" 34243 reaches into
-// Manatee). Such a ZIP fails closed to the technician-confirmed profile
-// county, else no plan (codex gh-r29, gh-r33). Elsewhere the tax map speaks
-// first and the FULLER service-area map covers the ZIPs it omits (Cortez
-// 34215, Anna Maria, Ellenton…).
-const { SERVICE_AREA_ZIP_COUNTY, SHARED_SERVICE_AREA_ZIPS } = (() => {
-  const seen = {};
-  for (const [county, zips] of Object.entries(SERVICE_AREA_COUNTY_ZIPS)) {
-    for (const z of zips) seen[z] = seen[z] ? 'shared' : county;
-  }
-  return {
-    SERVICE_AREA_ZIP_COUNTY: Object.freeze(Object.fromEntries(Object.entries(seen).filter(([, c]) => c !== 'shared'))),
-    SHARED_SERVICE_AREA_ZIPS: Object.freeze(new Set(Object.entries(seen).filter(([, c]) => c === 'shared').map(([z]) => z))),
-  };
-})();
-const ZIP_COUNTY = Object.freeze(Object.fromEntries([
-  ...MANATEE_ZIPS.map((z) => [z, 'Manatee']),
-  ...SARASOTA_ZIPS.map((z) => [z, 'Sarasota']),
-  ...CHARLOTTE_ZIPS.map((z) => [z, 'Charlotte']),
-].filter(([z]) => !SHARED_SERVICE_AREA_ZIPS.has(z))));
+// ZIP/city -> county tables live in address-county.js (shared with the
+// field report); see that file for the straddling-ZIP rules.
+const { resolveAddressCounty, CITY_COUNTY, ZIP_COUNTY } = require('./address-county');
 
 function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null, homeMoved = false, movedAt = null, countyConfirmed = false } = {}) {
   // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
@@ -92,14 +54,10 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // customer, stale profile) its county is dropped and the current city
   // decides — never the old property's order.
   const pCity = String(profileCity || '').trim().toLowerCase();
-  const cCity = String(city || '').trim().toLowerCase();
   // The customer's CURRENT county: ZIP first (the tax/compliance county map —
   // a USPS city of "Sarasota" at 34243 is Manatee), then a whole-county city.
-  const zip5 = String(zip || '').trim().slice(0, 5);
-  // A straddling ZIP is decided by no address-level source (see above).
-  const currentCounty = SHARED_SERVICE_AREA_ZIPS.has(zip5)
-    ? null
-    : (ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null);
+  // A straddling ZIP is decided by no address-level source (address-county.js).
+  const currentCounty = resolveAddressCounty({ zip, city });
   const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
   const profileCounty = norm(county);
   // A profile with NO city context can still be stale: when the customer's

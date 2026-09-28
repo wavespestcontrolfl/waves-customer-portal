@@ -151,6 +151,25 @@ async function lockCustomerEmail(trx, email) {
   await lockCustomerEmailKeys(trx, customerEmailLockKeys(email));
 }
 
+// Writers use compatible shared locks in this separate namespace. A final
+// provider boundary must use this nonblocking check AFTER its other locks,
+// then only read ownership sources before HTTP; it must not lock source rows.
+async function lockEmailOwnershipForSend(trx, email) {
+  const unavailable = () => Object.assign(new Error('Email ownership check temporarily unavailable'), { code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE' });
+  if (!trx?.isTransaction) throw unavailable();
+  try {
+    for (const key of customerEmailLockKeys(email).map((value) => `email-ownership:${value}`).sort()) {
+      const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS locked', [key]);
+      if (result.rows[0]?.locked !== true) {
+        throw Object.assign(new Error('Email ownership assignment in progress'), { code: 'EMAIL_OWNERSHIP_CHECK_BUSY' });
+      }
+    }
+  } catch (err) {
+    if (err?.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw err;
+    throw unavailable();
+  }
+}
+
 // Every column a customer's email can be recorded in — the same set the
 // bounce recovery's ownership check consults (email-bounce-recovery.js
 // CUSTOMER_EMAIL_FIELDS). A writer assigning any of them takes the address
@@ -170,5 +189,5 @@ async function lockAssignedCustomerEmails(trx, updates = {}) {
   return addresses;
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail,
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail, lockEmailOwnershipForSend,
   lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS, googleMailboxIdentity, GOOGLE_MAILBOX_SQL };

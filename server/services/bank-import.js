@@ -1340,12 +1340,26 @@ function strongExpenseMatch(row, c) {
     && !methodIncompatible(row.account_type, c.payment_method);
 }
 
+// A Plaid row the bank corrected or withdrew AFTER it was reviewed keeps
+// its flag (plaidModified / plaidRemoved) when the operator unlinks it, and
+// still carries the OLD values — no claim path (the matcher, or an
+// operator's create / link / refund) may book it before the operator
+// applies or dismisses the change. Enforced at selection AND at each claim
+// (a row can be linked elsewhere, flagged, and unlinked between a read and
+// its claim).
+const BANK_CHANGE_UNRESOLVED_SQL_NOT = "(suggestion->'plaidModified') is null and (suggestion->'plaidRemoved') is null";
+
+function hasUnresolvedBankChange(row) {
+  return !!(row && row.suggestion && (row.suggestion.plaidModified || row.suggestion.plaidRemoved));
+}
+
 async function runDeterministicMatching({ limit } = {}) {
   const healed = await resetDanglingLinks();
   const reconciliation = await retryPendingReconciliations();
   const bounded = Number.isFinite(limit) && limit > 0;
   const baseSelect = () => db('bank_transactions')
     .where({ status: 'unmatched' })
+    .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
     .orderBy('txn_date', 'asc')
     .select('id', 'txn_date', 'description', 'amount', 'direction', 'account_type', 'account_label', 'suggestion');
   // Rows the matcher already examined (transfer-flagged, parked candidates)
@@ -1420,6 +1434,7 @@ async function runDeterministicMatching({ limit } = {}) {
       // out of the leftover budget by an older sibling.
       const examined = await db('bank_transactions')
         .where({ status: 'unmatched' })
+        .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
         .whereRaw(`suggestion is not null and ${EXAMINED_SQL}`)
         .orderBy('updated_at', 'asc')
         .limit(fill + 1)
@@ -1549,6 +1564,9 @@ async function runDeterministicMatching({ limit } = {}) {
           // already reconciled → skip + clear; unreconciled → echo + clear.
           const changed = await db('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
+            // re-checked at the claim: the row may have been linked, got a
+            // bank change parked, and been unlinked since this pass read it
+            .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
             .update({
               status: 'matched_payout',
               matched_payout_id: exact[0].id,
@@ -1760,6 +1778,9 @@ async function runDeterministicMatching({ limit } = {}) {
           }
           const changed = await trx('bank_transactions')
             .where({ id: row.id, status: 'unmatched' })
+            // re-checked at the claim: the row may have been linked, got a
+            // bank change parked, and been unlinked since this pass read it
+            .whereRaw(BANK_CHANGE_UNRESOLVED_SQL_NOT)
             .update({
               status: 'matched_expense',
               matched_expense_id: strong[0].id,
@@ -1954,6 +1975,8 @@ module.exports = {
   methodIncompatible,
   effectivePayoutAmount,
   suggestionMerge,
+  BANK_CHANGE_UNRESOLVED_SQL_NOT,
+  hasUnresolvedBankChange,
   ledgerCoverage,
   // exported for tests
   parseAmount,

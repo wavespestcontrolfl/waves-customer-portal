@@ -157,6 +157,7 @@
             "employee",
             "real_estate_agent",
             "lender",
+            "home_buyer",
             "other",
             "unknown"
           ]
@@ -1198,6 +1199,62 @@
           ],
           "description": "true ONLY when OUR agent, in the agent's own words, explicitly committed to the confirmed slot (\"we'll confirm it for noon on Sunday\", \"you're on the schedule\"). The caller requesting, agreeing, or asserting a commitment is never an agent commitment. null when unclear."
         },
+        "caller_accepted_slot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Booking or reschedule that ENDS with an agreed slot: true ONLY when the CALLER, in the caller's own words, accepted that FINAL slot (or asked for exactly that slot and the agent committed to it), judged over the whole call; false when the caller later withdrew, changed, conditioned, or questioned it, or left the agent's proposal unanswered. The agent's words never count. Pin the caller's acceptance to /scheduling/caller_accepted_slot. null when no slot was agreed or it is unclear."
+        },
+        "moved_appointment_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date",
+          "description": "Reschedule only: the calendar date (YYYY-MM-DD, Eastern) of the EXISTING appointment being moved, as established on the call by either speaker. Pin the utterance naming it to /scheduling/moved_appointment_date. null when the call never identifies which existing appointment is being moved — never inferred from the new slot."
+        },
+        "agreed_slot_words": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "day",
+            "hour",
+            "period"
+          ],
+          "properties": {
+            "day": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "hour": {
+              "type": "string",
+              "minLength": 1
+            },
+            "period": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          },
+          "description": "Set ONLY when confirmed_start_at is set: the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, which must contain every non-null value here. hour: the word(s) naming the agreed START hour exactly as spoken (\"two\", \"2\", \"10\", \"noon\", \"midnight\") — only the hour, no minutes, no AM/PM; for an arrival window, the window's start (\"between two and four\" -> \"two\"). period: the words stating AM/PM for THAT hour (\"pm\", \"p.m.\", \"in the afternoon\", \"this evening\", \"tonight\") — null when nobody said AM/PM or a part of day for that time (never inferred from business hours, and never a part of day describing the OLD appointment, e.g. \"your morning appointment\"); null for noon/midnight. day: the words naming the agreed day (\"Thursday\", \"tomorrow\", \"tonight\", \"November 9th\", \"the 9th\") — null when the day was not said because only the time of the same-day appointment changes. Set the whole object null (and do not confirm) when the agreed time is not ONE exact on-the-hour start: approximate (\"two-ish\", \"around noonish\"), a bound (\"before noon\", \"by two\", \"two or later\"), alternatives (\"two or four\"), or has minutes (\"two thirty\"). When a speaker corrected the time, use the FINAL corrected words only (\"at two, actually three\" -> hour \"three\")."
+        },
+        "moved_appointment_words": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "For status \"reschedule_requested\" ONLY: the verbatim words from the /scheduling/moved_appointment_date evidence quote that name that date (\"the 24th\", \"September 24th\", \"Thursday\") — that quote must contain them exactly. null whenever moved_appointment_date is null."
+        },
         "requested_date_range_start": {
           "type": [
             "string",
@@ -1371,7 +1428,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it).",
       "items": {
         "type": "object",
         "additionalProperties": false,
