@@ -90,7 +90,8 @@
 
 const path = require('path');
 const { validCalendarDate } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'datetime-et'));
-const { SERVICE_AREA_COUNTY_ZIPS } = require(path.join(__dirname, '..', '..', 'server', 'config', 'county-zips'));
+const { SERVICE_AREA_COUNTY_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require(path.join(__dirname, '..', '..', 'server', 'config', 'county-zips'));
+const { resolveAddressCounty } = require(path.join(__dirname, '..', '..', 'server', 'config', 'address-county'));
 const {
   INTERNAL_TEST_CUSTOMERS,
   isInternalTestCustomerId,
@@ -105,50 +106,25 @@ const DEFAULT_MIN_CELL = 10;
 // might name their county.
 const REPORT_COUNTIES = ['Sarasota', 'Manatee', 'Charlotte'];
 
-// ZIP -> county, built the same way irrigation-restrictions.js builds its
-// watering-jurisdiction map: any ZIP that SERVICE_AREA_COUNTY_ZIPS lists
-// under more than one of our three counties is "shared" (unresolved by ZIP
-// alone) rather than assigned to either. Scoped to just the three report
-// counties (a ZIP shared between, say, Sarasota and a county outside our
-// three list is still unambiguous for our purposes and is kept).
-const { ZIP_COUNTY, SHARED_ZIPS } = (() => {
-  const seen = {};
-  for (const county of REPORT_COUNTIES) {
-    for (const zip of SERVICE_AREA_COUNTY_ZIPS[county] || []) {
-      seen[zip] = seen[zip] ? 'shared' : county;
-    }
-  }
-  const zipCounty = {};
-  const shared = new Set();
-  for (const [zip, val] of Object.entries(seen)) {
-    if (val === 'shared') shared.add(zip);
-    else zipCounty[zip] = val;
-  }
-  return { ZIP_COUNTY: zipCounty, SHARED_ZIPS: shared };
-})();
-
-// Whole-county-city fallback for when the ZIP is missing/unrecognized or is
-// one of the straddling ZIPs above. Mirrors irrigation-restrictions.js's
-// CITY_COUNTY: ONLY cities that sit entirely inside one of the three
-// counties are listed — a straddling city (Lakewood Ranch, Longboat Key,
-// Englewood, the "Sarasota" postal city that reaches into Manatee at ZIP
-// 34243) is deliberately absent, so it falls through to unresolved rather
-// than guessed.
-const CITY_COUNTY = Object.freeze({
-  bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
-  'anna maria': 'Manatee', 'holmes beach': 'Manatee', 'bradenton beach': 'Manatee',
-  myakka: 'Manatee', 'myakka city': 'Manatee',
-  venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
-  osprey: 'Sarasota', 'siesta key': 'Sarasota', laurel: 'Sarasota',
-  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
-});
+// Address -> county comes from the SHARED resolver (server/config/
+// address-county.js, also used by the irrigation-restriction resolver), so a
+// straddling-city or service-area correction lands in one place. On top of
+// it, a ZIP that any county list OUTSIDE the three report counties also
+// claims (e.g. 33921: Charlotte and Lee) is ambiguous for this report and is
+// excluded rather than attributed.
+const OUTSIDE_REPORT_ZIPS = new Set([
+  ...LEE_ZIPS,
+  ...COLLIER_ZIPS,
+  ...Object.entries(SERVICE_AREA_COUNTY_ZIPS)
+    .filter(([county]) => !REPORT_COUNTIES.includes(county))
+    .flatMap(([, zips]) => zips),
+]);
 
 function resolveCounty({ zip, city } = {}) {
   const zip5 = String(zip || '').trim().slice(0, 5);
-  if (zip5 && !SHARED_ZIPS.has(zip5) && ZIP_COUNTY[zip5]) return ZIP_COUNTY[zip5];
-  const cityKey = String(city || '').trim().toLowerCase();
-  if (cityKey && CITY_COUNTY[cityKey]) return CITY_COUNTY[cityKey];
-  return null;
+  if (zip5 && OUTSIDE_REPORT_ZIPS.has(zip5)) return null;
+  const county = resolveAddressCounty({ zip, city });
+  return county && REPORT_COUNTIES.includes(county) ? county : null;
 }
 
 // Canonical category vocabulary — the `services` catalog's own `category`
@@ -158,7 +134,7 @@ function resolveCounty({ zip, city } = {}) {
 // it for review instead of hiding it.
 const CANONICAL_CATEGORIES = [
   'pest_control', 'lawn_care', 'mosquito', 'termite', 'rodent',
-  'tree_shrub', 'inspection', 'wdo', 'specialty', 'other',
+  'tree_shrub', 'inspection', 'specialty', 'other',
 ];
 
 // Fallback keyword map for rows with no service_category_snapshot — matched
@@ -166,16 +142,19 @@ const CANONICAL_CATEGORIES = [
 // service_type. Document any new service_type spelling you see in real
 // output here rather than letting it silently fall to "other".
 const CATEGORY_KEYWORDS = [
+  // Inspections first: the catalog files "Termite Inspection Service",
+  // "Rodent Inspection Service" and WDO inspections under `inspection`
+  // (migration 20260507000002), so a legacy label must land there too.
+  ['inspection', /inspection|\bwdo\b|wood.?destroying/],
   ['mosquito', /mosquito|waveguard mosquito/],
   ['termite', /termite/],
-  ['wdo', /\bwdo\b|wood.?destroying/],
   ['rodent', /rodent|\brat\b|rats\b|\bmice\b|\bmouse\b/],
   ['tree_shrub', /tree|shrub|palm/],
   ['lawn_care', /lawn|turf|fertiliz|dethatch|topdress|plugging|weed/],
-  ['inspection', /inspection/],
   // Generic pest-control catch: "Quarterly Pest Control", "Pest & Rodent
   // Control" (rodent already matched above), roach/ant/spider one-offs.
-  ['pest_control', /pest|roach|ant\b|spider|general/],
+  // Ants as a whole word, so "Plant Health" never counts as pest control.
+  ['pest_control', /pest|roach|\bants?\b|spider|general/],
 ];
 
 function resolveCategory({ categorySnapshot, serviceType } = {}) {
@@ -208,6 +187,19 @@ function parseArgs(argv = process.argv.slice(2)) {
     }
   }
   return out;
+}
+
+/**
+ * --min-cell: absent -> the default; present -> must be a positive integer
+ * (a bare flag or junk value is rejected, never read as 1).
+ */
+function resolveMinCell(args = {}) {
+  if (!Object.prototype.hasOwnProperty.call(args, 'min-cell')) return DEFAULT_MIN_CELL;
+  const raw = args['min-cell'];
+  if (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw.trim())) {
+    throw new Error(`--min-cell must be a positive integer, got "${raw === true ? '(no value)' : raw}"`);
+  }
+  return Number(raw.trim());
 }
 
 /** Validates --from/--to: both real calendar dates, from < to. Throws with a usage message otherwise. */
@@ -297,7 +289,8 @@ function aggregate(rows, { minCell = DEFAULT_MIN_CELL } = {}) {
     counties: REPORT_COUNTIES,
     unresolvedGeography: cell(unresolvedGeography, minCell),
     excludedInternal: cell(excludedInternal, minCell),
-    totalCompleted: cell(rows ? rows.length : 0, minCell),
+    // Internal/test visits are dropped before counting, the headline too.
+    totalCompleted: cell((rows ? rows.length : 0) - excludedInternal, minCell),
     minCell,
   };
 }
@@ -336,8 +329,10 @@ function formatMarkdown(summary, { from, to } = {}) {
 const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS service_month,
               ss.service_type,
               ss.service_category_snapshot,
-              COALESCE(ss.service_address_zip, c.zip) AS zip,
-              COALESCE(ss.service_address_city, c.city) AS city,
+              CASE WHEN ss.service_address_zip IS NOT NULL OR ss.service_address_city IS NOT NULL
+                   THEN ss.service_address_zip ELSE c.zip END AS zip,
+              CASE WHEN ss.service_address_zip IS NOT NULL OR ss.service_address_city IS NOT NULL
+                   THEN ss.service_address_city ELSE c.city END AS city,
               c.id AS customer_id,
               c.first_name,
               c.last_name
@@ -345,7 +340,16 @@ const FIELD_REPORT_QUERY = `SELECT to_char(ss.scheduled_date, 'YYYY-MM') AS serv
          JOIN customers c ON c.id = ss.customer_id
         WHERE ss.status = 'completed'
           AND ss.scheduled_date >= $1::date
-          AND ss.scheduled_date < $2::date`;
+          AND ss.scheduled_date < $2::date
+          -- An incomplete closeout keeps scheduled_services.status='completed'
+          -- but records service_records.status='incomplete'; it counts only
+          -- once a completed record exists for the visit.
+          AND (
+            NOT EXISTS (SELECT 1 FROM service_records sr
+                         WHERE sr.scheduled_service_id = ss.id AND sr.status = 'incomplete')
+            OR EXISTS (SELECT 1 FROM service_records sr
+                        WHERE sr.scheduled_service_id = ss.id AND sr.status = 'completed')
+          )`;
 
 async function fetchRows({ fromStr, toStr }) {
   const conn = process.env.DATABASE_PUBLIC_URL;
@@ -376,9 +380,7 @@ async function fetchRows({ fromStr, toStr }) {
 async function main() {
   const args = parseArgs();
   const { fromStr, toStr } = resolveWindow(args);
-  const minCell = Number.isFinite(Number(args['min-cell'])) && Number(args['min-cell']) > 0
-    ? Math.floor(Number(args['min-cell']))
-    : DEFAULT_MIN_CELL;
+  const minCell = resolveMinCell(args);
   const rows = await fetchRows({ fromStr, toStr });
   const summary = aggregate(rows, { minCell });
   if (args.json) {
@@ -401,6 +403,7 @@ module.exports = {
   parseArgs,
   resolveCategory,
   resolveCounty,
+  resolveMinCell,
   resolveWindow,
   CANONICAL_CATEGORIES,
   REPORT_COUNTIES,

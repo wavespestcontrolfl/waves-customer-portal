@@ -61,12 +61,15 @@ describe('field-report category resolution', () => {
   test.each([
     ['WaveGuard Mosquito Treatment', 'mosquito'],
     ['Termite Bait Stations', 'termite'],
-    ['WDO Inspection (Real Estate)', 'wdo'],
+    ['WDO Inspection (Real Estate)', 'inspection'], // catalog files WDO under inspection
     ['Rodent Exclusion', 'rodent'],
     ['Pest & Rodent Control', 'rodent'], // rodent keyword checked before the generic pest catch
     ['Lawn Care Visit #3', 'lawn_care'],
     ['Tree & Shrub Care', 'tree_shrub'],
-    ['Termite Inspection (Standalone)', 'termite'], // termite checked before inspection
+    ['Termite Inspection (Standalone)', 'inspection'], // inspection labels checked first (catalog: inspection)
+    ['Rodent Inspection Service', 'inspection'],
+    ['Plant Health Program', 'other'], // "ant" only as a whole word
+    ['Ant Treatment', 'pest_control'],
     ['Annual Home Inspection', 'inspection'],
     ['Quarterly Pest Control', 'pest_control'],
     ['General Pest Treatment', 'pest_control'],
@@ -125,9 +128,17 @@ describe('field-report SQL — service-address-first geography (no live DB in th
   // sandbox to run the real query (waves-db skill §5: report blocked rather
   // than fake it), so this pins the query text itself; a real run should
   // re-verify against a preview/dev Postgres branch when one is available.
-  test('selects COALESCE(service_address_*, customer_*) for both zip and city', () => {
-    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(ss\.service_address_zip,\s*c\.zip\)\s+AS\s+zip/i);
-    expect(FIELD_REPORT_QUERY).toMatch(/COALESCE\(ss\.service_address_city,\s*c\.city\)\s+AS\s+city/i);
+  test('takes zip AND city from one source: the visit address when either is set, else the customer', () => {
+    const guard = /CASE WHEN ss\.service_address_zip IS NOT NULL OR ss\.service_address_city IS NOT NULL/gi;
+    expect(FIELD_REPORT_QUERY.match(guard)).toHaveLength(2);
+    expect(FIELD_REPORT_QUERY).toMatch(/THEN ss\.service_address_zip ELSE c\.zip END AS zip/i);
+    expect(FIELD_REPORT_QUERY).toMatch(/THEN ss\.service_address_city ELSE c\.city END AS city/i);
+    expect(FIELD_REPORT_QUERY).not.toMatch(/COALESCE\(ss\.service_address_/i);
+  });
+
+  test('an incomplete closeout counts only once a completed record exists', () => {
+    expect(FIELD_REPORT_QUERY).toMatch(/NOT EXISTS \(SELECT 1 FROM service_records sr\s+WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'incomplete'\)/i);
+    expect(FIELD_REPORT_QUERY).toMatch(/OR EXISTS \(SELECT 1 FROM service_records sr\s+WHERE sr\.scheduled_service_id = ss\.id AND sr\.status = 'completed'\)/i);
   });
 });
 
@@ -213,7 +224,7 @@ describe('field-report aggregate — exclusions', () => {
     ];
     const summary = aggregate(rows, { minCell: 1 });
     expect(summary.excludedInternal.count).toBe(1);
-    expect(summary.totalCompleted.count).toBe(1);
+    expect(summary.totalCompleted.count).toBe(0); // excluded before the headline count
   });
 
   test('a customer outside the three counties never appears in any county table', () => {
@@ -281,5 +292,20 @@ describe('field-report formatMarkdown', () => {
     expect(md).not.toMatch(/Jamie/);
     expect(md).not.toMatch(/Rivera/);
     expect(md).not.toMatch(/34292/);
+  });
+});
+
+describe('field-report county and option edge cases', () => {
+  const { resolveCounty, resolveMinCell } = require('../../ops/agents/field-report');
+  test('a ZIP another county list also claims (33921: Charlotte and Lee) is excluded', () => {
+    expect(resolveCounty({ zip: '33921' })).toBeNull();
+    expect(resolveCounty({ zip: '33921', city: 'Punta Gorda' })).toBeNull();
+  });
+  test('--min-cell: default when absent; positive integer when present; bare or junk rejected', () => {
+    expect(resolveMinCell({})).toBe(10);
+    expect(resolveMinCell({ 'min-cell': '5' })).toBe(5);
+    expect(() => resolveMinCell({ 'min-cell': true })).toThrow(/positive integer/);
+    expect(() => resolveMinCell({ 'min-cell': '0' })).toThrow(/positive integer/);
+    expect(() => resolveMinCell({ 'min-cell': 'abc' })).toThrow(/positive integer/);
   });
 });
