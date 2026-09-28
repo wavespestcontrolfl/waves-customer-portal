@@ -98,7 +98,9 @@ suite('billing-recovery Bill action — sibling coverage guard on real Postgres'
     await require('../models/db').destroy?.();
   });
 
-  const SAME_DATE = '2026-10-01';
+  // Yesterday (UTC date), never a literal: a completed visit must sit inside
+  // the leaks window (completed_at >= now() - 365 days) on every run date.
+  const SAME_DATE = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const RESERVED_PRICE = 153.60;
 
   // Verbatim shape of priced-covered-sibling-charge.postgres.test.js's own
