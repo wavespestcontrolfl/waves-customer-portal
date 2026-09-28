@@ -200,27 +200,18 @@ const TRAFFIC_SOURCE_LABELS = {
   direct: 'Direct/none',
 };
 
-// The labels a Google apex domain's TLD can be made of: a single 2-4 letter
-// TLD (google.com, google.de) or a short second-level label plus a 2-letter
-// country code (google.co.uk, google.com.au). Deliberately generic rather
-// than an exhaustive list of Google's ccTLDs.
-const APEX_TLD_RE = /^[a-z]{2,4}$/;
-const SECOND_LEVEL_TLD_RE = /^(?:co|com|org|net|gov|edu)$/;
-
 /**
  * True for any google.* host — google.com, google.co.uk, news.google.com,
- * etc. — never for a lookalike like notgoogle.com or googleusercontent.com
- * (no label is exactly "google"), or google.example.com / google.com.evil.
- * example (a "google" label with something other than a TLD after it).
+ * etc. — using the Public Suffix List so the registrable domain must be
+ * exactly "google" + a real public suffix. Lookalikes (notgoogle.com,
+ * googleusercontent.com) and hosts with "google" only as a subdomain label
+ * (google.example.com, google.com.evil.example) are not Google.
  */
 function isGoogleHost(host) {
-  const labels = String(host || '').trim().toLowerCase().split('.').filter(Boolean);
-  const i = labels.indexOf('google');
-  if (i === -1) return false;
-  const rest = labels.slice(i + 1);
-  if (rest.length === 1) return APEX_TLD_RE.test(rest[0]);
-  if (rest.length === 2) return SECOND_LEVEL_TLD_RE.test(rest[0]) && /^[a-z]{2}$/.test(rest[1]);
-  return false;
+  const h = String(host || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!h) return false;
+  const parsed = psl.parse(h);
+  return Boolean(parsed && !parsed.error && parsed.listed && parsed.sld === 'google');
 }
 
 /**
@@ -256,9 +247,7 @@ function toCount(value) {
 function summarize(groups) {
   const posts = new Map();
   const destinations = new Map();
-  // Landing volume per post, split by traffic source, for the source
-  // breakdown below — external (non-internal) blog-post views only.
-  const postSourceViews = new Map();
+  // External blog-post landings by traffic source (volume only).
   const sourceViews = { google: 0, facebook: 0, other: 0, direct: 0 };
   let blogEntries = 0;
   let blogViews = 0;
@@ -288,8 +277,6 @@ function summarize(groups) {
         blogEntries += views;
         const source = classifyTrafficSource(g.refererHost);
         sourceViews[source] += views;
-        if (!postSourceViews.has(dest)) postSourceViews.set(dest, { google: 0, facebook: 0, other: 0, direct: 0 });
-        postSourceViews.get(dest)[source] += views;
       }
     }
     if (!internal || classifyPath(from) !== 'blog-post') continue;
@@ -460,6 +447,7 @@ function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   return `${lines.join('\n')}\n`;
 }
 
+const psl = require('psl');
 const { cfRequest } = require('../../server/services/intelligence-bar/cloudflare-ops-tools');
 const {
   addETDays,
