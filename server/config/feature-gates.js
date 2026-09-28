@@ -3161,6 +3161,24 @@ const gates = {
   // for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
+
+  // Orphan-invoice adoption sweep (dunning unification, PR 3): invoices sent
+  // outside the direct-send path (scheduleForInvoice's own callers) never got
+  // an invoice_followup_sequences row and were left to the legacy
+  // late-payment-checker.js alone. Ships DARK: off unless exactly 'true'.
+  // This entry is for logGateStatus only: services/invoice-followups.js
+  // reads GATE_DUNNING_ADOPT_ORPHANS at call time inside runPending(), before
+  // its batch select, so adopted rows join the same run.
+  dunningAdoptOrphans: process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true',
+
+  // Retire the legacy account-level late-payment checker (dunning
+  // unification, PR 3): once every overdue invoice carries a follow-up
+  // sequence row (the ladder above, plus the orphan sweep), the daily
+  // account-level cron is redundant with — and can double-nag alongside —
+  // the per-invoice ladder. Ships DARK: off unless exactly 'true'. This
+  // entry is for logGateStatus only: services/late-payment-checker.js reads
+  // GATE_LATE_PAYMENT_CHECKER_OFF at call time inside checkAndNotify().
+  latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

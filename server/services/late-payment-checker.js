@@ -492,6 +492,19 @@ async function collectionsChannelPermitted(customerId, invoiceId, channel, now, 
 
 const LatePaymentService = {
   async checkAndNotify(daysOverdue = 7) {
+    // GATE_LATE_PAYMENT_CHECKER_OFF, read at call time (strict 'true'):
+    // dunning unification PR 3 — once every overdue invoice carries a
+    // follow-up sequence row (the Day 90 ladder, plus the orphan-adoption
+    // sweep in invoice-followups.js), this account-level checker is
+    // redundant with, and can double-nag alongside, the per-invoice ladder.
+    // On, retire before any query — nothing else in this file changes. Off
+    // (unset or any other spelling): byte-identical to before this gate.
+    if (process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true') {
+      logger.info('[late-payment-checker] retired: GATE_LATE_PAYMENT_CHECKER_OFF, the invoice follow-up ladder owns overdue invoices');
+      return {
+        notified: 0, emailedFallback: 0, skipped: 0, retired: true,
+      };
+    }
     const now = new Date();
     const cutoff = new Date(now.getTime() - daysOverdue * 86400000);
 

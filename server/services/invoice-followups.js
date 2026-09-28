@@ -568,6 +568,84 @@ async function scheduleForInvoice(invoiceId) {
   });
 }
 
+// GATE_DUNNING_ADOPT_ORPHANS, read at call time (strict 'true'): an invoice
+// sent outside the direct-send path (the only caller of scheduleForInvoice)
+// never got a sequence row and was left to the legacy late-payment-checker.js
+// alone. Off: byte-identical — runPending never looks for orphans.
+function adoptOrphanInvoicesLive() {
+  return process.env.GATE_DUNNING_ADOPT_ORPHANS === 'true';
+}
+
+/**
+ * Find open, unpaid invoices with NO invoice_followup_sequences row at all
+ * and arm one for each through scheduleForInvoice — the exact path a normal
+ * invoice send takes, so every one of its own guards (payer-billed, active
+ * payment plan, autopay hold, ownership-under-lock) applies unchanged.
+ * Nothing is sent here: a newly-armed row lands at step 0 with next_touch_at
+ * anchored to when the invoice actually went out, and when that anchor is
+ * already old the SAME runPending pass that calls this (adoption runs before
+ * the batch select) picks the fresh row up in its own batch select and the
+ * existing stale-touch pass (skipStaleTouches) advances it to the first step
+ * whose day has not passed — never a burst of late sends.
+ *
+ * `dryRun: true` writes nothing and returns the candidate set (for the ops
+ * script's read-only production count); oldest-sent-first either way, same
+ * selection so the count the ops script prints matches what the sweep would
+ * adopt.
+ */
+async function adoptOrphanInvoices({ dryRun = false } = {}) {
+  const rows = await db('invoices as i')
+    .leftJoin('invoice_followup_sequences as s', 's.invoice_id', 'i.id')
+    .join('customers as c', 'c.id', 'i.customer_id')
+    .whereNull('s.id')
+    .whereNotIn('i.status', NON_SCHEDULABLE_INVOICE_STATUSES)
+    .whereNull('i.payer_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereNull('c.deleted_at')
+    // Same guard scheduleForInvoice applies under the invoice lock — filtered
+    // here too so the dry-run candidate set matches what adoption would do.
+    .whereNotExists(function noActivePlan() {
+      this.select(1).from('payment_plans')
+        .whereRaw('payment_plans.invoice_id = i.id')
+        .andWhere('payment_plans.status', 'active');
+    })
+    .orderByRaw('COALESCE(i.sent_at, i.sms_sent_at, i.created_at) asc')
+    .select(
+      'i.id as invoice_id', 'i.customer_id', 'i.total', 'i.credit_applied',
+      'i.sent_at', 'i.sms_sent_at', 'i.created_at',
+    );
+
+  const now = Date.now();
+  const candidates = rows
+    .map((row) => ({
+      invoice_id: row.invoice_id,
+      customer_id: row.customer_id,
+      sent_at: row.sent_at || row.sms_sent_at || row.created_at,
+      amount_due: invoiceAmountDue(row),
+    }))
+    // amount due > 0 — the same "is there anything to collect" test the
+    // legacy checker's own dunning decision is built on.
+    .filter((candidate) => candidate.amount_due > 0)
+    .map((candidate) => ({
+      ...candidate,
+      days_since_sent: Math.floor((now - new Date(candidate.sent_at).getTime()) / 86400000),
+    }));
+
+  if (dryRun) return { candidates };
+
+  const adoptedIds = [];
+  for (const candidate of candidates) {
+    const armed = await scheduleForInvoice(candidate.invoice_id);
+    if (armed) adoptedIds.push(candidate.invoice_id);
+  }
+  if (adoptedIds.length) {
+    logger.info(`[invoice-followups] adopted ${adoptedIds.length} orphan invoice(s): ${adoptedIds.join(', ')}`);
+  }
+  return { adopted: adoptedIds.length, invoiceIds: adoptedIds };
+}
+
 /**
  * Cron entry point — fires all due touches.
  */
@@ -583,6 +661,7 @@ async function runPending() {
 
   const ladder = ladderThrough90Live();
   if (ladder) await reviveLegacyFinishedSequences();
+  if (adoptOrphanInvoicesLive()) await adoptOrphanInvoices();
 
   // No deleted-customer filter here: fireStep() pauses those sequences
   // (status='paused', next_touch_at=null) so they're handled terminally
@@ -2267,6 +2346,7 @@ async function isDunningStopped(invoiceId, database = db) {
 module.exports = {
   scheduleForInvoice,
   runPending,
+  adoptOrphanInvoices,
   // Used by the scheduled-SMS executor to suppress stale deferred
   // invoice/dunning replays (paid/void overnight).
   isTerminalInvoice,
