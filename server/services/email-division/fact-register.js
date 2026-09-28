@@ -40,22 +40,36 @@ const UNVERIFIED_CLAIM_RULES = [
   {
     // The exact false claim the September 2026 Pest Insider draft made:
     // native subterranean termites do NOT have a second, storm/late-summer
-    // triggered swarm (see fact-no-storm-triggered-second-termite-swarm).
+    // triggered swarm (see fact-no-storm-triggered-second-termite-swarm). A
+    // negated match ("termites do NOT swarm again after storms") is that
+    // fact stated correctly, not the false claim — negatable exempts it.
     rule: 'termite_second_swarm',
     pattern: /\btermites?\b[^.]{0,150}?\b(?:second|another|again|repeat(?:ed)?|late[-\s]?summer|post[-\s]?storm|storm[-\s]?(?:triggered|induced|driven)?)\b[^.]{0,60}?\bswarm/i,
+    negatable: true,
   },
   {
     // Large/brown patch is a spring-and-fall, cool/humid-weather disease —
-    // never a summer or above-80°F one (fact-st-augustinegrass-care).
+    // never a summer or above-80°F one (fact-st-augustinegrass-care). A
+    // NEGATED claim ("it is NOT a summer disease") is the correct fact
+    // stated correctly — findUnverifiedClaims below drops any match whose
+    // span carries a negation word, so only the asserted-true claim blocks.
     rule: 'large_patch_summer_disease',
     pattern: /\b(?:brown|large)\s+patch\b[^.]{0,100}?\b(?:summer|above[-\s]?80|hot\s+weather|warm\s+weather|high\s+temperatures?)\b|\b(?:summer|above[-\s]?80\s*(?:°|degrees?)?|hot\s+weather|high\s+temperatures?)\b[^.]{0,100}?\b(?:brown|large)\s+patch\b/i,
+    negatable: true,
   },
   {
     // "Vacuum daily for 14 days" is flea-specific (pupae hatch into the
-    // residual) — never generalize a no/avoid-vacuuming window to ants,
-    // roaches, or any other pest (fact-flea-vacuuming-14-days).
+    // residual) — fact-flea-vacuuming-14-days. Two distinct wrong shapes:
+    // (a) the AFFIRMATIVE instruction ("vacuum ... for N days") generalized
+    // to a non-flea pest — findUnverifiedClaims exempts this ONE shape when
+    // "flea" is nearby, since that's the actual correct guidance; (b) a
+    // NEGATED instruction ("do not"/"avoid" vacuuming for N days), which is
+    // never correct — no fact in the register recommends avoiding
+    // vacuuming, for fleas or anything else, so this is flagged regardless
+    // of context. Capture group 1 carries the negation phrase (or
+    // undefined) so findUnverifiedClaims can tell the two apart.
     rule: 'non_flea_vacuum_advice',
-    pattern: /\b(?:do\s*not|don'?t|avoid)\s+vacuum(?:ing)?\b[^.]{0,80}?\b\d+\s*(?:days?|weeks?)\b/i,
+    pattern: /\b((?:do\s*not|don'?t|avoid)\s+)?vacuum(?:ing)?\b[^.]{0,80}?\b\d+\s*(?:days?|weeks?)\b/i,
   },
   {
     // Absolute safety guarantees no label supports — mirrors the existing
@@ -64,6 +78,18 @@ const UNVERIFIED_CLAIM_RULES = [
     pattern: /\b(?:bee[-\s]?safe|safe\s+for\s+bees|pet[-\s]?safe|safe\s+for\s+pets?)\b/i,
   },
 ];
+
+// A "negatable" rule's own correct fact is stated as a denial (e.g. "no
+// second swarm", "not a summer disease") — a match carrying one of these
+// words is that denial stated correctly, not the false claim.
+const NEGATION_RE = /\b(?:not|isn'?t|is\s+not|never|no)\b/i;
+
+function nearbyWindow(body, match, radius) {
+  const idx = match.index ?? 0;
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(body.length, idx + match[0].length + radius);
+  return body.slice(start, end);
+}
 
 /**
  * Scan customer-facing copy for the known-false/overreaching claim shapes
@@ -74,16 +100,15 @@ function findUnverifiedClaims(text) {
   const body = String(text ?? '');
   if (!body) return [];
   const results = [];
-  for (const { rule, pattern } of UNVERIFIED_CLAIM_RULES) {
+  for (const { rule, pattern, negatable } of UNVERIFIED_CLAIM_RULES) {
     const match = body.match(pattern);
     if (!match) continue;
+    if (negatable && NEGATION_RE.test(match[0])) continue; // correctly denies the false claim
     if (rule === 'non_flea_vacuum_advice') {
-      // Flea-specific vacuuming advice is correct guidance — only flag it
-      // outside that context. Look for "flea" near the match.
-      const idx = match.index ?? 0;
-      const windowStart = Math.max(0, idx - 200);
-      const windowEnd = Math.min(body.length, idx + match[0].length + 200);
-      if (/\bflea/i.test(body.slice(windowStart, windowEnd))) continue;
+      const negated = !!match[1];
+      if (!negated && /\bflea/i.test(nearbyWindow(body, match, 200))) continue; // correct flea guidance
+      // A negated instruction ("do not"/"avoid" vacuuming for N days) is
+      // never correct — flagged regardless of flea context.
     }
     results.push({ rule, excerpt: match[0].trim().slice(0, 160) });
   }

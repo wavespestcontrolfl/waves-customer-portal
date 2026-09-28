@@ -62,18 +62,37 @@ describe('findUnverifiedClaims', () => {
     expect(claims).toEqual([]);
   });
 
+  test('does NOT flag a correctly-negated denial of the false swarm claim', () => {
+    const claims = findUnverifiedClaims('Termites do not have a second swarm after storms.');
+    expect(claims.some((c) => c.rule === 'termite_second_swarm')).toBe(false);
+  });
+
   test('flags brown/large patch mis-described as a summer disease', () => {
     const claims = findUnverifiedClaims('Watch for large patch this summer as temperatures climb.');
     expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(true);
   });
 
-  test('flags a generalized "do not vacuum" window outside a flea context', () => {
-    const claims = findUnverifiedClaims('Avoid vacuuming for 14 days after your ant treatment.');
+  test('does NOT flag the correct, negated large-patch explanation', () => {
+    const claims = findUnverifiedClaims('Large patch appears in spring and fall; it is not a summer disease.');
+    expect(claims.some((c) => c.rule === 'large_patch_summer_disease')).toBe(false);
+  });
+
+  test('flags a generalized "do not vacuum" instruction — never correct, any context', () => {
+    expect(findUnverifiedClaims('Avoid vacuuming for 14 days after your ant treatment.')
+      .some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
+    // Even in a flea context, telling customers to AVOID vacuuming is wrong
+    // — the actual guidance says to vacuum, so this is flagged too.
+    expect(findUnverifiedClaims('For fleas, avoid vacuuming for 14 days so pupae hatch into the residual.')
+      .some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
+  });
+
+  test('flags the affirmative "vacuum for N days" instruction generalized outside fleas', () => {
+    const claims = findUnverifiedClaims('Vacuum daily for 14 days after your ant treatment.');
     expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(true);
   });
 
-  test('does NOT flag the same vacuuming window when it is actually about fleas', () => {
-    const claims = findUnverifiedClaims('For fleas, avoid vacuuming for 14 days so pupae hatch into the residual.');
+  test('does NOT flag the correct affirmative flea vacuuming guidance', () => {
+    const claims = findUnverifiedClaims('For fleas, vacuum daily for about 14 days so pupae hatch into the residual.');
     expect(claims.some((c) => c.rule === 'non_flea_vacuum_advice')).toBe(false);
   });
 
