@@ -132,4 +132,68 @@ postgres('geocode enrichment visit-then-customer lock order', () => {
     expect(Number(visit.lat)).toBeCloseTo(27.6);
     expect(Number(visit.lng)).toBeCloseTo(-82.4);
   });
+
+  test('a multi-visit lock is acquired in ascending id order regardless of the caller\'s array order', async () => {
+    // Fixed ids so the sort order is known independent of insertion order.
+    // Inserted HIGH-then-LOW (reversed from id order): an unindexed/unordered
+    // lock query returns Postgres's physical (heap/insertion) order here, so
+    // this insertion order is what makes an unordered lock disagree with the
+    // ascending convention below -- inserting ascending would happen to
+    // "accidentally" match it and hide the bug this test exists to catch.
+    const lowId = '00000000-0000-4000-8000-000000000001';
+    const highId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    await mockConnection('scheduled_services').insert([
+      { id: highId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
+      { id: lowId, customer_id: customerId, property_id: propertyId, lat: null, lng: null },
+    ]);
+
+    let lowLocked;
+    let releaseHolder;
+    const locked = new Promise(resolve => { lowLocked = resolve; });
+    const release = new Promise(resolve => { releaseHolder = resolve; });
+    // Mimics prelockVisitContext's own ascending-id FOR UPDATE convention
+    // (customer-geocode-review-visits.js: .orderBy('id').forUpdate()): lock
+    // the LOW id, then the HIGH id.
+    const holder = mockConnection.transaction(async (trx) => {
+      await trx('scheduled_services').where({ id: lowId }).forUpdate().first('id');
+      lowLocked();
+      await release;
+      await trx('scheduled_services').where({ id: highId }).forUpdate().first('id');
+    });
+    await locked;
+
+    // Pass the ids in DESCENDING order. Without an explicit ORDER BY, a plain
+    // `whereIn` locks rows in the order Postgres returns them for this
+    // predicate shape, which follows the literal array order supplied here
+    // (confirmed against this database) -- so an unordered fence would lock
+    // HIGH (uncontested) then LOW, the reverse of the holder above, and
+    // deadlock. With the fix, the fence always locks LOW then HIGH no matter
+    // what order the caller's array is in, so it simply waits its turn.
+    let fenceSettled = false;
+    const fence = withReviewWriteFence({
+      propertyId, customerId, visitIds: [highId, lowId],
+    }, async (conn) => conn('scheduled_services').whereIn('id', [highId, lowId]).update({ lat: 1, lng: 1 }))
+      .finally(() => { fenceSettled = true; });
+
+    const deadline = Date.now() + 5000;
+    let blocked = false;
+    while (!blocked && Date.now() < deadline) {
+      const waiting = await admin('pg_stat_activity')
+        .where({ application_name: 'geocode-lock-order' })
+        .where({ state: 'active', wait_event_type: 'Lock' })
+        .count('* as count').first();
+      blocked = Number(waiting?.count || 0) > 0;
+      if (!blocked) await new Promise(resolve => setImmediate(resolve));
+    }
+    try {
+      // The fence must be the one waiting on LOW (the holder's first lock),
+      // not off holding HIGH while the holder waits on it.
+      expect(blocked).toBe(true);
+      expect(fenceSettled).toBe(false);
+    } finally {
+      releaseHolder();
+    }
+    await expect(holder).resolves.toBeUndefined();
+    await expect(fence).resolves.toBe(2);
+  });
 });

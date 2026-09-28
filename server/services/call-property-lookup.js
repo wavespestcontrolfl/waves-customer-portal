@@ -50,7 +50,12 @@ async function withReviewWriteFence({ propertyId, customerId, visitIds }, write)
     // BEFORE the customer row, or a concurrent switch on the same visit can
     // deadlock (it locks the visit first, then the customer).
     if (visitIds?.length) {
-      await trx('scheduled_services').whereIn('id', visitIds).forUpdate().select('id');
+      // Deterministic scan order (matching prelockVisitContext's own
+      // orderBy('id') FOR UPDATE in customer-geocode-review-visits.js) — two
+      // transactions locking an overlapping visit set in different orders can
+      // still deadlock each other even though both lock visits before the
+      // customer.
+      await trx('scheduled_services').whereIn('id', visitIds).orderBy('id').forUpdate().select('id');
     }
     const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id');
     if (!customer) return null;
