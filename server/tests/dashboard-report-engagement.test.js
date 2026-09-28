@@ -118,14 +118,14 @@ describe('get_report_engagement', () => {
     expect(res.by_service_line).toHaveLength(2);
     expect(res.by_service_line[0]).toMatchObject({ service_line: 'pest', sent: 25, opened: 18, open_rate_pct: 72, median_minutes_to_open: 30 });
     expect(res.by_service_line[1]).toMatchObject({ service_line: 'lawn', sent: 15, opened: 7, open_rate_pct: 47, median_minutes_to_open: null });
-    // reserviceWithin14Days defaults when the reservice query has no matching
-    // rows for a line that DID have reports sent.
-    expect(res.by_service_line[0].reserviceWithin14Days).toEqual({ visits: 0, reserviced: 0, rate: null });
-    // Every value the model will read is a number or null — never a string —
-    // except the one new structured field.
+    // reserviceWithin14Days is a top-level field, never a by_service_line key
+    // — a re-service line's engagement counts don't gate its reservice metric.
+    expect(res.by_service_line[0].reserviceWithin14Days).toBeUndefined();
+    expect(res.by_service_line[1].reserviceWithin14Days).toBeUndefined();
+    // Every value the model will read is a number or null — never a string.
     for (const row of [res.total, ...res.by_service_line]) {
       for (const [k, v] of Object.entries(row)) {
-        if (['service_line', 'reserviceWithin14Days'].includes(k)) continue;
+        if (k === 'service_line') continue;
         expect(v === null || typeof v === 'number').toBe(true);
       }
     }
@@ -138,15 +138,17 @@ describe('get_report_engagement', () => {
     expect(res.by_service_line).toEqual([]);
   });
 
-  test('reserviceWithin14Days is null for a line with no re-service concept', async () => {
-    rawRows = [
-      { service_line: 'tree_shrub', is_total: 0, sent: '5', opened: '3', median_minutes_to_open: '20', pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
-    ];
+  test('top-level reserviceWithin14Days always includes both pest and lawn, zero-filled with no data', async () => {
+    rawRows = [];
+    reserviceRows = [];
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
-    expect(res.by_service_line[0]).toMatchObject({ service_line: 'tree_shrub', reserviceWithin14Days: null });
+    expect(res.reserviceWithin14Days).toEqual({
+      pest: { visits: 0, reserviced: 0, rate: null },
+      lawn: { visits: 0, reserviced: 0, rate: null },
+    });
   });
 
-  test('reserviceWithin14Days reports visits/reserviced/rate per line from the reservice query', async () => {
+  test('reserviceWithin14Days reports visits/reserviced/rate per line from the reservice query, independent of by_service_line', async () => {
     rawRows = [
       { service_line: 'pest', is_total: 0, sent: '10', opened: '5', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
       { service_line: 'lawn', is_total: 0, sent: '4', opened: '2', median_minutes_to_open: null, pdf_downloaded: '0', photo_opened: '0', map_interacted: '0', reentry_timer_viewed: '0', review_request_clicked: '0', referral_cta_clicked: '0', cross_sell_requested: '0', followup_requested: '0', report_question_asked: '0' },
@@ -156,17 +158,18 @@ describe('get_report_engagement', () => {
       { service_line: 'lawn', visits: '8', reserviced: '0' },
     ];
     const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
-    const byLine = Object.fromEntries(res.by_service_line.map((r) => [r.service_line, r]));
-    expect(byLine.pest.reserviceWithin14Days).toEqual({ visits: 20, reserviced: 5, rate: 0.25 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 20, reserviced: 5, rate: 0.25 });
     // No re-services at all still returns a rate (0), not null — null is
     // reserved for zero VISITS, which the query can't produce either
     // (a zero-visit line drops out of the GROUP BY, not surfaces as a row).
-    expect(byLine.lawn.reserviceWithin14Days).toEqual({ visits: 8, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.lawn).toEqual({ visits: 8, reserviced: 0, rate: 0 });
     // reservice query bindings are [from, to, cutoff, 'pest', 'lawn'] — plain
     // date strings, not the ET timestamptz bounds the main query uses.
-    // cutoff is the tool's own ET "today" minus 14 days (right-censoring),
-    // never a UTC-derived value.
-    const expectedCutoff = etDateString(addETDays(new Date(), -14));
+    // cutoff is the tool's own ET "today" minus 15 days: a visit exactly 14
+    // days ago still has its 14th follow-up day running today, so the
+    // inclusive cutoff must be one day further back — never a UTC-derived
+    // value.
+    const expectedCutoff = etDateString(addETDays(new Date(), -15));
     expect(rawCalls[1].bindings).toEqual(['2026-08-01', '2026-08-31', expectedCutoff, 'pest', 'lawn']);
     expect(rawCalls[1].sql).toMatch(/r\.scheduled_date > v\.scheduled_date/);
     expect(rawCalls[1].sql).toMatch(/r\.scheduled_date <= v\.scheduled_date \+ INTERVAL '14 days'/);
@@ -174,6 +177,21 @@ describe('get_report_engagement', () => {
     // window — it rides in the same LEAST(...) as `to`, so a visit inside
     // the last 14 days is excluded from the visits CTE entirely.
     expect(rawCalls[1].sql).toMatch(/scheduled_date <= LEAST\(\?::date, \?::date\)/);
+  });
+
+  test('reserviceWithin14Days still appears when the send cohort is empty but reservice rows exist', async () => {
+    // No reports sent this period at all (by_service_line is []) — the
+    // reservice metric must not silently disappear because of that.
+    rawRows = [];
+    reserviceRows = [
+      { service_line: 'pest', visits: '3', reserviced: '1' },
+    ];
+    const res = await executeDashboardTool('get_report_engagement', { date_from: '2026-08-01', date_to: '2026-08-31' });
+    expect(res.by_service_line).toEqual([]);
+    expect(res.reserviceWithin14Days).toEqual({
+      pest: { visits: 3, reserviced: 1, rate: 0.333 },
+      lawn: { visits: 0, reserviced: 0, rate: null },
+    });
   });
 
   test('rejects malformed or inverted dates before touching the DB', async () => {

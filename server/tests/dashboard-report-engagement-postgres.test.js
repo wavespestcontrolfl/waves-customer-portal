@@ -90,8 +90,6 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     return sched;
   }
 
-  function pestLine(res) { return res.by_service_line.find((r) => r.service_line === 'pest'); }
-
   test('a same-customer same-line re-service 10 days later counts as reserviced', async () => {
     const cust = await customer();
     const { scheduled: visit } = await sentVisit({ customerId: cust, date: '2026-08-05', line: 'pest' });
@@ -99,7 +97,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-15', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(pestLine(res).reserviceWithin14Days).toEqual({ visits: 1, reserviced: 1, rate: 1 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate: 1 });
   });
 
   test('a same-customer same-line re-service 20 days later does not count', async () => {
@@ -108,7 +106,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-21', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(pestLine(res).reserviceWithin14Days).toEqual({ visits: 1, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
   });
 
   test('a re-service on the other line does not count', async () => {
@@ -118,7 +116,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await completedVisit({ customerId: cust, date: '2026-08-10', line: 'lawn', serviceKeySnapshot: 'lawn_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(pestLine(res).reserviceWithin14Days).toEqual({ visits: 1, reserviced: 0, rate: 0 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
   });
 
   test('a re-service visit is not itself counted as a visit', async () => {
@@ -128,7 +126,7 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     await sentVisit({ customerId: cust, date: '2026-08-05', line: 'pest', serviceKeySnapshot: 'pest_re_service' });
 
     const res = await executeDashboardTool('get_report_engagement', { date_from: FROM, date_to: TO });
-    expect(pestLine(res).reserviceWithin14Days).toEqual({ visits: 0, reserviced: 0, rate: null });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 0, reserviced: 0, rate: null });
   });
 
   test('right-censoring: a visit inside the last 14 days is excluded even with a re-service; one outside it counts', async () => {
@@ -153,6 +151,24 @@ postgres('get_report_engagement reserviceWithin14Days against migrated PostgreSQ
     const res = await executeDashboardTool('get_report_engagement', {}); // default: last 30 ET days ending today
     // Only visit B counts: 1 visit, 1 reserviced. Visit A never appears —
     // not as an uncounted zero, not as a false reservice match.
-    expect(pestLine(res).reserviceWithin14Days).toEqual({ visits: 1, reserviced: 1, rate: 1 });
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 1, rate: 1 });
+  });
+
+  test('right-censoring boundary: a visit exactly 14 days ago is excluded; one exactly 15 days ago is included', async () => {
+    // A visit exactly 14 days ago still has its 14th follow-up day running
+    // today, so it must be excluded — not counted even as a zero-reservice
+    // visit. Separate customers so neither visit's own presence/absence in
+    // the visits set is affected by the other.
+    const cust14 = await customer();
+    const date14 = etDateString(addETDays(new Date(), -14));
+    await completedVisit({ customerId: cust14, date: date14, line: 'pest' });
+
+    const cust15 = await customer();
+    const date15 = etDateString(addETDays(new Date(), -15));
+    await completedVisit({ customerId: cust15, date: date15, line: 'pest' });
+
+    const res = await executeDashboardTool('get_report_engagement', {});
+    // If the 14-days-ago visit were included, visits would be 2 — it isn't.
+    expect(res.reserviceWithin14Days.pest).toEqual({ visits: 1, reserviced: 0, rate: 0 });
   });
 });

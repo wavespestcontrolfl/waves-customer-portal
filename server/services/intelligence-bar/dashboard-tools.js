@@ -173,7 +173,7 @@ period can be: "this_week", "last_week", "this_month", "last_month", "this_quart
   },
   {
     name: 'get_report_engagement',
-    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Each service line also carries reserviceWithin14Days (pest and lawn only: of the completed visits on that line in the window whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later, plus the rate). Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
+    description: `Service-report engagement: of the completed-visit reports SENT to customers in a period (report email via the delivery queue and/or the completion SMS), how many were opened, the open rate, the median minutes from first send to first open, and what customers did inside the report (PDF download, photo opened, map interacted, re-entry timer viewed, review link clicked, referral clicked, add-on requested, follow-up requested, question asked). Split by service line (pest, lawn, tree_shrub, mosquito, termite, rodent, palm; 'unknown' for older records) plus a total row. Also returns a top-level reserviceWithin14Days: { pest, lawn } (each {visits, reserviced, rate}) — of the completed visits on that line in the period whose 14-day follow-up window has fully closed, how many got a same-customer same-line re-service 1-14 days later; this is independent of report sends, so it's always present even for a line with no reports sent in the period. Use for "are customers opening their reports?", "report open rate", "which service line reads its report least?", "how fast do people open the report?", "does the pest report content cut re-services?". Defaults to the last 30 days.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -933,10 +933,12 @@ const REPORT_ACTION_EVENTS = [
 //
 // Right-censoring: a visit from the last 14 days hasn't had its full 14-day
 // follow-up window pass yet, so counting it as a "no re-service" visit
-// biases the rate low. `cutoff` (the caller's ET "today" minus 14 days) is
-// an ADDITIONAL upper bound on the visit's own scheduled_date — never on the
-// [from, to] window itself — so only visits whose window has fully closed
-// are counted at all.
+// biases the rate low. A visit exactly 14 days ago still has its 14th
+// follow-up day running today, so `cutoff` (the caller's ET "today" minus
+// 15 days — visit day D counts only when D + 14 < today) is an ADDITIONAL
+// upper bound on the visit's own scheduled_date — never on the [from, to]
+// window itself — so only visits whose window has fully closed are counted
+// at all.
 const RESERVICE_LINES = ['pest', 'lawn'];
 
 async function getReserviceWithin14Days(from, to, cutoff) {
@@ -1099,31 +1101,35 @@ async function getReportEngagement(input = {}) {
   const totalRow = rows.find((r) => Number(r.is_total) === 1);
   const byLine = rows.filter((r) => Number(r.is_total) !== 1);
 
-  // Independent of the send/open cohort above: reserviceWithin14Days is keyed
-  // off visit scheduled_date, not report-send date — it uses the same [from,
-  // to] window the caller asked for, but doesn't require the line to have
-  // had a report actually sent in that window. reserviceCutoff (today ET
-  // minus 14 days, from the same `now` this tool's own window defaults use)
-  // right-censors it: a visit whose 14-day follow-up window hasn't fully
-  // passed yet is excluded rather than counted as "no re-service".
-  const reserviceCutoff = etDateString(addETDays(now, -14));
+  // Top-level, independent of the send/open cohort above: reserviceWithin14Days
+  // is keyed off visit scheduled_date, not report-send date, so it must not
+  // depend on a report having actually been sent for that line in the
+  // window — a line with visits but no sent reports would otherwise silently
+  // lose the metric. It uses the same [from, to] window the caller asked
+  // for. reserviceCutoff (today ET minus 15 days, from the same `now` this
+  // tool's own window defaults use — a visit exactly 14 days ago still has
+  // its 14th follow-up day running today) right-censors it: a visit whose
+  // 14-day follow-up window hasn't fully passed yet is excluded rather than
+  // counted as "no re-service".
+  const reserviceCutoff = etDateString(addETDays(now, -15));
   const reserviceByLine = await getReserviceWithin14Days(from, to, reserviceCutoff);
+  const reserviceWithin14Days = {};
+  for (const line of RESERVICE_LINES) {
+    reserviceWithin14Days[line] = reserviceByLine[line] || { visits: 0, reserviced: 0, rate: null };
+  }
 
   return {
     period: { from, to },
     cohort: 'service_report_v1 records first sent to the customer (report email per the email ledger / delivery queue, or the completion SMS/MMS per the server-stamped send status) in the period',
     total: totalRow ? shape(totalRow) : shape({ sent: 0, opened: 0 }),
-    by_service_line: byLine.map((r) => ({
-      service_line: r.service_line,
-      ...shape(r),
-      reserviceWithin14Days: RESERVICE_LINES.includes(r.service_line) ? (reserviceByLine[r.service_line] || { visits: 0, reserviced: 0, rate: null }) : null,
-    })),
+    by_service_line: byLine.map((r) => ({ service_line: r.service_line, ...shape(r) })),
+    reserviceWithin14Days,
     notes: [
       'opened = the report was first viewed at or after the first send, per the customer-only page-load event or the first-view stamp. Staff previews with a staff JWT and portal static views never count, but a staff download through the plain customer PDF link stamps the first view (that link cannot carry the staff JWT), so a small share of opens can be internal QA. A view that predates every send does not count, and does not hide a later real open.',
       'median_minutes_to_open is over those post-send first opens',
       'action counts are distinct reports with at least one such event at or after the first send (pdf_downloaded shares the staff-download caveat above)',
       "service_line 'unknown' = records completed before the line was stamped on the record",
-      'reserviceWithin14Days (pest and lawn only) counts completed, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later; rate is null when there were no such visits; visits from the last 14 days are left out until their follow-up window closes',
+      'reserviceWithin14Days (pest and lawn only, top-level — independent of whether a report was sent) counts completed, non-re-service visits scheduled in the period that got a same-customer same-line re-service 1-14 days later; rate is null when there were no such visits; a visit is only counted once its 14-day follow-up window has fully closed (excluded until the day after)',
     ],
   };
 }
