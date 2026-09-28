@@ -2878,6 +2878,14 @@ describe('owner competitor list + fact rule', () => {
     const offList = gate.evaluate({ body: 'Orkin and Truly Nolen both offer recurring residential plans.', title: 'x' }, OPTS);
     expect(gate.namedCompetitorListVerdict(offList)).toMatchObject({ ok: false, reason: 'named_competitor_off_list', offList: ['Truly Nolen'] });
 
+    // An uncurated business the curated detector does not know still counts
+    // (pre-push audit P1) — but a statute or regulator is not a business.
+    const uncurated = gate.evaluate({ body: 'Orkin and Acme Pest Solutions offer recurring residential plans.', title: 'x' }, OPTS);
+    expect(uncurated.namedCompetitors).toEqual(['Acme Pest Solutions', 'Orkin']);
+    expect(gate.namedCompetitorListVerdict(uncurated)).toMatchObject({ ok: false, offList: ['Acme Pest Solutions'] });
+    const regulator = gate.evaluate({ body: 'Florida licenses Orkin under the Structural Pest Control Act; the Bureau of Entomology and Pest Control enforces it. See our Sarasota Pest Control Guide.', title: 'x' }, OPTS);
+    expect(regulator.namedCompetitors).toEqual(['Orkin']);
+
     // A name only a link destination carries still counts.
     const linked = gate.evaluate({ body: 'Compare plans on [their site](https://www.trulynolen.com/plans).', title: 'x' }, OPTS);
     expect(linked.namedCompetitors).toContain('Truly Nolen');

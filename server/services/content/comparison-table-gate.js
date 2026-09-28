@@ -1667,7 +1667,43 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   if (factRule) findings.push(factRule);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
-  return { pass, findings, requiresHumanReview, namedCompetitors: sortedNames(known, unknown, linkedNames) };
+  return {
+    pass, findings, requiresHumanReview,
+    namedCompetitors: sortedNames(known, unknown, linkedNames, uncuratedBusinessNames(nameScanText)),
+  };
+}
+
+// Business-shaped names the curated detector does not know ("Acme Pest
+// Solutions", "Bob Smith Lawn Care LLC") — the table path already fails
+// these as COMPARISON_UNCLASSIFIED_OPTION; the table-less path lets a
+// neutral one through (a deliberate precision boundary for ordinary posts),
+// so they are recorded here to keep a competitor post that ALSO names an
+// uncurated business off the unattended lane. Case-sensitive Title-Case
+// provider shape or a legal-entity suffix, curated mentions blanked first
+// ("Orkin and Acme Pest Solutions" must not read as one name), and
+// generic/geo-led captures ("Sarasota Pest Control Guide") and statute /
+// regulator names ("the Structural Pest Control Act", "Bureau of …") dropped.
+const REGULATORY_TAIL_RE = /^\s+(?:Acts?|Laws?|Boards?|Bureaus?|Commissions?|Programs?|Divisions?|Offices?|Rules?|Statutes?|Chapters?|Licens\w*|Exams?|Examinations?|Certificat\w*|Categor\w*|Regulations?)\b/;
+const REGULATORY_HEAD_RE = /\b(?:Bureau|Division|Office|Board|Department|Commission)\s+(?:of|for)\s+$/i;
+function uncuratedBusinessNames(text) {
+  let blanked = String(text || '');
+  for (const n of competitorFacts._internals.DETECTABLE_NAMES) {
+    blanked = blanked.replace(new RegExp(`\\b${escapeForNameRe(n)}\\b`, 'gi'), (m) => ' '.repeat(m.length));
+  }
+  const out = new Set();
+  for (const re of [providerNameRe('g'), legalEntityRe('g')]) {
+    for (const m of blanked.matchAll(re)) {
+      const nm = m[1].trim().replace(/\s+/g, ' ');
+      const lead = nm.split(' ')[0].toLowerCase();
+      if (OWN_BRAND_RE.test(nm) || GENERIC_LEAD_SET.has(lead) || GEO_LEAD_SET.has(lead)) continue;
+      const end = m.index + m[0].length;
+      if (/^(?:bureau|division|office|board|department|commission)$/.test(lead)
+        || REGULATORY_TAIL_RE.test(blanked.slice(end, end + 40))
+        || REGULATORY_HEAD_RE.test(blanked.slice(Math.max(0, m.index - 40), m.index))) continue;
+      out.add(nm);
+    }
+  }
+  return out;
 }
 
 // Every competitor the draft names (prose, table, title/meta, or link
