@@ -109,7 +109,7 @@ describe('VisitPrepPhotoForm', () => {
     expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
   });
 
-  it('a 409 cap-reached error shows the server line and stays on the form', async () => {
+  it('a 409 cap-reached error retires the form to the terminal full state, never back to an editable Send', async () => {
     const err = Object.assign(new Error("You've reached the photo limit for this visit."), { status: 409, code: 'PREP_CAP_REACHED' });
     const onSubmit = vi.fn().mockRejectedValue(err);
     render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
@@ -118,8 +118,12 @@ describe('VisitPrepPhotoForm', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent("You've reached the photo limit for this visit.");
-    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+    // Same terminal state as a visit with no room to begin with — not a
+    // retryable form error banner, since tapping Send again would just
+    // 409 again.
+    expect(await screen.findByTestId('visit-prep-full')).toHaveTextContent('This visit already has the most photos it can take.');
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('a 503 error shows a short retry line, never the raw server message', async () => {
@@ -246,5 +250,68 @@ describe('VisitPrepPhotoForm', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('You can add up to 2 photos.');
     await waitFor(() => expect(screen.getAllByRole('button', { name: /Remove photo/ })).toHaveLength(2));
+  });
+
+  it('the sent count comes from the response, not from how many files were attached — the server can dedupe', async () => {
+    // Two files attached, but the server only counted ONE new photo
+    // (photosRemaining moved from 6 to 5, not 4) — the customer's own
+    // pick duplicated one already on the visit.
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 1, photosRemaining: 5 } });
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
+
+    fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('1 photo sent')).toBeInTheDocument();
+  });
+
+  it('an all-duplicate resubmit (accepted count of zero) shows a truthful line instead of "0 photos sent"', async () => {
+    // photosRemaining unchanged — every attached photo already existed on
+    // the visit (the server's idempotent 200 case).
+    const onSubmit = vi.fn().mockResolvedValue({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 6 } });
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
+
+    fireEvent.change(fileInput(), { target: { files: [photoFile()] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText('Got it.')).toBeInTheDocument();
+    // Heading and body copy are unchanged — only the count line differs.
+    expect(screen.getByText('This is attached to your visit so your technician sees it before starting.')).toBeInTheDocument();
+    expect(screen.getByText('Those photos are already attached to this visit.')).toBeInTheDocument();
+    expect(screen.queryByText(/photo.*sent/)).not.toBeInTheDocument();
+  });
+
+  it('freezes every control while a submit is in flight, so the visible form can never diverge from the FormData already posted', async () => {
+    let resolveSubmit;
+    const onSubmit = vi.fn(() => new Promise((resolve) => { resolveSubmit = resolve; }));
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={onSubmit} />);
+
+    fireEvent.click(screen.getByText('Pest'));
+    fireEvent.change(fileInput(), { target: { files: [photoFile('a.jpg'), photoFile('b.jpg')] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // The button's own label flips to "Sending…" while in flight.
+    expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
+    expect(screen.getByText('Pest')).toBeDisabled();
+    expect(screen.getByText('Back yard')).toBeDisabled();
+    expect(screen.getByLabelText('A short note (optional)')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add photos' })).toBeDisabled();
+    screen.getAllByRole('button', { name: /Remove photo/ }).forEach((btn) => expect(btn).toBeDisabled());
+
+    resolveSubmit({ ok: true, prepPhotos: { eligible: true, photoCount: 2, photosRemaining: 4 } });
+    await waitFor(() => expect(screen.getByText('Got it.')).toBeInTheDocument());
+  });
+
+  it('the remove control has at least a 48x48 hit area (customer-surface touch-target spec)', async () => {
+    render(<VisitPrepPhotoForm photosRemaining={6} onSubmit={vi.fn()} />);
+
+    fireEvent.change(fileInput(), { target: { files: [photoFile()] } });
+    const removeButton = await screen.findByRole('button', { name: 'Remove photo 1' });
+
+    expect(removeButton).toHaveStyle({ width: '48px', height: '48px' });
   });
 });

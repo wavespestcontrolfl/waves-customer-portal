@@ -306,7 +306,7 @@ describe('AppointmentPage visit prep photos block', () => {
     expect(await screen.findByText('Photos can no longer be added to this visit.')).toBeInTheDocument();
   });
 
-  it('a 409 cap response shows the photo-limit line', async () => {
+  it('a 409 cap response retires the form to the terminal full state', async () => {
     stubFetch({
       get: jsonResponse(upcomingPayload({ prepPhotos: { eligible: true, photoCount: 6, photosRemaining: 3 } })),
       post: jsonResponse({ error: "You've reached the photo limit for this visit.", code: 'PREP_CAP_REACHED' }, 409),
@@ -319,7 +319,8 @@ describe('AppointmentPage visit prep photos block', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
-    expect(await screen.findByText("You've reached the photo limit for this visit.")).toBeInTheDocument();
+    expect(await screen.findByText('This visit already has the most photos it can take.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
   });
 
   it('a 503 response shows a short retry line', async () => {

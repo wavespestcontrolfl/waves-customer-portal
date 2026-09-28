@@ -85,16 +85,19 @@ export const LOCATION_OPTIONS = [
 
 const GENERIC_ERROR = "We couldn't send that just now. Please try again, or text or call us.";
 const BUSY_ERROR = 'Please try again in a moment.';
-const CAP_ERROR = "You've reached the photo limit for this visit.";
+const FULL_MESSAGE = 'This visit already has the most photos it can take.';
+const DUPLICATE_MESSAGE = 'Those photos are already attached to this visit.';
 
 // Maps the server's error codes (server/services/visit-prep.js `prepError`,
 // docs/public-route-contracts.md) to a short, truthful customer line — no
-// price, no response-time promise, no "our team reviews" (scope §7).
-// PREP_INVALID_FIELD / PREP_INVALID_PHOTO / a multer 400 all carry the
-// server's own plain message already safe to echo verbatim.
+// price, no response-time promise, no "our team reviews" (scope §7). A 409
+// (PREP_CAP_REACHED) is handled separately, before this is ever called —
+// see `send()` — because it's a terminal state (the visit really is full),
+// not a retryable form error. PREP_INVALID_FIELD / PREP_INVALID_PHOTO / a
+// multer 400 all carry the server's own plain message already safe to
+// echo verbatim.
 function messageForSubmitError(err) {
   const status = err?.status;
-  if (status === 409) return err.message || CAP_ERROR;
   if (status === 503) return BUSY_ERROR;
   if (status === 400 || status === 413) return err.message || GENERIC_ERROR;
   return GENERIC_ERROR;
@@ -147,11 +150,12 @@ async function processPickedFile(file) {
   return { file: outFile, preview };
 }
 
-function Chip({ label, active, onClick }) {
+function Chip({ label, active, onClick, disabled }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-pressed={active}
       style={{
         padding: '8px 14px',
@@ -161,7 +165,8 @@ function Chip({ label, active, onClick }) {
         border: `1px solid ${active ? COLORS.glassNavy : S.borderStrong}`,
         background: active ? COLORS.glassNavy : '#FFFFFF',
         color: active ? COLORS.white : S.text,
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.6 : 1,
       }}
     >
       {label}
@@ -183,7 +188,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   const [location, setLocation] = useState(null);
   const [note, setNote] = useState('');
   const [photos, setPhotos] = useState([]); // [{ file, preview }]
-  const [phase, setPhase] = useState('form'); // 'form' | 'sending' | 'sent' | 'gone'
+  const [phase, setPhase] = useState('form'); // 'form' | 'sending' | 'sent' | 'gone' | 'full'
   const [error, setError] = useState(null);
   const [sentCount, setSentCount] = useState(0);
   // True for the whole duration of a pick's decode/resize loop (see
@@ -194,6 +199,12 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
   const fileInputRef = useRef(null);
   const mountedRef = useRef(true);
   const ackHeadingRef = useRef(null);
+  // The prop's value when this form first mounted — never updated after,
+  // deliberately: the server can dedupe a submission (the same image
+  // picked twice, or one already on the visit from an earlier send), so
+  // the ack's count is computed as (this) minus the response's own
+  // photosRemaining, not naively as "how many files did we attach".
+  const initialPhotosRemainingRef = useRef(photosRemaining);
 
   // Explicitly set true on run, not just false on cleanup — React 18
   // StrictMode's dev-only mount/cleanup/remount cycle runs this cleanup
@@ -281,9 +292,20 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
     if (topic) formData.append('topic', topic);
     if (location) formData.append('locationOnProperty', location);
     try {
-      await onSubmit(formData);
+      const response = await onSubmit(formData);
       if (!mountedRef.current) return;
-      setSentCount(photos.length);
+      // The server dedupes (the same image picked twice, or one already
+      // on the visit from an earlier send) — the response's own
+      // photosRemaining is the source of truth for how many of THIS
+      // pick actually landed, never `photos.length` (what was merely
+      // attempted).
+      const responseRemaining = response?.prepPhotos?.photosRemaining;
+      const initialRemaining = initialPhotosRemainingRef.current;
+      setSentCount(
+        typeof responseRemaining === 'number' && typeof initialRemaining === 'number'
+          ? Math.max(0, initialRemaining - responseRemaining)
+          : photos.length, // malformed response — fall back to the naive count
+      );
       setPhotos([]);
       setPhase('sent');
     } catch (err) {
@@ -292,29 +314,40 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         setPhase('gone');
         return;
       }
+      if (err?.status === 409) {
+        // The visit is genuinely full (PREP_CAP_REACHED) — a terminal
+        // state like "gone", not a retryable form error: Send would just
+        // 409 again.
+        setPhase('full');
+        return;
+      }
       setError(messageForSubmitError(err));
       setPhase('form');
     }
   };
 
   // A 404 on submit (the visit is no longer eligible — cancelled, en
-  // route, etc. between page load and send) and an already-full visit
-  // (maxPickable resolves to 0 — visitPrepEligibility doesn't itself check
-  // the photo/submission caps, so `eligible: true` with no room left is a
-  // real payload shape) both get the same one-line treatment: nothing left
-  // to do here, no dead-end form (scope §7: no price, no promise, no dead
-  // end).
+  // route, etc. between page load and send) gets its own one-line
+  // treatment: nothing left to do here, no dead-end form (scope §7: no
+  // price, no promise, no dead end).
   if (phase === 'gone') {
     return (
-      <div data-testid="visit-prep-gone" style={{ fontSize: 15, color: S.muted, lineHeight: 1.5 }}>
+      <div data-testid="visit-prep-gone" style={{ fontSize: 16, color: S.muted, lineHeight: 1.5 }}>
         Photos can no longer be added to this visit.
       </div>
     );
   }
-  if (maxPickable <= 0) {
+  // Full is the SAME terminal treatment for two different reasons a
+  // customer can never send more from here: `maxPickable` resolves to 0
+  // before any submit (visitPrepEligibility doesn't itself check the
+  // photo/submission caps, so `eligible: true` with no room left is a
+  // real payload shape), or a submit 409s with PREP_CAP_REACHED (the visit
+  // filled between page load and send — see `send()`'s catch). Either
+  // way: no editable form with a Send button that would just 409 again.
+  if (phase === 'full' || maxPickable <= 0) {
     return (
-      <div data-testid="visit-prep-full" style={{ fontSize: 15, color: S.muted, lineHeight: 1.5 }}>
-        This visit already has the most photos it can take.
+      <div data-testid="visit-prep-full" style={{ fontSize: 16, color: S.muted, lineHeight: 1.5 }}>
+        {FULL_MESSAGE}
       </div>
     );
   }
@@ -332,14 +365,25 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
           This is attached to your visit so your technician sees it before starting.
         </div>
-        <div style={{ fontSize: 14, color: S.muted, marginTop: 8, fontWeight: 600 }}>
-          {sentCount} photo{sentCount === 1 ? '' : 's'} sent
+        <div style={{ fontSize: 16, color: S.muted, marginTop: 8, fontWeight: 600 }}>
+          {/* The server can dedupe a submission down to zero NEW photos
+              (the same image twice, or one already on the visit) — sentCount
+              is the RESPONSE-derived accepted count (see send()), so this
+              never overclaims. */}
+          {sentCount > 0 ? `${sentCount} photo${sentCount === 1 ? '' : 's'} sent` : DUPLICATE_MESSAGE}
         </div>
       </div>
     );
   }
 
-  const sendDisabled = !photos.length || phase === 'sending' || pickingPhotos;
+  // While the submit is in flight, every control that could change what's
+  // about to be (or was just) sent freezes — the FormData is already
+  // built and posted, so nothing on screen may diverge from it.
+  const formFrozen = phase === 'sending';
+  const frozenOpacity = formFrozen ? 0.6 : 1;
+  // Photos still being processed, or a submit in flight: no new picks.
+  const pickerDisabled = pickingPhotos || formFrozen;
+  const sendDisabled = !photos.length || pickerDisabled;
 
   return (
     <div data-testid="visit-prep-form">
@@ -357,6 +401,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
             label={opt.label}
             active={topic === opt.value}
             onClick={() => setTopic((prev) => (prev === opt.value ? null : opt.value))}
+            disabled={formFrozen}
           />
         ))}
       </div>
@@ -369,6 +414,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
             label={opt.label}
             active={location === opt.value}
             onClick={() => setLocation((prev) => (prev === opt.value ? null : opt.value))}
+            disabled={formFrozen}
           />
         ))}
       </div>
@@ -381,6 +427,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         value={note}
         maxLength={NOTE_MAX_CHARS}
         onChange={(e) => setNote(e.target.value)}
+        disabled={formFrozen}
         rows={3}
         placeholder="What should we know before we arrive?"
         style={{
@@ -394,6 +441,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           color: S.text,
           resize: 'vertical',
           marginBottom: 14,
+          opacity: frozenOpacity,
         }}
       />
 
@@ -422,24 +470,46 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
               <button
                 type="button"
                 onClick={() => removePhoto(i)}
+                disabled={formFrozen}
                 aria-label={`Remove photo ${i + 1}`}
                 style={{
+                  // 48x48 hit area (customer-surface spec: 48px+ touch
+                  // targets) around a visually small 24px chip, same
+                  // pattern PortalPage's own photo picker uses — the
+                  // button itself is transparent so the larger box
+                  // never visually swallows the thumbnail.
                   position: 'absolute',
-                  top: -6,
-                  right: -6,
-                  width: 24,
-                  height: 24,
-                  borderRadius: '50%',
-                  border: `1px solid ${S.border}`,
-                  background: '#FFFFFF',
-                  color: S.text,
-                  fontSize: 13,
-                  lineHeight: '22px',
-                  cursor: 'pointer',
+                  top: -12,
+                  right: -12,
+                  width: 48,
+                  height: 48,
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: formFrozen ? 'default' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
                   padding: 0,
                 }}
               >
-                ×
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: '50%',
+                    border: `1px solid ${S.border}`,
+                    background: '#FFFFFF',
+                    color: S.text,
+                    fontSize: 13,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    opacity: frozenOpacity,
+                  }}
+                >
+                  ×
+                </span>
               </button>
             </div>
           ))}
@@ -450,7 +520,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={pickingPhotos}
+          disabled={pickerDisabled}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -464,8 +534,8 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
             color: S.text,
             fontSize: 15,
             fontWeight: 600,
-            cursor: pickingPhotos ? 'default' : 'pointer',
-            opacity: pickingPhotos ? 0.6 : 1,
+            cursor: pickerDisabled ? 'default' : 'pointer',
+            opacity: pickerDisabled ? 0.6 : 1,
             marginBottom: 14,
           }}
         >
@@ -479,7 +549,7 @@ export default function VisitPrepPhotoForm({ photosRemaining, onSubmit }) {
           role="alert"
           style={{
             background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8,
-            padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 14, lineHeight: 1.45,
+            padding: '10px 12px', fontSize: 16, color: '#9A3412', marginBottom: 14, lineHeight: 1.45,
           }}
         >
           {error}
