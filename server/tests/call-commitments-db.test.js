@@ -389,11 +389,11 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const wrongSeason = new Date(threePm).getUTCHours() === 19 ? '-05:00' : '-04:00';
     await scheduling({ status: 'confirmed', confirmed_start_at: `${day}T15:00:00${wrongSeason}` });
     expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
-    // The promise written with the same wrong offset is an hour off as an
-    // instant, but it is the V2 time's instant: still the 3 PM slot (codex
-    // #5081 r3 P2). An hour off with no shared instant is another time.
+    // A promise whose own time is an hour off names another wall clock —
+    // even one sharing the V2 time's instant (16:00-04:00 vs 15:00-05:00)
+    // could be a different spoken time, so it stays a hint (codex #5081 r6 P1).
     const wrongSeasonDue = new Date(`${day}T15:00:00${wrongSeason}`).toISOString();
-    expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
+    expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
     expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
@@ -430,6 +430,8 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     await lapses(visitTo({ status: 'cancelled' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ status: 'rescheduled' }), visitTo({ status: 'pending' }));
     await lapses(visitTo({ window_start: '16:30' }), visitTo({ window_start: '15:00' }));
+    // Entered once the slot had come: a record of it, not the booking (codex #5081 r6 P2).
+    await lapses(visitTo({ created_at: new Date(Date.parse(threePm) + 60 * 60 * 1000) }), visitTo({ created_at: new Date(Date.now() - 60 * 1000) }));
     // A reprocess rewrote the confirmed slot.
     await lapses(() => scheduling({ status: 'confirmed', confirmed_start_at: parseETDateTime(`${day}T16:00`).toISOString() }), () => scheduling({ status: 'confirmed', confirmed_start_at: threePm }));
     // The office moved the call to another customer.
@@ -443,9 +445,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.refreshFulfillment(db, call.id)).toMatchObject({ reopened: 0 });
     expect((await statusOf()).status).toBe('fulfilled');
     expect(await cc.listSlotKeptCallIds(db)).not.toContain(call.id);
-    // Past its slot by a day, the sweep leaves it.
-    await db('call_commitments').where({ id: kept.id }).update({ human_state: null });
-    expect(await cc.listSlotKeptCallIds(db, new Date(Date.parse(threePm) + 25 * 60 * 60 * 1000))).not.toContain(call.id);
+    // No age cutoff: a relink can come long after the slot (codex #5081 r6 P1).
+    await db('call_commitments').where({ id: kept.id }).update({ human_state: null, due_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
+    expect(await cc.listSlotKeptCallIds(db)).toContain(call.id);
   });
 
   test('a refresh racing a relink never keeps the promise with the previous customer\'s booking (pre-push audit P1 on 23ab49bc0f)', async () => {

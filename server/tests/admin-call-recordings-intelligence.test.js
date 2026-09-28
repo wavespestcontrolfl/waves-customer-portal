@@ -286,6 +286,18 @@ describe('GET /commitments/open — the Owed queue', () => {
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(2);
   });
 
+  test('a refresh that reopened a promise a booking had kept re-lists, so the newly owed row shows (codex #5081 r6 P2)', async () => {
+    const open = [{ id: 'c1', call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: false, fulfillment: null }];
+    const reopened = [...open, { id: 'c2', call_log_id: CALL_ID, kind: 'schedule_visit', status: 'open', overdue: false, fulfillment: null }];
+    commitments.listOpenCommitments.mockResolvedValueOnce(open).mockResolvedValueOnce(reopened);
+    commitments.refreshFulfillment.mockResolvedValueOnce({ checked: 2, fulfilled: 0, hinted: 0, cleared: 0, reopened: 1 });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open`);
+      expect((await res.json()).commitments).toEqual(reopened);
+    });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(2);
+  });
+
   test('gate off: rows already recorded are still listed, but no fulfillment refresh runs (nothing is written)', async () => {
     isEnabled.mockReturnValue(false);
     const open = [{ id: 'c1', call_log_id: CALL_ID, kind: 'callback', status: 'open', overdue: true }];

@@ -127,7 +127,7 @@ test('a call holding a promise kept by a booking for its promised slot is refres
   listSlotKeptCallIds.mockResolvedValueOnce(['call-kept']);
   refreshFulfillment.mockResolvedValueOnce({ fulfilled: 0, reopened: 1 });
   const out = await runCallCommitmentsWatchdog({ now: NOW });
-  expect(listSlotKeptCallIds).toHaveBeenCalledWith(expect.anything(), NOW);
+  expect(listSlotKeptCallIds).toHaveBeenCalledWith(expect.anything());
   expect(refreshFulfillment).toHaveBeenCalledWith(expect.anything(), 'call-kept');
   expect(listOpenCommitments).toHaveBeenCalledTimes(2);
   expect(out).toMatchObject({ overdue: 1 });
