@@ -674,4 +674,52 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
     expect(alertAfter.resolved_at).not.toBeNull();
     expect(alertAfter.resolved_action).toBe('extend');
   });
+  async function linkedPair() {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+    return { lawnParent, pestParent };
+  }
+
+  const snapshot = async (parentId) => (await seriesRows(parentId))
+    .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+
+  test.each([
+    ['customer_churned', { pipeline_stage: 'churned' }],
+    ['customer_inactive', { active: false }],
+    ['customer_deleted', { deleted_at: new Date() }],
+    ['customer_service_held', { service_paused_at: new Date(), service_pause_reason: 'owner_hold' }],
+  ])('an ineligible customer (%s) skips the sync and writes nothing', async (reason, patch) => {
+    const { pestParent } = await linkedPair();
+    await trx('customers').where({ id: customerId }).update(patch);
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBe(reason);
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
+  test('a series that rides itself is refused (self_link), nothing written', async () => {
+    const { pestParent } = await linkedPair();
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: pestParent.id });
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBe('self_link');
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
+
+  test('a host that itself rides another series is refused (host_is_rider), so links never chain or cycle', async () => {
+    const { lawnParent, pestParent } = await linkedPair();
+    await trx('scheduled_services').where({ id: lawnParent.id }).update({ rides_parent_id: pestParent.id });
+    const before = await snapshot(pestParent.id);
+    const { syncRiderSeries } = require('../services/rider-series');
+    const result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    expect(result.skipped).toBe('host_is_rider');
+    expect(await snapshot(pestParent.id)).toEqual(before);
+  });
 });

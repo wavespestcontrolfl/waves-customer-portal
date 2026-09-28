@@ -312,6 +312,10 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     const riderParentPeek = await trx('scheduled_services').where({ id: riderParentId }).first();
     if (!riderParentPeek || !riderParentPeek.rides_parent_id) return { ...empty(), skipped: 'not_a_rider' };
     const hostParentId = riderParentPeek.rides_parent_id;
+    if (String(hostParentId) === String(riderParentId)) {
+      logger.warn(`[rider-series] parent=${riderParentId} rides itself — refusing to sync`);
+      return { ...empty(), skipped: 'self_link' };
+    }
 
     // Non-blocking, in this fixed order — see the module header for why a
     // blocking host-then-rider order is not achievable from every call
@@ -343,9 +347,34 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
       return { ...empty(), skipped: 'cross_customer' };
     }
 
+    // One level only: a host that itself rides another series would chain
+    // (or, pointed back at this rider, cycle) and neither would ever walk on
+    // its own dates. Refuse rather than follow the chain.
+    if (hostParent.rides_parent_id) {
+      logger.warn(`[rider-series] parent=${riderParentId} rides ${hostParentId}, which itself rides ${hostParent.rides_parent_id} — refusing to sync`);
+      return { ...empty(), skipped: 'host_is_rider' };
+    }
+
     if (!(await tryLockCustomerCommsIfKnown(trx, riderParent.customer_id))) {
       return { ...empty(), skipped: 'customer_locked' };
     }
+
+    // Same customer gate as the visit-count top-up: never add or move visits
+    // for a deleted, held, inactive or churned customer. The nightly reconcile
+    // reaches this with no other customer check. FOR SHARE blocks a
+    // concurrent stage save until commit; NOWAIT keeps every wait in this
+    // module non-blocking (a held row skips and the next sync retries).
+    const { SERIES_CUSTOMER_COLUMNS, seriesCustomerSkipReason } = require('./series-customer-eligibility');
+    let customer;
+    try {
+      customer = await trx('customers').where({ id: riderParent.customer_id })
+        .forShare().noWait().first(SERIES_CUSTOMER_COLUMNS);
+    } catch (err) {
+      if (err.code === '55P03') return { ...empty(), skipped: 'customer_row_locked' };
+      throw err;
+    }
+    const customerSkip = seriesCustomerSkipReason(customer);
+    if (customerSkip) return { ...empty(), skipped: customerSkip };
 
     const todayStr = etDateString();
 
