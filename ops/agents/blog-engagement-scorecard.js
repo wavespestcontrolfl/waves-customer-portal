@@ -201,15 +201,27 @@ const TRAFFIC_SOURCE_LABELS = {
   direct: 'Direct/none',
 };
 
+// The labels a Google apex domain's TLD can be made of: a single 2-4 letter
+// TLD (google.com, google.de) or a short second-level label plus a 2-letter
+// country code (google.co.uk, google.com.au). Deliberately generic rather
+// than an exhaustive list of Google's ccTLDs.
+const APEX_TLD_RE = /^[a-z]{2,4}$/;
+const SECOND_LEVEL_TLD_RE = /^(?:co|com|org|net|gov|edu)$/;
+
 /**
  * True for any google.* host — google.com, google.co.uk, news.google.com,
- * etc. — never for a lookalike like notgoogle.com or googleusercontent.com,
- * whose hostname has no label that is exactly "google".
+ * etc. — never for a lookalike like notgoogle.com or googleusercontent.com
+ * (no label is exactly "google"), or google.example.com / google.com.evil.
+ * example (a "google" label with something other than a TLD after it).
  */
 function isGoogleHost(host) {
-  const labels = String(host || '').trim().toLowerCase().split('.');
+  const labels = String(host || '').trim().toLowerCase().split('.').filter(Boolean);
   const i = labels.indexOf('google');
-  return i !== -1 && i < labels.length - 1;
+  if (i === -1) return false;
+  const rest = labels.slice(i + 1);
+  if (rest.length === 1) return APEX_TLD_RE.test(rest[0]);
+  if (rest.length === 2) return SECOND_LEVEL_TLD_RE.test(rest[0]) && /^[a-z]{2}$/.test(rest[1]);
+  return false;
 }
 
 /**

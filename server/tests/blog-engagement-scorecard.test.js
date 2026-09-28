@@ -78,6 +78,9 @@ describe('blog scorecard path classes', () => {
     ['www.bing.com', 'other'],
     ['notgoogle.com', 'other'],
     ['googleusercontent.com', 'other'],
+    ['google.example.com', 'other'],
+    ['google.com.evil.example', 'other'],
+    ['google.evil.example.com', 'other'],
     ['facebook.com.evil.example', 'other'],
     ['fb.me.example.com', 'other'],
   ])('classifies referrer host %s as %s', (host, expected) => {
