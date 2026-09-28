@@ -300,6 +300,8 @@ describe('groundModelCommitments', () => {
     expect(say('2026-07-10T15:00:00')).toMatchObject({ due_local: '2026-07-10T15:00' });
     expect(say('2026-07-10T19:00:00Z')).toMatchObject({ due_local: '2026-07-10T15:00' });
     expect(say('tomorrow-ish')).toMatchObject({ due_at: null, due_local: null });
+    // Shaped like a time but not one: never persisted (the sweep casts it).
+    expect(say('2026-13-45T15:00:00-04:00')).toMatchObject({ due_at: null, due_local: null });
   });
 
   test('a nonempty due_at the parser rejects is not a stated deadline: kept, counted, and its wording rides in due_text (codex gh-r12 P2)', () => {

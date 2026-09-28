@@ -320,7 +320,9 @@ function isoOrNull(value) {
 // or none keeps the written clock; any other offset is converted. due_at
 // keeps the instant; this keeps what was said (persisted as due_local).
 function spokenWallClock(value) {
-  if (value == null || value === '') return null;
+  // Only a time the Eastern parser accepts (never '2026-13-45T…'): the
+  // lapse sweep casts due_local to a timestamp.
+  if (!(parseDueAt(value) instanceof Date)) return null;
   const wall = require('./call-booking-miss-watchdog').confirmedWallClockET(value);
   if (!wall || !/^\d{4}-\d{2}-\d{2}$/.test(wall.dateET) || !Number.isFinite(wall.minutes)) return null;
   const pad = (n) => String(n).padStart(2, '0');
@@ -692,7 +694,7 @@ function groundModelCommitments(items, transcript, reference = null) {
       // the raw wording rides in due_text so the row still says WHEN)
       // rather than persisted as "stated" with no instant (Codex r12 P2).
       due_at: malformedDue ? null : isoOrNull(item.due_at),
-      due_local: malformedDue ? null : spokenWallClock(item.due_at),
+      due_local: spokenWallClock(item.due_at),
       due_basis: !malformedDue && item.due_at ? 'stated' : null,
       due_type: !malformedDue && item.due_at && ['floor', 'deadline'].includes(item.due_type) ? item.due_type : null,
       due_text: item.due_text || (malformedDue ? String(item.due_at).slice(0, 80) : null),
@@ -747,6 +749,11 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
 }
 
 // ── Persistence ────────────────────────────────────────────────────────────
+// The spoken clock rides only with the instant it was spoken for.
+function dueLocalOf(item) {
+  return (item.due_at && item.due_local) || null;
+}
+
 function toRow(callLogId, item, { generation, extractorVersion, recordingSid = null }) {
   return {
     call_log_id: callLogId,
@@ -760,7 +767,7 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     description: String(item.due_text && !item.due_at ? `${item.description || ''} (${item.due_text})` : (item.description || '')).slice(0, 2000),
     channel: CHANNELS.includes(item.channel) ? item.channel : 'unknown',
     due_at: item.due_at ? new Date(item.due_at) : null,
-    due_local: item.due_at && item.due_local ? item.due_local : null,
+    due_local: dueLocalOf(item),
     due_basis: item.due_basis || null,
     due_type: item.due_type || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
