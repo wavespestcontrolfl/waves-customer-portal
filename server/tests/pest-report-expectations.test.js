@@ -229,6 +229,28 @@ describe('buildRainExpectation', () => {
       expect(out.lines[1]).toMatch(/treated band/);
     });
 
+    // codex P1 2026-09-29 (pre-push audit round 3): same collision as the
+    // pyrethroid barrier sentence — "Interior entry points" is a controlled
+    // INTERIOR chip and must never earn the treated-band claim, even though
+    // it contains the substring "entry points".
+    it('the controlled INTERIOR chip "Interior entry points" never earns the treated-band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Demand CS', method: 'spot_treatment', methodInferred: false, applicationArea: 'Interior entry points' }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('an unrecognized / free-text area string never qualifies as exterior (fail closed, no guessing)', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Demand CS', applicationArea: 'Somewhere out back, per the tech\'s note' }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
     it('never guarantees/eliminates in the neutral wording either', () => {
       const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
       expect(out.lines[1]).not.toMatch(/guarantee|eliminat/i);
@@ -417,6 +439,42 @@ describe('buildWhatToExpect', () => {
       expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
     });
 
+    // codex P1 2026-09-29 (pre-push audit round 3): the PRIOR unanchored
+    // "entry points?" regex alternative matched the controlled INTERIOR chip
+    // "Interior entry points" too, since it never anchored on the "Interior"
+    // prefix. A Demand CS application chipped there — with an explicit
+    // interior method (spot_treatment) — must never earn the barrier line.
+    // Area evidence now resolves through an EXACT lookup against the
+    // controlled interior/exterior classification (shared/treatment-area-scopes.json),
+    // never a substring match.
+    it('the controlled INTERIOR chip "Interior entry points" never earns the barrier line, even with the collision-prone substring "entry points"', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Demand CS', method: 'spot_treatment', methodInferred: false, applicationArea: 'Interior entry points' }],
+      });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+
+    // The genuine controlled EXTERIOR chips this predicate exists to
+    // recognize — straight from shared/treatment-area-scopes.json.
+    it.each([
+      'Perimeter',
+      'Foundation',
+      'Foundation perimeter',
+      'Eaves / soffit',
+      'Eaves / soffits',
+      'Exterior perimeter',
+    ])('the real controlled exterior chip %j still earns the barrier line', (applicationArea) => {
+      const out = buildWhatToExpect({ products: [{ name: 'Demand CS', applicationArea }] });
+      expect(out.lines[0]).toMatch(/barrier treatment/);
+    });
+
+    it('an unrecognized / free-text area string never qualifies as exterior (fail closed, no guessing)', () => {
+      const out = buildWhatToExpect({
+        products: [{ name: 'Demand CS', applicationArea: 'Somewhere out back, per the tech\'s note' }],
+      });
+      expect(out.lines[0]).not.toMatch(/barrier|doors and windows/i);
+    });
+
     it('never guarantees/eliminates in either pyrethroid wording', () => {
       const confirmed = buildWhatToExpect({ products: [{ name: 'Demand CS', method: 'perimeter_spray', methodInferred: false }] });
       const unconfirmed = buildWhatToExpect({ products: [{ name: 'Demand CS' }] });
@@ -538,6 +596,35 @@ describe('buildSpiderExpectation', () => {
     expect(out.expectation).toMatch(/residual we applied/i);
     expect(out.expectation).toMatch(/thin out over about two weeks/);
     expect(out.nextStep).toMatch(/come take another look/);
+  });
+
+  it('the OTHER real controlled eave chip, "Eaves / soffits" (plural), also earns the combined wording', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Eaves / soffits' }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs and treated the eaves and entry points where spiders build.');
+  });
+
+  // codex P1 2026-09-29 (pre-push audit round 3): eave/soffit area evidence
+  // resolves by EXACT controlled-chip key, never a substring match. Neither
+  // the controlled INTERIOR chip "Interior entry points" nor an
+  // eave-sounding but uncontrolled free-text string may stand in for the
+  // real "Eaves / soffit(s)" chip(s).
+  it('the controlled INTERIOR chip "Interior entry points" is not eave/soffit evidence (no false residual credit)', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Interior entry points' }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
+  });
+
+  it('an eave-sounding but uncontrolled free-text area does not qualify as eave/soffit evidence', () => {
+    const out = buildSpiderExpectation({
+      actionLabels: EAVE_ACTION,
+      applications: [{ product: { name: 'Onslaught Fastcap' }, targets: ['spiders'], applicationArea: 'Cleaned out the eaves and gutters' }],
+    });
+    expect(out.whatWeDid).toBe('We knocked down webs around the eaves and entry points.');
   });
 
   it('action recorded AND a spider-labeled pyrethroid residual applied, AND the visit separately recorded a genuine (treatmentApplied: true) eave action: combined wording', () => {

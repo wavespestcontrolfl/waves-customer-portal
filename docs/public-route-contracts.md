@@ -111,14 +111,21 @@ rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
 the calendar month alone, and never when there is no rain data at all. That
 second line's WORDING is itself gated (owner ruling 2026-09-28, revised
-codex P1 2026-09-29, P1 audit round 2): "trails ... usually mean the colony
+codex P1 2026-09-29 rounds 2–3): "trails ... usually mean the colony
 is moving through the treated band" is a TREATMENT claim and requires the
 SAME confirmed exterior/perimeter application evidence the `whatToExpect`
 pyrethroid barrier sentence below requires (an explicit, non-inferred
-`perimeter_spray`/`broadcast_spray` method, or an `applicationArea` naming
-an exterior/perimeter chip) on a product whose class is `non_repellent` or
+`perimeter_spray`/`broadcast_spray` method, or an `applicationArea` chip
+that the CONTROLLED classification — `shared/treatment-area-scopes.json`,
+the same source `report-data.js`'s own interior/exterior scope reads —
+places in its `exterior` list, matched by EXACT chip key after a comma
+split and normalization, never a substring/regex match: an earlier
+unanchored `entry points?` alternative matched the controlled INTERIOR
+chip "Interior entry points" too, since it never anchored on the
+"Interior" prefix) on a product whose class is `non_repellent` or
 `pyrethroid` — an ant bait, roach gel, or IGR is never a perimeter band
-either, regardless of where it was placed. No applications at all
+either, regardless of where it was placed. An unrecognized or free-text
+area string never qualifies, fail closed. No applications at all
 (inspection/sweep-only visit), an interior-only application, or unknown
 method/area all fall back to a treatment-neutral sentence (rain pushes ants
 indoors; text us if activity persists) that states the same honest
@@ -170,11 +177,14 @@ knocked down webs around the eaves and entry points.") and an expectation
 that never says "the residual we applied"; (2) the action was recorded AND
 a product tagged for spiders that also classifies `pyrethroid` in the
 explicit map was applied WITH evidence it reached the eaves/soffit area
-(owner ruling 2026-09-28, P1 audit round 2: a spider-targeted pyrethroid
-applied anywhere is not enough — the application's own recorded area names
-eaves/soffit/overhang, or the visit separately recorded a genuine
-`treatmentApplied: true` eave action, never just the sweep-only action
-that gates the section in the first place) → combined wording ("We
+(owner ruling 2026-09-28, P1 audit rounds 2–3: a spider-targeted pyrethroid
+applied anywhere is not enough — the application's own recorded area must
+be the EXACT controlled chip key "Eaves / soffit" or "Eaves / soffits"
+(`shared/treatment-area-scopes.json`; there is no "overhang" chip, so
+nothing else stands in for it — matched by exact key, never a substring),
+or the visit separately recorded a genuine `treatmentApplied: true` eave
+action, never just the sweep-only action that gates the section in the
+first place) → combined wording ("We
 knocked down webs and treated the eaves and entry points where spiders
 build.") with a residual-backed expectation — even here, the eaves-treated
 claim rests on recorded, structured evidence, never on the product tag
@@ -207,11 +217,15 @@ fail closed, never guessed; extending the map to a new product requires an
 owner-verified name, never reintroduced inference. The pyrethroid barrier
 sentence additionally requires structured application evidence (an EXPLICIT
 `method` of `perimeter_spray` / `broadcast_spray`, or an `applicationArea`
-naming an exterior/perimeter chip) that the application was exterior — an
-inferred (not explicitly recorded) method is treated as unknown, never
-assumed exterior; when the method/area is unknown or indicates an interior
-application, the report uses different, non-barrier wording for the SAME
-product class rather than silently asserting the claim. Never a "guarantee"
+chip the controlled classification — `shared/treatment-area-scopes.json`'s
+`exterior` list — places there, matched by EXACT chip key after a comma
+split and normalization, never a substring/regex match, codex P1 2026-09-29
+round 3) that the application was exterior — an inferred (not explicitly
+recorded) method is treated as unknown, never assumed exterior; an
+unrecognized or free-text area string never qualifies either, fail closed;
+when the method/area is unknown or indicates an interior application, the
+report uses different, non-barrier wording for the SAME product class
+rather than silently asserting the claim. Never a "guarantee"
 or "eliminate" claim (screened through the existing `validateCustomerCopy`
 banned-copy guard). The same rain + what-to-expect facts (never the spider
 block, never the live forecast clause) also feed an `EXPECTATIONS` section

@@ -33,6 +33,46 @@ function pestReportExpectationsGateOn() {
   return process.env.GATE_PEST_REPORT_EXPECTATIONS === 'true';
 }
 
+// Controlled treatment-area chip vocabulary (shared/treatment-area-scopes.json
+// — the SAME source report-data.js's own interior/exterior classification
+// reads, `AREA_SCOPE_BY_LABEL`). codex P1 2026-09-29 (pre-push audit round
+// 3): an earlier unanchored substring regex here (`entry points?`) matched
+// the controlled INTERIOR chip "Interior entry points" — a Demand CS
+// application chipped there earned both the exterior barrier sentence and
+// the ants "treated band" claim. Area evidence now resolves through this
+// EXACT, by-key lookup against the controlled classification instead of any
+// substring/regex match, matching the "explicit map, never guessed" posture
+// classifyProductExpectation already uses. An unrecognized or free-text area
+// never qualifies as exterior — fail closed, same as an unmapped product.
+const AREA_SCOPES = require('../../../shared/treatment-area-scopes.json');
+
+function normalizeAreaChipText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+const EXTERIOR_AREA_CHIPS = new Set((AREA_SCOPES.exterior || []).map(normalizeAreaChipText));
+// The eave/soffit chip(s) BY KEY — there is no "overhang" chip in the
+// controlled vocabulary, so nothing else may stand in for it.
+const EAVE_AREA_CHIPS = new Set(['Eaves / soffit', 'Eaves / soffits'].map(normalizeAreaChipText));
+
+// application_area may be a comma-joined multi-area list (report-data.js's
+// matchZoneIds handles the same shape) — split and normalize each part so a
+// legitimate chip is recognized regardless of what else rides alongside it.
+function applicationAreaChips(value) {
+  return String(value || '')
+    .split(',')
+    .map((part) => normalizeAreaChipText(part))
+    .filter(Boolean);
+}
+
+function isExteriorApplicationArea(value) {
+  return applicationAreaChips(value).some((chip) => EXTERIOR_AREA_CHIPS.has(chip));
+}
+
+function isEaveApplicationArea(value) {
+  return applicationAreaChips(value).some((chip) => EAVE_AREA_CHIPS.has(chip));
+}
+
 // SW Florida rainy season (owner framing: "ants spike when the rains come").
 const RAINY_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]); // Jun–Oct
 
@@ -208,10 +248,11 @@ const SPIDER_TARGET_RE = /spider/i;
 // were worked (owner ruling 2026-09-28, P1 audit round 2: a spider-targeted
 // pyrethroid applied ANYWHERE previously earned the residual/treated
 // wording even when the tech only SWEPT the eaves — treatmentApplied:
-// false — while separately spraying somewhere unrelated). Matches the
-// controlled application-area chip vocabulary (shared/treatment-area-scopes.json
-// — "Eaves / soffit(s)"), never free text like technician notes.
-const EAVE_AREA_RE = /\b(eaves?|soffits?|overhang)\b/i;
+// false — while separately spraying somewhere unrelated). isEaveApplicationArea
+// (above) matches the controlled application-area chip vocabulary BY KEY —
+// "Eaves / soffit(s)" only, never free text like technician notes, and never
+// a substring match (codex P1 2026-09-29 round 3: a substring regex here
+// would have the same false-positive class the exterior-barrier regex did).
 
 // Fixed customer wording only — a raw completed protocol-action label is
 // NEVER rendered here; it is used only to decide the action gate above.
@@ -264,7 +305,7 @@ function buildSpiderExpectation({ actionLabels = [], actionEntries = [], applica
   const residualApplied = (applications || []).some((app) => {
     const targeted = Array.isArray(app?.targets) && app.targets.some((t) => SPIDER_TARGET_RE.test(cleanText(t)));
     if (!targeted || classifyProductExpectation(toExpectationProduct(app)) !== 'pyrethroid') return false;
-    const areaEvidence = EAVE_AREA_RE.test(cleanText(app?.applicationArea));
+    const areaEvidence = isEaveApplicationArea(app?.applicationArea);
     return areaEvidence || eaveActionTreated;
   });
 
@@ -366,13 +407,16 @@ const EXPECTATION_PRIORITY = ['non_repellent', 'ant_bait', 'roach_gel_bait', 'py
 // unspecified method to 'perimeter_spray', which is a GUESS, not
 // application evidence, so an inferred method is treated the same as
 // unknown (fail closed, same "explicit map, never guessed" posture as
-// classifyProductExpectation itself).
+// classifyProductExpectation itself). The area side reads
+// isExteriorApplicationArea (module top) — the controlled chip
+// classification BY KEY, never a substring regex (codex P1 2026-09-29
+// round 3: an earlier unanchored "entry points?" alternative matched the
+// controlled INTERIOR chip "Interior entry points").
 const EXTERIOR_METHODS = new Set(['perimeter_spray', 'broadcast_spray']);
-const EXTERIOR_AREA_RE = /\b(perimeter|exterior|foundation|eaves?|soffits?|overhang|lanai|patio|entry points?|fence line|trash area)\b/i;
 
 function hasExteriorApplicationEvidence(product = {}) {
   if (product.methodInferred !== true && EXTERIOR_METHODS.has(String(product.method || ''))) return true;
-  return EXTERIOR_AREA_RE.test(cleanText(product.applicationArea));
+  return isExteriorApplicationArea(product.applicationArea);
 }
 
 function buildWhatToExpect({ products = [] } = {}) {
