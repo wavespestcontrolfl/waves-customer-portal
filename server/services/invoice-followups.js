@@ -700,6 +700,23 @@ async function runPending() {
  * but if one ever were, it has not reached the customer and must not be
  * revived into an active reminder.
  */
+// Has the legacy checker ever contacted the customer about this invoice?
+// Such an invoice carries state the ladder does not model (which tier it
+// delivered, a pending email retry, spacing from that delivery), so the
+// ladder never picks it up on its own; the person settling it can arm a
+// sequence by hand. An unreadable history is not an empty one.
+async function legacyCheckerContacted(invoiceId) {
+  try {
+    const rows = await db('collections_contact_ledger')
+      .where({ source: 'late_payment_checker' })
+      .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoiceId])]);
+    return { contacted: (rows || []).length > 0 };
+  } catch (err) {
+    logger.warn(`[invoice-followups] legacy-history lookup failed for invoice ${invoiceId} — treating as contacted for this run: ${err.message}`);
+    return { contacted: true, unavailable: true };
+  }
+}
+
 async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { reanchorToNow = false } = {}) {
   const rows = await db('invoice_followup_sequences as s')
     .join('invoices as i', 's.invoice_id', 'i.id')
@@ -712,10 +729,11 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
     .select(
-      's.id', 's.step_index', 's.anchor_at', 's.created_at',
+      's.id', 's.invoice_id', 's.step_index', 's.anchor_at', 's.created_at',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
     );
   let revived = 0;
+  const leftForAPerson = [];
   for (const row of rows) {
     try {
       const anchorAt = reanchorToNow ? new Date() : sequenceAnchor(row);
@@ -725,15 +743,36 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
         updated_at: db.fn.now(), status: 'active', next_touch_at: nextAt,
         ...(reanchorToNow ? { anchor_at: anchorAt } : {}),
       };
-      const updated = await db('invoice_followup_sequences')
-        .where({ id: row.id, status: 'completed', step_index: row.step_index })
-        .update(patch);
-      revived += Number(updated) || 0;
+      const guard = { id: row.id, status: 'completed', step_index: row.step_index };
+      if (!reanchorToNow) {
+        revived += Number(await db('invoice_followup_sequences').where(guard).update(patch)) || 0;
+        continue;
+      }
+      // Reopened-invoice revival (re-anchored to now, so it WILL send): an
+      // invoice the legacy checker already contacted may have had its 60- and
+      // 90-day tiers, and re-dunning it from Day 10 would follow a final
+      // notice with five more reminders (Fable review of #5198) — left for a
+      // person. And the invoice is re-read under its row lock so a payment
+      // that settled it between the select and this update cannot leave an
+      // active sequence on a paid invoice (Codex #5198 r1).
+      if ((await legacyCheckerContacted(row.invoice_id)).contacted) {
+        leftForAPerson.push(row.invoice_id);
+        continue;
+      }
+      revived += await db.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: row.invoice_id }).forUpdate().first('status', 'payer_id', 'scheduled_send_error');
+        if (!invoice || !PUBLISHED_INVOICE_STATUSES.includes(normalizedStatus(invoice)) || invoice.payer_id
+          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 0;
+        return Number(await trx('invoice_followup_sequences').where(guard).update(patch)) || 0;
+      });
     } catch (err) {
       // One row's failure must never abort the whole revival pass (Fable
       // pre-push P2 E) — the next run re-selects it fresh.
       logger.error(`[invoice-followups] revival failed for sequence ${row.id}: ${err.message}`);
     }
+  }
+  if (leftForAPerson.length) {
+    logger.info(`[invoice-followups] reopened invoice(s) with legacy checker history left for a person to settle: ${leftForAPerson.join(', ')}`);
   }
   return revived;
 }

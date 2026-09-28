@@ -47,13 +47,13 @@ afterEach(() => {
 // Each `invoice_followup_sequences as s` read is answered in order: the
 // ladder's Day 60/90 revival read, then the reopened-invoice revival read,
 // then the send batch.
-function setupDb({ joinedReads = [] }) {
+function setupDb({ joinedReads = [], invoiceAtLock = { status: 'overdue', payer_id: null, scheduled_send_error: null }, legacyLedgerRows = [] }) {
   const reads = [...joinedReads];
   const joined = [];
   const seqUpdates = [];
+  const lockReads = [];
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
-  db.transaction = jest.fn(async () => {});
-  db.mockImplementation((table) => {
+  const route = (table) => {
     if (table === 'invoice_followup_sequences as s') {
       const rows = reads.shift() || [];
       const q = { wheres: [] };
@@ -70,9 +70,23 @@ function setupDb({ joinedReads = [] }) {
       q.update = jest.fn(async (patch) => { seqUpdates.push({ wheres: q.wheres, patch }); return 1; });
       return q;
     }
+    if (table === 'invoices') {
+      const q = { where: jest.fn(() => q), forUpdate: jest.fn(() => q) };
+      q.first = jest.fn(async () => { lockReads.push(true); return invoiceAtLock; });
+      return q;
+    }
+    if (table === 'collections_contact_ledger') {
+      const q = { where: jest.fn(() => q), whereRaw: jest.fn(() => q) };
+      q.then = (resolve, reject) => Promise.resolve(legacyLedgerRows).then(resolve, reject);
+      return q;
+    }
     throw new Error(`unexpected table in test: ${table}`);
-  });
-  return { joined, seqUpdates };
+  };
+  db.mockImplementation(route);
+  // The reopened revival re-reads the invoice under its row lock inside a
+  // transaction; the same recorder answers through the trx handle.
+  db.transaction = jest.fn(async (fn) => fn(route));
+  return { joined, seqUpdates, lockReads };
 }
 
 const finished = (overrides = {}) => ({
@@ -98,13 +112,14 @@ describe('reopened-invoice revival once the legacy checker retires', () => {
   test('both gates on: a sequence completed at a low step (paid early, sent long ago) on a reopened invoice resumes at that step, RE-ANCHORED to now, without sending', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
-    const { joined, seqUpdates } = setupDb({ joinedReads: [[], [finished()], []] });
+    const { joined, seqUpdates, lockReads } = setupDb({ joinedReads: [[], [finished()], []] });
     const result = await runPending();
     // ladder revival [4,6), then the reopened revival [0,4), then the batch
     expect(joined[1].wheres).toEqual(expect.arrayContaining([
       ['s.status', 'completed'], ['s.step_index', '>=', 0], ['s.step_index', '<', 4],
     ]));
     expect(joined[1].whereIn).toHaveBeenCalledWith('i.status', ['sent', 'viewed', 'overdue']);
+    expect(lockReads).toHaveLength(1); // the invoice was re-read under its lock
     expect(seqUpdates).toHaveLength(1);
     expect(seqUpdates[0].wheres).toEqual([[{ id: 'seq-reopened', status: 'completed', step_index: 1 }]]);
     // Re-anchored to NOW: step 1 (Day 10 on the ladder) lands 10 days after the reopen,
@@ -119,5 +134,31 @@ describe('reopened-invoice revival once the legacy checker retires', () => {
     const { seqUpdates } = setupDb({ joinedReads: [[], [], []] });
     await runPending();
     expect(seqUpdates).toHaveLength(0);
+  });
+
+  test('a payment that settled the invoice between the select and the update leaves the sequence completed', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    const { seqUpdates, lockReads } = setupDb({
+      joinedReads: [[], [finished()], []],
+      invoiceAtLock: { status: 'paid', payer_id: null, scheduled_send_error: null },
+    });
+    await runPending();
+    expect(lockReads).toHaveLength(1);
+    expect(seqUpdates).toHaveLength(0);
+  });
+
+  test('a reopened invoice the legacy checker already contacted is never revived: left for a person, logged', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    const logger = require('../services/logger');
+    const { seqUpdates, lockReads } = setupDb({
+      joinedReads: [[], [finished()], []],
+      legacyLedgerRows: [{ idempotency_key: 'late_payment_checker:inv-1:90:sms', invoice_ids: ['inv-1'] }],
+    });
+    await runPending();
+    expect(lockReads).toHaveLength(0);
+    expect(seqUpdates).toHaveLength(0);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('reopened invoice(s) with legacy checker history left for a person to settle: inv-1'));
   });
 });
