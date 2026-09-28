@@ -1549,10 +1549,17 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
   }
+  // guard_slot_ms feeds the move guard only. A notice that quotes no window
+  // (a windowless reschedule: "at a time we'll confirm") still needs the
+  // slot check, but must not RECORD its bookkeeping 08:00 as
+  // rendered_slot_ms — the no-show detector reads that key as the window
+  // the customer was promised.
+  const { guard_slot_ms: guardSlotMs, ...recordedMeta } = metaExtra;
+  const renderedSlotMs = Number.isFinite(metaExtra.rendered_slot_ms) ? metaExtra.rendered_slot_ms : guardSlotMs;
 
   const appSelected = await require('./messaging/push-channel-routing').wantsAppFirst({
     to: phone, channel: 'sms', audience: 'customer', customerId, purpose, operatorInitiated,
-    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
+    metadata: { original_message_type: messageType, ...recordedMeta, useCustomerChannel: true },
   });
   if (!appSelected && await isLandline(customerId, phone)) {
     return false;
@@ -1602,7 +1609,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // route through the handler — never defaulted true, and cron/
     // customer-driven callers leave it false so they stay fenced.
     ...(operatorInitiated === true ? { operatorInitiated: true } : {}),
-    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
+    metadata: { original_message_type: messageType, ...recordedMeta, useCustomerChannel: true },
     // Canonical visit linkage for the audit row (messaging_audit_log.
     // appointment_id) — sms_log metadata does NOT survive the provider
     // handoff (twilio-sms.js forwards an allowlist), so the audit record is
@@ -1610,7 +1617,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
     // ABA guard input (codex r39): the slot this body was rendered against,
     // verified live at both canonical move-hold checkpoints.
-    ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
+    ...(Number.isFinite(renderedSlotMs) ? { renderedSlotMs } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran. (The
@@ -4304,7 +4311,12 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: newApptTime.getTime() }, { sendOutcome: rescheduleNoticeOutcome });
+          }, 'appointment_rescheduled', 'appointment_confirmation', {
+            scheduled_service_id: scheduledServiceId,
+            // A windowless notice promised no window: guard the send on the
+            // slot, but record it as an unknown-window promise.
+            ...(resolved?.windowless ? { guard_slot_ms: newApptTime.getTime() } : { rendered_slot_ms: newApptTime.getTime() }),
+          }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -5757,6 +5769,7 @@ AppointmentReminders.handOffToOffice = handOffToOffice;
 AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 
 AppointmentReminders._test = {
+  safeSend,
   maskPhone,
   sanitizeLookupError,
   acceptedMixServiceName,
