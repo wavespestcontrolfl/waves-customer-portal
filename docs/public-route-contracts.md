@@ -143,39 +143,67 @@ predicate feeds the `EXPECTATIONS` grounding section below; that path is
 structurally incapable of proving perimeter evidence (its product list is
 deduped by catalog product, not by application) and so always gets the
 neutral wording, never a stronger claim than the deterministic card itself
-would make with the same missing evidence. A
-PDF/static render of a GEOCODED visit whose week is not both SETTLED
-(`windowClosed === true`) AND POPULATED (`rainInches != null`) is
-additionally marked **uncacheable** (codex P0 2026-09-28, refined codex P1
-2026-09-29, same rule as the lawn week-weather freeze above):
-`reports-public.js` sets a top-level `data.pestWeekWeatherUncacheable`
-(sibling of `pestReportV2`, not nested inside it, so it survives even when
-`pestReportV2` itself composes to nothing) whenever the gate is on, the
-render is non-live, coordinates exist (a fetch was attempted at all —
-`fetchPestWeekWeatherSafe` returns a bare `null` ONLY for "no coordinates",
-never for a fetch that ran and failed), and the result is not both settled
-and populated — an open window, a provider outage disguised as a "settled"
-empty reading (`fetchServiceWeekWeather`'s own fallback can legitimately
-return `{ rainInches: null, windowClosed: true }` for a geocoded property
-when every source misses), an unexpected fetch exception, and a fetch that
-did not settle within ~1200ms (codex P2 2026-09-29 round 2: a direct,
-unbounded await here could hold every live pest report render up to ~7s on
-a cold cache or provider outage — `fetchPestWeekWeatherSafe` now races the
-lookup the same way `fetchPestRainForecastHeavySafe` already bounds its own
-NWS call, and a timeout returns the SAME `{ unavailable: true }` sentinel
-an exception does; the in-flight lookup keeps running and still warms
-`fetchServiceWeekWeather`'s own cache for the next request) are ALL treated
-as not-yet-cacheable (the sentinel, never folded into the same `null` "no
-coordinates" uses), since a retry can recover any of them and the render
-only shows "no rain block" because the data is missing, not because none
-exists. "No coordinates" is the one
-legitimate, permanently-cacheable absence. Both PDF cache-decision sites
-(the direct `/:token` route and the queued renderer in `pdf-queue.js`, via
-the shared `pestWeekWeatherUncacheableForPdf` in `pest-report-v2.js`, which
-applies the identical settled+populated rule) skip storing under the stable
-`-pex1` key when the marker is set, so a later render — once the window
-closes or the provider recovers — is what gets cached, not a permanent "no
-rain block" copy. This flag rides the JSON payload the same way
+would make with the same missing evidence. The pest week's rain reading is
+**FROZEN AT FIRST RENDER** (codex P0 2026-09-28, refined codex P1
+2026-09-29 rounds 3–4 — the SAME pin the lawn water balance above uses,
+for the identical reason): `report-data.js`'s `resolvePestWeekWeather` /
+`resolvePestWeekWeatherForBuild`, called from INSIDE `buildReportV1Data`
+itself, is the ONE canonical resolution every caller shares — the direct
+PDF route's pre-render pass, `pdf-queue.js`'s pre-render pass, AND the
+browser's own independent live `/data` fetch all call `buildReportV1Data`.
+The first successful render freezes the settled week onto
+`service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
+atomic conditional UPDATE guarded on the key's absence — no preceding
+read, exactly like the lawn freeze); every later reader — a pre-render
+preflight OR a live view, in either order — replays the SAME persisted
+value. This is what makes `pestWeekWeatherUncacheable` sound: an earlier
+design fetched the week INDEPENDENTLY in each of the three call sites (a
+preflight racing its own short deadline in one process invocation cannot
+know what the browser's own fetch, in a SEPARATE request, will resolve
+moments later — a successful preflight followed by a browser-side timeout
+would cache a PDF that disagrees with what the browser actually rendered);
+the pin removes that divergence entirely, since there is no longer a
+separate fetch anywhere to disagree with the render.
+`pestWeekWeatherUncacheable` is a public, top-level boolean
+`report-data.js` attaches directly to the object `buildReportV1Data`
+returns (sibling of `pestReportV2`, which is composed later in
+`reports-public.js`'s wrapper — so the marker survives even when
+`pestReportV2` itself composes to nothing), TRUE whenever the gate is on,
+coordinates exist (a fetch was attempted at all — no coordinates is the
+one legitimate, permanently-cacheable absence, and never fetches), and the
+result is not both SETTLED (`windowClosed === true`) AND POPULATED
+(`rainInches != null`) AND successfully FROZEN — an open window, a
+provider outage disguised as a "settled" empty reading
+(`fetchServiceWeekWeather`'s own fallback can legitimately return
+`{ rainInches: null, windowClosed: true }` for a geocoded property when
+every source misses), an unexpected fetch exception, and a freeze write
+that could not be persisted (or read back) are all treated alike — never
+cacheable, since a retry (of the freeze, or simply the window closing) can
+recover any of them and the render only shows "no rain block" because the
+data is missing, not because none exists. The raw provider numbers
+(`rainInches`, `dailyRain`, ...) that feed `expectations.rain` are
+server-internal only, carried from `buildReportV1Data` to the caller
+solely through the same opt-in `expectationFactsOut` out-param
+`moa_group`/`rainfast_minutes` already use — never attached to the object
+the function returns, so nothing beyond the boolean marker and the
+customer-facing `rain.lines` sentence documented above reaches the public
+payload. **LIVE requests only** are additionally bounded to a short
+(~1200ms) deadline on the resolver call — `resolvePestWeekWeatherForBuild`
+— so a slow provider never holds a customer's page load; on a timeout the
+request gets the SAME `{ unavailable: true }` sentinel a fetch exception
+produces, and the underlying resolution keeps running in the background
+(never cancelled) and still freezes the real answer once it settles — the
+timed-out request is never itself the one writing a freeze, so it can
+never persist a wrong or partial answer. A background PDF/static
+pre-render pass (the direct route or `pdf-queue.js`) is not a live UX
+concern and stays UNBOUNDED, matching the lawn water balance's own
+equivalent fetch exactly (no deadline there either). Both PDF
+cache-decision sites (the direct `/:token` route and the queued renderer
+in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
+object `buildReportV1Data` returns and skip storing under the stable
+`-pex1` key when it is set, so a later render — once the window closes or
+the provider recovers — is what gets cached, not a permanent "no rain
+block" copy. This flag rides the JSON payload the same way
 `lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
 cache-eligibility marker, not visit data.
 `spiders: { headline, whatWeDid, expectation, nextStep }` — a fixed,

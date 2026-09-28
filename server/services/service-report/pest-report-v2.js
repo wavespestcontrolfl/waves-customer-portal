@@ -405,78 +405,19 @@ function pestReportV2PdfSignature(service = {}) {
   return `-pestv2c${tonSuffix}${pexSuffix}`;
 }
 
-// Best-effort week-weather fetch — mirrors reports-public.js's own
-// fetchPestWeekWeatherSafe (same return contract: a bare `null` means ONLY
-// "no coordinates" — a permanent, legitimately-cacheable absence; a
-// geocoded property ALWAYS gets the fetch's own result object back, even
-// its empty/failed shape, and an unexpected throw becomes an explicit
-// `{ rainInches: null, windowClosed: false, unavailable: true }` sentinel
-// rather than being folded into the same `null` "no coordinates" uses —
-// codex P1 2026-09-29 pre-push audit: conflating the two let a transient
-// provider outage look identical to "nothing to fetch" here, so
-// pestWeekWeatherUncacheableForPdf below could not tell them apart either).
-// Kept here too (rather than re-implemented ad hoc) so pdf-queue.js's
-// queued renderer — which never composes pestReportV2 itself; the actual
-// PDF bytes come from a real HTTP round-trip to the report page fetching
-// its own /data — can still learn the SAME settledness fact the served
-// render will use.
-async function fetchPestWeekWeatherForCache(service) {
-  const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
-  const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
-  const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
-  if (lat == null || lng == null) return null;
-  try {
-    return await fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date });
-  } catch {
-    return { rainInches: null, windowClosed: false, unavailable: true };
-  }
-}
-
-// Whether a PDF/static render of this pest-line record must be treated as
-// UNCACHEABLE because the rain block's trailing 7-day window is still open
-// (codex P0 2026-09-28 — same rule as the lawn week-weather freeze in
-// report-data.js: a render whose week is not yet SETTLED is not
-// reproducible, so a durably cached copy would keep serving the "no rain
-// block" bytes forever even after the window closes and a later render
-// would include it). LIVE view is never uncacheable this way — mode ===
-// 'live' always returns false, since only a durably cached PDF/static
-// render is the risk this guards.
-//
-// Callable directly by BOTH PDF cache-decision sites: reports-public.js's
-// direct PDF route (through buildServiceReportV1ResponseData, which
-// composes pestReportV2 itself and already has a fetched week to check —
-// see reports-public.js's own pestWeekWeatherUncacheable) and
-// pdf-queue.js's queued renderer, which calls buildReportV1Data directly
-// and never composes pestReportV2 at all — this function is the ONLY
-// channel that render has to the same fact. Best-effort / fail-open
-// (false): a weather hiccup must never block a PDF render, only widen its
-// cache eligibility back to the pre-fix behavior — no worse than before
-// this close.
-async function pestWeekWeatherUncacheableForPdf(service = {}, { mode } = {}) {
-  if (mode === 'live' || process.env.PEST_REPORT_V2 !== 'true' || !pestReportExpectationsGateOn()) {
-    return false;
-  }
-  const serviceLine = service.service_line || detectServiceLine(service.service_type);
-  if (serviceLine !== 'pest') return false;
-  // Same cockroach-family exclusion pestReportV2PdfSignature uses above —
-  // those typed reports never compose the V2 dashboard/expectations at all,
-  // so their rain window is never at risk of being baked into a cache key.
-  try {
-    const parsed = typeof service.service_data === 'string'
-      ? JSON.parse(service.service_data)
-      : service.service_data;
-    if (isCockroachTypedReportType(parsed?.typedReportSnapshot?.type)) return false;
-  } catch { /* fall through — an unparsable snapshot is not a cockroach report */ }
-  const weekWeather = await fetchPestWeekWeatherForCache(service);
-  // Same rule reports-public.js's own pestWeekWeatherUncacheable applies
-  // (codex P1 2026-09-29): `null` means ONLY "no coordinates" — a
-  // permanent, cacheable absence. Any other result (a fetch was attempted)
-  // is uncacheable unless it is BOTH settled (windowClosed === true) AND
-  // populated (rainInches != null) — `windowClosed` alone can't tell a
-  // genuine settled reading from a provider failure disguised as one.
-  return weekWeather !== null
-    && !(weekWeather.rainInches != null && weekWeather.windowClosed === true);
-}
+// codex P1 2026-09-29 round 3: pestWeekWeatherUncacheableForPdf (and its
+// own fetchPestWeekWeatherForCache) used to live here as a SEPARATE
+// preflight fetch so pdf-queue.js's queued renderer — which never composes
+// pestReportV2 itself — could learn the pest week's settledness without
+// composing the whole dashboard. That preflight was itself the bug: it was
+// a second, independent fetch that could disagree with whatever the
+// browser's own live /data request resolved moments later (two separate
+// process invocations racing the same provider). Removed — pdf-queue.js's
+// call to buildReportV1Data now carries `pestWeekWeatherUncacheable`
+// directly on the returned object (report-data.js's resolvePestWeekWeather
+// / resolvePestWeekWeatherForBuild, the ONE canonical fetch+freeze every
+// caller of buildReportV1Data shares), so there is nothing left for this
+// module to fetch on pdf-queue.js's behalf.
 
 module.exports = {
   buildPestReportV2,
@@ -484,7 +425,6 @@ module.exports = {
   pestReportV2PdfSignature,
   pestTraceOrNothingGateOn,
   pestReportExpectationsGateOn,
-  pestWeekWeatherUncacheableForPdf,
   isCockroachTypedReportType,
   // exported for tests
   stripZoneLetter,

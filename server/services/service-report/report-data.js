@@ -26,6 +26,7 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -2662,6 +2663,149 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
+// Pest week-weather — the SAME freeze pattern as the lawn water balance
+// immediately above, and for the identical reason (codex P1 2026-09-29
+// round 3, pre-push audit): the pre-render pass (direct PDF route /
+// pdf-queue) and the browser's own independent live /data fetch are TWO
+// SEPARATE invocations of buildReportV1Data — a preflight fetch racing a
+// short deadline in one process cannot know what the browser's own fetch,
+// in a DIFFERENT request, will see (a successful preflight followed by a
+// browser-side timeout would cache a PDF that disagrees with what the
+// browser actually rendered). Freezing the settled answer here — first
+// successful render wins, every later reader (preflight OR live view)
+// replays the SAME persisted value — removes the divergence entirely:
+// there is no separate preflight fetch to disagree with the render,
+// because both paths call buildReportV1Data and both read/write the
+// identical pin. No per-assessment map needed (unlike lawn, which can
+// hold several assessments per customer) — a pest service_record IS its
+// own single visit, so the guard is simply the key's absence.
+function storedPestWeekFor(structuredNotes) {
+  const entry = parseJsonObject(structuredNotes).pestWeekWeather;
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+async function freezePestWeekWeather(serviceRecordId, weekWeather, knex = db) {
+  if (!serviceRecordId || !weekWeather) return null;
+  try {
+    const updated = await knex('service_records')
+      .where({ id: serviceRecordId })
+      // First writer wins — the guard is this key's absence, in the
+      // predicate, with no preceding read (same shape as the lawn freeze).
+      .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'pestWeekWeather' IS NULL")
+      .update({
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('pestWeekWeather', ?::jsonb)",
+          [JSON.stringify(weekWeather)],
+        ),
+      });
+    if (updated > 0) return weekWeather;
+    // Lost the race: adopt what the winner stored so both renders agree.
+    const row = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('structured_notes');
+    return storedPestWeekFor(row?.structured_notes);
+  } catch (err) {
+    logger.warn(`[report-data] pest week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Resolves (and freezes) the visit's pest week-weather for THIS build —
+// called unconditionally (mode-independent, like the lawn freeze) so the
+// pin settles on whichever render happens first, live or not. Returns
+// { weekWeather, uncacheable }: weekWeather is the raw fetched/frozen
+// object ({ rainInches, et0Inches, dailyRain, rainConfidence, rainSource,
+// windowClosed }) or null (no coordinates, or gate off — a permanent,
+// legitimately-cacheable absence); uncacheable is true whenever a fetch
+// was attempted and the result is not both settled and persisted — an
+// open window, a provider outage, or a freeze that could not be written
+// are all treated alike, matching pestWeekWeatherUncacheable's existing
+// contract (docs/public-route-contracts.md).
+async function resolvePestWeekWeather(service, serviceLine, knex = db) {
+  if (serviceLine !== 'pest' || !pestReportExpectationsGateOn()) {
+    return { weekWeather: null, uncacheable: false };
+  }
+  const stored = storedPestWeekFor(service.structured_notes);
+  if (stored) return { weekWeather: stored, uncacheable: false };
+
+  const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+  const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+  const latN = toCoordinate(latitude);
+  const lonN = toCoordinate(longitude);
+  if (latN == null || lonN == null || (latN === 0 && lonN === 0)) {
+    // No coordinates — nothing to fetch, nothing that will ever change.
+    return { weekWeather: null, uncacheable: false };
+  }
+  try {
+    const fetched = await fetchServiceWeekWeather({ latitude, longitude, serviceDate: service.service_date });
+    if (!fetched.windowClosed) {
+      // Still accumulating — not yet reproducible, so never frozen; the
+      // live page may still show it (mode-based stripping for non-live
+      // renders happens at the caller, same as before this fix).
+      return { weekWeather: fetched, uncacheable: true };
+    }
+    if (fetched.rainInches == null) {
+      // Closed window we DID try to resolve and got nothing for — the
+      // providers were unreachable or incomplete. Never frozen (persisting
+      // the null would lock in "no rainfall known" forever); transient.
+      return { weekWeather: fetched, uncacheable: true };
+    }
+    const canonical = await freezePestWeekWeather(service.id, {
+      rainInches: fetched.rainInches,
+      et0Inches: fetched.et0Inches ?? null,
+      dailyRain: fetched.dailyRain ?? null,
+      rainConfidence: fetched.rainConfidence ?? null,
+      rainSource: fetched.rainSource ?? null,
+      windowClosed: true,
+      frozenAt: new Date().toISOString(),
+    }, knex);
+    if (canonical) return { weekWeather: canonical, uncacheable: false };
+    // Fetched fine but could not persist (or read back) — this output is
+    // not reproducible: a later view may freeze different provider data
+    // while a durably cached PDF kept these numbers forever.
+    return { weekWeather: fetched, uncacheable: true };
+  } catch {
+    // The fetch itself threw — transient by definition, nothing resolved.
+    return { weekWeather: null, uncacheable: true };
+  }
+}
+
+// LIVE requests only: bounded to a short deadline so a slow provider never
+// holds a customer's page load (fetchServiceWeekWeather can cost up to
+// ~7s on a cold cache/outage) — codex P1 2026-09-29 round 4. A background
+// PDF/static pre-render pass (direct route or pdf-queue) is not a live UX
+// concern and stays UNBOUNDED, matching the lawn water balance's own
+// equivalent fetch exactly (no deadline there either).
+//
+// Critically, this does NOT reintroduce the divergence the pin exists to
+// close: the underlying resolvePestWeekWeather call is never cancelled on
+// timeout — it keeps running in the background and, if it eventually
+// settles, still freezes the REAL answer for every later reader. The
+// timed-out caller only ever returns the sentinel to ITS OWN request; it
+// never itself writes a freeze, so a request that hit the deadline can
+// never persist a wrong or partial answer.
+async function resolvePestWeekWeatherForBuild(service, serviceLine, knex, mode) {
+  if (mode !== 'live') return resolvePestWeekWeather(service, serviceLine, knex);
+  const DEADLINE = Symbol('deadline');
+  // Pre-caught so a rejection landing after the deadline already won the
+  // race never surfaces as an unhandled rejection (same shape
+  // getDailyRainOutlookBounded uses for its own in-flight lookup).
+  const lookup = resolvePestWeekWeather(service, serviceLine, knex)
+    .catch(() => ({ weekWeather: null, uncacheable: true }));
+  let timer;
+  const result = await Promise.race([
+    lookup,
+    new Promise((resolve) => { timer = setTimeout(resolve, 1200, DEADLINE); }),
+  ]).finally(() => clearTimeout(timer));
+  if (result === DEADLINE) {
+    return {
+      weekWeather: { rainInches: null, windowClosed: false, unavailable: true },
+      uncacheable: true,
+    };
+  }
+  return result;
+}
+
 async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
@@ -3852,6 +3996,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // function returns — same "server-internal, never on `data`" contract
   // completedProtocolActionLabels uses for raw protocol-action labels.
   // Aligned to `applications` by index (both map 1:1 over `products`).
+  //
+  // pestWeekWeather is resolved (and FROZEN) here too, unconditionally —
+  // codex P1 2026-09-29 round 3: this is the ONE canonical fetch, called
+  // identically by every caller of buildReportV1Data (the direct PDF
+  // route's pre-render pass, pdf-queue.js's pre-render pass, AND the
+  // browser's own independent live /data fetch), so there is no separate
+  // preflight fetch left to disagree with whatever the browser actually
+  // renders — see resolvePestWeekWeather's own comment.
+  const { weekWeather: pestWeekWeather, uncacheable: pestWeekWeatherUncacheable } = await resolvePestWeekWeatherForBuild(service, serviceLine, knex, opts.mode);
   if (opts.expectationFactsOut && typeof opts.expectationFactsOut === 'object') {
     opts.expectationFactsOut.applications = applications.map((app, index) => ({
       id: app.id,
@@ -3862,6 +4015,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       },
       targets: app.targets,
     }));
+    // Raw provider numbers (rainInches, dailyRain, ...) are server-internal
+    // only — same channel as `applications` above, never attached to the
+    // returned object. reports-public.js applies its own mode-based
+    // settling (settledWeekWeatherForRender) to this before it can reach a
+    // non-live render.
+    opts.expectationFactsOut.weekWeather = pestWeekWeather;
   }
   const evidenceLevel = serviceData.evidenceLevel
     || serviceData.evidence_level
@@ -5731,6 +5890,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     protocol,
     advisory,
     lawnAssessment,
+    // Public cache-eligibility marker only (a boolean, no visit data) —
+    // same convention as lawnAssessment.weekWeatherUncacheable. Sibling of
+    // `pestReportV2` (composed later, in reports-public.js's wrapper), not
+    // nested inside it, so it survives even when pestReportV2 itself
+    // composes to nothing. See resolvePestWeekWeather above.
+    pestWeekWeatherUncacheable,
     mowingHeight,
     lawnProgramOverview: lawnCallbackNarrativeOwns ? null : lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
@@ -5870,6 +6035,10 @@ module.exports = {
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,
+  freezePestWeekWeather,
+  storedPestWeekFor,
+  resolvePestWeekWeather,
+  resolvePestWeekWeatherForBuild,
   LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,

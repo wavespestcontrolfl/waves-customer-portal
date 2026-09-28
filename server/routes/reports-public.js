@@ -80,65 +80,35 @@ async function fetchSeasonalForecastSafe(zip) {
 
 // Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS,
 // dark). Best-effort, fail-soft — a weather hiccup must never block the
-// report. weekWeather is the trailing 7-day rainfall at the property
-// (application-conditions.js — the same source the lawn report uses,
-// fetched independently here rather than through the lawn "freeze"
-// machinery: this block is not a permanent water-balance narrative, it's a
-// short deterministic sentence, and application-conditions.js already
-// caches by coordinate+date for 6h).
+// report. weekWeather is the trailing 7-day rainfall at the property.
 //
-// Return contract matters for CACHING (codex P1 2026-09-29, pre-push audit
-// on the P0-A fix): a bare `null` here must mean ONLY "no coordinates" — a
-// permanent, legitimately-cacheable absence (nothing will ever retry a
-// property with no location). A geocoded visit whose PROVIDER fetch failed
-// or threw is a DIFFERENT, transient condition — fetchServiceWeekWeather's
-// own "empty" fallback can legitimately return `{ rainInches: null,
-// windowClosed: true }` for a geocoded property (both Open-Meteo and MRMS
-// missed), which looks identical to a genuinely settled reading unless the
-// caller also checks `rainInches`. Conflating the two here would let a
-// transient provider outage cache a PDF with no rain block under the
-// permanent '-pex1' key, and recovery would never refresh those bytes. So:
-// no coordinates => null; coordinates present => ALWAYS the fetch's own
-// result object, even when it is the empty/failed shape, and an unexpected
-// throw becomes an explicit `{ rainInches: null, windowClosed: false,
-// unavailable: true }` sentinel rather than being swallowed into the same
-// `null` the "no coordinates" case uses. pestWeekWeatherUncacheable below
-// reads `rainInches`/`windowClosed` (and this sentinel) to tell a settled,
-// populated reading from every other, non-cacheable outcome.
-// codex P2 2026-09-29 (round 2): fetchServiceWeekWeather's own cache is
-// keyed by coordinate+date and can cost two live provider fetches (2.5s
-// timeout each) on a cold key or an outage — a direct, unbounded await here
-// could hold every live pest report render up to ~7s. Bounded the same way
-// fetchPestRainForecastHeavySafe already bounds its own NWS lookup below
-// (~1200ms, Promise.race against a deadline): on a slow fetch the caller
-// gets the UNAVAILABLE sentinel now while the in-flight lookup keeps
-// running and warms fetchServiceWeekWeather's own cache for the next
-// request — a deadline is fail-soft on VIEWING (the rain block is simply
-// absent) and correctly fail-closed on CACHING, since the sentinel already
-// marks the render uncacheable (see pestWeekWeatherUncacheable below) so a
-// later, faster render is what gets stored, never a permanent "no rain
-// block" copy baked in by a slow one.
-const PEST_WEEK_WEATHER_DEADLINE_MS = 1200;
-
-async function fetchPestWeekWeatherSafe(service) {
-  const { fetchServiceWeekWeather, toCoordinate } = require('../services/service-report/application-conditions');
-  const lat = toCoordinate(service.customer_latitude ?? service.latitude ?? service.lat);
-  const lng = toCoordinate(service.customer_longitude ?? service.longitude ?? service.lng);
-  if (lat == null || lng == null) return null;
-  const UNAVAILABLE = { rainInches: null, windowClosed: false, unavailable: true };
-  const DEADLINE = Symbol('deadline');
-  // Pre-caught so a rejection landing AFTER the deadline already won the
-  // race never surfaces as an unhandled rejection (same shape
-  // getDailyRainOutlookBounded uses for its own in-flight lookup).
-  const lookup = fetchServiceWeekWeather({ latitude: lat, longitude: lng, serviceDate: service.service_date })
-    .catch(() => null);
-  let timer;
-  const result = await Promise.race([
-    lookup,
-    new Promise((resolve) => { timer = setTimeout(resolve, PEST_WEEK_WEATHER_DEADLINE_MS, DEADLINE); }),
-  ]).finally(() => clearTimeout(timer));
-  return (result === DEADLINE || result == null) ? UNAVAILABLE : result;
-}
+// codex P1 2026-09-29 round 3 (pre-push audit): this used to fetch its own
+// week-weather here, independently of report-data.js's own lawn-style
+// freeze machinery — a SEPARATE preflight fetch from what the browser's
+// own, independent live /data request would resolve. That is exactly the
+// gap the lawn water balance's freeze avoids: the pre-render pass (this
+// route, and pdf-queue.js) and the browser's live fetch are two SEPARATE
+// process invocations, and a preflight racing its own deadline can settle
+// to a different answer than the browser's own fetch does moments later —
+// a successful preflight followed by a browser-side timeout would cache a
+// PDF that disagrees with what the browser actually rendered.
+//
+// Fixed by moving the fetch (and the freeze) into
+// report-data.js's resolvePestWeekWeather /
+// resolvePestWeekWeatherForBuild, called from INSIDE buildReportV1Data —
+// the ONE canonical resolution every caller of buildReportV1Data shares
+// (this route, pdf-queue.js, and the browser's own live /data fetch all
+// call buildReportV1Data). The first successful render freezes the
+// settled week onto service_records.structured_notes.pestWeekWeather
+// (first-writer-wins); every later reader — preflight or live view —
+// replays the SAME persisted value, so there is no separate fetch left to
+// disagree with the render. weekWeather below is read from
+// expectationFactsOut.weekWeather, the server-internal channel
+// buildReportV1Data already populated in the `data = await
+// buildReportV1Data(...)` call above; pestWeekWeatherUncacheable is
+// already on `data` itself (report-data.js attaches it directly, same
+// convention as lawnAssessment.weekWeatherUncacheable) — nothing to
+// recompute here.
 
 // LIVE VIEW ONLY — never called for a PDF/static render (see the call site).
 // True when the NWS forecast (weather-forecast.js — the same source the tech
@@ -613,48 +583,26 @@ async function buildServiceReportV1ResponseData(service, token, {
       // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
       // mutable-content rule): a non-live render always passes false.
       const expectationsGateOn = pestReportExpectationsGateOn();
-      const [fetchedWeekWeather, forecastHeavyRain] = expectationsGateOn
-        ? await Promise.all([
-          fetchPestWeekWeatherSafe(service),
-          mode === 'live' ? fetchPestRainForecastHeavySafe(service) : Promise.resolve(false),
-        ])
-        : [null, false];
+      const forecastHeavyRain = expectationsGateOn && mode === 'live'
+        ? await fetchPestRainForecastHeavySafe(service)
+        : false;
+      // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
+      // it comes from expectationFactsOut.weekWeather, the SAME
+      // pinned/frozen value report-data.js's buildReportV1Data already
+      // resolved for THIS invocation (via resolvePestWeekWeather /
+      // resolvePestWeekWeatherForBuild, called above in the
+      // `data = await buildReportV1Data(...)` at the top of this function).
+      // See this block's header comment for why a separate preflight fetch
+      // here was the bug.
       // PDF/static: an unsettled (still-accumulating) week never reaches the
       // rain block — see settledWeekWeatherForRender. Live keeps whatever
-      // fetchPestWeekWeatherSafe returned, settled or not.
-      const weekWeather = settledWeekWeatherForRender(fetchedWeekWeather, mode);
-      // Same rule as the lawn week-weather freeze (report-data.js's
-      // weekWeatherUncacheable): a non-live render whose 7-day window is
-      // still OPEN dropped its rain fact above (settledWeekWeatherForRender),
-      // but that alone is not reproducible — the window closes on its own
-      // clock, so a later view would freeze a different (settled) answer
-      // while a durably cached PDF keeps serving the "no rain block" bytes
-      // forever. Mark it so the direct PDF route and the queued renderer
-      // (pdf-queue.js) both skip storing, exactly like the lawn precedent.
-      //
-      // codex P1 2026-09-29 (pre-push audit on the P0-A fix): `windowClosed`
-      // ALONE is not enough. fetchServiceWeekWeather's own "empty" fallback
-      // returns `{ rainInches: null, windowClosed: true }` for a GEOCODED
-      // property when the provider fetch genuinely failed (both Open-Meteo
-      // and MRMS missed) — that reads exactly like a settled reading unless
-      // rainInches is also checked, and a failure IS transient (a retry can
-      // recover it, unlike a merely-open window that only elapsed time
-      // resolves). So: uncacheable whenever a fetch was attempted (had
-      // coordinates — fetchedWeekWeather !== null; `null` means ONLY "no
-      // coordinates", see fetchPestWeekWeatherSafe) AND the result is not
-      // BOTH settled (windowClosed === true) AND populated
-      // (rainInches != null). "No coordinates" is the one legitimate,
-      // permanently-cacheable absence — nothing will ever retry it.
-      const pestWeekWeatherUncacheable = expectationsGateOn
-        && mode !== 'live'
-        && fetchedWeekWeather !== null
-        && !(fetchedWeekWeather.rainInches != null && fetchedWeekWeather.windowClosed === true);
-      // Set unconditionally (even if buildPestReportV2 below returns null
-      // because nothing else is meaningful to show) so the cache-decision
-      // sites in reports-public.js and pdf-queue.js always see it — a
-      // pestReportV2-nested flag would silently disappear on exactly the
-      // early-return path that drops the rain block's own content.
-      data.pestWeekWeatherUncacheable = pestWeekWeatherUncacheable;
+      // was resolved, settled or not.
+      const weekWeather = settledWeekWeatherForRender(expectationFactsOut.weekWeather ?? null, mode);
+      // pestWeekWeatherUncacheable is already on `data` — report-data.js
+      // attaches it directly (same convention as
+      // lawnAssessment.weekWeatherUncacheable), from the SAME
+      // resolvePestWeekWeather* call that produced weekWeather above, so it
+      // can never disagree with what this render actually used.
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -2751,5 +2699,4 @@ module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
 module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
-module.exports.fetchPestWeekWeatherSafe = fetchPestWeekWeatherSafe;
 module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;

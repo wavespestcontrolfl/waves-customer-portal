@@ -20,7 +20,7 @@ const {
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
-const { pestReportV2PdfSignature, pestWeekWeatherUncacheableForPdf } = require('./pest-report-v2');
+const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('./reservice-report');
@@ -259,10 +259,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
     attachTermiteReportV2(data, service);
     attachCockroachReportV2(data, service);
     // This path never composes pestReportV2 itself (the actual bytes come
-    // from the browser's own /data fetch below), so it has no other way to
-    // learn whether the pest rain block's 7-day window is still open — see
-    // pestWeekWeatherUncacheableForPdf's own comment (codex P0 2026-09-28).
-    data.pestWeekWeatherUncacheable = await pestWeekWeatherUncacheableForPdf(service, { mode: 'static' });
+    // from the browser's own /data fetch below) — but `data` already
+    // carries `pestWeekWeatherUncacheable` straight from buildReportV1Data
+    // above (codex P1 2026-09-29 round 3: report-data.js's
+    // resolvePestWeekWeather / resolvePestWeekWeatherForBuild is the ONE
+    // canonical fetch+freeze every caller of buildReportV1Data shares — no
+    // separate preflight fetch left here to disagree with the render).
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
