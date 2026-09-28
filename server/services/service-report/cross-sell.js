@@ -695,7 +695,7 @@ async function resolveReportCrossSellV2({ service, database, ladderEvidence, pla
     if (signal.heavyMosquito && notOwned('mosquito')) {
       return {
         targetKey: 'mosquito',
-        reason: 'You mentioned heavy mosquito pressure today — our mosquito program treats the yard through peak season.',
+        reason: 'We noted heavy mosquito activity today — our mosquito program treats the yard through peak season.',
       };
     }
   }
