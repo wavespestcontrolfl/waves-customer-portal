@@ -7,7 +7,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true }, isEnabled: jest.fn(() => false), stampedZeroFreeLive: jest.fn(() => false) }));
 jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeObligation: jest.fn(async () => ({ owed: false })) }));
 jest.mock('../services/estimate-card-holds', () => ({ isCardHoldEnabled: jest.fn(() => true) }));
 
