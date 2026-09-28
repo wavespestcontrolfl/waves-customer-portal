@@ -295,13 +295,39 @@ describe('candidateFromRow', () => {
 });
 
 describe('candidateFromAutonomousRun', () => {
-  test('uses stored draft and brief signals for a fleet URL', () => {
+  // Fields arrive pre-projected from SQL (Codex #4984 r6+ P2: never load the
+  // full draft_payload JSONB blob for every historical run) — not a nested
+  // draft_payload/frontmatter object.
+  test('uses projected frontmatter and brief signals for a fleet URL', () => {
     expect(candidateFromAutonomousRun({
       id: 'run-1',
       published_url: 'https://www.wavespestcontrol.com/termite/autonomous-post/',
       brief_service: 'termite',
-      draft_payload: { frontmatter: { title: 'Autonomous Termite Post', primary_keyword: 'termite mud tubes' } },
-    })).toMatchObject({ path: '/termite/autonomous-post/', service: 'termite' });
+      frontmatter_title: 'Autonomous Termite Post',
+      frontmatter_primary_keyword: 'termite mud tubes',
+    })).toMatchObject({
+      path: '/termite/autonomous-post/',
+      service: 'termite',
+      title: 'Autonomous Termite Post',
+      keyword: 'termite mud tubes',
+    });
+  });
+
+  test('falls back to the top-level payload title and brief/frontmatter service/city/category', () => {
+    expect(candidateFromAutonomousRun({
+      id: 'run-2',
+      published_url: 'https://www.wavespestcontrol.com/termite/fallback-post/',
+      payload_title: 'Top-Level Payload Title',
+      frontmatter_first_area: 'Venice',
+      frontmatter_service: 'termite',
+      frontmatter_category: 'termite',
+      brief_city: 'Sarasota',
+    })).toMatchObject({
+      title: 'Top-Level Payload Title',
+      city: 'Venice',
+      service: 'termite',
+      category: 'termite',
+    });
   });
 
   test('rejects an off-fleet absolute URL', () => {
@@ -406,6 +432,11 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       if (table === 'autonomous_runs') return autonomousQuery;
       throw new Error(`unexpected table: ${table}`);
     });
+    // The autonomous-run query projects frontmatter_*/payload_title fields
+    // via db.raw(...) instead of selecting the whole draft_payload column
+    // (Codex #4984 r6+ P2) — a passthrough is enough since these fixtures
+    // supply the already-projected row shape directly.
+    database.raw = jest.fn((sql) => sql);
     database.autonomousQuery = autonomousQuery;
     return database;
   }
@@ -502,9 +533,9 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
 
   test('admits completed autonomous posts only through matching current live registry truth', async () => {
     const autonomousRows = [
-      { id: 'live-run', published_url: 'https://www.wavespestcontrol.com/termite/live-run/', brief_service: 'rodent', draft_payload: { frontmatter: { title: 'Old Rodent Title', primary_keyword: 'old rodent topic' } } },
-      { id: 'stale-run', published_url: 'https://www.wavespestcontrol.com/termite/stale-run/', brief_service: 'termite', draft_payload: { frontmatter: { title: 'Stale Run' } } },
-      { id: 'missing-run', published_url: 'https://www.wavespestcontrol.com/termite/missing-run/', brief_service: 'termite', draft_payload: { frontmatter: { title: 'Missing Run' } } },
+      { id: 'live-run', published_url: 'https://www.wavespestcontrol.com/termite/live-run/', brief_service: 'rodent', frontmatter_title: 'Old Rodent Title', frontmatter_primary_keyword: 'old rodent topic' },
+      { id: 'stale-run', published_url: 'https://www.wavespestcontrol.com/termite/stale-run/', brief_service: 'termite', frontmatter_title: 'Stale Run' },
+      { id: 'missing-run', published_url: 'https://www.wavespestcontrol.com/termite/missing-run/', brief_service: 'termite', frontmatter_title: 'Missing Run' },
     ];
     const baseRegistry = {
       content_type: 'blog', reconciliation_status: 'astro_only', workflow_status: 'published',
@@ -541,6 +572,57 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
       { service: 'termite', domains: ['wavespestcontrol.com'] },
       { database }
     )).resolves.toEqual([]);
+  });
+
+  test('never donates a stale run\'s metadata to an unrelated page that reused its pathname on another domain (Codex #4984 r6+ P2)', async () => {
+    const spoke = 'sarasotaflpestcontrol.com';
+    const path = '/lawn-care/shared-slug/';
+    // A hub run once published at this SAME pathname; the slug was later
+    // reused on a completely different spoke page. Path-only matching would
+    // let the hub run's own keyword (a fallback field the registry lacks)
+    // leak onto the unrelated spoke page.
+    const autonomousRows = [{
+      id: 'hub-old-run', published_url: `https://www.wavespestcontrol.com${path}`,
+      brief_service: 'rodent', frontmatter_primary_keyword: 'old hub rodent topic',
+    }];
+    const registryRows = [{
+      id: 'spoke-registry', canonical_url_normalized: `https://www.${spoke}${path}`,
+      content_type: 'blog', reconciliation_status: 'astro_only', workflow_status: 'published',
+      astro_status: 'present', live_status: 'live', noindex_detected: false,
+      title: 'Current Spoke Lawn Post', target_service: 'lawn',
+      // No target_keyword: the merge loop would otherwise mask the bug by
+      // always overwriting candidate.keyword with the registry's own value.
+      metadata: { frontmatter: { domains: [spoke] } },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'lawn', domains: [spoke] }, { database });
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path, title: 'Current Spoke Lawn Post' });
+    expect(out[0].keyword).not.toBe('old hub rodent topic');
+  });
+
+  test('keeps only the newest completed run for a re-published domain+path before ranking (Codex #4984 r6+ P2)', async () => {
+    const path = '/termite/republished/';
+    const autonomousRows = [
+      { id: 'older-run', published_url: `https://www.wavespestcontrol.com${path}`, brief_service: 'termite', completed_at: '2026-01-01T00:00:00Z', frontmatter_primary_keyword: 'old topic version' },
+      { id: 'newer-run', published_url: `https://www.wavespestcontrol.com${path}`, brief_service: 'termite', completed_at: '2026-06-01T00:00:00Z', frontmatter_primary_keyword: 'new topic version' },
+    ];
+    const registryRows = [{
+      id: 'registry-republished', canonical_url_normalized: path, content_type: 'blog',
+      reconciliation_status: 'astro_only', workflow_status: 'published', astro_status: 'present',
+      live_status: 'live', noindex_detected: false, title: 'Current Registry Title', target_service: 'termite',
+      // No target_keyword: whichever run's keyword survives dedup is the
+      // one that reaches the final candidate — the test signal.
+      metadata: { frontmatter: {} },
+    }];
+    const database = fakeDb({ autonomousRows, registryRows });
+
+    const out = await getRelatedPostsForBrief({ service: 'termite' }, { database });
+
+    expect(out).toHaveLength(1);
+    expect(out[0].keyword).toBe('new topic version');
   });
 
   test('a DB read failure propagates (the caller is responsible for the fallback-to-empty catch)', async () => {
