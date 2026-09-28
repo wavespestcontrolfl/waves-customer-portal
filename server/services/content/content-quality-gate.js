@@ -676,9 +676,21 @@ function checkLocalBusinessServiceSchema(draft) {
 function boxProp(tag, name) {
   const { decodeEntitiesForScan } = require('./content-guardrails')._internals;
   const quoted = attrValue(tag, name);
-  if (quoted !== null && quoted !== undefined) return decodeEntitiesForScan(String(quoted));
+  if (quoted !== null && quoted !== undefined) return decodeRenderedText(decodeEntitiesForScan(String(quoted)));
   const m = String(tag).match(new RegExp(`\\b${name}\\s*=\\s*\\{\\s*(["'\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1\\s*\\}`));
-  return m ? decodeJsStringEscapes(m[2]) : '';
+  return m ? decodeRenderedText(decodeJsStringEscapes(m[2])) : '';
+}
+// decodeEntitiesForScan keeps to a security subset; the box text is also
+// read as it RENDERS: remaining numeric references and the whitespace
+// named references (&nbsp; &ensp; &emsp; &thinsp;) decode, and every
+// Unicode space collapses to a plain space (Codex r6 on #5272).
+const WHITESPACE_ENTITIES = { nbsp: ' ', ensp: ' ', emsp: ' ', thinsp: ' ', numsp: ' ', puncsp: ' ', hairsp: ' ' };
+function decodeRenderedText(text) {
+  return String(text)
+    .replace(/&#x([0-9a-f]+);?/gi, (all, hex) => { const n = parseInt(hex, 16); return n <= 0x10ffff ? String.fromCodePoint(n) : all; })
+    .replace(/&#(\d+);?/g, (all, dec) => { const n = parseInt(dec, 10); return n <= 0x10ffff ? String.fromCodePoint(n) : all; })
+    .replace(/&([a-z]+);/gi, (all, name) => WHITESPACE_ENTITIES[name.toLowerCase()] ?? all)
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ');
 }
 const JS_SIMPLE_ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
 function decodeJsStringEscapes(raw) {

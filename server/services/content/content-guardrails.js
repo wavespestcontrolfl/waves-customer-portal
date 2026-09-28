@@ -5111,9 +5111,13 @@ function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
 // definition parser (Codex r4 on #5272: `[ants][fire]` + a `[fire]:`
 // definition whose destination sits on the next line).
 function renderedInternalDestinations(body) {
-  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false });
+  // Block context (blockquote depth, list membership) is kept for the
+  // definition parser: a definition started by a container transition
+  // ("> [fire]:") resolves as the publisher resolves it (Codex r6 on #5272).
+  const { text: base, depths, inList } = blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const text = blankExpressionStringLiterals(base, { attrValues: false });
   const dests = collectInternalDestinations(text).map((d) => d.dest);
-  const defs = markdownReferenceDefinitions(text);
+  const defs = markdownReferenceDefinitions(text, { depths, inList });
   for (const span of eachMarkdownLink(text)) {
     if (span.isImage || span.kind === 'inline' || span.kind === 'malformed') continue;
     const tail = span.kind === 'reference' ? text.slice(span.refStart, span.refEnd + 1) : '';

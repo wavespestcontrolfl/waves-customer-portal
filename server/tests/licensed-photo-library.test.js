@@ -339,3 +339,16 @@ describe('a second pest named by its full catalog name', () => {
   });
 });
 
+// Codex r6 on #5272 ("Detect longer species names before blanking shared
+// aliases").
+describe('a longer species name that contains the matched alias', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  test.each([
+    ['fire ants and little fire ants', null],
+    ['tawny crazy ant and longhorn crazy ant', null],
+    ['florida carpenter ants in the attic', 'Florida carpenter ant'],
+  ])('%s -> %s', (topic, expected) => {
+    expect(matchSpecies(topic)).toBe(expected);
+  });
+});
+

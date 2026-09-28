@@ -229,7 +229,9 @@ function getCatalogOrganisms() {
         const names = [entry.common_name, ...(entry.aliases || [])]
           .map((name) => String(name || '').trim().toLowerCase())
           .filter((name) => name.length >= 3);
-        return { slug: entry.slug, names, patterns: names.map((name) => namePattern(name)) };
+        // Global patterns, compiled once: matchAll clones them, so their
+        // lastIndex is never shared between scans.
+        return { slug: entry.slug, names, patterns: names.map((name) => namePattern(name, 'gi')) };
       });
     } catch {
       catalogOrganisms = null;
@@ -241,15 +243,30 @@ function namesAnotherPest(text, entry) {
   const organisms = getCatalogOrganisms();
   if (!organisms) return true;
   const own = organisms.find((o) => o.slug === entry.catalog_slug);
-  // Blank every span any of the species' own names covers — overlapping
-  // names ("florida huntsman" + "huntsman spider") leave no stray noun.
-  const covered = new Array(text.length).fill(false);
+  // Spans the matched species' own names cover (overlapping names —
+  // "florida huntsman" + "huntsman spider" — merge into one covered range).
+  const ownSpans = [];
   for (const name of [...(entry.aliases || []), ...(own ? own.names : [])]) {
-    for (const m of text.matchAll(namePattern(name, 'gi'))) covered.fill(true, m.index, m.index + m[0].length);
+    for (const m of text.matchAll(namePattern(name, 'gi'))) ownSpans.push([m.index, m.index + m[0].length]);
   }
+  const insideOwn = (start, end) => ownSpans.some(([s, e]) => s <= start && e >= end);
+  // Another organism's name counts unless it sits wholly inside one of the
+  // species' own names ("carpenter ant" inside "florida carpenter ant").
+  // Checked BEFORE blanking, so a longer name that CONTAINS an own alias —
+  // "little fire ants" around "fire ants" — is still seen (Codex r6 on
+  // #5272).
+  for (const o of organisms) {
+    if (o.slug === entry.catalog_slug) continue;
+    for (const re of o.patterns) {
+      for (const m of text.matchAll(re)) {
+        if (!insideOwn(m.index, m.index + m[0].length)) return true;
+      }
+    }
+  }
+  const covered = new Array(text.length).fill(false);
+  for (const [s, e] of ownSpans) covered.fill(true, s, e);
   const rest = [...text].map((ch, i) => (covered[i] ? ' ' : ch)).join('');
-  if (PEST_NOUN_RE.test(rest)) return true;
-  return organisms.some((o) => o.slug !== entry.catalog_slug && o.patterns.some((re) => re.test(rest)));
+  return PEST_NOUN_RE.test(rest);
 }
 
 // Codex r5 on #5216 ("Do not classify identification phrasing as

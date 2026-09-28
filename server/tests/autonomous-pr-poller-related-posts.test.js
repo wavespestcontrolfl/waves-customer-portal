@@ -125,3 +125,11 @@ test('a frozen related post linked through a multi-line reference definition is 
   expect(res.reason).toContain('/pest-control/fire-ants/');
 });
 
+// Codex r6 on #5272 ("Preserve container depths when resolving reference links").
+test('a related link whose definition starts in a blockquote is rechecked', async () => {
+  relatedPosts.getLiveRelatedPaths.mockResolvedValue(new Set());
+  const file = '---\ntitle: T\nslug: /pest-control/t/\ndomains: ["wavespestcontrol.com"]\n---\n\nSee [ants][fire].\n> [fire]:\n> /pest-control/fire-ants/\n';
+  const res = await relatedPostsLivenessVerdict(file, { paths: ['/pest-control/fire-ants/'] });
+  expect(res.ok).toBe(false);
+});
+

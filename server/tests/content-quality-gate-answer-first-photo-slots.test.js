@@ -856,3 +856,14 @@ describe('#5272 r5: decoded prop values, blockquote definitions', () => {
   });
 });
 
+// Codex r6 on #5272 ("Decode all rendered whitespace entities").
+test.each([
+  ['recommendation="Call&nbsp;today."'],
+  ['recommendation="Call&#160;today."'],
+  ['recommendation={"Call\\u00a0today."}'],
+])('#5272 r6: %s is a pitch', (prop) => {
+  const body = `<BottomLineBox verdict="Yes, they sting." ${prop} />\n\nMore.`;
+  expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+    .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+});
+
