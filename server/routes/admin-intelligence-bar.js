@@ -446,11 +446,22 @@ function withCacheBreakpoint(messages) {
 // dispatches a cancel_appointment pending action when the gate is live AND
 // the stored action carries that frozen pin — a legacy row minted before
 // this pin existed (or a row minted while the gate was on, then turned off)
-// still refuses, never executes unpinned. Gate off (default) is
-// byte-identical to before this lane: every cancel_appointment proposal and
-// confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE, and cancels
-// happen from the Dispatch screen, which owns the waiver and review
-// controls.
+// still refuses, never executes unpinned. A terminal appointment (already
+// completed/cancelled/skipped/no_show) also refuses AT PROPOSAL, before any
+// pending action is minted — a fresh proposal is never the commit-time
+// idempotent-replay path. The impact also carries card_cancel_refusals'
+// invoice_holds_money (an invoice the void preview EXCLUDES — paid,
+// processing, or on a finalized statement — that would still hold money;
+// card_payment_on_invoice alone only covers a PaymentIntent on a WOULD-VOID
+// candidate) and customer_notice ('none' | 'may_send' — the existing
+// GATE_CANCEL_NOTICE_HOOK cancellation-text hook may still text the
+// customer; this card DISCLOSES that, via job-status.js's read-only
+// previewCancellationNoticeVerdict, rather than the earlier draft of this
+// lane silently claiming cancellations never contact anyone). Gate off
+// (default) is byte-identical to before this lane: every cancel_appointment
+// proposal and confirm refuses with CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE,
+// and cancels happen from the Dispatch screen, which owns the waiver and
+// review controls.
 const CANCEL_NOT_CARD_CONFIRMABLE_MESSAGE = 'Cancelling a visit can charge a late-cancel fee, void invoices, and reverse credits, which the confirmation card cannot pin exactly. Cancel it from the Dispatch screen (fee waiver and invoice review live there). Nothing was changed.';
 
 function ibWritesDisabled() {
@@ -1213,6 +1224,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       if (!impact) {
         return { failed: true, modelResult: { error: 'Appointment not found — nothing was proposed.' } };
+      }
+      // Terminal appointments — including one already cancelled — refuse
+      // at proposal (Codex round-1 P2): computeCancelAppointmentImpact does
+      // not check status (it previews the money rails only), so without
+      // this a terminal visit would mint a full confirmation card that
+      // tools.js's own commit-time guard then refuses outright (or, for an
+      // already-cancelled row, silently re-runs the idempotent replay path
+      // — never a fresh cancellation a NEW proposal should represent).
+      // Same set the reschedule_appointment proposal pin already refuses on.
+      if (TERMINAL_APPOINTMENT_STATUSES_FOR_PINS.includes(String(impact.appointment?.status))) {
+        return { failed: true, modelResult: { error: `This appointment is already ${impact.appointment.status} and can't be cancelled.` } };
       }
       // Owner ruling 2026-09-28: the bar cancels SIMPLE visits only — a
       // card fee agreement, a card payment on the invoice, an estimate

@@ -61,6 +61,11 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'request_standard_payout',
   'cancel_pending_payout',
   'run_seo_pipeline',
+  // A charged late-cancel fee, a voided invoice, and a reversed inspection
+  // credit are all real money movement no portal path undoes (Codex
+  // round-1 P2) — the status flip alone is editable, but this tool's money
+  // effects are not, so the card must say so.
+  'cancel_appointment',
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
@@ -794,12 +799,24 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   const emailReplyToCustomer = toolName === 'send_email_reply' && preview?.pinned_recipient?.linked_customer === true;
   // A timed Intelligence Bar booking texts its confirmation (owner 2026-09-27).
   const bookingConfirmationText = toolName === 'create_appointment' && !!params?.time_window;
+  // cancel_appointment's own SHARED status-writer hook (GATE_CANCEL_NOTICE_HOOK,
+  // job-status.js) may text the customer a cancellation notice — a real
+  // effect this card must disclose, never silently claim away (Codex
+  // round-1 P1/P2: the card must never say "no customer message" when the
+  // existing hook can still send one). 'none' means the hook definitely
+  // does not engage for this visit (off, nothing to claim, or an
+  // unconditional merged-slot suppression); anything else — today only
+  // 'may_send' — discloses it. See appointment-cancel-impact.js /
+  // job-status.js#previewCancellationNoticeVerdict for the exact rule.
+  const cancelCustomerNotice = toolName === 'cancel_appointment'
+    ? (preview?.cancellation?.customer_notice || 'none') : 'none';
   const notifiesCustomer = toolName === 'move_stops_to_day'
     ? params?.notify_customers === true
     : (CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || emailChangeMayContact || bookingConfirmationText
       // A repair plan that queues a report email or receipt contacts the
       // customer through the delivery workers.
-      || (toolName === 'repair_closeout' && preview?.notifies_customer === true));
+      || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
+      || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
   // irreversibility derivation stay conservative either way.
@@ -807,6 +824,12 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
+      // Evidence-independent wording (see cancelCustomerNotice above): this
+      // never claims to know WHEN it sends, only that the existing hook
+      // may still text the customer for this visit.
+      contactLabel = 'The customer MAY be texted a cancellation notice by the existing notice system — right away if a reminder or confirmation for this visit was already delivered, otherwise automatically once one is (up to 72 hours later); never sent if another live visit already covers them at this same time';
+    }
     if (bookingConfirmationText) {
       // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
       // send window (appointment-reminders.js reminderSendWindowHold — 'email'

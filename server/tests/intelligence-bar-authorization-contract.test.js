@@ -198,9 +198,53 @@ test('two-step previews surface their resolved facts as effects (capped) and fin
 
 test('schedule moves/cancels are NOT marked as contacting the customer; sends and bookings are', () => {
   expect(buildContract({ toolName: 'reschedule_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+  // cancel_appointment with no cancellation impact pinned (or customer_notice
+  // 'none') is genuinely NOT contacting the customer — see the next test for
+  // the customer_notice: 'may_send' case, which flips this on (Codex
+  // round-1 P1: the real GATE_CANCEL_NOTICE_HOOK can still text one, and
+  // this card must disclose it, never silently claim otherwise).
   expect(buildContract({ toolName: 'cancel_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
   expect(buildContract({ toolName: 'trigger_review_request', params: {}, displayParams: {} }).notifies_customer).toBe(true);
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
+});
+
+// Codex round-1 P1/P2 on the ib-cancel-appointment-live lane: cancel_appointment's
+// SHARED status-writer hook (job-status.js#previewCancellationNoticeVerdict,
+// mirrored into the pinned impact as customer_notice) may text the
+// customer a cancellation notice — a real effect the card must disclose
+// and hash, never silently claim away. cancel_appointment is also always
+// irreversible now (money moves no portal path undoes, whether or not it
+// notifies).
+test('cancel_appointment: customer_notice may_send discloses the notice, marks notifies_customer, and binds the hash', () => {
+  const maySend = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'may_send' } },
+  });
+  const none = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'none' } },
+  });
+  expect(maySend.notifies_customer).toBe(true);
+  expect(maySend.effects.some((e) => e.kind === 'comms' && /cancellation notice/.test(e.label))).toBe(true);
+  // Wording never claims to know WHEN — only that the existing hook may
+  // still text (evidence-independent, per previewCancellationNoticeVerdict).
+  expect(maySend.effects.find((e) => e.kind === 'comms').label).toMatch(/MAY be texted/);
+  expect(none.notifies_customer).toBe(false);
+  expect(none.effects.some((e) => e.kind === 'comms')).toBe(false);
+  expect(contractHash(maySend)).not.toBe(contractHash(none));
+});
+
+test('cancel_appointment is irreversible unconditionally — money moves no portal path undoes, notice or not', () => {
+  const notified = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'may_send' } },
+  });
+  const silent = buildContract({
+    toolName: 'cancel_appointment', params: {}, displayParams: {},
+    preview: { cancellation: { ...synthCancellationBase(), customer_notice: 'none' } },
+  });
+  expect(notified.irreversible).toBe(true);
+  expect(silent.irreversible).toBe(true);
 });
 
 test('create_appointment: card bookings are credit-free by construction; a windowless one never sends a booking confirmation', () => {

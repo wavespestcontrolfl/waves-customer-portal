@@ -15,10 +15,19 @@
  */
 
 let mockApptRow = null;
+// Captures the ONE update() the reason-append branch issues against
+// scheduled_services inside the transition trx (db === trx in this mock —
+// see db.transaction below) — asserted by the notes-append-race tests.
+let capturedNotesUpdate = null;
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     if (table === 'scheduled_services') {
-      return { where: () => ({ first: async () => mockApptRow }) };
+      return {
+        where: () => ({
+          first: async () => mockApptRow,
+          update: async (fields) => { capturedNotesUpdate = fields; return 1; },
+        }),
+      };
     }
     if (table === 'job_status_history') {
       const chain = { where: () => chain, whereNot: () => chain, orderBy: () => chain, first: async () => ({ transitioned_at: new Date(Date.now() - 60 * 1000) }) };
@@ -30,6 +39,10 @@ jest.mock('../models/db', () => {
     throw new Error(`unexpected table in this suite: ${table}`);
   });
   db.transaction = (cb) => cb(db);
+  // Stand-in for Knex's trx.raw — real enough to prove the notes update is
+  // SQL-side (concat_ws against the LIVE `notes` column), never a JS-side
+  // read of a value captured before the transaction opened.
+  db.raw = (sql, bindings) => ({ __raw: true, sql, bindings });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -66,6 +79,7 @@ const FROZEN = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  capturedNotesUpdate = null;
   mockApptRow = {
     id: 'svc-synthetic-1',
     status: 'confirmed',
@@ -170,6 +184,73 @@ test('a matched confirm carries the pin into the follow-through (only the listed
   expect(mockFollowThrough).toHaveBeenCalledWith(expect.objectContaining({
     targetIds: ['svc-synthetic-1'], pinnedEffects: PINNED,
   }));
+});
+
+// Codex round-1 P1: this tool ALWAYS runs its own pinned follow-through
+// (runVisitCancellationFollowThrough, mocked as mockFollowThrough above)
+// right after the transition commits — pinned or not (an unpinned run
+// still voids every voidable invoice via the SAME invoice.js entry point).
+// The shared status writer's own maybeReparkFollowupObligation hook also
+// calls that entry point, UNPINNED, post-commit — racing it against this
+// tool's pinned/scoped call could void an invoice the operator never
+// approved. skipCancellationMoneySeam: true tells the writer to skip
+// ONLY that seam (see job-status.js's own test coverage for the
+// non-money re-park hook still running).
+test('the commit always tells the status writer to skip its own unpinned invoice-void seam (pinned or not)', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+  expect(mockTransitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+    skipCancellationMoneySeam: true,
+  }));
+
+  mockTransitionJobStatus.mockClear();
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  await executeTool('cancel_appointment', { appointment_id: 'svc-synthetic-1' }, {});
+  expect(mockTransitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({
+    skipCancellationMoneySeam: true,
+  }));
+});
+
+// Codex round-1 P1: the reason append must read the CURRENT `notes` column
+// at UPDATE time, not a value captured before the transaction opened — a
+// note a concurrent writer appended in between must survive.
+test('the reason append is a SQL-side concat against the live notes column, never the pre-transaction JS read', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  // The row read before the transaction opened carries a note this update
+  // must NOT embed — a real concurrent writer's note (added after this
+  // read, before the UPDATE runs) would otherwise be silently discarded.
+  mockApptRow = { ...mockApptRow, notes: 'stale pre-transaction note' };
+
+  await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    reason: 'rain',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+
+  expect(capturedNotesUpdate).not.toBeNull();
+  expect(capturedNotesUpdate.notes).toEqual({
+    __raw: true,
+    sql: expect.stringContaining('concat_ws'),
+    bindings: ['Cancelled: rain'],
+  });
+  // The stale JS-side value never rides into the update payload — only a
+  // reference to the live column.
+  expect(JSON.stringify(capturedNotesUpdate)).not.toContain('stale pre-transaction note');
+});
+
+test('no reason: no notes update at all (unchanged from before)', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockTransitionJobStatus.mockResolvedValue(undefined);
+  await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+  expect(capturedNotesUpdate).toBeNull();
 });
 
 test('a replay of a pinned confirm (visit already cancelled) keeps the pin', async () => {

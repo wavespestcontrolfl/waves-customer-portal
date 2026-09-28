@@ -373,6 +373,27 @@ describe('W0B cancel_appointment card-confirm (GATE_IB_CANCEL_APPOINTMENT)', () 
     });
   });
 
+  test.each([
+    ['completed', 'completed'],
+    ['cancelled (already cancelled — a NEW proposal is not the replay path)', 'cancelled'],
+    ['skipped', 'skipped'],
+    ['no_show', 'no_show'],
+  ])('a terminal appointment (%s) is refused at proposal, before minting a pending action', async (_label, status) => {
+    mockComputeCancelImpact.mockResolvedValue({ ...SIMPLE_IMPACT, appointment: { ...SIMPLE_IMPACT.appointment, status } });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'cancel_appointment', input: { appointment_id: APPOINTMENT_ID, reason: 'x' } }],
+      [{ type: 'text', text: 'already terminal' }],
+    ]);
+    await withServer(async (baseUrl) => {
+      const { status: httpStatus } = await postQuery(baseUrl, { prompt: 'cancel it', context: 'schedule' });
+      expect(httpStatus).toBe(200);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toBe(`This appointment is already ${status} and can't be cancelled.`);
+    });
+  });
+
   test('an impact that throws → refused, nothing proposed', async () => {
     mockComputeCancelImpact.mockRejectedValue(new Error('rail read failed'));
     scriptModelTurns([

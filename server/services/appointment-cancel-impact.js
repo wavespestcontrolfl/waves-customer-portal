@@ -21,6 +21,14 @@
  *     candidate/skip rules (same file, same exported status constants).
  *   - inspection credit: inspection-credit.previewInspectionCreditReversalForBooking,
  *     a read-only mirror of reverseInspectionCreditForBooking's read path.
+ *   - customer notice: job-status.previewCancellationNoticeVerdict, a
+ *     read-only mirror of the SAME shared-writer cancellation-notice hook
+ *     (GATE_CANCEL_NOTICE_HOOK) every other cancel surface goes through —
+ *     'none' (the hook is off, or has nothing to claim, or this visit's
+ *     notice is unconditionally suppressed) or 'may_send' (the hook may
+ *     text the customer, immediately or via its own delivery-evidence
+ *     retry). PR B (below) discloses this on the card rather than silently
+ *     reversing the 2026-08-05 fix that added it.
  *
  * W0B (server/routes/admin-intelligence-bar.js) refused to make
  * cancel_appointment card-confirmable because these rails "settle amounts
@@ -112,6 +120,15 @@ function cardCancelRefusals({ row, fee, invoices }) {
   if (invoices.some((inv) => inv.payment_intent)) refusals.push('card_payment_on_invoice');
   if (invoices.some((inv) => Number(inv.deposit_credit) > 0)) refusals.push('estimate_deposit');
   if (require('./recurring-series-cancel-reseed').cancelMayReseedPlan(row)) refusals.push('plan_makeup_visit');
+  // Money already collected on an invoice the void preview would NOT touch
+  // (paid/processing/on a finalized statement) — `card_payment_on_invoice`
+  // above only covers a PaymentIntent on a would-void CANDIDATE invoice, so
+  // it misses this case entirely (Codex round-1 P1). `fee.blocked_by_invoice`
+  // is the SAME verdict visit-cancellation-followthrough.js's own gate acts
+  // on (previewUnresolvedInvoiceAfterCancelVoid, run against the post-void
+  // state) — reusing it here means the refusal and the follow-through's own
+  // office-review gate can never disagree.
+  if (fee.blocked_by_invoice) refusals.push('invoice_holds_money');
   return refusals.sort();
 }
 
@@ -130,10 +147,19 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
 
   const InvoiceService = require('./invoice');
   const InspectionCredit = require('./inspection-credit');
+  const { previewCancellationNoticeVerdict } = require('./job-status');
 
-  const [railFee, invoiceRows] = await Promise.all([
+  const [railFee, invoiceRows, customerNotice] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
+    // Read-only mirror of job-status.js's real cancellation-notice hook
+    // (Codex round-1 P1: the bar's card claimed cancellations never contact
+    // the customer, but the shared status writer's default notice path can
+    // text one — GATE_CANCEL_NOTICE_HOOK is a deliberate, existing fix, not
+    // something this lane may silently reverse). 'none' | 'may_send' — see
+    // previewCancellationNoticeVerdict's own header for exactly which real
+    // suppression conditions it mirrors.
+    previewCancellationNoticeVerdict(scheduledServiceId),
   ]);
   // The commit runs the void FIRST, then gates both later money steps on
   // what is left (visit-cancellation-followthrough.js step 1; the credit
@@ -168,6 +194,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
     invoices,
     inspection_credit_reversal: creditReversal,
     card_cancel_refusals: cardCancelRefusals({ row, fee, invoices }),
+    customer_notice: customerNotice,
   };
 }
 

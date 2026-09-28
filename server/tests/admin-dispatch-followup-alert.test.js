@@ -285,6 +285,41 @@ describe('shared status writer re-parks on child cancellation (source contracts)
     expect(ownTrxPath).toBeGreaterThan(callerTrxPath);
   });
 
+  test('skipCancellationMoneySeam skips ONLY the unpinned invoice-void seam — the re-park hook always runs (Codex round-1 P1)', () => {
+    // Intelligence Bar cancel_appointment runs its own PINNED
+    // invoice-void/credit-reversal follow-through right after
+    // transitionJobStatus; racing that against this writer's UNPINNED
+    // voidOpenInvoicesForCancelledService(jobId) could void an invoice the
+    // operator never saw approved on the card. skipCancellationMoneySeam
+    // must gate ONLY that money call, never the non-money re-park hook.
+    const hookDef = jobStatusSource.indexOf('function maybeReparkFollowupObligation()');
+    const hookEnd = jobStatusSource.indexOf('\n  if (trx) {', hookDef);
+    const hookBody = jobStatusSource.slice(hookDef, hookEnd);
+    expect(hookEnd).toBeGreaterThan(hookDef);
+
+    const reparkIdx = hookBody.indexOf('handleFollowupChildCancellation({ jobId, toStatus })');
+    const guardIdx = hookBody.indexOf('if (!skipCancellationMoneySeam) {');
+    const voidCallIdx = hookBody.indexOf("require('./invoice').voidOpenInvoicesForCancelledService(jobId)");
+    expect(reparkIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(voidCallIdx).toBeGreaterThan(-1);
+    // The re-park call is NOT inside the money-seam guard.
+    expect(reparkIdx).toBeLessThan(guardIdx);
+    // The void call IS inside it (between the guard's `{` and its `}`).
+    expect(voidCallIdx).toBeGreaterThan(guardIdx);
+    const guardClose = hookBody.indexOf('\n      }', voidCallIdx);
+    expect(guardClose).toBeGreaterThan(voidCallIdx);
+    // The visit-group terminal hook (also non-money) sits after the guard
+    // closes, unconditional on skipCancellationMoneySeam.
+    const visitGroupIdx = hookBody.indexOf("require('./visit-groups').handleChildTerminal(jobId)");
+    expect(visitGroupIdx).toBeGreaterThan(guardClose);
+
+    // The param itself: documented, defaulted false (opt-in only), and
+    // threaded through to this exact function's closure (no explicit pass
+    // needed — nested function shares transitionJobStatus's scope).
+    expect(jobStatusSource).toContain('skipCancellationMoneySeam = false,');
+  });
+
   test('the cancellation handler re-parks only when the obligation is uncovered', () => {
     const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
     const handler = moduleSource.slice(moduleSource.indexOf('async function handleFollowupChildCancellation'));

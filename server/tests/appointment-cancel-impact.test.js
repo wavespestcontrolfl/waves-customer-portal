@@ -53,6 +53,10 @@ const mockCreditPreview = jest.fn();
 jest.mock('../services/inspection-credit', () => ({
   previewInspectionCreditReversalForBooking: (...a) => mockCreditPreview(...a),
 }));
+const mockNoticeVerdict = jest.fn();
+jest.mock('../services/job-status', () => ({
+  previewCancellationNoticeVerdict: (...a) => mockNoticeVerdict(...a),
+}));
 
 const {
   computeCancelAppointmentImpact,
@@ -72,6 +76,7 @@ beforeEach(() => {
   mockInvoicePreview.mockResolvedValue([]);
   mockUnresolvedAfterVoid.mockResolvedValue(false);
   mockCreditPreview.mockResolvedValue(null);
+  mockNoticeVerdict.mockResolvedValue('none');
 });
 
 test('returns null for an appointment that no longer exists', async () => {
@@ -227,6 +232,34 @@ test('invoices carry the deposit credit the void would restore', async () => {
   expect(impact.invoices[0].deposit_credit).toBe(75);
 });
 
+describe('customer_notice (Codex round-1 P1: disclose, never silently suppress, the real cancellation-notice hook)', () => {
+  const noCard = () => {
+    mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+    mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  };
+
+  test('rides through untouched from job-status.previewCancellationNoticeVerdict: none', async () => {
+    noCard();
+    mockNoticeVerdict.mockResolvedValue('none');
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.customer_notice).toBe('none');
+    expect(mockNoticeVerdict).toHaveBeenCalledWith('svc-synthetic-1');
+  });
+
+  test('rides through untouched: may_send', async () => {
+    noCard();
+    mockNoticeVerdict.mockResolvedValue('may_send');
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.customer_notice).toBe('may_send');
+  });
+
+  test('a failed read makes the whole impact undeterminable (throws), never silently "none"', async () => {
+    noCard();
+    mockNoticeVerdict.mockRejectedValue(new Error('notice lookup failed'));
+    await expect(computeCancelAppointmentImpact('svc-synthetic-1')).rejects.toThrow('notice lookup failed');
+  });
+});
+
 describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple visits only)', () => {
   const noCard = () => {
     mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
@@ -265,6 +298,28 @@ describe('card_cancel_refusals (owner ruling 2026-09-28: the bar cancels simple 
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.card_cancel_refusals).toEqual(['card_payment_on_invoice', 'estimate_deposit', 'plan_makeup_visit']);
     expect(mockMayReseed).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-synthetic-1', status: 'confirmed' }));
+  });
+
+  // Codex round-1 P1: card_payment_on_invoice above only covers a
+  // PaymentIntent on a WOULD-VOID candidate invoice — it misses money
+  // already collected on an invoice the void preview excludes entirely
+  // (paid, processing, or on a finalized statement). fee.blocked_by_invoice
+  // is the SAME verdict visit-cancellation-followthrough.js's own
+  // office-review gate acts on, so reusing it here can never disagree with
+  // what actually happens at commit.
+  test('an invoice that would still hold money after the void is refused (invoice_holds_money) even with an otherwise plain visit', async () => {
+    noCard();
+    mockUnresolvedAfterVoid.mockResolvedValue(true);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.fee.blocked_by_invoice).toBe(true);
+    expect(impact.card_cancel_refusals).toEqual(['invoice_holds_money']);
+  });
+
+  test('invoice_holds_money sorts alongside the other refusal codes', async () => {
+    mockCardHoldPreview.mockResolvedValue({ held: true, feeApplies: false, feeAmount: 49, rule: { code: 'outside_window' } });
+    mockUnresolvedAfterVoid.mockResolvedValue(true);
+    const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+    expect(impact.card_cancel_refusals).toEqual(['card_fee_agreement', 'invoice_holds_money']);
   });
 });
 

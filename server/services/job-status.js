@@ -318,6 +318,15 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *                                       success). This writer then skips its
  *                                       own lazy activation instead of
  *                                       running a second, concurrent one.
+ * @param {boolean} [args.skipCancellationMoneySeam] pass true when the
+ *                                       caller runs its OWN pinned invoice-
+ *                                       void/credit-reversal follow-through
+ *                                       right after this call (today: IB
+ *                                       cancel_appointment) — skips only
+ *                                       this writer's UNPINNED
+ *                                       voidOpenInvoicesForCancelledService(jobId)
+ *                                       seam; the follow-up re-park and
+ *                                       visit-group hooks still run.
  * @returns {Promise<{customerPayload: object, adminPayload: object}>}
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
@@ -330,6 +339,16 @@ async function transitionJobStatus({
   // flushDispatchQualityDates). Without it a 100-row bulk cancel would
   // launch 100 concurrent route repair/measurement passes (codex #4295 r1 P2).
   qualityDates = null,
+  // A caller that runs its OWN pinned invoice-void/credit-reversal follow-
+  // through immediately after this call (today: Intelligence Bar
+  // cancel_appointment — see tools.js) sets this so maybeReparkFollowupObligation
+  // below skips its own UNPINNED voidOpenInvoicesForCancelledService — that
+  // seam could otherwise race the caller's pinned, card-approved set and
+  // void an invoice the operator never saw. Narrow to this ONE money seam:
+  // the follow-up re-park and visit-group hooks in the same function still
+  // run for every caller, pinned or not — they carry no money and no
+  // card-approved effect set to violate.
+  skipCancellationMoneySeam = false,
 }) {
   if (!jobId || !toStatus || fromStatus === undefined) {
     throw new Error(
@@ -951,10 +970,16 @@ async function transitionJobStatus({
       // writer — so no transition surface can forget it; the helper is
       // idempotent, so routes that also run it (cancel/no-show branches)
       // double-run safely. Post-commit by placement, best-effort by
-      // contract.
-      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
-        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
-      });
+      // contract. Skipped when the caller runs its OWN pinned version of
+      // this exact seam right after (skipCancellationMoneySeam — Codex
+      // round-1 P1): this call is UNPINNED (no invoice allowlist), so
+      // racing it against a card-approved set could void an invoice the
+      // operator never saw approved.
+      if (!skipCancellationMoneySeam) {
+        void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+          logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
+        });
+      }
       // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
       // child leaves its group; the last remaining row dissolves it.
       // Guarded HERE — the one shared status writer — so no transition
@@ -1096,11 +1121,55 @@ const STATUS_ROUTE_ALLOWED_TARGETS = new Set([
   'confirmed', 'en_route', 'on_site', 'skipped', 'no_show', 'cancelled', 'completed',
 ]);
 
+// Read-only preview of what processCancelNoticeClaim (above, inside
+// transitionJobStatus) would do for THIS visit if it were cancelled right
+// now — for a caller (the Intelligence Bar cancel_appointment confirmation
+// card, appointment-cancel-impact.js) that needs to DISCLOSE the real
+// hook's outcome before committing anything, never silently suppress it
+// (the 2026-08-05 fix, GATE_CANCEL_NOTICE_HOOK, exists precisely so a
+// cancellation surface can't go silent on the customer).
+//
+// Mirrors only the conditions that are UNCONDITIONAL and evidence-
+// independent — never the delivery-evidence check itself (whether a prior
+// reminder/confirmation already landed only decides WHEN the notice sends:
+// right away, or later via the 15-minute/72-hour sweep in
+// appointment-reminders.js#sweepStaleCancellationClaims — never whether it
+// CAN). Returning 'none' is reserved for the two cases where the real hook
+// truly never engages at all:
+//   - the gate is off (no claim is ever minted), or
+//   - no `appointment_reminders` row exists for this visit (the in-trx
+//     claim's UPDATE matches zero rows, so processCancelNoticeClaim's own
+//     guard — no claim, no late-claim, no caller-claim — returns
+//     immediately and no worker ever runs), or
+//   - a live "merged-slot survivor" already covers this customer at the
+//     same appointment_time (the in-trx claim, the post-commit worker's
+//     caller-repair path, and the sweep's settlement all independently
+//     stamp this case terminally 'suppressed' before any evidence check).
+// Every other case is 'may_send': a 'pending' claim is minted, and the
+// hook sends as soon as delivery evidence exists (now, or up to 72 hours
+// later) — this function never claims to know that in advance, so a card
+// showing 'may_send' can never under-disclose a real send.
+async function previewCancellationNoticeVerdict(scheduledServiceId) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('cancelNoticeHook')) return 'none';
+  const own = await db('appointment_reminders')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first('customer_id', 'appointment_time');
+  if (!own) return 'none';
+  const survivor = await db('appointment_reminders')
+    .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
+    .whereNot('scheduled_service_id', scheduledServiceId)
+    .first('id');
+  if (survivor) return 'none';
+  return 'may_send';
+}
+
 module.exports = {
   nextClaimTs,
   transitionJobStatus,
   STATUS_ROUTE_ALLOWED_TARGETS,
   evaluateTerminalTransition,
+  previewCancellationNoticeVerdict,
   CUSTOMER_EVENT,
   ADMIN_EVENT,
   ADMIN_ROOM,

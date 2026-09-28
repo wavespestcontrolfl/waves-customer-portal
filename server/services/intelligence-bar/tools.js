@@ -3639,7 +3639,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved-card fee agreement, a card payment on its invoice, an invoice that would still hold money after the cancellation, an estimate deposit, or a plan make-up visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 // The follow-through's per-target pin for a cancel confirmed against a frozen
 // impact (see cancelAppointment); null when nothing was pinned.
@@ -3800,11 +3800,27 @@ async function cancelAppointment(input, actionContext = {}) {
         // silent for — an operator cancelling their own visit gets no card.
         transitionedBy: actionContext.technicianId || null,
         notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+        // The follow-through below (runVisitCancellationFollowThrough) is
+        // this tool's OWN pinned money seam — it always runs, pinned or
+        // not (Codex round-1 P1). transitionJobStatus's shared status
+        // writer also runs an UNPINNED voidOpenInvoicesForCancelledService
+        // post-commit (job-status.js#maybeReparkFollowupObligation) for
+        // every caller; racing that against a card-approved, PINNED set
+        // could void an invoice the operator never saw on the card. Skip
+        // ONLY that money seam here — the non-money re-park/visit-group
+        // hooks in the same function still run unconditionally.
+        skipCancellationMoneySeam: true,
         trx,
       });
       if (reason) {
         await trx('scheduled_services').where('id', appointment_id).update({
-          notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
+          // SQL-side concat against the LIVE column (Codex round-1 P1): a
+          // JS-side `${appt.notes || ''}` read from BEFORE this transaction
+          // opened would overwrite a note a concurrent writer appended in
+          // between. concat_ws + NULLIF drop the separator entirely when
+          // notes is still empty, matching the old `.trim()`'s leading-
+          // newline behavior without reading a stale value.
+          notes: trx.raw("concat_ws(E'\\n', NULLIF(notes, ''), ?::text)", [`Cancelled: ${reason}`]),
           updated_at: new Date(),
         });
       }
