@@ -557,6 +557,16 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.updated).not.toHaveProperty('payment_receipt');
   });
 
+  it('notification_prefs: a kept profile\'s own payment_receipt=false is cleared by the merge', async () => {
+    const { trx, state } = stubTrx({
+      winnerRow: { id: 'p1', customer_id: 'W', sms_enabled: true, payment_receipt: false, payment_receipt_channels: ['email'], created_at: 'x', updated_at: 'x' },
+      loserRow: { id: 'p2', customer_id: 'L', sms_enabled: true, payment_receipt: true, payment_receipt_channels: ['email'], created_at: 'x', updated_at: 'x' },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated.payment_receipt).toBe(true);
+    expect(state.updated.payment_receipt_channels).not.toEqual([]);
+  });
+
   it('notification_prefs: a moved duplicate row sheds payment_receipt=false', async () => {
     const { trx, state } = stubTrx({
       winnerRow: null,
