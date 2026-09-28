@@ -205,7 +205,8 @@ export default function BiometricGate({ children }) {
           // app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
-          if (pickerCoveringRef.current) unlockAfterPickerRef.current = true;
+          // Resign can arrive before the picker's hidden event: arm on either.
+          if (pickerCoveringRef.current || pickerOpen()) unlockAfterPickerRef.current = true;
         }
       }))
       .then((l) => { listener = l; })

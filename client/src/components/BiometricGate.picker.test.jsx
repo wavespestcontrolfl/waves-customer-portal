@@ -185,3 +185,16 @@ it('keeps the deferred Face ID prompt when the pick lands before the page is vis
   await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
   expect(authenticateBiometric).toHaveBeenCalledTimes(2);
 });
+
+it('prompts once the picker closes when the real app switch arrives before the hidden event', async () => {
+  await renderUnlocked();
+  fireEvent.click(screen.getByTestId('camera'));
+  appState(false); // resign first
+  setVisibility('hidden');
+  appState(true);
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  setVisibility('visible');
+  await waitFor(() => expect(lockShown()).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(2);
+});
