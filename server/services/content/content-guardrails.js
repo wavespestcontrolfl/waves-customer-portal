@@ -5104,6 +5104,14 @@ function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
 
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
+// Every internal link destination the body RENDERS — the same text
+// preparation and extraction internalRouteFinding uses (the PR poller
+// rechecks related-post liveness on it at merge time, Codex r2 on #5272).
+function renderedInternalDestinations(body) {
+  return collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false }))
+    .map((d) => d.dest);
+}
+
 function collectInternalDestinations(text) {
   const s = String(text || '');
   const dests = [];
@@ -7068,7 +7076,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+  _internals: { renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call

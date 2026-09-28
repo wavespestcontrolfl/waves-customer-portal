@@ -5137,9 +5137,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('bodyImageRefs: an inline destination with trailing junk is literal text, not an image; a wrapped (multi-line) label is still one image on its first line (GH r12)', async () => {
     const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
-    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1 }]);
+    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1, endLine: 1 }]);
     const wrapped = '## A\n\nProse.\n\n![Technician\nworking](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
-    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7 }]);
+    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4, endLine: 5 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7, endLine: 7 }]);
     expect((await validateBodyImageRefs({ body: wrapped, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
     // The section scanner sees the wrapped image under its heading.
     const { sections } = AstroPublisher._internals.scanBodySections(wrapped, { title: 'T' });
@@ -5226,7 +5226,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('bodyImageRefs: an empty destination renders (empty src) and is REJECTED; a picture inside a merely styled <div> is scanned, definitely-hidden containers still are not (GH r14)', async () => {
     const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
-    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0 }, { alt: 'b', src: '', line: 1 }]);
+    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0, endLine: 0 }, { alt: 'b', src: '', line: 1, endLine: 1 }]);
     expect((await validateBodyImageRefs({ body: '![illustration]()\n\n![p](/images/blog/x/body-1.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/not committed.*empty src/);
     const styled = '<div class="figure" style="max-width:600px">\n\n![styled](/images/blog/x/hero.webp)\n\n</div>\n<div hidden>\n\n![gone](/images/blog/x/body-9.webp)\n\n</div>\n<div aria-hidden="true">\n\n![gone2](/images/blog/x/body-8.webp)\n\n</div>';
     expect(bodyImageRefs(styled).map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);

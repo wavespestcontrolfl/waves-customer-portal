@@ -317,3 +317,10 @@ describe('bare "like" stays comparison-shaped', () => {
   });
 });
 
+// Codex r2 on #5272 ("Recognize pluralized catalog head nouns").
+test('a pluralized catalog-only head noun still names a pest', () => {
+  const { matchSpecies } = require('../services/content/licensed-photo-library');
+  expect(matchSpecies('brown recluses and huntsman spider')).toBeNull();
+  expect(matchSpecies('southern black widows or huntsman spider')).toBeNull();
+});
+

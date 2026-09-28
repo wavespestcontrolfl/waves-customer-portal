@@ -802,3 +802,10 @@ describe('#5272 r1: compact phone numbers in the box, reference-style credits', 
   });
 });
 
+// Codex r2 on #5272 ("Start the credit check after the complete image span").
+test('#5272 r2: a credit directly below an image whose alt wraps a line passes', () => {
+  const wrapped = PHOTO.alt.replace(' ', '\n');
+  const body = `Intro.\n\n![${wrapped}](${PHOTO_URL})\n\n${ATTR}\n\nMore.`;
+  expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: true });
+});
+

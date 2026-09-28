@@ -247,11 +247,26 @@ function loadCatalogPestHeads() {
     return null;
   }
 }
-const CATALOG_PEST_HEADS = loadCatalogPestHeads();
+// Loaded on first use, not at module load (never a load-time require
+// between the two modules); undefined = not loaded yet, null = unreadable.
+let catalogPestHeads;
+function getCatalogPestHeads() {
+  if (catalogPestHeads === undefined) catalogPestHeads = loadCatalogPestHeads();
+  return catalogPestHeads;
+}
+// A plural drops only what it added: "recluses" → "recluse" (s), and
+// "roaches" → "roach" (es) — never "reclus" (Codex r2 on #5272).
+function singularForms(word) {
+  const forms = [word];
+  if (word.endsWith('s')) forms.push(word.slice(0, -1));
+  if (word.endsWith('es')) forms.push(word.slice(0, -2));
+  return forms;
+}
 function namesPest(text) {
   if (PEST_NOUN_RE.test(text)) return true;
+  const heads = getCatalogPestHeads();
   for (const word of String(text).match(/[a-z]+/g) || []) {
-    if (CATALOG_PEST_HEADS.has(word) || CATALOG_PEST_HEADS.has(word.replace(/e?s$/, ''))) return true;
+    if (singularForms(word).some((form) => heads.has(form))) return true;
   }
   return false;
 }
@@ -262,7 +277,7 @@ function isConnectorComparison(text) {
   CONNECTOR_RE.lastIndex = 0;
   let match;
   while ((match = CONNECTOR_RE.exec(text))) {
-    if (!CATALOG_PEST_HEADS) return true;
+    if (!getCatalogPestHeads()) return true;
     const before = text.slice(0, match.index);
     const after = text.slice(match.index + match[0].length);
     if (namesPest(before) && namesPest(after)) return true;

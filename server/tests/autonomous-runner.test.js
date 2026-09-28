@@ -4622,6 +4622,13 @@ describe('refresh quality gate receives the live frontmatter', () => {
       withRuns([{ published_url: 'https://www.wavespestcontrol.com/pest-control/other/' }]);
       expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBe(false);
     });
+    // Codex r2 on #5272: two fleet domains can carry different posts at one path.
+    test('host-aware: a run on another fleet domain at the same path does not count', async () => {
+      withRuns([{ published_url: 'https://www.bradentonflpestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/')).toBe(false);
+      withRuns([{ published_url: 'https://wavespestcontrol.com/pest-control/can-cockroaches-fly/' }]);
+      expect(await _internals.publishedAsCustomerQuestion('https://www.wavespestcontrol.com/pest-control/can-cockroaches-fly/')).toBe(true);
+    });
     test('null when the ledger cannot be read', async () => {
       withRuns([], { fail: true });
       expect(await _internals.publishedAsCustomerQuestion('/pest-control/can-cockroaches-fly/')).toBeNull();

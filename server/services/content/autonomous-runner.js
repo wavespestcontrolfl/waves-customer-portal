@@ -5122,16 +5122,31 @@ async function refreshTargetFields(publisher, targetUrl) {
  * from autonomous_runs (page_type + published_url, path-compared), null when
  * the ledger cannot be read.
  */
-async function publishedAsCustomerQuestion(targetUrl) {
+// Host + path of a URL; host is null for a bare path. www. is ignored.
+function ledgerUrlKey(value) {
   const { _internals: { normalizePathForCompare } } = require('./related-posts');
-  const key = normalizePathForCompare(targetUrl);
-  if (!key || key === '/') return false;
+  const raw = String(value || '').trim();
+  let host = null;
+  if (/^https?:\/\//i.test(raw)) {
+    try { host = new URL(raw).hostname.toLowerCase().replace(/^www\./, ''); } catch { host = null; }
+  }
+  return { host, path: normalizePathForCompare(raw) };
+}
+
+async function publishedAsCustomerQuestion(targetUrl) {
+  const target = ledgerUrlKey(targetUrl);
+  if (!target.path || target.path === '/') return false;
   try {
     const rows = await db('autonomous_runs')
       .where('page_type', 'customer-question')
       .whereNotNull('published_url')
       .select('published_url');
-    return rows.some((row) => normalizePathForCompare(row.published_url) === key);
+    // Same path; and when both sides name a host, the same host — two fleet
+    // domains can carry different posts at one path (Codex r2 on #5272).
+    return rows.some((row) => {
+      const run = ledgerUrlKey(row.published_url);
+      return run.path === target.path && (!run.host || !target.host || run.host === target.host);
+    });
   } catch (err) {
     logger.warn(`[autonomous-runner] customer-question ledger read failed: ${err.message}`);
     return null;

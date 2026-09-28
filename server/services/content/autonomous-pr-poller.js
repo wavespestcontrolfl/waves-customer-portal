@@ -441,8 +441,37 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null, { ap
 // posts.js). Same withhold posture as the neighbouring merge-time checks
 // (body images / affiliate belt): a stale path withholds, and so does a
 // failed liveness read (fail closed, transient — the next tick retries).
-async function relatedPostsLivenessVerdict(head) {
+// The brief's frozen related-post list (voice_constraints.related_posts),
+// derived exactly as the runner derives it (guardrail-options). A lookup
+// error THROWS — the caller withholds this tick (transient).
+async function frozenRelatedPostsForRun(run) {
+  if (!run?.brief_id) return { paths: [], hosts: undefined };
+  const brief = await db('content_briefs').where('id', run.brief_id).first();
+  if (!brief) return { paths: [], hosts: undefined };
+  const options = require('./guardrail-options').deriveSyncGuardrailOptions({}, brief);
+  return {
+    paths: Array.isArray(options.relatedPostLinks) ? options.relatedPostLinks : [],
+    hosts: Array.isArray(options.relatedPostHosts) && options.relatedPostHosts.length ? options.relatedPostHosts : undefined,
+  };
+}
+
+// The related-post paths a HEAD file ships: its rail plus any brief-frozen
+// related path linked from the rendered body or a next_steps button.
+function relatedPostSurfacePaths(content, fmHead, frozen) {
+  const { _internals: { normalizePathForCompare } } = require('./related-posts');
+  const frozenByKey = new Map((frozen?.paths || []).map((p) => [normalizePathForCompare(p), p]));
+  const rail = Array.isArray(fmHead.related_posts) ? fmHead.related_posts.filter((p) => typeof p === 'string' && p.trim()) : [];
+  const body = require('../content-astro/frontmatter').parse(content)?.content || '';
+  const nextStepHrefs = Array.isArray(fmHead.next_steps) ? fmHead.next_steps.map((step) => step && step.href).filter((h) => typeof h === 'string') : [];
+  const linked = [...require('./content-guardrails')._internals.renderedInternalDestinations(body), ...nextStepHrefs]
+    .map((dest) => frozenByKey.get(normalizePathForCompare(dest)))
+    .filter(Boolean);
+  return [...new Set([...rail, ...linked])];
+}
+
+async function relatedPostsLivenessVerdict(head, frozen = { paths: [] }) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
+  if (frozen?.unavailable) return { ok: false, transient: true, reason: 'related-post brief lookup failed' };
   if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the related-posts liveness recheck' };
   let fmHead = {};
   try {
@@ -450,13 +479,20 @@ async function relatedPostsLivenessVerdict(head) {
   } catch (err) {
     return { ok: false, transient: true, reason: `head frontmatter unreadable for the related-posts liveness recheck: ${err.message}` };
   }
-  const paths = Array.isArray(fmHead.related_posts)
-    ? fmHead.related_posts.filter((p) => typeof p === 'string' && p.trim())
-    : [];
+  // Codex r2 on #5272: every surface a related post can ship on — the rail
+  // (frontmatter.related_posts) plus any brief-frozen related path the body
+  // or a next_steps button links to (the pre-publish guard treats all
+  // three the same).
+  let paths;
+  try {
+    paths = relatedPostSurfacePaths(content, fmHead, frozen);
+  } catch (err) {
+    return { ok: false, transient: true, reason: `related-post surfaces unreadable: ${err.message}` };
+  }
   if (!paths.length) return { ok: true };
   try {
     const { getLiveRelatedPaths, _internals } = require('./related-posts');
-    const hosts = Array.isArray(fmHead.domains) && fmHead.domains.length ? fmHead.domains : undefined;
+    const hosts = Array.isArray(fmHead.domains) && fmHead.domains.length ? fmHead.domains : frozen?.hosts;
     const live = await getLiveRelatedPaths(paths, hosts ? { hosts } : {});
     const stale = paths.filter((p) => !live.has(_internals.normalizePathForCompare(p)));
     if (stale.length) {
@@ -1832,7 +1868,7 @@ async function maybeAutoMerge(run, pr) {
         // 3.8b Related-post liveness — see relatedPostsLivenessVerdict. Reuses
         //      the SAME head content the topic recheck just fetched (no
         //      second GitHub read).
-        const related = await relatedPostsLivenessVerdict(topic.content);
+        const related = await relatedPostsLivenessVerdict(topic.content, await frozenRelatedPostsForRun(run).catch(() => ({ unavailable: true })));
         if (!related.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
           withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };
@@ -1890,7 +1926,7 @@ async function maybeAutoMerge(run, pr) {
           return null;
         }
         // 3.8b Related-post liveness — see relatedPostsLivenessVerdict.
-        const related = await relatedPostsLivenessVerdict(headContent);
+        const related = await relatedPostsLivenessVerdict(headContent, await frozenRelatedPostsForRun(run).catch(() => ({ unavailable: true })));
         if (!related.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: related-post liveness — ${related.reason}`);
           withheld = { pending: true, reason: `related_posts_stale: ${related.reason}`, transient: related.transient === true };

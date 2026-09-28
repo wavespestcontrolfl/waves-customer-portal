@@ -1411,7 +1411,7 @@ function collectBodyImageOccurrences(body, { mdx = true } = {}) {
   // require — never top-level, or the two modules deadlock on load).
   const { bodyImageRefs } = require('../content-astro/astro-publisher')._internals;
   for (const ref of bodyImageRefs(body, { mdx })) {
-    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown', line: ref.line });
+    out.push({ alt: String(ref.alt || '').trim(), url: String(ref.src || '').trim(), form: 'markdown', line: Number.isInteger(ref.endLine) ? ref.endLine : ref.line });
   }
 
   let m;
