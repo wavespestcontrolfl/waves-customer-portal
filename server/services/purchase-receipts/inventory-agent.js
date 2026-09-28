@@ -619,7 +619,11 @@ function validateExistingCandidate(raw, ctx, candidate) {
 // A new product's category is accepted only when the LISTING states it
 // (Codex round 11), and only from ONE fixed, canonical list this agent may
 // ever create — never the catalog's own DB-distinct categories, which carry
-// duplicate spellings a separate data fix renames away. Names are LOWERCASE:
+// duplicate spellings a separate data fix renames away. Names are the
+// catalog's ESTABLISHED lowercase keys ("igr", "pgr", "rodent_trap",
+// "soil_amendment" — exact-key consumers such as the inventory audit's
+// pesticide set and the report's deterministic application roles read
+// those spellings). They are LOWERCASE:
 // products_catalog stores a lowercase category (AGENTS.md lawn protocol
 // fan-out), it is copied into service_products.product_category and
 // property_application_history.category, and compliance readers compare it
@@ -652,17 +656,17 @@ const CANONICAL_CATEGORIES = [
     statedBy: /\bfertili[sz]ers?\b|\b\d{1,2}-\d{1,2}-\d{1,2}\b|\b(?:lawn|plant|turf|palm) food\b|\bweed ?(?:&|and) ?feed\b/i,
   },
   { name: 'micronutrient fertilizer', statedBy: /\bmicronutrients?\b/i },
-  { name: 'insect growth regulator (igr)', statedBy: /\binsect growth regulators?\b|\bIGR\b/i },
-  { name: 'plant growth regulator', statedBy: /\bplant growth regulators?\b|\bPGR\b/i },
+  { name: 'igr', statedBy: /\binsect growth regulators?\b|\bIGR\b/i },
+  { name: 'pgr', statedBy: /\bplant growth regulators?\b|\bPGR\b/i },
   // "surfactant" alone states adjuvant; "soil surfactant" (however it is
   // punctuated — statingText folds the separator) never does.
   { name: 'adjuvant', statedBy: /\badjuvants?\b|(?<!\bsoil )\bsurfactants?\b/i },
-  { name: 'soil amendment', statedBy: /\bsoil amendments?\b/i },
+  { name: 'soil_amendment', statedBy: /\bsoil amendments?\b/i },
   { name: 'bait', statedBy: /(?<!\b(?:termite|mole) )\bbaits?\b/i },
   { name: 'termite bait', statedBy: /\btermite baits?\b/i },
   { name: 'mole bait', statedBy: /\bmole baits?\b/i },
   { name: 'rodenticide', statedBy: /\brodenticides?\b|\brat poison\b|\bmouse poison\b/i },
-  { name: 'rodent trap', statedBy: /\b(?:rat|mouse|mice|rodent|snap) traps?\b/i },
+  { name: 'rodent_trap', statedBy: /\b(?:rat|mouse|mice|rodent|snap) traps?\b/i },
   { name: 'mosquito', statedBy: /\bmosquito(?:es)?\b|\blarvicides?\b/i },
 ];
 
@@ -727,8 +731,13 @@ function validateNewProduct(raw, ctx) {
   // hold (or to succeed).
   const reading = validateReading(raw.reading, { rawTitle, lineQuantity });
   const validReading = reading.ok ? reading : null;
-  // Every 'unsure' return from here on names a real proposed product, worth
-  // carrying into the hold bell as a suggestion even though it was refused.
+  // A refusal of the proposal's IDENTITY or CATEGORY (name not from the
+  // title, collides with a stocked product, category not allowed or not
+  // stated) carries no suggestion: "add as a new X" would recommend exactly
+  // what was just rejected. Only once name and category have both passed
+  // does a later refusal (the reading) still carry the proposal into the
+  // hold bell as its closest guess.
+  const refuse = (reason) => unsureResult(reason);
   const hold = (reason) => ({
     kind: 'unsure', status: 'agent_unsure', reason, suggestion: newProductSuggestion(name, proposed.category, validReading),
   });
@@ -742,7 +751,7 @@ function validateNewProduct(raw, ctx) {
   const titleWords = normalizeForMatch(rawTitle).split(' ').filter(Boolean);
   const nameWords = normalizeForMatch(name).split(' ').filter(Boolean);
   const span = contiguousTitlePhraseSpan(nameWords, titleWords);
-  if (!span) return hold(`the proposed name ("${name}") isn't a specific product phrase from the title`);
+  if (!span) return refuse(`the proposed name ("${name}") isn't a specific product phrase from the title`);
   // The phrase must also COVER the title's own ANCHOR (item 1, 2026-09-27
   // round 10 review) — see titleAnchorWordIndex's own header. A name that
   // only lifts the manufacturer/brand words ahead of the real product name
@@ -750,17 +759,17 @@ function validateNewProduct(raw, ctx) {
   // here even though it IS a genuine contiguous run of the title's words.
   const anchor = titleAnchorWordIndex(rawTitle);
   if (anchor == null || anchor < span.start || anchor > span.end) {
-    return hold(`the proposed name ("${name}") doesn't cover the title's own product-identity word`);
+    return refuse(`the proposed name ("${name}") doesn't cover the title's own product-identity word`);
   }
   if (collidesWithActiveProduct(name, rawTitle, allActiveProducts, activeProductAliases)) {
-    return hold(`looks like an existing product ("${name}")`);
+    return refuse(`looks like an existing product ("${name}")`);
   }
 
   const category = String(proposed.category || '').trim().toLowerCase();
   const canonicalCategory = CANONICAL_CATEGORY_BY_LOWER.get(category);
-  if (!category || !canonicalCategory) return hold('proposed category is not in the catalog\'s allowed set');
+  if (!category || !canonicalCategory) return refuse('proposed category is not in the catalog\'s allowed set');
   if (!categoriesStatedBy(rawTitle).has(canonicalCategory)) {
-    return hold(`the listing doesn't state the category ("${category}")`);
+    return refuse(`the listing doesn't state the category ("${category}")`);
   }
 
   if (!reading.ok) return hold(`reading did not check out (${reading.reason})`);
@@ -821,9 +830,12 @@ function classifyDecision(raw, ctx) {
 // this code can't stand behind.
 function unsureDirectAnswer(raw, ctx) {
   const reason = (raw && raw.reason ? raw.reason : 'The agent was not sure.').slice(0, 500);
+  // The deterministic match, when there is one, outranks whatever candidate
+  // the model left in product_id (existingGuess) — a bare "unsure" never
+  // steers a person away from the stronger catalog match.
   const candidate = (ctx.candidates || []).find((c) => c.id === raw?.product_id);
-  if (!candidate) return { kind: 'unsure', status: 'agent_unsure', reason };
-  return { kind: 'unsure', status: 'agent_unsure', reason, suggestion: { type: 'existing', productId: candidate.id, productName: candidate.name } };
+  const guess = candidate ? existingGuess(candidate, ctx) : null;
+  return guess ? { kind: 'unsure', status: 'agent_unsure', reason, suggestion: guess } : { kind: 'unsure', status: 'agent_unsure', reason };
 }
 
 // ---- catalog reads used to build a line's LLM context --------------------

@@ -310,8 +310,8 @@ describe('classifyDecision — a new product\'s category must be one the listing
     expect(decide('LESCO 16-4-8 Turf 50 lb', 'LESCO 16-4-8 Turf', 'fertilizer', { size_text: '50 lb', size_number: 50, size_unit: 'lb', pack_count: 1 }))
       .toMatchObject({ kind: 'new_product', newProduct: { category: 'fertilizer' } });
     const count = { size_text: '4 Count', size_number: 4, size_unit: 'each', pack_count: 1 };
-    expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'rodent trap', count))
-      .toMatchObject({ kind: 'new_product', newProduct: { category: 'rodent trap' } });
+    expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'rodent_trap', count))
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'rodent_trap' } });
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'supplies', count)).toMatchObject({ kind: 'unsure' });
     expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'cleaner', count)).toMatchObject({ kind: 'unsure' });
   });
@@ -760,8 +760,8 @@ describe('classifyDecision — new_product: the name must COVER the title\'s own
   });
 
   test('a count-item noun ("Trap") is not an identity word either — the anchor is the real word before it', () => {
-    const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 }, 'rodent trap');
-    expect(decision).toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'rodent trap' } });
+    const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 }, 'rodent_trap');
+    expect(decision).toMatchObject({ kind: 'new_product', status: 'logged', newProduct: { category: 'rodent_trap' } });
   });
 
   test('a size-first title has no identity word before its first size claim — no anchor, always unsure', () => {
@@ -898,20 +898,27 @@ describe('classifyDecision — refused proposals carry a "closest guess" suggest
     expect(decision).not.toHaveProperty('suggestion');
   });
 
-  test('a refused new_product proposal suggests the CANONICAL category and the read container size when the reading validated', () => {
-    const raw = {
-      kind: 'new_product', new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
-      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 },
-    };
-    // Refused for a reason AFTER the reading validates (an existing active
-    // product collides with the name) — so the suggestion's containerSize is
-    // still known.
-    const decision = classifyDecision(raw, ctx({
+  test('a refusal of the proposal\'s identity or category carries NO suggestion (never recommend what was just rejected)', () => {
+    const reading = { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 };
+    const np = (name, category) => ({ kind: 'new_product', new_product: { name, category, active_ingredient: null, epa_reg_no: null }, reading });
+    // collides with a stocked product
+    expect(classifyDecision(np('Bifen XTS', 'insecticide'), ctx({
       rawTitle: 'Bifen XTS Insecticide 96 oz', allActiveProducts: [{ id: 'p-x', name: 'Bifen XTS' }],
+    }))).not.toHaveProperty('suggestion');
+    // name not from the title
+    expect(classifyDecision(np('Termidor SC', 'insecticide'), ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz' })))
+      .not.toHaveProperty('suggestion');
+    // category not on the list, and category not stated
+    expect(classifyDecision(np('Bifen XTS', 'supplies'), ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz' }))).not.toHaveProperty('suggestion');
+    expect(classifyDecision(np('Bifen XTS', 'fungicide'), ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz' }))).not.toHaveProperty('suggestion');
+  });
+
+  test('a direct "unsure" answer on a matched line suggests the matcher\'s product, never the candidate the model left', () => {
+    const other = { id: 'p-other', name: 'Other Product', category: 'insecticide', container_size: '1 gal', inventory_unit: 'fl_oz' };
+    const decision = classifyDecision({ kind: 'unsure', reason: 'not sure', product_id: 'p-other' }, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', candidates: [taurus, other], matchedProductId: 'p-taurus',
     }));
-    expect(decision).toMatchObject({
-      kind: 'unsure', suggestion: { type: 'new_product', name: 'Bifen XTS', category: 'insecticide', containerSize: '96 oz' },
-    });
+    expect(decision.suggestion).toEqual({ type: 'existing', productId: 'p-taurus', productName: 'Taurus SC' });
   });
 
   test('a refused new_product proposal omits containerSize when the reading itself never validated', () => {
