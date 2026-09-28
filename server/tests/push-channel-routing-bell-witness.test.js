@@ -105,4 +105,18 @@ describe('attemptPushFirst persisted-bell failure evidence', () => {
       delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt,
     });
   });
+
+  test('a first native acceptance on an unchanged old bell remains the original billing event', async () => {
+    const visibleAt = new Date(Date.now() - 86400000);
+    mockNotifyCustomer.mockResolvedValue({ id: 'original-bell', created_at: visibleAt,
+      deduped: true, push: { accepted: 1, deduped: false } });
+
+    expect(await attemptPushFirst(input)).toEqual({
+      delivered: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt,
+    });
+    expect(mockNotifyCustomer).toHaveBeenCalledTimes(1);
+    // The existing bell settled billing at visibleAt; no second billing
+    // contact or retry-time sms_log proof is written for its native transport.
+    expect(mockDb).not.toHaveBeenCalledWith('sms_log');
+  });
 });
