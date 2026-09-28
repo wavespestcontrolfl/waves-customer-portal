@@ -10974,6 +10974,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } = await resolveExtendedLane({
       svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, apptCardOneTimeCharge, apptCardLaneUnresolved, customerAutopayActive,
     });
+    // A per-application visit stamped $0 is free (owner 2026-09-28): any
+    // positive invoice on it goes through the $0 cap (plus only a setup-fee
+    // allowance) below with its credit untouched — credit must never be
+    // consumed, or the invoice flipped prepaid, for a free visit.
+    const perAppStampedZeroVisit = perApplicationBilling && !svc.is_callback && isStampedZeroEstimate(svc.estimated_price);
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
@@ -10986,6 +10991,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !apptCardOverCap && !apptCardLaneUnresolved
       && !(extendedChargeCandidate && extendedLaneOverCap)
       && !annualPrepayOfficeReview
+      && !perAppStampedZeroVisit
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
