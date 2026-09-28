@@ -9,11 +9,13 @@ jest.mock('../services/service-report/pdf-queue', () => ({ ensureReportToken: je
 jest.mock('../services/service-report/delivery-queue', () => ({ enqueueServiceReportV1EmailDelivery: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().mockResolvedValue(false) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
+jest.mock('../services/completion-followup-booking', () => ({ bookCompletionFollowup: jest.fn() }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const { bookCompletionFollowup } = require('../services/completion-followup-booking');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -327,4 +329,80 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
   });
   expect(run.preview_changed).toBe(true);
   expect(ensureReportToken).not.toHaveBeenCalled();
+});
+
+describe('book_followup — the Dispatch follow-up action as a repair step', () => {
+  const OWED = { followUp: { state: 'pending', reason: 'followup_required_not_booked', windowDays: 14, frozen: true } };
+  const WOULD = { status: 200, body: { dryRun: true, alreadyScheduled: false, wouldBook: { date: '2026-10-05', windowStart: '09:00:00', windowEnd: '10:00:00', technicianId: 'tech-1', status: 'pending' } } };
+
+  test('plans the CTA booking from its own preview; the card names date, window, technician and the later reminders', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: OWED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], technicians: [{ name: 'Adam' }] }));
+    bookCompletionFollowup.mockResolvedValue(WOULD);
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(bookCompletionFollowup).toHaveBeenCalledWith(expect.objectContaining({ serviceId: SVC, useSuggestedDate: true, dryRun: true }));
+    expect(preview.steps).toEqual([expect.objectContaining({ step: 'book_followup', date: '2026-10-05', technician_id: 'tech-1', technician_name: 'Adam' })]);
+    expect(preview.notifies_customer).toBe(false);
+    const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
+    expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/PENDING \$0 follow-up visit.*on 2026-10-05 09:00–10:00 with Adam — nothing is sent now; it is registered for the usual appointment reminders, which go out per the customer's reminder settings/);
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ customer_id: 'cust-1', overlap: false }));
+  });
+
+  test('a CTA refusal (date passed, already booked…) is the manual fix', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: OWED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    bookCompletionFollowup.mockResolvedValue({ status: 400, body: { error: 'Follow-up date must be today or later', code: 'followup_date_past' } });
+    const past = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(past.code).toBe('nothing_repairable');
+    expect(past.manual).toEqual([expect.objectContaining({ fact: 'followUp', fix: expect.stringMatching(/today or later/) })]);
+  });
+
+  test('confirmed: books through the CTA with the approved technician pinned and admin_ib attribution', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: OWED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], technicians: [{ name: 'Adam' }] }));
+    bookCompletionFollowup.mockResolvedValue(WOULD);
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    bookCompletionFollowup.mockImplementation(async (args) => (args.dryRun ? WOULD
+      : { status: 200, body: { success: true, alreadyScheduled: false, appointment: { id: 'fu-1', scheduledDate: '2026-10-05', status: 'pending' } } }));
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+      confirmed: true, technicianId: 'admin-1', executionPins: { _verified_repair_steps: approved },
+    });
+    expect(run.success).toBe(true);
+    expect(run.receipt).toEqual([expect.objectContaining({ step: 'book_followup', status: 'completed', appointment_id: 'fu-1' })]);
+    expect(bookCompletionFollowup).toHaveBeenLastCalledWith(expect.objectContaining({
+      serviceId: SVC, date: '2026-10-05', actorId: 'admin-1', sourceAction: 'admin_ib',
+      expectedWindow: { start: '09:00:00', end: '10:00:00' }, expectedTechnicianId: 'tech-1', expectedCustomerId: 'cust-1',
+    }));
+    expect(bookCompletionFollowup.mock.calls.at(-1)[0].dryRun).toBeUndefined();
+    expect(bookCompletionFollowup.mock.calls.at(-1)[0].useSuggestedDate).toBeUndefined();
+  });
+
+  test('confirmed: a technician change under the lock is a failed step, never a different booking', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: OWED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], technicians: [{ name: 'Adam' }] }));
+    bookCompletionFollowup.mockResolvedValue(WOULD);
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    bookCompletionFollowup.mockImplementation(async (args) => {
+      if (args.dryRun) return WOULD;
+      throw Object.assign(new Error('The follow-up technician changed since it was approved — ask again for a fresh card.'), { statusCode: 409, code: 'FOLLOWUP_TECH_CHANGED' });
+    });
+    const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+      confirmed: true, technicianId: 'admin-1', executionPins: { _verified_repair_steps: approved },
+    });
+    expect(executionOutcome(run)).toBe('failed');
+    expect(run.receipt).toEqual([expect.objectContaining({ step: 'book_followup', status: 'failed', detail: expect.stringMatching(/technician changed/) })]);
+  });
+});
+
+test('book_followup: an advisory overlap is shown on the card and carried to the receipt', async () => {
+  getCloseoutStatus.mockResolvedValue({ ...status({ facts: { followUp: { state: 'pending', reason: 'followup_required_not_booked' } } }), serviceId: SVC });
+  db.mockImplementation(fakeDb({ service_records: [RECORD], technicians: [{ name: 'Adam' }] }));
+  const WOULD = { status: 200, body: { dryRun: true, alreadyScheduled: false, wouldBook: { date: '2026-10-05', windowStart: '09:00:00', windowEnd: '10:00:00', technicianId: 'tech-1', status: 'pending', overlap: true } } };
+  bookCompletionFollowup.mockResolvedValue(WOULD);
+  const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+  expect(preview.steps[0].effect).toMatch(/overlaps another appointment on the schedule — both are kept/);
+  bookCompletionFollowup.mockImplementation(async (args) => (args.dryRun ? WOULD
+    : { status: 200, body: { success: true, alreadyScheduled: false, appointment: { id: 'fu-1', scheduledDate: '2026-10-05', status: 'pending' }, overlapWarning: 'Heads up: overlap' } }));
+  const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: preview.steps } });
+  expect(run.receipt[0]).toEqual(expect.objectContaining({ status: 'completed', warning: 'Heads up: overlap' }));
 });

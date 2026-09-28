@@ -23,8 +23,9 @@
  *   - an agreed-slot quote (/scheduling/confirmed_start_at) appears word for
  *     word in one turn and contains every recorded slot word; the hour word
  *     is one hour ("two", "2", "noon") and is the slot's; the period words
- *     state the slot's AM/PM (required unless the hour is noon or midnight:
- *     a time nobody put in the morning or afternoon is not agreed); the day
+ *     state the slot's AM/PM — or, when none were said (owner decision
+ *     2026-09-28), the hour reads as business hours (7-11 morning, 12 and
+ *     1-6 afternoon) and the quote must say no period at all; the day
  *     words name the slot's date, or are absent only when the slot keeps the
  *     moved appointment's date;
  *   - when the extraction names the moved appointment, a quote pinned to
@@ -113,7 +114,7 @@ function parseTurns(transcript) {
     // Each keeps whether it was a question ("Will we see you Thursday at two?").
     const sentences = (joinMeridiem(m[2]).match(/[^.!?]+[.!?]*/g) || [])
       .map((raw) => ({ ns: normalize(raw), question: /\?/.test(raw) })).filter((x) => x.ns);
-    turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]), sentences });
+    turns.push({ agent: m[1].toLowerCase() === 'agent', raw: m[2], ns: normalize(m[2]), sentences });
   }
   return turns;
 }
@@ -178,6 +179,12 @@ function hourNumber(hourWords) {
   return n >= 1 && n <= 12 ? n : null;
 }
 
+function businessHour(n) {
+  if (n >= 7 && n <= 11) return n;
+  if (n === 12) return 12;
+  return n >= 1 && n <= 6 ? n + 12 : null;
+}
+
 function statedHour(hourWords, periodWords) {
   const toks = normalize(hourWords).split(' ');
   if (toks.length !== 1) return null;
@@ -186,6 +193,10 @@ function statedHour(hourWords, periodWords) {
   if (tok === 'midnight') return 0;
   const n = /^\d{1,2}$/.test(tok) ? Number(tok) : HOUR_WORDS[tok];
   if (!(n >= 1 && n <= 12)) return null;
+  // No period said (owner decision 2026-09-28, reschedules): business
+  // hours — 7-11 the morning, 12 and 1-6 the afternoon; other hours state
+  // nothing. The slot quote must then say no period at all (statesSlotWords).
+  if (typeof periodWords !== 'string') return /^0/.test(tok) ? null : businessHour(n); // "02" is a 24-hour clock
   const periodToks = normalize(periodWords).split(' ');
   // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
   // or midnight is a window's end (see PERIOD_PHRASES). Twelve beside a
@@ -304,7 +315,9 @@ const MINUTES_BEFORE = new Set(['past', 'after', 'to', 'til', 'till', 'of', 'bef
 // starts are on the hour, so such a quote never states the slot.
 function hourHasMinutes(toks, [ha, hb]) {
   const next = toks[hb] || '';
-  return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next)
+  // "two zero five", "two o five" (but "two o'clock" is on the hour).
+  const zeroMinutes = next === 'zero' || (next === 'o' && toks[hb + 1] !== 'clock');
+  return (/^\d+$/.test(next) && !/^0+$/.test(next)) || MINUTE_WORDS.has(next) || Object.hasOwn(HOUR_WORDS, next) || zeroMinutes
     || isMinuteCount(toks[ha - 1]) // "half two", "quarter two", "October 2, 2 PM" all fail closed
     || (MINUTES_BEFORE.has(toks[ha - 1]) && isMinuteCount(toks[ha - 2]));
 }
@@ -343,19 +356,101 @@ function periodIsTheHours(quote, words) {
 
 // Does this slot quote hold every recorded word, with the period its hour's
 // and the hour on the hour?
-function statesSlotWords(quote, words) {
-  return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words);
+// The only shapes an hour with no period may be said in for the
+// business-hours reading: led by "at"/"to"/"for"/"between" or a day
+// ("Tuesday, 2 to 4"), and followed by nothing, "o'clock", a range end, or
+// a day. "Around two", "by two", "two or four", "two-ish" never qualify.
+const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
+const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
+// Judged over the whole turns that hold the quote, and EVERY place a turn
+// says the hour must be exact: "at two" cut from "at two or four" fails.
+function saidExactly(quote, words, turns) {
+  const nq = padded(normalize(quote));
+  const holding = turns.filter((t) => padded(t.ns).includes(nq));
+  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words));
+}
+
+// Days that may lead straight into an hour ("Tuesday, 2 to 4"). Never a
+// month: the "2" of "March 2" is the date, not a time.
+const HOUR_LEAD_DAYS = new Set([
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'sun', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs', 'fri', 'sat', 'today', 'tonight', 'tomorrow',
+]);
+// Once the exact hour is said, the rest of the turn may only be courtesy
+// from this closed list. Anything else — a correction ("actually three"),
+// an alternative ("or four"), doubt ("I think", "approximately"), a length
+// ("two to four hours") — sends the call to the office.
+const AFTER_HOUR_WORDS = new Set([
+  ',', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
+  'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
+  'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
+  'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
+]);
+
+function hourExactIn(text, words) {
+  // Tokens keeping clause punctuation, so "at two, a tech will call" ends
+  // the hour at the comma.
+  const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
+  const at = spans(toks, words.hour);
+  return at.length > 0 && at.every(([ha, end]) => {
+    const prev = toks[ha - 1];
+    const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
+    const next = toks[hb];
+    const lead = EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
+    const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
+      && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
+    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || HOUR_LEAD_DAYS.has(next) || rangeEnd;
+    const rest = toks.slice(rangeEnd ? hb + 2 : hb);
+    const clean = rest.every((t) => AFTER_HOUR_WORDS.has(t) || HOUR_LEAD_DAYS.has(t));
+    return lead && tail && clean && (prev !== 'between' || rangeEnd);
+  });
+}
+
+function statesSlotWords(quote, words, turns, agreementQuotes = []) {
+  return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
+    // "Next" near the slot ("two next Thursday") names a later week than the
+    // recorded day words can: it never grounds.
+    && !padded(sentencesHolding(turns, quote)).includes(' next ')
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
+    // An hour read as business hours: the sentences the quote sits in must
+    // state no half of the day and name no noon/midnight bound — "Thursday
+    // at two" cut from "Thursday at two in the morning" never falls back.
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour))
+      || ![quote, ...agreementQuotes].some((q) => mayStatePeriod(sentencesHolding(turns, q))));
+}
+
+// The sentences, in every turn that holds this quote, that the quote
+// touches, as one normalized text.
+function sentencesHolding(turns, quote) {
+  const nq = padded(normalize(quote));
+  return turns.filter((t) => padded(t.ns).includes(nq))
+    .flatMap((t) => sentencesAround(t, quote)).map((x) => x.ns).join(' ') || normalize(quote);
+}
+
+// Before an unstated hour is read as business hours, the sentences of the
+// slot, commitment and acceptance quotes must carry NO sign of a half of the
+// day in any form: am/pm (also spelled "a m", "p m", or away from the hour:
+// "two sharp a.m."), a part of the day, noon or midnight. Only the verb "am"
+// right after "I" ("I am", "I really am") is exempt. Broad on purpose: any
+// doubt goes to the office.
+const PERIOD_SIGNS = new Set(['pm', 'morning', 'afternoon', 'evening', 'tonight', 'night', 'noon', 'midnight']);
+function mayStatePeriod(text) {
+  const toks = normalize(text).split(' ');
+  return toks.some((t, i) => PERIOD_SIGNS.has(t)
+    || ((t === 'a' || t === 'p') && toks[i + 1] === 'm') // "a m" / "p m" spelled apart
+    || (t === 'am' && !isVerbAm(toks, i)));
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say
 // the recorded hour, on the hour (periodIsTheHours's minute check), any day
 // words the slot records (none at all for a same-day change), and no am/pm
 // or part of the day but the slot's.
-function commitsToSlot(quote, words, hour24) {
+function commitsToSlot(quote, words, hour24, turns) {
   const withoutPeriod = { ...words, period: null };
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
     && (typeof words.day === 'string' ? holds(quote, words.day) : !namesAnyDay(quote))
-    && halvesSaid(quote).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+    // Read in the sentences it sits in: "at two" cut from "at two AM".
+    && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
 
 // Does this quote name a day at all (a weekday, a month, today/tomorrow/
@@ -375,8 +470,25 @@ function namesAnyDay(quote) {
 // The halves of the day this quote's am/pm and part-of-day words state
 // ("at two AM" -> am), so a commitment in the other half never counts.
 const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
+// Every half of the day said, whatever it describes: "your morning
+// appointment" may be the old visit or the new one, and the words cannot
+// tell which (Codex #5163 r1). "a m" / "p m" spelled apart count, and "am"
+// anywhere counts unless it is the verb right after "I" ("I am", "I really
+// am") — the same reading as mayStatePeriod.
 function halvesSaid(quote) {
-  return normalize(quote).split(' ').filter((t) => Object.hasOwn(HALF_WORDS, t)).map((t) => HALF_WORDS[t]);
+  const toks = normalize(quote).split(' ');
+  return toks.flatMap((t, i) => {
+    if ((t === 'a' || t === 'p') && toks[i + 1] === 'm') return [t === 'a' ? 'am' : 'pm'];
+    if (t === 'am') return isVerbAm(toks, i) ? [] : ['am'];
+    return Object.hasOwn(HALF_WORDS, t) ? [HALF_WORDS[t]] : [];
+  });
+}
+
+// Only "I am" and "I <adverb> am" are the verb; "I mean AM", "I said AM",
+// "I prefer AM" state the morning.
+const AM_ADVERBS = new Set(['really', 'also', 'just', 'still', 'actually', 'now', 'definitely', 'certainly']);
+function isVerbAm(toks, i) {
+  return toks[i - 1] === 'i' || (AM_ADVERBS.has(toks[i - 1]) && toks[i - 2] === 'i');
 }
 
 // The recorded words the slot quote must hold.
@@ -423,10 +535,11 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words))) return fail('agreed_slot_ungrounded');
+  const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
-  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24))) return fail('agent_commitment_not_the_slot');
+  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 

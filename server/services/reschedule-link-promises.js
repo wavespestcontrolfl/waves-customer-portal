@@ -1872,10 +1872,11 @@ async function acquireSendLock(connection, customerId, held) {
 // was written for (local codex audit P1). An unpooled connection's own
 // error/end/close events are the authority instead — and listening for 'error'
 // also keeps a dead raw connection from taking the process down with it.
+// Codex #4971 r15 P1: lifted into raw-connection-slots.js so the
+// parent-decision lock session (annual-prepay-renewals.js) shares this exact
+// mechanism instead of a second copy.
 function trackInterlockLoss(connection, held) {
-  if (typeof connection?.on !== 'function') return;
-  const lost = () => { held.lost = true; };
-  for (const event of ['error', 'end', 'close']) connection.on(event, lost);
+  require('./raw-connection-slots').trackConnectionLoss(connection, held);
 }
 
 // The interlock runs OUTSIDE the pool, so it has to be bounded in both time
@@ -1886,53 +1887,20 @@ function trackInterlockLoss(connection, held) {
 // the caller decides whether that is a retry or an ordinary send.
 const INTERLOCK_CONNECT_MS = 5000;
 const MAX_OPEN_INTERLOCKS = 4;
-let openInterlocks = 0;
+// The cap + connect-timeout mechanism itself is shared (raw-connection-slots.js,
+// lifted from here) — the renewal gate's session lock uses the same one.
+const interlockSlots = require('./raw-connection-slots').rawConnectionSlots({
+  max: MAX_OPEN_INTERLOCKS,
+  connectMs: INTERLOCK_CONNECT_MS,
+  logPrefix: '[reschedule-link-promises] send interlock',
+});
 
-async function openInterlockConnection() {
-  if (openInterlocks >= MAX_OPEN_INTERLOCKS) {
-    require('./logger').warn(`[reschedule-link-promises] send interlock at its connection cap (${MAX_OPEN_INTERLOCKS})`);
-    return null;
-  }
-  openInterlocks += 1;
-  let timer = null;
-  let opening = null;
-  try {
-    opening = Promise.resolve(db.client.acquireRawConnection());
-    return await Promise.race([
-      opening,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('interlock connect timed out')), INTERLOCK_CONNECT_MS); }),
-    ]);
-  } catch (err) {
-    if (err.message === 'interlock connect timed out') {
-      // The timer winning the race proves nothing about the underlying
-      // connect — it is still in flight, and freeing the slot on the timer
-      // alone (as an earlier round did) let a burst of slow connects each
-      // release their slot while the real sockets stayed open underneath,
-      // so the cap no longer bounded the true number of concurrent raw
-      // connections (codex #4293 P1 r8). Keep the slot counted until the
-      // attempt actually settles: a late-arriving connection is destroyed —
-      // ITS destroy, not this timeout, is what frees the slot — and a late
-      // rejection (the connect failed on its own after all) frees it
-      // directly, with nothing left to destroy.
-      opening.then((late) => closeInterlockConnection(late), () => { openInterlocks -= 1; });
-    } else {
-      // acquireRawConnection() itself rejected before the timer ever fired —
-      // the attempt is already over, with nothing left to wait for.
-      openInterlocks -= 1;
-    }
-    require('./logger').warn(`[reschedule-link-promises] send interlock connection unavailable (${err.code || err.name || 'error'})`);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+function openInterlockConnection() {
+  return interlockSlots.acquire();
 }
 
-async function closeInterlockConnection(connection, counted = true) {
-  if (counted) openInterlocks -= 1;
-  if (!connection) return;
-  await db.client.destroyRawConnection(connection).catch((err) => {
-    require('./logger').warn(`[reschedule-link-promises] send interlock close failed (${err.code || err.name || 'error'})`);
-  });
+function closeInterlockConnection(connection, counted = true) {
+  return interlockSlots.release(connection, counted);
 }
 
 const LOCK_BUSY = Object.freeze({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY',

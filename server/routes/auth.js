@@ -675,15 +675,36 @@ router.delete('/account', authenticate, async (req, res, next) => {
     const customerId = req.customerId;
     const accountId = req.accountId || accountIdForCustomer(req.customer);
 
-    const query = db('customers').whereNull('deleted_at');
-    if (accountId) {
-      query.where(function () {
-        this.where('account_id', accountId).orWhere('id', customerId);
-      });
-    } else {
-      query.where('id', customerId);
-    }
-    const deletedProfiles = await query.update({ deleted_at: db.fn.now() });
+    const scopeToAccount = (query) => {
+      if (accountId) {
+        return query.where(function () {
+          this.where('account_id', accountId).orWhere('id', customerId);
+        });
+      }
+      return query.where('id', customerId);
+    };
+
+    // Codex #4971 r15 P1 (restructured r21): fence deletion against a live
+    // termite-renewal action (a pay-link send, a charge, a mint) — otherwise
+    // deleted_at can commit after that action's own eligibility read but
+    // before its provider handoff, mailing a usable pay link to an account
+    // that no longer exists. withCustomerDeletionGate runs the write INSIDE
+    // its own transaction, after taking every affected profile's termite
+    // keys as transaction-level advisory locks on that same connection (one
+    // pooled connection however many profiles — never a raw lock session
+    // per profile, never a lock that can outlive or be lost by its write).
+    // The UPDATE re-checks whereNull('deleted_at') inside it so a concurrent
+    // double-delete still reports 0 the second time through.
+    const affectedIds = await scopeToAccount(db('customers').whereNull('deleted_at')).pluck('id');
+    const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+    // Codex #4971 r29 P1: the gated write deletes exactly the ids the gate
+    // was taken for (the frozen snapshot), never a re-derived account scope
+    // — a profile attached to the account after the snapshot has no lock in
+    // common with this deletion and is left for its own request.
+    const deletedProfiles = await withCustomerDeletionGate(
+      affectedIds,
+      (trx) => trx('customers').whereIn('id', affectedIds).whereNull('deleted_at').update({ deleted_at: new Date() }),
+    );
 
     // Account deletion terminates every portal refresh session for the account
     // so another device cannot mint a fresh access token after deletion.
@@ -705,6 +726,12 @@ router.delete('/account', authenticate, async (req, res, next) => {
 
     res.json({ success: true, deletedProfiles });
   } catch (err) {
+    if (err && err.code === 'PARENT_DECISION_LOCK_TIMEOUT') {
+      return res.status(409).json({
+        error: 'termite_renewal_in_progress',
+        message: 'A termite plan renewal is being processed for this account right now. Please try again in a few minutes.',
+      });
+    }
     next(err);
   }
 });
