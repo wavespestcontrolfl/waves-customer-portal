@@ -76,9 +76,9 @@ test('missed_call_text_back: keeps {callback_clause} required and the exact "cal
   // Renders naturally with and without a known dialed line (callbackClause()
   // in missed-call-text-back.js — '' or ' at (941) 297-5749').
   expect(set.replace('{callback_clause}', ''))
-    .toBe("Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible, or text us here with what you need, or call back anytime.");
+    .toBe("Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible. You can also text us here with what you need, or call back anytime.");
   expect(set.replace('{callback_clause}', ' at (941) 297-5749'))
-    .toBe("Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible, or text us here with what you need, or call back anytime at (941) 297-5749.");
+    .toBe("Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible. You can also text us here with what you need, or call back anytime at (941) 297-5749.");
 });
 
 test('voicemail_quote_link: keeps the existing message and link untouched, only adds the reassurance', () => {

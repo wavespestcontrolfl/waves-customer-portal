@@ -34,7 +34,7 @@
 const SWAPS = [
   ['missed_call_text_back',
     "Hi there, it's Waves. Sorry we missed your call. Text us here with what you need, or call back anytime{callback_clause}.",
-    "Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible, or text us here with what you need, or call back anytime{callback_clause}."],
+    "Hi there, it's Waves. Sorry we missed your call. Someone from the Waves team will follow up as soon as possible. You can also text us here with what you need, or call back anytime{callback_clause}."],
   ['voicemail_quote_link',
     "Hello {first_name}, it's Waves Pest Control. We got your message about {service_label}, and your quote is here: {quote_url}\n\nOr reply and we'll call you back.\n\nReply STOP to opt out.",
     "Hello {first_name}, it's Waves Pest Control. We got your message about {service_label}, and your quote is here: {quote_url}\n\nSomeone from the Waves team will follow up as soon as possible. Or reply and we'll call you back.\n\nReply STOP to opt out."],
