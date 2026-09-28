@@ -19,6 +19,9 @@
  *   node server/scripts/replay-review-day0-topics.js --days 60
  *   node server/scripts/replay-review-day0-topics.js --days 14 --out /private/topics.md
  *
+ * Output carries customer first names and message text: the default path is
+ * the git-ignored reports/ directory at the repo root, never a tracked path.
+ *
  * Requires DATABASE_URL or DATABASE_PUBLIC_URL to be set (a dev/preview DB —
  * never point this at production yourself; the owner runs that).
  */
@@ -187,8 +190,9 @@ async function main() {
 
   const days = Math.max(1, Number.parseInt(args.days, 10) || 60);
   const today = new Date().toISOString().slice(0, 10);
-  const outPath = args.out || path.join(process.cwd(), `review-day0-topics-${today}.md`);
+  const outPath = args.out || path.join(__dirname, '..', '..', 'reports', `review-day0-topics-${today}.md`);
   const jsonlPath = outPath.replace(/\.md$/i, '') + '.jsonl';
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
 
   const now = new Date();
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);

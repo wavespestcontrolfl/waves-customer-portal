@@ -219,6 +219,20 @@ describe('collectTopicEvidence', () => {
     expect(evidence.completion).toEqual({ concernText: 'ants in the kitchen' });
   });
 
+  test('redacts access codes in the completion concern text too', async () => {
+    db.mockImplementation(makeDb({
+      scheduled_services: [],
+      service_records: [
+        { id: 'sr-code', structured_notes: { customerConcernText: 'Gate code is 4821, ants by the pool cage' } },
+      ],
+      sms_log: [],
+    }));
+
+    const evidence = await collectTopicEvidence({ customerId: 'c1', serviceRecordId: 'sr-code', completedAt: NOW });
+    expect(evidence.completion.concernText).not.toContain('4821');
+    expect(evidence.completion.concernText).toContain('[redacted]');
+  });
+
   test('never throws — a lookup failure returns fully empty evidence', async () => {
     db.mockImplementation(() => { throw new Error('pool exhausted'); });
     const evidence = await collectTopicEvidence({ customerId: 'c1', completedAt: NOW });

@@ -107,7 +107,11 @@ async function loadVisit({ serviceRecordId, scheduledServiceId }) {
     ? await db("service_records").where({ id: serviceRecordId }).select("structured_notes", "scheduled_service_id").first()
     : null;
   const notes = parseStructuredNotes(sr?.structured_notes);
-  const concernText = typeof notes.customerConcernText === "string" ? notes.customerConcernText.trim() : "";
+  // Same redact-then-cap as the texts below: free-text concerns can carry a
+  // gate or lockbox code.
+  const concernText = typeof notes.customerConcernText === "string"
+    ? redactAccessCodes(notes.customerConcernText.trim()).slice(0, MAX_TEXT_CHARS)
+    : "";
   const visitId = scheduledServiceId || sr?.scheduled_service_id || null;
   const visit = visitId ? await db("scheduled_services").where({ id: visitId }).select("completed_at").first() : null;
   return { concernText: concernText || null, completedAt: visit?.completed_at ? new Date(visit.completed_at) : null };
