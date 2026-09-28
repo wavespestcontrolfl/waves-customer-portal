@@ -356,8 +356,13 @@ function periodIsTheHours(quote, words) {
 // and the hour on the hour?
 function statesSlotWords(quote, words) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    // An hour read as business hours: the quote must state no half of the day.
-    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || !halvesSaid(quote).length);
+    // An hour read as business hours: the quote must state no half of the
+    // day, and name no noon/midnight bound ("between 11 and midnight").
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || !statesAnyPeriod(quote));
+}
+
+function statesAnyPeriod(quote) {
+  return halvesSaid(quote).length > 0 || /\b(?:noon|midnight)\b/.test(normalize(quote));
 }
 
 // Does this agent commitment quote commit to the recorded slot? It must say
