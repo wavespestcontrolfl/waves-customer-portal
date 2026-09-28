@@ -22,6 +22,7 @@
  */
 
 const db = require('../../models/db');
+const { CUSTOMER_STAGES } = require('../customer-stages');
 const { etDateString } = require('../../utils/datetime-et');
 const { toE164 } = require('../../utils/phone');
 const { activeSuppressionsFor, GLOBAL_SUPPRESSION_TYPES } = require('../email-template-library');
@@ -37,6 +38,9 @@ const REASONS = {
   STREAM_FLAG_OFF: 'STREAM_FLAG_OFF',
   STREAM_CHANNEL_NOT_EMAIL: 'STREAM_CHANNEL_NOT_EMAIL',
   RELATIONSHIP_NOT_ELIGIBLE: 'RELATIONSHIP_NOT_ELIGIBLE',
+  // Ledger-level (reserveWithCap): the idempotency key already names another
+  // customer/stream/email operation.
+  IDEMPOTENCY_KEY_CONFLICT: 'IDEMPOTENCY_KEY_CONFLICT',
   CAP_WEEKLY_BROADCAST: 'CAP_WEEKLY_BROADCAST',
   CAP_WEEKLY_ALERT: 'CAP_WEEKLY_ALERT',
   CAP_SAME_PEST_14D: 'CAP_SAME_PEST_14D',
@@ -98,6 +102,10 @@ function streamChannelBlocksEmail(stream, emailKey, prefs) {
   return String(prefs?.[column] || '').trim().toLowerCase() === 'sms';
 }
 
+function isLiveCustomer(customer) {
+  return customer.active === true && customer.deleted_at == null && CUSTOMER_STAGES.includes(customer.pipeline_stage);
+}
+
 // Whether the customer's standing relationship qualifies this stream.
 async function relationshipEligible(stream, emailKey, customer, database) {
   if (stream === 'lifecycle') {
@@ -109,7 +117,12 @@ async function relationshipEligible(stream, emailKey, customer, database) {
     // other reader (admin-cancellation.js, revenue-forecast.js,
     // cancellation-processor.js) treats as authoritative on its own.
     if (isWinbackKey(emailKey)) return customer.pipeline_stage === 'churned';
-    return customer.active === true && customer.churned_at == null;
+    // A live customer is the canonical customer-stages.js condition (the
+    // same one whereLiveCustomer applies in SQL): active, not deleted, and in
+    // a customer stage. `active` alone is true for CRM leads, and churned_at
+    // is historical — a re-activated customer can still carry one (codex
+    // GitHub round P1).
+    return isLiveCustomer(customer);
   }
   if (stream === 'nurture') {
     const row = await database('estimates').where({ customer_id: customer.id }).first('id');

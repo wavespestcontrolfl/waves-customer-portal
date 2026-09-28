@@ -19,12 +19,60 @@ const { eligibleForEmail, REASONS } = require('./eligibility');
 // in the ledger and is never counted again.
 const RESERVATION_LIFETIME_MS = 30 * 60 * 1000; // 30 minutes
 
+// email_messages is the durable delivery authority: sendTemplate records
+// provider acceptance there (status 'sent', sent_at) before it returns.
+// CONTRACT for every caller of this ledger: pass the reservation's
+// idempotency_key as sendTemplate's `idempotencyKey`, so the two ledgers
+// share the key. That is what lets this ledger be reconciled from the
+// truth instead of guessing: a crash between provider acceptance and
+// markSent leaves a `reserved` row here whose email DID go out, and it must
+// be counted toward the caps, never written off as abandoned (codex GitHub
+// round P1). A key with no accepted message is a reservation that never
+// reached the provider.
+async function acceptedMessageFor(trx, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  return trx('email_messages')
+    .where({ idempotency_key: idempotencyKey })
+    .whereNotNull('sent_at')
+    .first('id', 'sent_at');
+}
+
+async function completeFromAcceptedMessage(trx, id, accepted) {
+  return trx('marketing_email_ledger').where({ id, status: 'reserved' }).update({
+    status: 'sent',
+    sent_at: accepted.sent_at,
+    email_message_id: accepted.id,
+    reason: 'reconciled_from_email_messages',
+    updated_at: trx.fn.now(),
+  });
+}
+
 async function settleAbandonedReservations(trx, customerId, now) {
   const staleCutoff = new Date(now.getTime() - RESERVATION_LIFETIME_MS);
-  await trx('marketing_email_ledger')
+  const stale = await trx('marketing_email_ledger')
     .where({ customer_id: customerId, status: 'reserved' })
     .where('reserved_at', '<=', staleCutoff)
-    .update({ status: 'failed', reason: 'abandoned_reservation', updated_at: trx.fn.now() });
+    .select('id', 'idempotency_key');
+  for (const row of stale) {
+    const accepted = await acceptedMessageFor(trx, row.idempotency_key);
+    if (accepted) {
+      await completeFromAcceptedMessage(trx, row.id, accepted);
+    } else {
+      await trx('marketing_email_ledger')
+        .where({ id: row.id, status: 'reserved' })
+        .update({ status: 'failed', reason: 'abandoned_reservation', updated_at: trx.fn.now() });
+    }
+  }
+  return stale.length;
+}
+
+// The row an idempotency key names must be THIS operation's: same customer,
+// stream and email key. A key reused for another customer (a batch sender's
+// campaign-level key, or two concurrent reservations resolving a conflict to
+// each other's row) is refused, never returned as a duplicate that would
+// silently skip a recipient (codex GitHub round P2).
+function sameOperation(row, { customerId, stream, emailKey }) {
+  return row.customer_id === customerId && row.stream === stream && row.email_key === emailKey;
 }
 
 async function reserve({
@@ -51,6 +99,11 @@ async function reserve({
     .where({ idempotency_key: idempotencyKey })
     .first();
   if (!existing) throw new Error('marketing email ledger reservation neither inserted nor found');
+  if (!sameOperation(existing, { customerId, stream, emailKey })) {
+    const err = new Error(`idempotency key ${idempotencyKey} already belongs to another customer/stream/email`);
+    err.code = 'IDEMPOTENCY_KEY_CONFLICT';
+    throw err;
+  }
   return { row: existing, duplicate: true };
 }
 
@@ -98,9 +151,13 @@ async function markSent(id, { emailMessageId = null } = {}, { conn } = {}) {
 async function settleReservedOnly(id, status, reason, conn) {
   const runner = conn || db;
   return runner.transaction(async (trx) => {
-    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id');
+    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id', 'idempotency_key');
     if (!existing) return false;
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
+    // A failure report against a message the provider already accepted is
+    // a lost response, not a failure: the row completes as sent instead.
+    const accepted = await acceptedMessageFor(trx, existing.idempotency_key);
+    if (accepted) return (await completeFromAcceptedMessage(trx, id, accepted)) > 0;
     const changed = await trx('marketing_email_ledger')
       .where({ id, status: 'reserved' })
       .update({ status, reason, updated_at: trx.fn.now() });
@@ -125,8 +182,13 @@ async function markFailed(id, reason, { conn } = {}) {
  *
  * Under the SAME lock, before anything else:
  *   - any of this customer's `reserved` rows older than
- *     RESERVATION_LIFETIME_MS is settled to `failed`/`abandoned_reservation`
- *     (codex round-1 P1) — never counted as outstanding again.
+ *     RESERVATION_LIFETIME_MS is settled: to `sent` (linked to the message)
+ *     when email_messages shows the provider accepted that key — the
+ *     crash-after-acceptance case, which must keep counting toward the caps —
+ *     else to `failed`/`abandoned_reservation` (codex round-1 P1, GitHub
+ *     round P1) — never counted as outstanding again.
+ *   - an idempotency key already held by ANOTHER customer/stream/email key
+ *     is refused with IDEMPOTENCY_KEY_CONFLICT (codex GitHub round P2).
  *   - a retry of an idempotency key that already exists returns
  *     `{ ok: true, duplicate: true, row }` for WHATEVER status that row
  *     holds, without ever re-running eligibility (codex round-1 P2): a
@@ -159,7 +221,12 @@ async function reserveWithCap({
     const existingByKey = await trx('marketing_email_ledger')
       .where({ idempotency_key: idempotencyKey })
       .first();
-    if (existingByKey) return { ok: true, reason: null, row: existingByKey, duplicate: true };
+    if (existingByKey) {
+      if (!sameOperation(existingByKey, { customerId, stream, emailKey })) {
+        return { ok: false, reason: REASONS.IDEMPOTENCY_KEY_CONFLICT, row: null, duplicate: false };
+      }
+      return { ok: true, reason: null, row: existingByKey, duplicate: true };
+    }
 
     const verdict = await eligibleForEmail({
       customerId, stream, marketingClass, emailKey, pestKey, now, conn: trx,

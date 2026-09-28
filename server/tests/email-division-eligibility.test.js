@@ -28,7 +28,7 @@ function chain({ result = [], first, firstError } = {}) {
 function customerRow(overrides = {}) {
   return {
     id: 'cust-1', email: 'sandy@example.test', phone: '+19415550100',
-    active: true, churned_at: null, deleted_at: null, ...overrides,
+    active: true, churned_at: null, deleted_at: null, pipeline_stage: 'active_customer', ...overrides,
   };
 }
 
@@ -144,6 +144,27 @@ describe('email-division eligibility', () => {
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
     const r = await evalWith({}, { stream: 'nurture', marketingClass: 'marketing', emailKey: 'nur.tip1' });
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
+  test.each([
+    ['a CRM lead (active=true, no churn stamp, pipeline_stage new_lead)', { pipeline_stage: 'new_lead' }],
+    ['an estimate-stage lead', { pipeline_stage: 'estimate_sent' }],
+    ['a past customer', { pipeline_stage: 'past_customer' }],
+    ['a churned customer', { pipeline_stage: 'churned' }],
+    ['a customer row with no pipeline stage at all', { pipeline_stage: null }],
+  ])('RELATIONSHIP_NOT_ELIGIBLE for a lifecycle email to %s — a live customer is the canonical customer-stages condition (codex GitHub P1)', async (_label, overrides) => {
+    const r = await evalWith({ customer: customerRow(overrides) }, { emailKey: 'lc.welcome' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
+  });
+
+  test.each([
+    ['active_customer with a stale churned_at from an earlier churn', { pipeline_stage: 'active_customer', churned_at: new Date('2025-01-01T00:00:00Z') }],
+    ['won', { pipeline_stage: 'won' }],
+    ['at_risk', { pipeline_stage: 'at_risk' }],
+  ])('a lifecycle email to a live customer in stage %s is eligible', async (_label, overrides) => {
+    const r = await evalWith({ customer: customerRow(overrides) }, { emailKey: 'lc.welcome' });
+    expect(r.ok).toBe(true);
   });
 
   test('RELATIONSHIP_NOT_ELIGIBLE for lifecycle win-back on a customer who never churned', async () => {

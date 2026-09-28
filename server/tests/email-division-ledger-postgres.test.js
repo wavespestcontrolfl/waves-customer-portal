@@ -130,6 +130,76 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(rows[0].status).toBe('sent');
   });
 
+  test('GitHub round P1: a stale reservation whose key email_messages shows as accepted completes as SENT, links the message, and keeps counting toward the cap', async () => {
+    const first = await attempt('accepted-key');
+    expect(first.ok).toBe(true);
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'accepted-key', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.broadcast.weekly', status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic-1',
+    }).returning(['id']);
+    try {
+      // Backdate the reservation past the sweep's lifetime, as a crash after
+      // provider acceptance but before markSent would leave it.
+      await db('marketing_email_ledger').where({ idempotency_key: 'accepted-key' })
+        .update({ reserved_at: new Date(Date.now() - 45 * 60 * 1000) });
+
+      const second = await attempt('next-key');
+
+      const reconciled = await db('marketing_email_ledger').where({ idempotency_key: 'accepted-key' }).first();
+      expect(reconciled.status).toBe('sent');
+      expect(reconciled.email_message_id).toBe(message.id);
+      expect(reconciled.reason).toBe('reconciled_from_email_messages');
+      expect(reconciled.sent_at).not.toBeNull();
+      // The delivered email counts: the weekly broadcast cap denies the next one.
+      expect(second.ok).toBe(false);
+      expect(second.reason).toBe(Eligibility.REASONS.CAP_WEEKLY_BROADCAST);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
+  test('GitHub round P1: a failure reported against a message the provider accepted completes the row as sent instead', async () => {
+    const first = await attempt('lost-response-key');
+    const [message] = await db('email_messages').insert({
+      idempotency_key: 'lost-response-key', recipient_email_snapshot: customerEmail, recipient_type: 'customer', recipient_id: customerId,
+      template_key: 'mkt.broadcast.weekly', status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic-2',
+    }).returning(['id']);
+    try {
+      const changed = await Ledger.markFailed(first.row.id, 'timeout_waiting_for_provider');
+      expect(changed).toBe(true);
+      const row = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+      expect(row.status).toBe('sent');
+      expect(row.email_message_id).toBe(message.id);
+    } finally {
+      await db('email_messages').where({ id: message.id }).del();
+    }
+  });
+
+  test('GitHub round P2: an idempotency key already used for another customer is refused, never returned as that customer\'s duplicate', async () => {
+    const otherId = randomUUID();
+    await db('customers').insert({
+      id: otherId, first_name: 'Synthetic', last_name: 'Other', phone: `+1941556${String(Math.floor(Math.random() * 9000) + 1000)}`,
+      email: `${otherId}@example.invalid`, active: true,
+    });
+    await db('notification_prefs').insert({ customer_id: otherId, email_enabled: true, marketing_offers: true });
+    try {
+      const mine = await attempt('campaign-2026-10');
+      expect(mine.ok).toBe(true);
+      const theirs = await Ledger.reserveWithCap({
+        customerId: otherId, stream: 'broadcast', marketingClass: 'marketing',
+        emailKey: 'mkt.broadcast.weekly', idempotencyKey: 'campaign-2026-10', now: new Date(),
+      });
+      expect(theirs).toEqual({ ok: false, reason: Eligibility.REASONS.IDEMPOTENCY_KEY_CONFLICT, row: null, duplicate: false });
+      const rows = await db('marketing_email_ledger').where({ idempotency_key: 'campaign-2026-10' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].customer_id).toBe(customerId);
+    } finally {
+      await db('marketing_email_ledger').where({ customer_id: otherId }).del();
+      await db('notification_prefs').where({ customer_id: otherId }).del();
+      await db('customers').where({ id: otherId }).del();
+    }
+  });
+
   test('finding 1 (codex round 1): a stale reservation no longer blocks and is settled as abandoned', async () => {
     const [staleRow] = await db('marketing_email_ledger').insert({
       customer_id: customerId, stream: 'broadcast', marketing_class: 'marketing',
