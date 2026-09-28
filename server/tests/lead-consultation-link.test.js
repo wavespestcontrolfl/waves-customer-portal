@@ -460,6 +460,22 @@ describe('buildLeadConsultationSmsLine', () => {
   // placeholder, unresolved placeholders) is a plain early return inside
   // getTemplate's own try block and never reaches its catch, so it is
   // never turned into a false transient by this.
+  test('an sms_templates availability query failure is flagged transient — retried by the worker, never a terminal skip (codex #5018 P2)', async () => {
+    const failing = chainBuilder();
+    failing.first = jest.fn(async () => { throw new Error('connection reset'); });
+    mockBuilders = {
+      leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),
+      sms_templates: failing,
+    };
+    const result = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(result.url).toBeNull();
+    expect(result.transient).toBe(true);
+    // A deliberately disabled template stays a plain refusal.
+    mockBuilders.sms_templates = chainBuilder({ firstRow: { is_active: false } });
+    const refused = await buildLeadConsultationSmsLine(LEAD_ID, 'Pat');
+    expect(refused.transient).toBeUndefined();
+  });
+
   test('a getTemplate DB/render error during the DRY pre-check is flagged transient — safe to retry, never a terminal skip', async () => {
     mockBuilders = {
       leads: chainBuilder({ firstRow: { id: LEAD_ID, phone: '+19415550100', status: 'new', converted_at: null } }),

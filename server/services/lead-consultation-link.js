@@ -207,7 +207,10 @@ async function probeLeadConsultationLink(leadOrId) {
     }
   } catch (err) {
     logger.warn(`[lead-consultation-link] availability check failed: ${err.message}`);
-    return { available: false, reason: 'Could not check consultation link availability' };
+    // transient: a DB hiccup, not a refusal — callers with a retry rail
+    // (call-booking-link-text) requeue instead of recording a final skip
+    // (codex #5018 P2). The admin probe ignores the extra field.
+    return { available: false, transient: true, reason: 'Could not check consultation link availability' };
   }
   return { available: true };
 }
@@ -252,7 +255,7 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
   // the real render below. A disabled, missing or STOP-less template never
   // leaves a live, unused 14-day short code behind.
   const availability = await consultationLinkAvailable(leadOrId);
-  if (!availability.available) return unavailable(availability.reason);
+  if (!availability.available) return { ...unavailable(availability.reason), ...(availability.transient ? { transient: true } : {}) };
   try {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
     if (!row || row.is_active === false) return unavailable('template disabled');
