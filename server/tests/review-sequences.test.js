@@ -24,6 +24,13 @@ jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: (...a) => mockDraftAskBody(...a),
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
 }));
+// Day-0 contextual topic (own suite: review-ask-topic.test.js). Default null
+// = no topic, matching the gate-off production posture; this file only
+// asserts enrollPostService wires the result into decision.context.
+const mockResolveReviewTopic = jest.fn(async () => null);
+jest.mock('../services/review-ask-topic', () => ({
+  resolveReviewTopicForEnrollment: (...a) => mockResolveReviewTopic(...a),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The per-customer send lock needs a real pool; its own suite covers it.
 jest.mock('../utils/cron-lock', () => {
@@ -180,6 +187,7 @@ beforeEach(() => {
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
   mockDraftEmailIntro.mockReset().mockResolvedValue(null);
+  mockResolveReviewTopic.mockReset().mockResolvedValue(null);
 });
 
 describe('review sequences — cadence engine', () => {
@@ -2819,6 +2827,45 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
     expect(plan).toHaveLength(1);
     expect(plan[0]).toMatchObject({ day: 0, channel: 'sms' });
+  });
+
+  test('GATE_REVIEW_DAY0_CONTEXT: a recurring-plan enrollment persists decision.context when the topic resolver returns one', async () => {
+    mockGates.reviewSequences = true;
+    const topic = { topic: 'ants in kitchen', kind: 'service_concern', source: 'sms', evidenceId: 'sms-1', confidence: 0.9, version: 'review-day0-context-v1' };
+    mockResolveReviewTopic.mockResolvedValue(topic);
+    const mock = makeMock({
+      customers: [{ id: 'rc-ctx-1', first_name: 'Sam', last_name: 'H', phone: '+19410000050', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rc-ctx-1', customer_id: 'rc-ctx-1', scheduled_service_id: 'ss-rc-ctx-1', service_type: 'Quarterly Pest Control Service' }],
+      scheduled_services: [{ id: 'ss-rc-ctx-1', customer_id: 'rc-ctx-1', is_recurring: true, status: 'completed', scheduled_date: '2026-08-01' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    expect(mockResolveReviewTopic).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1',
+      plan: expect.arrayContaining([expect.objectContaining({ day: 0, channel: 'sms' })]),
+    }));
+    const decision = JSON.parse(mock.__state.rows.review_sequences[0].decision);
+    expect(decision.context).toEqual(topic);
+  });
+
+  test('GATE_REVIEW_DAY0_CONTEXT: decision carries no context key when the topic resolver returns null', async () => {
+    mockGates.reviewSequences = true;
+    mockResolveReviewTopic.mockResolvedValue(null);
+    const mock = makeMock({
+      customers: [{ id: 'rc-ctx-2', first_name: 'Sam', last_name: 'H', phone: '+19410000051', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rc-ctx-2', customer_id: 'rc-ctx-2', scheduled_service_id: 'ss-rc-ctx-2', service_type: 'Quarterly Pest Control Service' }],
+      scheduled_services: [{ id: 'ss-rc-ctx-2', customer_id: 'rc-ctx-2', is_recurring: true, status: 'completed', scheduled_date: '2026-08-01' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-2', serviceRecordId: 'sr-rc-ctx-2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const decision = JSON.parse(mock.__state.rows.review_sequences[0].decision);
+    expect(decision).not.toHaveProperty('context');
   });
 
   test('a customer with live recurring coverage gets the single ask even off an unlinked completion', async () => {

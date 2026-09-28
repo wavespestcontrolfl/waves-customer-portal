@@ -65,6 +65,7 @@ async function technicianFirstName(technicianId) {
 }
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
+const { resolveReviewTopicForEnrollment } = require("./review-ask-topic");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
 const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
@@ -474,7 +475,7 @@ function nextTouchRunAt({ startedAt, step, previousStep = null, now = new Date()
  * whether the owner has anything to do — a routine deferral is
  * ownerAction 'none', never a send/drop question.
  */
-function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null }) {
+function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none", enrollmentReason = null, context = null }) {
   return JSON.stringify({
     reason,
     plannedAt: plannedAt ? new Date(plannedAt).toISOString() : null,
@@ -484,6 +485,10 @@ function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAc
     // A parked series final keeps the enrollment's own reason so redemption
     // re-labels the active sequence honestly (codex #4140 r1).
     ...(enrollmentReason ? { enrollmentReason } : {}),
+    // GATE_REVIEW_DAY0_CONTEXT: the grounded topic resolved at enrollment
+    // (review-ask-topic.js) — storage only in this PR, a later PR reads it
+    // to word the ask. Never changes whether an ask is sent.
+    ...(context ? { context } : {}),
   });
 }
 // A send claim (next_run_at NULL on an active row) older than this is not a
@@ -1774,6 +1779,15 @@ const ReviewService = {
           completedAt ? new Date(completedAt) : new Date(),
           svcType,
         ).at;
+      // GATE_REVIEW_DAY0_CONTEXT (dark): resolves to null off-gate, off the
+      // recurring plan, or on any lookup/model failure — never blocks or
+      // changes this enrollment (review-ask-topic.js).
+      const topicContext = await resolveReviewTopicForEnrollment({
+        customerId,
+        serviceRecordId,
+        completedAt: completedAt ? new Date(completedAt) : new Date(),
+        plan: resolved.plan,
+      });
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -1789,6 +1803,7 @@ const ReviewService = {
           reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
           plannedAt: firstTouchAt,
           nextEvalAt: firstTouchAt,
+          context: topicContext,
         }),
       });
       if (result?.started) {
