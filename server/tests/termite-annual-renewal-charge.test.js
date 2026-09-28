@@ -215,6 +215,33 @@ describe('termite annual renewal charge', () => {
   // stripe_invoice_charge_attempts row), never the full prepay_amount,
   // which overstates it whenever account credit reduced the cash amount
   // actually tried (a $249 renewal with $100 credit tries $149).
+  // Codex #4971 r23 P1: the lapse-void provenance. The move-15 shape (the
+  // customer declined the NEXT renewal while this successor was unpaid)
+  // keeps renewal_decision 'cancel' after its lapse void settles it, so
+  // "undecided" cannot be the test — the persisted lapse start is.
+  describe('lapseVoidAlreadyRanFor (recovery provenance)', () => {
+    const voided = { status: 'void' };
+    test('cancelled + voided invoice + no decision: the lapse void ran', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: null }, voided)).toBe(true);
+    });
+    test('cancelled + voided invoice + a declined NEXT renewal whose lapse had started: the lapse void ran (resumes retrieval + parent decision)', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: 'cancel', renewal_lapse_started_at: new Date() }, voided)).toBe(true);
+    });
+    test('a decided cancel with NO lapse ever started is an external cancel, not ours; other shapes never match', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: 'cancel', renewal_lapse_started_at: null }, voided)).toBe(false);
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: 'renew', renewal_lapse_started_at: new Date() }, voided)).toBe(false);
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'payment_pending', renewal_decision: null, renewal_lapse_started_at: new Date() }, voided)).toBe(false);
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: null }, { status: 'paid' })).toBe(false);
+      expect(_private.lapseVoidAlreadyRanFor({ status: 'cancelled', renewal_decision: null }, null)).toBe(false);
+    });
+  });
+
   describe('ringRenewalBell — declined amount', () => {
     function attemptQuery(amount) {
       const q = {};
@@ -829,6 +856,58 @@ describe('termite annual renewal charge', () => {
     // renewable termite parent terms, so an account deletion racing in
     // during a mint either waits behind the whole mint or wins the gate
     // first and is seen by the mint's own re-check.
+    // Codex #4971 r23 P1: the 45-day notice's quoted fee is frozen on the
+    // parent (renewal_noticed_fee). A parent whose current prepay_amount no
+    // longer matches it is never minted or charged automatically — one
+    // staff bell (deduped on the parent) and null, so the sweep defers it.
+    test('Codex #4971 r23 P1: a parent whose fee changed after the renewal notice is NOT minted — bell + null', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const parent = baseParent({ prepay_amount: '249.00', renewal_noticed_fee: '200.00' });
+      const { trx } = makeMintTrx({ parent });
+      const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
+      const { createTermForAnnualPrepay } = mockMintDeps();
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        withParentDecisionLock: jest.fn(async (_termId, fn) => fn()),
+        createTermForAnnualPrepay,
+        recordDecision: jest.fn(),
+        TERMITE_RENEWAL_GRACE_DAYS: 30,
+        termiteRenewalGraceDeadlineFor: jest.fn(() => '2099-01-01'),
+      }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      await expect(_private.mintRenewalSuccessor('parent-1', conn)).resolves.toBeNull();
+      expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/fee changed after the renewal notice/i),
+        expect.stringMatching(/\$249\.00.*\$200\.00/), expect.objectContaining({ dedupeKey: 'termite-renewal-charge:parent-1:fee_changed_after_notice' }));
+    });
+
+    test('Codex #4971 r23 P1: a parent whose fee still matches the noticed fee (or was never noticed) mints normally', async () => {
+      for (const noticed of ['249.00', null]) {
+        jest.resetModules();
+        mockCommon();
+        const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+        const parent = baseParent({ prepay_amount: '249.00', renewal_noticed_fee: noticed });
+        const { trx } = makeMintTrx({ parent });
+        const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
+        const { createTermForAnnualPrepay } = mockMintDeps();
+        jest.doMock('../services/annual-prepay-renewals', () => ({
+          withParentDecisionLock: jest.fn(async (_termId, fn) => fn()),
+          createTermForAnnualPrepay,
+          recordDecision: jest.fn(),
+          TERMITE_RENEWAL_GRACE_DAYS: 30,
+          termiteRenewalGraceDeadlineFor: jest.fn(() => '2099-01-01'),
+        }));
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const result = await _private.mintRenewalSuccessor('parent-1', conn);
+        expect(result.minted).toBe(true);
+        expect(notifyAdmin).not.toHaveBeenCalledWith('billing', expect.stringMatching(/fee changed/i), expect.any(String), expect.any(Object));
+      }
+    });
+
     test('Codex #4971 r16 P1 (finding 4): the mint runs inside withParentDecisionLock, keyed on the parent id', async () => {
       mockCommon();
       const parent = baseParent();

@@ -4101,6 +4101,12 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
         // still moves it out of ACTIVE_STATUSES/renewal_decision-null
         // regardless of this stamp.
         .whereNull('s.renewal_parent_deleted_conflict_belled_at')
+        // Codex #4971 r23 P2: a parent whose window was moved after the
+        // mint is a TERMINAL conflict here — recordParentRenewedIfEligible
+        // refuses it as parent_term_moved every pass, and the late-paid
+        // bell (term_window_changed_at) owns it. Excluded in SQL so such
+        // rows cannot fill this bounded page and starve valid stamps.
+        .whereRaw('s.term_start = p.term_end + 1')
         .where(function parentInvoiceSettled() {
           this.whereNull('p.prepay_invoice_id').orWhere(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
         }),
@@ -7216,6 +7222,16 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
   let stamped = null;
   let otherRecorded = null;
   await db.transaction(async (trx) => {
+    // Codex #4971 r23 P1: the termite 45-day rung quotes term.prepay_amount
+    // to the customer — freeze that fee WITH the witness
+    // (renewal_noticed_fee, 20260928030000) so the renewal mint can refuse
+    // to bill or charge a fee the customer was never told. Column-tolerant
+    // by ROW SHAPE (the claimed row is the table's own `returning('*')`, so
+    // it carries the key exactly when the schema has the column) — no extra
+    // probe query on this transaction.
+    const freezeFee = daysOut === TERMITE_EXTRA_NOTICE_DAYS
+      && claimedTerm.prepay_amount != null && claimedTerm.prepay_amount !== ''
+      && Object.prototype.hasOwnProperty.call(claimedTerm, 'renewal_noticed_fee');
     stamped = await trx('annual_prepay_terms')
       .where({ id: claimedTerm.id })
       .whereNull(noticeCol)
@@ -7224,6 +7240,7 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
       .update({
         [sentCol]: sentAt,
         [claimCol]: null,
+        ...(freezeFee ? { renewal_noticed_fee: claimedTerm.prepay_amount } : {}),
         updated_at: new Date(),
       });
     if (lateCol && stamped) {

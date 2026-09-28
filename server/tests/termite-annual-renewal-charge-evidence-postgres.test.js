@@ -312,9 +312,19 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const otherPaid = await insertInvoice({ status: 'paid', paid_at: new Date() });
       await insertSuccessor(cancelledParent, otherPaid, { status: 'active' });
 
+      // Codex #4971 r23 P2: a parent whose window was MOVED after the mint
+      // (successor no longer starts the day after the parent ends) is a
+      // terminal parent_term_moved conflict for the renew stamp — the
+      // late-paid bell owns it — and must not occupy this bounded page.
+      const movedParent = await insertParent({ term_end: daysFromToday(-40) });
+      const movedPaid = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_moved' });
+      await insertSuccessor(movedParent, movedPaid, { status: 'active' }); // term_start = today-34 ≠ parent end+1
+
       const summary = await Renewals.reconcileParentRenewedStamps({ conn: db, limit: 50 });
 
       expect(summary).toEqual({ scanned: 1, stamped: 1 });
+      expect(await db('annual_prepay_terms').where({ id: movedParent.id }).first('status', 'renewal_decision'))
+        .toEqual({ status: 'active', renewal_decision: null });
       expect(await db('annual_prepay_terms').where({ id: paidParent.id }).first('status', 'renewal_decision'))
         .toEqual({ status: 'renewed', renewal_decision: 'renew' });
       expect(await db('annual_prepay_terms').where({ id: refundedParent.id }).first('status', 'renewal_decision'))
@@ -561,7 +571,10 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
 
     test('leg 7d resolves each stale pending outcome from durable evidence only — and never charges', async () => {
       const settled = await pendingOutcome({ invoice: { status: 'paid', paid_at: new Date() }, attempt: { status: 'succeeded', submitted_at: new Date() } });
-      const declined = await pendingOutcome({ attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'Your card was declined.' } });
+      // r23 P1: stripe.js persists decline_code ONLY for a customer decline
+      // — that column, not the message text, is what recovery classifies by.
+      const declined = await pendingOutcome({ attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'Your card was declined.', decline_code: 'card_declined' } });
+      const refused = await pendingOutcome({ attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'No such payment_method (resource_missing)' } });
       const unknown = await pendingOutcome({ attempt: { status: 'claimed', stripe_payment_intent_id: 'pi_lost' } });
       const clearing = await pendingOutcome({ invoice: { status: 'processing' }, attempt: { status: 'succeeded', submitted_at: new Date() } });
       const fresh = await pendingOutcome({ attempt: { status: 'claimed', submitted_at: new Date() }, attemptedAgoMs: 5 * 60000 });
@@ -571,17 +584,22 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const counts = sweepCounts();
       await Charge._private.resolvePendingChargeOutcomes({ conn: db, limit: 50, counts });
 
-      expect(counts.reconcilePendingOutcomeScanned).toBe(5); // not the fresh one, not 7b's
+      expect(counts.reconcilePendingOutcomeScanned).toBe(6); // not the fresh one, not 7b's
       expect((await kindOf(settled.successor.id)).renewal_charge_failure_kind).toBeNull();
       expect(await kindOf(declined.successor.id)).toMatchObject({
         renewal_charge_failure_kind: 'declined', renewal_charge_failure_reason: expect.stringContaining('Your card was declined.'), renewal_charge_failure_handled_at: null,
+      });
+      // A non-decline error (no decline_code) recovers as 'refused' — the
+      // live path's own outcome for that shape — never a false decline.
+      expect(await kindOf(refused.successor.id)).toMatchObject({
+        renewal_charge_failure_kind: 'refused', renewal_charge_failure_reason: expect.stringContaining('resource_missing'), renewal_charge_failure_handled_at: null,
       });
       expect(await kindOf(unknown.successor.id)).toMatchObject({ renewal_charge_failure_kind: 'ambiguous', renewal_charge_failure_handled_at: null });
       expect(await kindOf(clearing.successor.id)).toMatchObject({ renewal_charge_failure_kind: 'outcome_pending', renewal_sweep_deferred_at: expect.any(Date) });
       expect((await kindOf(fresh.successor.id)).renewal_charge_failure_kind).toBe('outcome_pending');
       expect((await kindOf(neverReached.successor.id)).renewal_charge_failure_kind).toBe('outcome_pending');
       expect((await kindOf(activated.successor.id)).renewal_charge_failure_kind).toBeNull();
-      expect(counts.reconcilePendingOutcomeResolved).toBe(4);
+      expect(counts.reconcilePendingOutcomeResolved).toBe(5);
 
       // Leg 7c then follows each resolved outcome through in the same sweep:
       // the decline gets its pay link + bell; the unknown outcome a bell only.
@@ -593,9 +611,12 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       } finally {
         Renewals2.withParentDecisionLock = originalLock;
       }
-      expect(counts.reconcileFollowThroughScanned).toBe(2);
-      expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(counts.reconcileFollowThroughScanned).toBe(3);
+      // The decline AND the refusal each get their pay link; the unknown
+      // outcome gets a bell only.
+      expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(2);
       expect(mockSendViaSMSAndEmail).toHaveBeenCalledWith(declined.invoice.id, expect.objectContaining({ firstDeliveryOnly: true }));
+      expect(mockSendViaSMSAndEmail).toHaveBeenCalledWith(refused.invoice.id, expect.objectContaining({ firstDeliveryOnly: true }));
       expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
         dedupeKey: `termite-renewal-charge:${unknown.successor.id}:ambiguous`,
       }));

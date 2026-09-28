@@ -8200,9 +8200,17 @@ async function handleDisputeClosed(dispute) {
       // would let a late payment_intent.succeeded resurrect the
       // chargeback to paid), and the invoice is reopened idempotently
       // so dunning chases it even when created/closed arrive reversed.
+      // updated_at dates the revocation (parentChangedAtSql — Codex #4971
+      // r11). Codex #4971 r23 P1: when dispute.created already flipped this
+      // row to 'disputed' (and dated it), closing lost must NOT move that
+      // date forward — a renewal that settled between the two events would
+      // then read as paid BEFORE the change and lose its refund-or-honor
+      // alert. Only a lost-closure with no prior created event dates the
+      // revocation itself.
+      const priorStatus = String((await db('payments').where({ id: payment.id }).first('status'))?.status || '').toLowerCase();
       await db('payments').where({ id: payment.id }).update({
         status: 'disputed',
-        updated_at: new Date(), // dates the revocation (parentChangedAtSql — Codex #4971 r11)
+        ...(priorStatus === 'disputed' ? {} : { updated_at: new Date() }),
         failure_reason: `Dispute lost — $${amount} returned to customer`,
         metadata: finalMeta,
       });

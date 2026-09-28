@@ -1001,6 +1001,18 @@ async function mintRenewalSuccessorUnderGate(
 
     const planLabel = parent.plan_label || 'Waves Subterranean Termite Protection';
     const prepayAmount = assertValidPrepayAmount(parent);
+    // Codex #4971 r23 P1: the fee the 45-day notice quoted is frozen with
+    // that witness (renewal_noticed_fee, 20260928030000). A parent whose
+    // current prepay_amount no longer matches it is never minted or charged
+    // automatically — bell staff (dedupe on the parent) and return null so
+    // the sweep defers this parent (stampSweepDeferred) rather than
+    // re-trying it ahead of newer ones. Column-tolerant: NULL (no notice
+    // witnessed yet, or a pre-migration row) freezes nothing.
+    const noticedFee = parent.renewal_noticed_fee == null || parent.renewal_noticed_fee === '' ? null : Number(parent.renewal_noticed_fee);
+    if (noticedFee != null && Number.isFinite(noticedFee) && Math.round(noticedFee * 100) !== Math.round(prepayAmount * 100)) {
+      await ringRenewalBell(parent, 'fee_changed_after_notice', `the term's fee is now $${prepayAmount.toFixed(2)} but the renewal notice quoted $${noticedFee.toFixed(2)}`);
+      return null;
+    }
 
     const invoice = await InvoiceService.create({
       database: trx,
@@ -2324,6 +2336,16 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — now billed to a third-party payer',
     body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) now routes to a third-party payer (${reason}). The card on file was NOT charged and NO pay link was sent to the homeowner — route this renewal to the payer by hand.`,
   }),
+  // Codex #4971 r23 P1: the 45-day notice told the customer a specific fee
+  // (persisted as renewal_noticed_fee with that witness); staff then changed
+  // the term's prepay_amount before the renewal date. Neither the invoice
+  // nor the automatic charge may use a fee the customer was never told —
+  // the mint is held (this bell, sweep-deferred) until the term's fee again
+  // matches the noticed one.
+  fee_changed_after_notice: (parent, reason) => ({
+    title: 'Termite annual renewal — fee changed after the renewal notice, auto-renewal on hold',
+    body: `Customer ${parent.customer_id}'s termite annual renewal was NOT minted or charged: ${reason}. The customer was notified of the earlier fee. Restore that fee on the term (or agree the new fee with the customer and record it) — the automatic renewal stays on hold until the term's fee matches the noticed fee.`,
+  }),
   ambiguous: (successor, reason) => ({
     title: 'Termite annual renewal — charge outcome unclear, needs reconciliation',
     body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal may or may not have gone through (${reason}). Check Stripe and the invoice before collecting any other way — the saved method will NOT be retried automatically.`,
@@ -2926,8 +2948,15 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
 // one-use wrapper relocating a single branch.
 function lapseVoidAlreadyRanFor(fresh, invoice) {
   const invoiceStatusKey = String(invoice?.status || '').toLowerCase();
-  return fresh.status === 'cancelled' && !fresh.renewal_decision
-    && !!invoice && INVOICE_CANCELLED_STATUSES.has(invoiceStatusKey);
+  if (fresh.status !== 'cancelled' || !invoice || !INVOICE_CANCELLED_STATUSES.has(invoiceStatusKey)) return false;
+  // Codex #4971 r23 P1: the move-15 shape — the customer declined the NEXT
+  // renewal while this successor was still unpaid (payment_pending +
+  // renewal_decision 'cancel'). Its lapse void settles it to 'cancelled'
+  // and KEEPS that decision (settleDecidedPendingTerm), so "undecided" is
+  // not the provenance here — the persisted lapse start is. A decided
+  // cancel with no lapse ever started is an external cancel, not ours.
+  if (!fresh.renewal_decision) return true;
+  return fresh.renewal_decision === 'cancel' && !!fresh.renewal_lapse_started_at;
 }
 
 async function parentStillDecidableForLapse(trx, fresh) {
@@ -4005,6 +4034,15 @@ async function pendingChargeOutcomeVerdict(successor, conn) {
         reason: `the charge failed at Stripe pending additional authentication (authentication_required) — its live PaymentIntent may still be completed and succeed: ${attempt.error_message || 'no reason recorded'}`,
       };
     }
+    // Codex #4971 r23 P1: stripe.js persists decline_code ONLY for a
+    // customer decline (the live path's own wavesCardDecline rule); a failed
+    // attempt with no decline_code is a deterministic NON-decline error
+    // (its raw code rides the message) — recovered as 'refused', the live
+    // path's own outcome for that shape (pay link, neutral notice), never
+    // as a false "your payment method was declined".
+    if (!attempt.decline_code) {
+      return { kind: 'refused', reason: `the charge failed at Stripe for a reason other than a decline: ${attempt.error_message || 'no reason recorded'}` };
+    }
     return { kind: 'declined', reason: `the charge failed at Stripe: ${attempt.error_message || 'no reason recorded'}` };
   }
   return {
@@ -4076,6 +4114,7 @@ module.exports = {
   onRenewalSuccessorPaid,
   _private: {
     mintRenewalSuccessor,
+    lapseVoidAlreadyRanFor,
     decideAndCharge,
     resolveChargeEligibility,
     chargeRefusalUnderGate,

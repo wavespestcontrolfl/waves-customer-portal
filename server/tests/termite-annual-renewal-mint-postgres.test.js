@@ -44,6 +44,7 @@ async function createScratchDb() {
     renewal_decision text,
     renewed_from_term_id uuid,
     notice_45_sent_at timestamptz,
+    renewal_noticed_fee numeric(10,2),
     installation_anchored_at timestamptz,
     term_start date NOT NULL,
     term_end date NOT NULL,
@@ -171,6 +172,22 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
     expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
     expect(await db('invoices')).toHaveLength(0);
+  });
+
+  // Codex #4971 r23 P1: the 45-day notice's quoted fee is frozen on the
+  // parent (renewal_noticed_fee). Staff changed the fee afterwards: nothing
+  // is minted or charged at a fee the customer was never told.
+  test('a parent whose fee changed after the renewal notice mints nothing; a matching noticed fee mints', async () => {
+    const { _private } = require('../services/termite-annual-renewal-charge');
+    await db('annual_prepay_terms').where({ id: parentId }).update({ renewal_noticed_fee: 199, prepay_amount: 249 });
+    await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
+    expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
+    expect(await db('invoices')).toHaveLength(0);
+
+    await db('annual_prepay_terms').where({ id: parentId }).update({ renewal_noticed_fee: 249 });
+    const result = await _private.mintRenewalSuccessor(parentId, db, TODAY);
+    expect(result.minted).toBe(true);
+    expect(await db('invoices')).toHaveLength(1);
   });
 
   test('a parent whose on-time 45-day notice witness is gone mints nothing', async () => {

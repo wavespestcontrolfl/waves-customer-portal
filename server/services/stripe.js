@@ -2846,11 +2846,20 @@ const StripeService = {
         // right after this row resolves) leaves a recovery reader
         // (termite-annual-renewal-charge.js pendingChargeOutcomeVerdict)
         // something to classify by other than the raw error_message text.
-        const declineCode = err.decline_code || err.raw?.decline_code || err.code || null;
+        // Codex #4971 r23 P1: decline_code is persisted ONLY for a CUSTOMER
+        // decline (the exact rule the wavesCardDecline marker below uses) —
+        // the renewal's crash recovery (pendingChargeOutcomeVerdict) derives
+        // declined-vs-refused from that column alone, so a non-decline error
+        // code (an InvalidRequestError's resource_missing, say) persisted
+        // there would recover as a false "your payment method was declined"
+        // notice. A non-decline keeps its raw code in the message instead.
+        const customerDecline = err.type === 'StripeCardError' || err.code === 'card_declined' || Boolean(err.decline_code);
+        const rawCode = err.decline_code || err.raw?.decline_code || err.code || null;
+        const declineCode = customerDecline ? rawCode : null;
         await resolveNoFundsSavedCardChargeAttempt({
           attemptId: chargeAttempt.id,
           invoiceId,
-          failureMessage: err.message || 'Card charge failed',
+          failureMessage: `${err.message || 'Card charge failed'}${!customerDecline && rawCode ? ` (${rawCode})` : ''}`,
           declineCode,
         }).catch((attemptErr) => {
           logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
@@ -2864,7 +2873,7 @@ const StripeService = {
         // a false decline for an internal error. attemptedAmount is the
         // surcharge-inclusive total computeChargeAmount priced (what the
         // customer actually saw attempted), never the pre-surcharge base.
-        if (err.type === 'StripeCardError' || err.code === 'card_declined' || err.decline_code) {
+        if (customerDecline) {
           chargeFailed.wavesCardDecline = {
             attemptedAmount: Number.isFinite(total) ? total : null,
             cardBrand: card.card_brand || null,
