@@ -645,6 +645,19 @@ describe('review sequences — cadence engine', () => {
       expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'responded' });
     });
 
+    test('a reply that lands while the Day-0 send is still being recorded still cancels the follow-up (codex r3 on #5246)', async () => {
+      const dayZeroAt = Date.now() - 4 * 86400000;
+      const mock = setup({ seq: { ...followupDue, last_touch_at: new Date(dayZeroAt) }, sms: [
+        // After the Day-0 touch was minted, before last_touch_at was written.
+        { id: 'in-fast', customer_id: 'tf-1', direction: 'inbound', message_body: 'Still seeing ants', created_at: new Date(dayZeroAt - 20000) },
+      ] });
+      mock.__state.rows.review_requests.push({ id: 'rr-d0', sequence_id: 'seq-tf', sequence_step: 0, customer_id: 'tf-1', channel: 'sms', template_key: 'day0_ask', status: 'sent', created_at: new Date(dayZeroAt - 60000) });
+      await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(seqRow(mock)).toMatchObject({ status: 'stopped', stop_reason: 'responded' });
+    });
+
     test('a text from BEFORE the Day-0 ask (the one that raised the topic) does not cancel the follow-up', async () => {
       const mock = setup({ seq: followupDue, sms: [
         { id: 'in-0', customer_id: 'tf-1', direction: 'inbound', message_body: 'Ants in the kitchen again', created_at: new Date(Date.now() - 6 * 86400000) },

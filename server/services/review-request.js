@@ -6570,10 +6570,16 @@ const ReviewService = {
       if (!require("../config/feature-gates").isEnabled("reviewDay0Context")) return stop("completed");
       // The Day-0 text invites "Reply if anything's off": a customer who has
       // texted since it went out is in a conversation with the office, so no
-      // automated review follow-up.
+      // automated review follow-up. Counted from the Day-0 touch's own row,
+      // minted before the send — last_touch_at is only written after the
+      // send's bookkeeping, and a fast reply can land before it.
+      const dayZeroTouch = await db("review_requests")
+        .where({ sequence_id: seq.id, sequence_step: 0 })
+        .orderBy("created_at", "asc")
+        .first("created_at");
       const repliedSince = await db("sms_log")
         .where({ customer_id: seq.customer_id, direction: "inbound" })
-        .where("created_at", ">", seq.last_touch_at || seq.started_at)
+        .where("created_at", ">", dayZeroTouch?.created_at || seq.last_touch_at || seq.started_at)
         .first("id");
       if (repliedSince) return stop("responded");
     }

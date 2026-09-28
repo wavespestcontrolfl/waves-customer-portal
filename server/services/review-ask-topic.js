@@ -262,11 +262,19 @@ function resolveCitedText(evidence, source, evidenceId) {
   return "";
 }
 
-// Plural-insensitive stem (strip one trailing 's') — deliberately not full
-// lemmatization; the (s|es) suffix in isWordInEvidence absorbs the rest
-// (topic "roaches" -> "roache" still matches "roaches").
-function normalizePluralToken(token) {
-  return token.length > 1 && token.endsWith("s") ? token.slice(0, -1) : token;
+// One consistent singular form per word ("roaches" -> "roach", "flies" ->
+// "fly", "mosquitoes" -> "mosquito", "ants" -> "ant"; "grass" stays). Both
+// sides of every comparison go through it, so a singular matches its plural
+// in either direction and a mechanically stripped stem ("roache") matches
+// nothing real. Deliberately not full lemmatization: an irregular plural
+// ("mice") simply does not match its singular, which only ever refuses.
+function singularForm(word) {
+  const w = String(word).toLowerCase();
+  if (w.length <= 3 || w.endsWith("ss")) return w;
+  if (w.endsWith("ies")) return `${w.slice(0, -3)}y`;
+  if (/(?:ch|sh|x|z|ss|o)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith("s")) return w.slice(0, -1);
+  return w;
 }
 
 // Function words a topic may add around the customer's own words ("ants IN
@@ -283,10 +291,9 @@ const TOPIC_FILLER_WORDS = new Set([
 
 // Whole word, plural-insensitive ("ants" grounds on "ant" or "ants"): a
 // substring is too loose — "ants" is inside "plants", "rat" inside "rather".
-// `word` is letters only, so it is safe inside the pattern.
 function isWordInEvidence(word, evidenceLower) {
-  const stem = word.length > 3 ? normalizePluralToken(word) : word;
-  return new RegExp(`\\b${stem}(?:s|es)?\\b`).test(evidenceLower);
+  const target = singularForm(word);
+  return (String(evidenceLower || "").toLowerCase().match(/[a-z]+/g) || []).some((w) => singularForm(w) === target);
 }
 
 /**

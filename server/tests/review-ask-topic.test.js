@@ -467,6 +467,25 @@ describe('extractReviewTopic', () => {
   });
 });
 
+describe('plural matching is symmetric and never accepts a stripped stem (codex r3 on #5246)', () => {
+  const { isTopicWord, mentionsTopic } = require('../services/review-ask-topic');
+
+  test('a singular matches its plural in either direction', () => {
+    expect(isTopicWord('roach', 'roaches')).toBe(true);
+    expect(isTopicWord('roaches', 'roach')).toBe(true);
+    expect(isTopicWord('fly', 'flies')).toBe(true);
+    expect(isTopicWord('mosquito', 'mosquitoes')).toBe(true);
+    expect(isTopicWord('grass', 'grasses')).toBe(true);
+    expect(mentionsTopic('How are the roach droppings?', 'roaches')).toBe(true);
+  });
+
+  test('a mechanically stripped stem, or a word hidden inside another, never matches', () => {
+    expect(isTopicWord('roache', 'roaches')).toBe(false);
+    expect(isTopicWord('ant', 'plants')).toBe(false);
+    expect(isTopicWord('rat', 'rather')).toBe(false);
+  });
+});
+
 describe('classifyTopic (the replay\'s raw outcome)', () => {
   const evidence = { completion: { concernText: null }, serviceLines: ['pest'], texts: [{ id: 's-1', at: NOW.toISOString(), body: 'Is the tech still coming today?' }] };
 
