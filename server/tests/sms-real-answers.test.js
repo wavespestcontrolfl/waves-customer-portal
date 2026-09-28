@@ -1848,8 +1848,8 @@ describe('follow-up #5: a NEW booking is priced with the requested service, not 
     const pestOnly = { ...combined, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }] };
     await drafter.generateGroundedDraft(args('Can you add lawn service?', pestOnly));
     expect(getAvailableSlots).toHaveBeenLastCalledWith('Venice', null, expect.objectContaining({ serviceType: 'Lawn Care' }));
-    // unit: the gate words alone veto the override
-    await expect(drafter.newBookingServiceType('Please reschedule my lawn visit', pestOnly)).resolves.toBeNull();
+    // unit: the reschedule words alone veto a new booking — the one visit on file stands
+    await expect(drafter.serviceIdentityFor('Please reschedule my lawn visit', pestOnly)).resolves.toMatchObject({ serviceType: 'Quarterly Pest', reason: 'single_upcoming' });
   });
 
   test('the availability lookup uses the requested service; a message naming none falls back to the next visit', async () => {
@@ -1946,8 +1946,8 @@ describe('#5194 round 1', () => {
     mockCatalog();
     const drafter = require('../services/sms-shadow-drafter');
     const ctx = { summary: 'x', upcomingServices: [], serviceHistory: [{ type: 'Pest + Mosquito', date: '2026-09-20' }], customer: { id: 'c1' } };
-    await expect(drafter.newBookingServiceType('The mosquitoes came back after the last visit', ctx)).resolves.toBeNull();
-    await expect(drafter.newBookingServiceType('Can you add mosquito service?', ctx)).resolves.toBe('Mosquito Control');
+    await expect(drafter.serviceIdentityFor('The mosquitoes came back after the last visit', ctx)).resolves.toMatchObject({ serviceType: 'Pest + Mosquito', reason: 'last_completed' });
+    await expect(drafter.serviceIdentityFor('Can you add mosquito service?', ctx)).resolves.toMatchObject({ serviceType: 'Mosquito Control', reason: 'new_booking' });
   });
 
   test('with the gate OFF, or on a frozen replay, the catalog is never queried', async () => {
@@ -1990,8 +1990,8 @@ describe('#5194 round 2', () => {
     mockCatalog();
     const drafter = require('../services/sms-shadow-drafter');
     const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }], customer: { id: 'c1' } };
-    await expect(drafter.newBookingServiceType('What times do you have for pest control?', ctx)).resolves.toBeNull();
-    await expect(drafter.newBookingServiceType('Can you add lawn service?', ctx)).resolves.toBe('Lawn Fertilization & Weed Control');
+    await expect(drafter.serviceIdentityFor('What times do you have for pest control?', ctx)).resolves.toMatchObject({ serviceType: 'Quarterly Pest + Termite Bait Station', reason: 'named_scheduled_visit' });
+    await expect(drafter.serviceIdentityFor('Can you add lawn service?', ctx)).resolves.toMatchObject({ serviceType: 'Lawn Fertilization & Weed Control', reason: 'new_booking' });
   });
 
   test('the deadline for "by 9 AM tomorrow morning" on a row inserted after midnight is that row\'s own 9 AM, not a day later', () => {
@@ -2038,9 +2038,9 @@ describe('#5194 round 3', () => {
     jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (key === 'pest_general_quarterly' ? { name: 'General Pest Control (Quarterly)', is_active: true, is_archived: false } : null) }));
     const drafter = require('../services/sms-shadow-drafter');
     const ctx = { summary: 'x', upcomingServices: [{ type: 'Quarterly Tree & Shrub Care Service', date: '2026-10-01' }], customer: { id: 'c1' } };
-    await expect(drafter.newBookingServiceType('Can you add pest control?', ctx)).resolves.toBe('General Pest Control (Quarterly)');
+    await expect(drafter.serviceIdentityFor('Can you add pest control?', ctx)).resolves.toMatchObject({ serviceType: 'General Pest Control (Quarterly)', reason: 'new_booking' });
     const pestCtx = { ...ctx, upcomingServices: [{ type: 'Bi-Monthly Pest Control Service', date: '2026-10-01' }] };
-    await expect(drafter.newBookingServiceType('Can you add pest control?', pestCtx)).resolves.toBeNull();
+    await expect(drafter.serviceIdentityFor('Can you add pest control?', pestCtx)).resolves.toMatchObject({ serviceType: 'Bi-Monthly Pest Control Service', reason: 'named_scheduled_visit' });
   });
 });
 
@@ -2113,5 +2113,49 @@ describe('#5194 round 4', () => {
     const MON_NIGHT = new Date('2026-09-29T01:30:00Z');
     expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T11:30:00Z') })).toBeNull(); // Tue 07:30 ET
     expect(followupPromiseBlockReason({ inputSnapshot: promised, originalBody: original, body: edited, draftedAt: MON_NIGHT, now: new Date('2026-09-29T14:00:00Z') })).toBe('sla_deadline_passed'); // Tue 10:00 ET
+  });
+});
+
+
+describe('#5194 round 5', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; jest.resetModules(); });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/service-library'); jest.resetModules();
+  });
+  const CATALOG = { rodent_trapping: 'Rodent Trapping', rodent_inspection: 'Rodent Inspection', pest_general_quarterly: 'General Pest Control (Quarterly)' };
+  const mockCatalog = () => jest.doMock('../services/service-library', () => ({ resolveServiceType: async (key) => (CATALOG[key] ? { name: CATALOG[key], is_active: true, is_archived: false } : null) }));
+
+  test('a named service picks the visit booked as exactly that service, not the first visit of its family', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const both = { upcomingServices: [{ type: 'Rodent Monitoring', date: '2026-10-01' }, { type: 'rodent trapping', date: '2026-10-08' }] };
+    await expect(serviceIdentityFor('Can you reschedule my rodent trapping?', both)).resolves.toMatchObject({ serviceType: 'rodent trapping', certain: true, reason: 'named_scheduled_visit' });
+  });
+
+  test('a service matching several scheduled types, none exactly, is uncertain; the same type twice is not', async () => {
+    mockCatalog();
+    const { serviceIdentityFor } = require('../services/sms-shadow-drafter');
+    const twoPest = { upcomingServices: [{ type: 'Quarterly Pest + Termite Bait Station', date: '2026-10-01' }, { type: 'Initial Pest Cleanout', date: '2026-10-02' }] };
+    await expect(serviceIdentityFor('Can we move my pest control visit?', twoPest)).resolves.toMatchObject({ serviceType: null, certain: false, reason: 'ambiguous_named_visit' });
+    const sameTwice = { upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-01' }, { type: 'Quarterly Pest', date: '2027-01-01' }] };
+    await expect(serviceIdentityFor('Can we move my pest control visit?', sameTwice)).resolves.toMatchObject({ serviceType: 'Quarterly Pest', certain: true });
+  });
+
+  test('the explicit-work table is ordered: an inspection wins over trapping words in the same message', async () => {
+    mockCatalog();
+    const drafter = require('../services/sms-shadow-drafter');
+    await expect(drafter.requestedServiceType('Can someone do a rodent inspection before you set traps?')).resolves.toBe('Rodent Inspection');
+  });
+
+  test('billingAmountCents is the one definition of the owed and paid figures both amount guards use', () => {
+    const { billingAmountCents } = require('../services/sms-shadow-drafter');
+    const context = { billing: { outstandingBalance: 0, openInvoice: { amountDue: 45.5 }, recentPayments: [{ amount: 95, status: 'paid' }, { amount: 60, status: 'failed' }, { amount: null }] } };
+    const { owed, paid } = billingAmountCents(context);
+    expect([...owed]).toEqual([4550]); // a zero balance is not owed; the open invoice is
+    expect([...paid].sort((a, b) => a - b)).toEqual([6000, 9500]);
+    expect([...billingAmountCents(context, { settledOnly: true }).paid]).toEqual([9500]);
+    expect(billingAmountCents(null)).toEqual({ owed: new Set(), paid: new Set() });
   });
 });

@@ -9,7 +9,11 @@ jest.mock('../services/context-aggregator', () => ({
   getContextForCustomer: jest.fn(),
   authorizedDuesCents: jest.fn(() => []),
 }));
-jest.mock('../services/sms-shadow-drafter', () => ({ replyQuotesUngroundedAmount: jest.fn(() => false) }));
+// the clause-aware guard is stubbed; the shared billing figures are the real ones
+jest.mock('../services/sms-shadow-drafter', () => ({
+  ...jest.requireActual('../services/sms-shadow-drafter'),
+  replyQuotesUngroundedAmount: jest.fn(() => false),
+}));
 jest.mock('../services/sms-followup-sla', () => ({ realAnswersGateOn: jest.fn(() => false) }));
 jest.mock('../services/sms-suggest-mode', () => ({ hasPriceQuote: jest.fn((t) => /\b(?:fifty|forty|twenty|hundred)\s+dollars\b|\d+\s?\/\s?mo\b|\$\s?\d/i.test(String(t || ''))) }));
 const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');

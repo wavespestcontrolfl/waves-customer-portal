@@ -450,11 +450,6 @@ function validateReserviceOffer({ reply, factsBlock }) {
   return { ok: true, violations: [] };
 }
 
-// The service a customer is asking FOR in an inbound message, resolved to a
-// catalog service name through the existing resolvers (customer-pricing-ai
-// serviceKeyFromText → service-library resolveServiceType). Null when the
-// message names no service, or on any resolver error (fail-safe: the
-// caller falls back to the customer's own visit).
 // Pricing-family key → the catalog service_keys that family books as, in
 // preference order (Codex #5194 r1): the pricing resolver's families are not
 // catalog keys, and a partial match on "termite" lands on the lowest-sorted
@@ -476,56 +471,61 @@ const PRICING_KEY_TO_CATALOG_KEYS = Object.freeze({
   termite: ['termite_bait'],
   rodent_bait: ['rodent_monitoring', 'rodent_bait'],
 });
+// Specific work the pricing resolver folds into a family, checked in order
+// before it (Codex #5194 r5: one table instead of a decision tree per
+// service): the first entry whose patterns ALL match names the catalog keys
+// to try, in preference order, and makes the request `explicit`.
+//   - inspections (pre-push audit P1): the pricing resolver folds "WDO
+//     inspection" into the termite family, which would price a bait-system
+//     treatment for an inspection request;
+//   - one-time / initial pest (Codex #5194 r2): the pricing resolver's
+//     special-intent branch returns null for pest, which would fall through
+//     to the 45-minute General Pest default although a cleanout runs 90;
+//   - rodent trapping / exclusion (Codex #5194 r4): distinct catalog
+//     services with different durations (audit P1) — trapping alone → the
+//     trapping row, exclusion alone → exclusion-only, both → the combined row.
+const PEST_WORDS_RE = /\b(?:pest|bugs?|roach(?:es)?|ants?|spiders?|general)\b/i;
+const RODENT_WORDS_RE = /\b(?:rodent|rats?|mice|mouse)\b/i;
+const INSPECTION_RE = /\binspection\b/i;
+const TRAPPING_RE = /\b(?:trapping|traps?)\b/i;
+const EXCLUSION_RE = /\bexclusion\b/i;
+const EXPLICIT_SERVICE_INTENTS = Object.freeze([
+  { patterns: [/\bwdo\b/i], keys: ['wdo_inspection'] },
+  { patterns: [INSPECTION_RE, /\btermite/i], keys: ['termite_inspection'] },
+  { patterns: [INSPECTION_RE, RODENT_WORDS_RE], keys: ['rodent_inspection'] },
+  { patterns: [INSPECTION_RE, PEST_WORDS_RE], keys: ['pest_inspection'] },
+  { patterns: [/\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i, PEST_WORDS_RE], keys: ['pest_initial_cleanout'] },
+  { patterns: [RODENT_WORDS_RE, TRAPPING_RE, EXCLUSION_RE], keys: ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping'] },
+  { patterns: [RODENT_WORDS_RE, TRAPPING_RE], keys: ['rodent_trapping', 'rodent_exclusion'] },
+  { patterns: [RODENT_WORDS_RE, EXCLUSION_RE], keys: ['rodent_exclusion_only', 'rodent_exclusion'] },
+]);
+
 async function requestedServiceType(inboundMessage) {
   return (await resolveRequestedService(inboundMessage))?.name || null;
 }
-// { name, explicit }: `explicit` is true for work named specifically
-// (an inspection, one-time/initial pest, rodent trapping/exclusion) as
-// opposed to a family-level request ("pest control", "lawn service").
+// The service a customer is asking FOR in an inbound message: the first
+// bookable catalog row among its candidate keys, as { name, explicit } —
+// `explicit` for specific work (EXPLICIT_SERVICE_INTENTS) as opposed to a
+// family-level request ("pest control", "lawn service") resolved through
+// the pricing resolver (customer-pricing-ai serviceKeyFromText). Null when
+// the message names no service, no candidate is bookable, or on any
+// resolver error (fail-safe: the caller falls back to the customer's own
+// visit).
 async function resolveRequestedService(inboundMessage) {
   const text = String(inboundMessage || '').trim();
   if (!text) return null;
   try {
-    // Explicit inspection intent first (pre-push audit P1): the pricing
-    // resolver folds "WDO inspection" into the termite family, which would
-    // price a bait-system treatment for an inspection request.
-    const pestWords = /\b(?:pest|bugs?|roach(?:es)?|ants?|spiders?|general)\b/i;
-    const inspection = /\bwdo\b/i.test(text) ? 'wdo_inspection'
-      : /\binspection\b/i.test(text) && /\btermite/i.test(text) ? 'termite_inspection'
-        : /\binspection\b/i.test(text) && /\b(?:rodent|rats?|mice|mouse)\b/i.test(text) ? 'rodent_inspection'
-          : /\binspection\b/i.test(text) && pestWords.test(text) ? 'pest_inspection'
-            : null;
-    // One-time / initial pest work (Codex #5194 r2): the pricing resolver's
-    // special-intent branch maps only lawn, mosquito and termite there and
-    // returns null for pest, which would fall through to the 45-minute
-    // General Pest default although a cleanout runs 90.
-    const oneTimePest = !inspection && /\b(?:one[-\s]?time|initial|clean\s?out|knock\s?down)\b/i.test(text) && pestWords.test(text)
-      ? 'pest_initial_cleanout' : null;
-    // Rodent exclusion / trapping (Codex #5194 r4): the pricing resolver's
-    // special-intent branch returns null for rodent work.
-    // Trapping and exclusion are distinct catalog services with different
-    // durations (audit P1): trapping alone → the trapping row; exclusion
-    // alone → exclusion-only; both named → the combined exclusion & trapping.
-    const rodentWords = /\b(?:rodent|rats?|mice|mouse)\b/i.test(text);
-    const wantsTrapping = /\b(?:trapping|traps?)\b/i.test(text);
-    const wantsExclusion = /\bexclusion\b/i.test(text);
-    const rodentWork = !inspection && !oneTimePest && rodentWords && (wantsTrapping || wantsExclusion)
-      ? (wantsTrapping && wantsExclusion ? ['rodent_exclusion', 'rodent_exclusion_only', 'rodent_trapping']
-        : wantsTrapping ? ['rodent_trapping', 'rodent_exclusion']
-          : ['rodent_exclusion_only', 'rodent_exclusion'])
-      : null;
-    const { serviceKeyFromText } = require('./customer-pricing-ai');
-    const explicit = inspection || oneTimePest;
-    const key = explicit || rodentWork ? null : serviceKeyFromText(text);
-    const candidates = explicit ? [explicit] : rodentWork || (key ? PRICING_KEY_TO_CATALOG_KEYS[key] : null);
-    if (!candidates || !candidates.length) return null;
+    const intent = EXPLICIT_SERVICE_INTENTS.find(({ patterns }) => patterns.every((re) => re.test(text)));
+    const candidates = intent ? intent.keys : PRICING_KEY_TO_CATALOG_KEYS[require('./customer-pricing-ai').serviceKeyFromText(text)];
     const { resolveServiceType } = require('./service-library');
-    for (const catalogKey of candidates) {
+    for (const catalogKey of candidates || []) {
       const row = await resolveServiceType(catalogKey);
-      if (!row?.name) continue;
-      if (row.is_archived === true || row.is_active === false) continue; // retired rows never price a booking
-      if (row.booking_enabled === false) continue; // offered no longer (e.g. bi-monthly lawn) — historical visits keep their own identity elsewhere
-      return { name: String(row.name), explicit: Boolean(explicit || rodentWork) };
+      // Retired rows never price a booking, nor rows offered no longer
+      // (booking_enabled=false, e.g. bi-monthly lawn); a historical visit
+      // keeps its own identity through the scheduled-visit match.
+      if (row?.name && row.is_archived !== true && row.is_active !== false && row.booking_enabled !== false) {
+        return { name: String(row.name), explicit: Boolean(intent) };
+      }
     }
     return null;
   } catch (err) {
@@ -538,8 +538,7 @@ async function resolveRequestedService(inboundMessage) {
 // a reschedule, cancellation or skip is about an existing visit, and so is
 // any message naming a service the customer already has on the calendar —
 // "move my lawn and shrub visit" must keep the visit's own combined
-// service, not collapse to standalone lawn care. Null → caller falls back
-// to the customer's own visit.
+// service, not collapse to standalone lawn care.
 const EXISTING_VISIT_WORDS_RE = /\b(?:move|moving|reschedul\w*|change|changing|cancel\w*|skip\w*|push(?:ed|ing)?\s+(?:back|out)|bump\w*|postpone\w*|delay\w*|earlier|later)\b/i;
 const SERVICE_FAMILY_ALIASES = Object.freeze({
   pest: /\b(?:pest|bugs?|general pest|cleanout|roach(?:es)?|ants?|spiders?)\b/i, // identity terms only — never a cadence word (Codex #5194 r3)
@@ -548,7 +547,7 @@ const SERVICE_FAMILY_ALIASES = Object.freeze({
   tree_shrub: /\b(?:tree|shrub|ornamental)\b/i,
   palm: /\bpalm/i,
   termite: /\b(?:termite|wdo)\b/i,
-  rodent: /\b(?:rodent|rats?|mice|mouse)\b/i,
+  rodent: RODENT_WORDS_RE,
 });
 function serviceFamilyOf(serviceName) {
   const name = String(serviceName || '');
@@ -564,58 +563,54 @@ function serviceFamilyOf(serviceName) {
 // flag (Codex #5194 r4, structural): availability with the WRONG duration
 // is worse than no availability, so an uncertain identity withholds OPEN
 // TIMES and the draft defers ("we'll confirm a time"). Certain when:
-//   - the message names a service (requestedServiceType) — the matching
-//     scheduled visit's own (possibly combined) label when one is on the
-//     calendar, else the requested catalog service as a NEW booking;
+//   - the message names a service (resolveRequestedService) that refers to
+//     exactly one scheduled visit type (scheduledTypesFor) — that visit's
+//     own (possibly combined) label — or to none, and is not about an
+//     existing visit — the requested catalog service as a NEW booking;
 //   - the customer has exactly one upcoming visit (a reschedule, callback
 //     or "when can you come" is about it);
-//   - no upcoming visit but a completed one (a callback on it).
-// Uncertain only when several visits are scheduled and the message names
-// none of them; a customer with nothing on file keeps the engine's default.
+//   - no upcoming visit but a completed one (a callback on it — Codex
+//     #5194 r1: "the mosquitoes came back" is about the completed combined
+//     visit, never a new standalone booking).
+// Uncertain when the named service refers to several scheduled visit types,
+// or several visits are scheduled and the message names none of them.
 async function serviceIdentityFor(inboundMessage, context) {
   const text = String(inboundMessage || '');
   const upcoming = (context?.upcomingServices || []).filter((s) => s && s.type);
   const resolved = await resolveRequestedService(text);
   if (resolved) {
-    const requested = resolved.name;
     const aboutExisting = EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text);
-    const family = serviceFamilyOf(requested);
-    const scheduled = family ? upcoming.find((s) => SERVICE_FAMILY_ALIASES[family].test(String(s.type))) : null;
-    // Explicitly distinct work (trapping while monitoring is scheduled, a
-    // WDO inspection while treatment is scheduled) is NEW work unless the
-    // message is about the existing visit (audit P1); a family-level
-    // request ("pest control?") with a visit in that family is about it.
-    if (scheduled && (aboutExisting || !resolved.explicit)) return { serviceType: String(scheduled.type), certain: true, reason: 'named_scheduled_visit' };
-    if (!aboutExisting) return { serviceType: requested, certain: true, reason: 'new_booking' };
+    const scheduled = scheduledTypesFor(resolved, upcoming, aboutExisting);
+    if (scheduled.length === 1) return { serviceType: scheduled[0], certain: true, reason: 'named_scheduled_visit' };
+    if (scheduled.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_named_visit' };
+    if (!aboutExisting) return { serviceType: resolved.name, certain: true, reason: 'new_booking' };
   }
   if (upcoming.length === 1) return { serviceType: String(upcoming[0].type), certain: true, reason: 'single_upcoming' };
   if (upcoming.length > 1) return { serviceType: null, certain: false, reason: 'ambiguous_upcoming' };
   const last = liveServiceType(context);
   if (last) return { serviceType: last, certain: true, reason: 'last_completed' };
   // Nothing on file at all (a brand-new customer): the engine's own default
-  // service is the right answer, as it was before this lane — the only
-  // genuinely ambiguous case is several visits with none named.
+  // service is the right answer, as it was before this lane.
   return { serviceType: null, certain: true, reason: 'engine_default' };
 }
 
-async function newBookingServiceType(inboundMessage, context) {
-  const text = String(inboundMessage || '');
-  // A complaint or cancellation is about the visit the customer already
-  // had (Codex #5194 r1): "the mosquitoes came back" is a callback on the
-  // completed combined visit, never a new standalone booking.
-  if (EXISTING_VISIT_WORDS_RE.test(text) || SAVE_SALE_TEXT_RE.test(text)) return null;
-  const resolvedNb = await resolveRequestedService(text);
-  const requested = resolvedNb?.name || null;
-  if (!requested) return null;
-  if (resolvedNb.explicit) return requested; // explicitly distinct work is new even beside a same-family visit
-  // Already on the calendar? Compared by service FAMILY (Codex #5194 r2):
-  // "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
-  // Termite Bait Station" share the pest family even though no first word
-  // matches. The family aliases mirror the pricing resolver's matchers.
-  const family = serviceFamilyOf(requested);
-  const alreadyScheduled = Boolean(family) && (context?.upcomingServices || [])
-    .some((s) => s && s.type && SERVICE_FAMILY_ALIASES[family].test(String(s.type)));
-  return alreadyScheduled ? null : requested;
+// The distinct scheduled visit types a requested service refers to. A visit
+// booked as exactly that catalog service wins (Codex #5194 r5): "reschedule
+// my rodent trapping" must not land on a Rodent Monitoring visit listed
+// before it. Otherwise every type in the service's FAMILY (Codex #5194 r2:
+// "General Pest Control (Quarterly)" and a scheduled "Quarterly Pest +
+// Termite Bait Station" share the pest family though no first word
+// matches; the aliases mirror the pricing resolver's matchers) — which
+// explicitly distinct work joins only when the message is about an
+// existing visit (audit P1): trapping beside scheduled monitoring, or a WDO
+// inspection beside treatment, is a NEW booking.
+function scheduledTypesFor(resolved, upcoming, aboutExisting) {
+  const types = [...new Set(upcoming.map((s) => String(s.type)))];
+  const name = resolved.name.trim().toLowerCase();
+  const exact = types.filter((t) => t.trim().toLowerCase() === name);
+  if (exact.length || (resolved.explicit && !aboutExisting)) return exact;
+  const family = serviceFamilyOf(resolved.name);
+  return family ? types.filter((t) => SERVICE_FAMILY_ALIASES[family].test(t)) : [];
 }
 
 // The service a live (non-estimate) scheduling reply is about: the next
@@ -1019,6 +1014,28 @@ const AMOUNT_OWED_RE = /\b(?:balance|owe[sd]?|due|outstanding|invoice[sd]?|bill(
 const UNSUCCESSFUL_PAYMENT_STATUSES = new Set(['failed', 'pending', 'overdue', 'upcoming', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed', 'processing', 'requires_action']);
 const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
 const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+// The billing figures a reply may quote, in cents — one definition for this
+// draft-time guard and the send-time recheck (sms-amount-recheck): what is
+// OWED (balance, open invoice, published monthly dues) and what was PAID.
+// `settledOnly` keeps only payments that went through (Codex r7 —
+// recentPayments is attempted history and carries failed / pending /
+// overdue rows too, none of which back "your payment went through").
+function billingAmountCents(context, { settledOnly = false } = {}) {
+  const billing = context?.billing || {};
+  const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
+  const finiteSet = (list) => new Set(list.filter((v) => Number.isFinite(v)));
+  return {
+    owed: finiteSet([
+      billing.outstandingBalance > 0 ? centsOf(billing.outstandingBalance) : NaN,
+      centsOf(billing.openInvoice?.amountDue),
+      ...require('./context-aggregator').authorizedDuesCents(context),
+    ]),
+    paid: finiteSet((billing.recentPayments || [])
+      .filter((p) => !settledOnly || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
+      .map((p) => centsOf(p?.amount))),
+  };
+}
+
 // `opts.byMeaning` pins the strict clause/status-aware rule regardless of
 // the live gate (Codex #5194 r2 P1): a v12 review card that outlives a gate
 // rollback is still a v12 draft and is rechecked as one.
@@ -1026,21 +1043,9 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
   const text = String(reply || '');
-  const finite = (list) => list.filter((v) => Number.isFinite(v));
-  // What is OWED: balance, open invoice, monthly dues (shared definition).
-  const owedCents = new Set(finite([
-    context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
-    context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-    ...require('./context-aggregator').authorizedDuesCents(context),
-  ]));
-  // What was PAID: payment history.
-  // Gate on: only payments that actually went through (Codex r7 —
-  // recentPayments is attempted history and carries failed / pending /
-  // overdue rows too, none of which back "your payment went through").
+  // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const paidCents = new Set(finite((context.billing?.recentPayments || [])
-    .filter((p) => !realAnswers || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
-    .map((p) => (p?.amount != null ? centsOf(p.amount) : null))));
+  const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
   // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
   // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
   // unit-less numerals stay out of the deterministic guard (dates, house
@@ -2555,10 +2560,10 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
+  billingAmountCents,
   replyBindsDeclaredDays,
   liveServiceType,
   requestedServiceType,
-  newBookingServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
   reserviceFactLine,

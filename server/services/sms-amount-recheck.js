@@ -44,42 +44,36 @@ function strictForVersion(promptVersion) {
 }
 
 async function outgoingAmountsStale({ customerId, body, promptVersion = null, dbh = db } = {}) {
+  const text = String(body || '');
   const strict = strictForVersion(promptVersion);
-  const bodyAmounts = bodyAmountCents(body);
-  if (!bodyAmounts.length) {
+  const amounts = bodyAmountCents(text);
+  if (!amounts.length) {
     // Price grammar the numeric extractor cannot verify ("fifty dollars",
     // "45/mo") is unverifiable, not amount-free (audit P1): with real
     // answers on it fails closed, mirroring the drafter's draft-time rule.
-    const { hasPriceQuote } = require('./sms-suggest-mode');
-    if (strict && hasPriceQuote(String(body || ''))) {
-      return { stale: true, reason: 'amount_unverifiable' };
-    }
-    return { stale: false };
+    const unverifiable = strict && require('./sms-suggest-mode').hasPriceQuote(text);
+    return unverifiable ? { stale: true, reason: 'amount_unverifiable' } : { stale: false };
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
-    const ContextAggregator = require('./context-aggregator');
+    const drafter = require('./sms-shadow-drafter');
     const customerRow = await dbh('customers').where({ id: customerId }).first();
-    const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
-    // Masked before matching (audit P1): the ack grammar stops at a period,
-    // and "$95.50" must not end the clause.
-    const ackBody = PAYMENT_ACK_RE.test(String(body || '').replace(AMOUNT_FORMS_RE, ' AMT '));
-    const authorized = new Set([
-      ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
-      ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
-      ...ContextAggregator.authorizedDuesCents(ctx),
-      ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
-    ].filter((v) => Number.isFinite(v)));
-    let stale = bodyAmounts.some((a) => !authorized.has(a));
-    // With real answers on, the drafter's clause-aware guard is the
-    // stricter authority (Codex #5194 r1 P1): each amount binds to the
-    // meaning of its own clause, and only payments that went through back
-    // an acknowledgement — a payment that later failed, was refunded or
-    // disputed no longer authorizes "we received your $95 payment", even
-    // when the reversal reopened a balance for the same figure.
-    if (!stale && strict) {
-      stale = require('./sms-shadow-drafter').replyQuotesUngroundedAmount(String(body || ''), ctx || {}, { byMeaning: true });
-    }
+    const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
+    // With real answers on, the drafter's clause-aware guard is the whole
+    // rule (Codex #5194 r1 P1; r5: its checks are a superset of the pooled
+    // one below): each amount binds to the meaning of its own clause, and
+    // only payments that went through back an acknowledgement — a payment
+    // that later failed, was refunded or disputed no longer authorizes "we
+    // received your $95 payment", even when the reversal reopened a balance
+    // for the same figure. Otherwise the pooled rule over the same shared
+    // figures: what is still owed, plus payment history only when the body
+    // reads as an acknowledgement (masked first, audit P1 — the ack grammar
+    // stops at a period, and "$95.50" must not end the clause).
+    const { owed, paid } = drafter.billingAmountCents(ctx);
+    const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
+    const stale = strict
+      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true })
+      : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);
@@ -87,4 +81,4 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
   }
 }
 
-module.exports = { outgoingAmountsStale, bodyAmountCents, AMOUNT_FORMS_RE, PAYMENT_ACK_RE };
+module.exports = { outgoingAmountsStale, bodyAmountCents };
