@@ -119,8 +119,13 @@ function followupLedgerKey(row, step, channel) {
 // channels writes ledger siblings collapseDunningReminderEvents (dunning
 // spacing shadow/replay) can group as one customer contact instead of
 // counting each channel's leg as an independent reminder (codex r2 P2).
+// The touch's due time is part of the LEDGER key (pre-push audit, #5189): a
+// revived or reopened sequence can fire the same step again weeks later,
+// and that is a second reminder, not a retry of the first. Only the
+// spacing reducer reads this key; the send's own key is unchanged.
 function followupEventKey(row, step) {
-  return `invoice-followup:${row.id}:${step.id}`;
+  const due = row.next_touch_at ? new Date(row.next_touch_at).toISOString() : 'unscheduled';
+  return `invoice-followup:${row.id}:${step.id}:${due}`;
 }
 
 async function currentStepLedgerIds(row, step, channels) {
