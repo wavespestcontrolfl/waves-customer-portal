@@ -490,7 +490,7 @@ async function recordManualPayment(id, {
     queued = true;
   } else if (sendReceipt) {
     const { sendReceiptEmail } = require('./invoice-email');
-    const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('./receipt-delivery-queue');
     // The payment is already recorded: a claim failure only skips the
     // receipt (reported back), never fails the payment.
     const claim = await claimReceiptJobForOperatorSend(id)
@@ -505,6 +505,7 @@ async function recordManualPayment(id, {
       try {
         if (emailLeg) {
           emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
+          if (emailResult?.ok) await recordOperatorReceiptEmail(claim);
         }
         if (via === 'sms' || via === 'both') {
           try {

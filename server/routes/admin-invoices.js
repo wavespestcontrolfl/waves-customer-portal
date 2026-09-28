@@ -1502,7 +1502,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
     }
 
     const { sendReceiptEmail } = require('../services/invoice-email');
-    const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
     const sent = [];
     const failed = [];
     const skipped = [];
@@ -1548,7 +1548,10 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
         try {
           const r = await sendReceiptEmail(invoiceId);
           emailRes = r || null;
-          if (r?.ok) emailOk = true;
+          if (r?.ok) {
+            emailOk = true;
+            await recordOperatorReceiptEmail(claim);
+          }
           else if (r?.error) errs.push(`email: ${r.error}`);
         } catch (err) {
           errs.push(`email: ${err.message}`);
@@ -2519,7 +2522,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
     }
 
     const { sendReceiptEmail } = require('../services/invoice-email');
-    const { claimReceiptJobForOperatorSend, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
+    const { claimReceiptJobForOperatorSend, recordOperatorReceiptEmail, releaseOperatorReceiptClaim } = require('../services/receipt-delivery-queue');
 
     // The invoice's queued receipt job (if any) is claimed first so it
     // cannot deliver a second receipt around this send.
@@ -2537,6 +2540,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
     try {
       if (via === 'email' || via === 'both') {
         emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+        if (emailResult.ok) await recordOperatorReceiptEmail(claim);
       }
       if (via === 'sms' || via === 'both') {
         // Manual operator resend — pass force:true to override the auto-send

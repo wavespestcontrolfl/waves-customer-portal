@@ -73,27 +73,21 @@ async function enqueueReceiptDelivery({
 }
 
 async function recoverStaleLocks() {
-  // A stale operator claim (claimReceiptJobForOperatorSend) whose invoice is
-  // already stamped receipt_sent_at was never handed back after the operator's
-  // send delivered (a failed release, or a process that died after the
-  // stamp). Requeueing it would email the receipt again — the drain's email
-  // leg does not read the stamp — so it is closed instead. The one cost: a
-  // job an enqueue took over, whose operator send was text-only, loses its
-  // email; the customer already has the receipt text.
+  // A stale operator claim (claimReceiptJobForOperatorSend) whose own email
+  // already went out (recordOperatorReceiptEmail stamped this claim's token
+  // on the row) was never handed back — a failed release, or a process that
+  // died after the send. Requeueing it would email the receipt again, so it
+  // is closed instead. Without that claim-specific evidence it is requeued
+  // below like any stale job: the email may still be owed.
   await db('receipt_delivery_jobs')
     .where({ status: 'running' })
     .where('locked_at', '<', db.raw(`now() - interval '${STALE_LOCK_MINUTES} minutes'`))
     .where('locked_by', 'like', 'operator:%')
-    .whereExists(function receiptAlreadySent() {
-      this.select(db.raw('1'))
-        .from('invoices')
-        .whereRaw('invoices.id = receipt_delivery_jobs.invoice_id')
-        .whereNotNull('invoices.receipt_sent_at');
-    })
+    .whereRaw("email_result->>'operator_claim' = locked_by")
     .update({
       status: 'completed',
       completed_at: db.fn.now(),
-      last_error: 'operator receipt claim was not released; the receipt was already sent',
+      last_error: 'operator receipt claim was not released after its email was sent',
       locked_at: null,
       locked_by: null,
       updated_at: db.fn.now(),
@@ -386,7 +380,8 @@ async function processDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {
 // A short transaction only: never held across the sends. A process that dies
 // holding the claim leaves a `running` row, which recoverStaleLocks hands to
 // the drain after STALE_LOCK_MINUTES — the receipt still goes out — unless
-// the invoice was already stamped receipted, which closes it instead.
+// the claim's own email was recorded as sent (recordOperatorReceiptEmail),
+// which closes it instead.
 async function claimReceiptJobForOperatorSend(invoiceId) {
   const token = `operator:${workerId()}:${randomUUID()}`;
   return db.transaction(async (trx) => {
@@ -429,6 +424,18 @@ async function claimReceiptJobForOperatorSend(invoiceId) {
         : { status: job.status, next_attempt_at: job.next_attempt_at },
     };
   });
+}
+
+// Right after the operator's email leg delivers: claim-specific evidence on
+// the row, so a claim that is never released is closed by recoverStaleLocks
+// rather than requeued to email again. Best effort — without it the stale
+// claim is requeued (a possible repeat email, never a lost one).
+async function recordOperatorReceiptEmail(claim) {
+  if (!claim?.id) return;
+  await db('receipt_delivery_jobs')
+    .where({ id: claim.id, status: 'running', locked_by: claim.token })
+    .update({ email_result: { ok: true, operator_claim: claim.token }, updated_at: db.fn.now() })
+    .catch((err) => logger.warn(`[receipt-delivery-queue] operator receipt email evidence failed for job ${claim.id}: ${err.message}`));
 }
 
 // After the operator send: a delivered receipt EMAIL completes the job (the
@@ -493,6 +500,7 @@ module.exports = {
   processReceiptDeliveryJob,
   scheduleReceiptDeliveryDrain,
   claimReceiptJobForOperatorSend,
+  recordOperatorReceiptEmail,
   releaseOperatorReceiptClaim,
   _internals: {
     recoverStaleLocks,

@@ -25,6 +25,7 @@ const {
   releaseOperatorReceiptClaim,
   claimDueReceiptDeliveryJobs,
   enqueueReceiptDelivery,
+  recordOperatorReceiptEmail,
   _internals: { recoverStaleLocks },
 } = require('../services/receipt-delivery-queue');
 
@@ -49,7 +50,6 @@ postgres('operator receipt claim on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
     await jobsMigration.up(mockPg);
     await customerInitiatedMigration.up(mockPg);
-    await mockPg.schema.createTable('invoices', (t) => { t.uuid('id').primary(); t.timestamp('receipt_sent_at'); });
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -169,20 +169,26 @@ postgres('operator receipt claim on PostgreSQL', () => {
     expect(await job(invoiceId)).toMatchObject({ status: 'running', locked_by: 'worker-2' });
   });
 
-  test('a stale operator claim on an invoice already receipted is closed, never requeued to email again', async () => {
+  test('a stale operator claim is closed only on its OWN recorded email — otherwise requeued, since the email may still be owed', async () => {
     const stale = new Date(Date.now() - 60 * 60 * 1000);
-    const sentId = await seedJob({ status: 'running', source: 'operator_send', locked_at: stale, locked_by: 'operator:host:1:a' });
-    await mockPg('invoices').insert({ id: sentId, receipt_sent_at: new Date() });
-    const unsentId = await seedJob({ status: 'running', source: 'operator_send', locked_at: stale, locked_by: 'operator:host:1:b' });
-    await mockPg('invoices').insert({ id: unsentId, receipt_sent_at: null });
+    // The operator's email went out (evidence recorded), then the release never ran.
+    const sentId = await seedJob();
+    const sentClaim = await claimReceiptJobForOperatorSend(sentId);
+    await recordOperatorReceiptEmail(sentClaim);
+    await mockPg('receipt_delivery_jobs').where({ id: sentClaim.id }).update({ locked_at: stale });
+    // A job whose earlier drain attempt texted (and emailed nothing yet): the
+    // operator claimed it and died before sending — no evidence for this claim.
+    const owedId = await seedJob({ status: 'retry_scheduled', email_result: { ok: true } });
+    const owedClaim = await claimReceiptJobForOperatorSend(owedId);
+    await mockPg('receipt_delivery_jobs').where({ id: owedClaim.id }).update({ locked_at: stale });
+    // Evidence from a DIFFERENT (earlier) claim does not count for this one.
+    const otherId = await seedJob({ status: 'running', locked_at: stale, locked_by: 'operator:host:1:new', email_result: { ok: true, operator_claim: 'operator:host:1:old' } });
     const workerId = await seedJob({ status: 'running', locked_at: stale, locked_by: 'worker-9' });
-    await mockPg('invoices').insert({ id: workerId, receipt_sent_at: new Date() });
 
     await recoverStaleLocks();
-    expect(await job(sentId)).toMatchObject({ status: 'completed', locked_by: null, last_error: expect.stringMatching(/already sent/) });
-    // Nothing went out on this one: the drain delivers it.
-    expect(await job(unsentId)).toMatchObject({ status: 'retry_scheduled', locked_by: null });
-    // A drain worker's own stale job is recovered as before (its retry owes the email).
+    expect(await job(sentId)).toMatchObject({ status: 'completed', locked_by: null, last_error: expect.stringMatching(/email was sent/) });
+    expect(await job(owedId)).toMatchObject({ status: 'retry_scheduled', locked_by: null });
+    expect(await job(otherId)).toMatchObject({ status: 'retry_scheduled' });
     expect(await job(workerId)).toMatchObject({ status: 'retry_scheduled' });
   });
 });

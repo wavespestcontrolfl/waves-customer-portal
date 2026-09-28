@@ -46,6 +46,7 @@ jest.mock('../services/receipt-delivery-queue', () => ({
   enqueueReceiptDelivery: jest.fn(async () => ({ enqueued: true })),
   scheduleReceiptDeliveryDrain: jest.fn(),
   claimReceiptJobForOperatorSend: jest.fn(async () => ({ id: 'job-1', token: 'claim-1', prior: null })),
+  recordOperatorReceiptEmail: jest.fn(async () => undefined),
   releaseOperatorReceiptClaim: jest.fn(async () => undefined),
 }));
 
