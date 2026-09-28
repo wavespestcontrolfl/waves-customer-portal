@@ -238,7 +238,7 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
 
   let count = 0;
   for (const row of rows) {
-    const result = await db.raw(
+    const insert = (runner) => runner.raw(
       `INSERT INTO opportunity_queue
          (bucket, action_type, query, page_url, service, city,
           score, score_breakdown, signal_metadata, status,
@@ -283,6 +283,7 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
                                   ELSE opportunity_queue.attempt_count
                              END,
              updated_at = now()
+       RETURNING status
       `,
       [
         row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,
@@ -291,7 +292,30 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
         maxClaimAttempts(),
       ]
     );
-    count += result.rowCount || 1;
+    let result;
+    if (row.page_url && row.action_type === 'refresh_existing_page') {
+      result = await db.transaction(async (trx) => {
+        const refreshAudit = require('../seo/refresh-audit');
+        const queue = require('./opportunity-queue')._internals;
+        await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+        const inflight = await refreshAudit.findInflightPageEdit(trx, {
+          path: refreshAudit._identity.urlToPath(row.page_url),
+          targetDomain: refreshAudit._identity.registrableDomain(row.page_url) || 'wavespestcontrol.com',
+        });
+        if (inflight && inflight.dedupe_key !== row.dedupe_key) return { rowCount: 0, rows: [] };
+        const inserted = await insert(trx);
+        if (['pending', 'claimed', 'pending_review'].includes(inserted.rows?.[0]?.status)) {
+          await queue.supersedeCitabilityBackfillsForPage(trx, {
+            pageUrl: row.page_url,
+            ordinaryDedupeKey: row.dedupe_key,
+          });
+        }
+        return inserted;
+      });
+    } else {
+      result = await insert(db);
+    }
+    count += result.rowCount ?? 1;
   }
   logger.info(`[intercept-brief-seeder] seeded ${count}/${rows.length} intercept brief(s) from ${path.basename(file)}`);
   return { dryRun: false, count, rows };

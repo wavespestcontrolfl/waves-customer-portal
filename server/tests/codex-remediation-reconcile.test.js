@@ -41,6 +41,8 @@ function fixture() {
         return q;
       },
       whereNot(key, value) { filters.push(row => row[key] !== value); return q; },
+      // newerSiblingRun scopes siblings to the run's queue claim (NULL claim ⇒ whereNull).
+      whereNull(key) { filters.push(row => row[key] == null); return q; },
       forUpdate() { return q; },
       orderBy() { ordered = true; return q; },
       async first() { return structuredClone(rows()[0]); },

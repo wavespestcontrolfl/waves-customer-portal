@@ -13,6 +13,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putFile: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
+  deleteRef: jest.fn(),
 }));
 
 const gh = require('../services/content-astro/github-client');
@@ -105,6 +106,46 @@ describe('publishRefresh frontmatter freeze', () => {
     gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
     gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/x/y/pull/77', head: { sha: 'h' } });
     gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test.each(['false', 'true'])('citability publication honors the live gate (%s)', async (enabled) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = enabled === 'true';
+    try {
+      const result = pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } });
+      if (enabled === 'true') {
+        await expect(result).resolves.toMatchObject({ status: 'pr_open' });
+        expect(gh.createPr).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+        expect(gh.createBranch).not.toHaveBeenCalled();
+        expect(gh.putFile).not.toHaveBeenCalled();
+        expect(gh.createPr).not.toHaveBeenCalled();
+      }
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test.each(['getFile', 'createBranch', 'putFile'])('a stop during %s prevents the next publishing write', async (method) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    gates.citabilityBackfill = true;
+    gh[method].mockImplementationOnce(async () => {
+      gates.citabilityBackfill = false;
+      return method === 'getFile' ? { content: EXISTING, sha: 'existing-sha' } : {};
+    });
+    try {
+      await expect(pub.publishRefresh(refreshDraft(), { ...BRIEF, gsc_signal: { bucket: 'citability_backfill' } }))
+        .rejects.toMatchObject({ code: 'CITABILITY_BACKFILL_DISABLED' });
+      expect(gh.createPr).not.toHaveBeenCalled();
+      if (method !== 'putFile') expect(gh.putFile).not.toHaveBeenCalled();
+      if (method === 'getFile') expect(gh.createBranch).not.toHaveBeenCalled();
+      else expect(gh.deleteRef).toHaveBeenCalledTimes(1);
+    } finally {
+      gates.citabilityBackfill = previous;
+    }
   });
 
   // Refreshes auto-merge too, so the owner-list chokepoint runs on the final
