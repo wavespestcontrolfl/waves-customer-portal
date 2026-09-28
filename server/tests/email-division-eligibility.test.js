@@ -120,6 +120,27 @@ describe('email-division eligibility', () => {
     expect(r.checks.allowPitch).toBe(false);
   });
 
+  test.each([
+    ['broadcast', 'mkt.broadcast.fall', 'marketing_channel'],
+    ['alert', 'lc.alert.storm', 'weather_alert_channel'],
+    ['lifecycle', 'lc.referral.friend', 'referral_channel'],
+  ])('STREAM_CHANNEL_NOT_EMAIL for %s when its channel column is sms-only (codex round-1 P1)', async (stream, emailKey, column) => {
+    const prefs = {
+      email_enabled: true, marketing_offers: true, weather_alerts: true, referral_nudge: true, [column]: 'sms',
+    };
+    const r = await evalWith({ prefs }, { stream, marketingClass: 'marketing', emailKey });
+    expect(r.reason).toBe(REASONS.STREAM_CHANNEL_NOT_EMAIL);
+  });
+
+  test.each([undefined, null, 'email', 'both'])('a broadcast passes the channel check when marketing_channel is %s', async (value) => {
+    // marketingClass 'relationship' here so the pass only exercises the
+    // channel gate itself, not the marketing-only caps/recent-contact
+    // checks that follow it (covered separately above).
+    const prefs = { email_enabled: true, marketing_offers: true, marketing_channel: value };
+    const r = await evalWith({ prefs }, { stream: 'broadcast', marketingClass: 'relationship', emailKey: 'mkt.broadcast.fall' });
+    expect(r.ok).toBe(true);
+  });
+
   test('RELATIONSHIP_NOT_ELIGIBLE for nurture with no estimates on file', async () => {
     const r = await evalWith({}, { stream: 'nurture', marketingClass: 'marketing', emailKey: 'nur.tip1' });
     expect(r.reason).toBe(REASONS.RELATIONSHIP_NOT_ELIGIBLE);
