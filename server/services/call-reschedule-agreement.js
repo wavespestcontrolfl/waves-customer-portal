@@ -343,7 +343,8 @@ function spans(toks, words) {
 // to check.
 function periodIsTheHours(quote, words) {
   const toks = normalize(quote).split(' ');
-  const hours = spans(toks, words.hour);
+  const hours = hourSpans(toks, words);
+  if (!hours.length) return false;
   // Every place the hour is said must be on the hour ("two thirty" never
   // grounds "two").
   if (hours.some((span) => hourHasMinutes(toks, span))) return false;
@@ -361,7 +362,6 @@ function periodIsTheHours(quote, words) {
 // ("Tuesday, 2 to 4"), and followed by nothing, "o'clock", a range end, or
 // a day. "Around two", "by two", "two or four", "two-ish" never qualify.
 const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
-const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
 // Judged over the whole turns that hold the quote, and EVERY place a turn
 // says the hour must be exact: "at two" cut from "at two or four" fails.
 function saidExactly(quote, words, turns) {
@@ -381,17 +381,37 @@ const HOUR_LEAD_DAYS = new Set([
 // an alternative ("or four"), doubt ("I think", "approximately"), a length
 // ("two to four hours") — sends the call to the office.
 const AFTER_HOUR_WORDS = new Set([
-  ',', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
+  ',', ';', 'o', 'clock', 'oclock', 'on', 'then', 'this', 'please', 'sharp', 'and', 'so',
   'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
   'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
   'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
 ]);
+const UNRESOLVED_HOUR_WORDS = new Set(['or', 'either', 'about', 'approximately', 'around', 'roughly']);
+
+// Find recorded date phrases in the punctuation-preserving token stream.
+// Commas inside a date ("Thursday, October 10") do not break the phrase;
+// the returned indexes still refer to `toks`.
+function dateSpans(toks, day) {
+  if (typeof day !== 'string') return [];
+  const lexical = toks.flatMap((token, index) => (token === ',' ? [] : [{ token, index }]));
+  return spans(lexical.map(({ token }) => token), day)
+    .map(([start, end]) => [lexical[start].index, lexical[end - 1].index + 1]);
+}
+
+function hourSpans(toks, words) {
+  const dates = dateSpans(toks, words.day);
+  // The recorded calendar phrase owns these numerals in both the exact-hour
+  // and minute/period checks ("October 10 at 10", "10/10 at 10").
+  return spans(toks, words.hour)
+    .filter(([start, end]) => !dates.some(([dateStart, dateEnd]) => start >= dateStart && end <= dateEnd));
+}
 
 function hourExactIn(text, words) {
-  // Tokens keeping clause punctuation, so "at two, a tech will call" ends
-  // the hour at the comma.
-  const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
-  const at = spans(toks, words.hour);
+  // Commas do not erase a qualifier earlier in the same sentence. Keep a
+  // separate sentence boundary so unrelated earlier statements stay separate.
+  const toks = joinMeridiem(text).toLowerCase().replace(/[.;!?]/g, ' ; ').replace(/,/g, ' , ')
+    .replace(/[^a-z0-9,;]+/g, ' ').trim().split(/\s+/);
+  const at = hourSpans(toks, words);
   return at.length > 0 && at.every(([ha, end]) => {
     const prev = toks[ha - 1];
     const hb = toks[end] === '00' ? end + 1 : end; // "2:00" is exact; what follows it decides
@@ -399,18 +419,42 @@ function hourExactIn(text, words) {
     const lead = EXACT_LEADS.has(prev) || HOUR_LEAD_DAYS.has(prev) || (prev === ',' && HOUR_LEAD_DAYS.has(toks[ha - 2]));
     const rangeEnd = (next === 'to' || next === 'through' || (next === 'and' && prev === 'between'))
       && (hourNumber(toks[hb + 1]) != null || /^(?:noon|midnight)$/.test(toks[hb + 1] || ''));
-    const tail = next === undefined || next === ',' || EXACT_TAILS.has(next) || HOUR_LEAD_DAYS.has(next) || rangeEnd;
+    // One closed list judges the whole suffix, including its first word.
     const rest = toks.slice(rangeEnd ? hb + 2 : hb);
     const clean = rest.every((t) => AFTER_HOUR_WORDS.has(t) || HOUR_LEAD_DAYS.has(t));
-    return lead && tail && clean && (prev !== 'between' || rangeEnd);
+    const prefix = toks.slice(toks.lastIndexOf(';', ha - 1) + 1, end);
+    // An ambiguity word must qualify a time/date, not an unrelated action
+    // or topic ("call or text", "your question about access"). Commas do
+    // not detach it from the following date in "around Thursday, at two".
+    const unresolved = prefix.some((token, index) => {
+      if (!UNRESOLVED_HOUR_WORDS.has(token)) return false;
+      const target = prefix.slice(index + 1).filter((word) => word !== ',').join(' ')
+        .replace(/^(?:(?:the|at|on)\s+)*/, '').replace(NEAREST_LEAD, '');
+      const following = target.split(' ')[0];
+      const recordedDay = normalize(words.day).replace(NEAREST_LEAD, '');
+      return isHourToken(following) || DAY_WORDS.has(following)
+        || Boolean(recordedDay && padded(target).startsWith(padded(recordedDay)));
+    });
+    return lead && clean && !unresolved && (prev !== 'between' || rangeEnd);
   });
+}
+
+// Relative-week qualifiers have to be part of the recorded day words. A
+// bare "Thursday" cannot ground "the following Thursday" or "Thursday a
+// week from now" because the shared date reader would choose the nearer day.
+const RELATIVE_WEEK_RE = new RegExp(
+  String.raw`\b(?:(?:next|following)\s+(?:coming\s+)?(?:week|${[...HOUR_LEAD_DAYS].join('|')})|(?:${[...HOUR_LEAD_DAYS].join('|')}|(?:the\s+)?week)\s+(?:after|before)\s+next|(?:[a-z]+|\d+)\s+(?:full\s+)?weeks?\s+(?:from\s+(?:now|today|${[...HOUR_LEAD_DAYS].join('|')})|later|hence)|(?:in|within|after)\s+(?:(?:[a-z]+|\d+)\s+){1,3}weeks?)\b`,
+  'g',
+);
+function hasUnrecordedRelativeWeek(text, day) {
+  const recorded = padded(normalize(day));
+  const qualifiers = normalize(text).match(RELATIVE_WEEK_RE) || [];
+  return qualifiers.some((phrase) => !recorded.includes(padded(phrase)));
 }
 
 function statesSlotWords(quote, words, turns, agreementQuotes = []) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
-    // "Next" near the slot ("two next Thursday") names a later week than the
-    // recorded day words can: it never grounds.
-    && !padded(sentencesHolding(turns, quote)).includes(' next ')
+    && !hasUnrecordedRelativeWeek(sentencesHolding(turns, quote), words.day)
     && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
@@ -449,6 +493,9 @@ function commitsToSlot(quote, words, hour24, turns) {
   const withoutPeriod = { ...words, period: null };
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
     && (typeof words.day === 'string' ? holds(quote, words.day) : !namesAnyDay(quote))
+    && !hasUnrecordedRelativeWeek(sentencesHolding(turns, quote), words.day)
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour))
+      || saidExactly(quote, words, turns))
     // Read in the sentences it sits in: "at two" cut from "at two AM".
     && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
