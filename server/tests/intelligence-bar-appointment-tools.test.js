@@ -346,6 +346,7 @@ describe('create_appointment', () => {
     // module's own terminal list excludes it), so visitWentTerminal is
     // false here. Without the round-5 fix, that alone let the deferred
     // "see you then" confirmation fire for a visit now awaiting rebooking.
+    const vetoWrite = chain({ update: jest.fn().mockResolvedValue(1) });
     const rescheduledRow = () => chain({ first: jest.fn().mockResolvedValue({ status: 'rescheduled' }) });
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
@@ -355,6 +356,7 @@ describe('create_appointment', () => {
       // recheck AND this fix's own status read) sees the SAME 'rescheduled'
       // row regardless of exactly which reader lands on which queue slot.
       scheduled_services: [chain(), chain(), rescheduledRow(), rescheduledRow(), rescheduledRow(), rescheduledRow()],
+      appointment_reminders: [vetoWrite],
     });
     const result = await executeTool('create_appointment', {
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
@@ -365,6 +367,9 @@ describe('create_appointment', () => {
     expect(result.warning).toBeUndefined();
     await new Promise((resolve) => setImmediate(resolve));
     expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+    // The veto is persisted, so the recovery sweep cannot send it later.
+    expect(vetoWrite.where).toHaveBeenCalledWith({ scheduled_service_id: 'appt-1', confirmation_sent: false });
+    expect(vetoWrite.update).toHaveBeenCalledWith(expect.objectContaining({ confirmation_sent: true }));
   });
 
   test('a terminal status the recheck could not act on (a transient read failure there) still vetoes the confirmation (Codex r9)', async () => {

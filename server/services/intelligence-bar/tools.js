@@ -3236,6 +3236,13 @@ async function createAppointment(input, actionContext = {}) {
         const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
         const visitNow = await db('scheduled_services').where({ id: appointment.id }).first('status');
         visitNotLive = TERMINAL_STATUSES.includes(String(visitNow?.status || '').toLowerCase());
+        // Persist the veto: a row left with its confirmation pending would
+        // be sent later by the recovery sweep. The reminders stay armed.
+        if (visitNotLive) {
+          await db('appointment_reminders')
+            .where({ scheduled_service_id: appointment.id, confirmation_sent: false })
+            .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+        }
       } catch (statusErr) {
         logger.warn(`[intelligence-bar] post-registration rescheduled-status check failed for appointment ${appointment.id}: ${statusErr.message}`);
       }
