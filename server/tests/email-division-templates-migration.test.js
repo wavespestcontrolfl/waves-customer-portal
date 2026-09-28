@@ -222,22 +222,40 @@ describe('seed migration 20260928230000 (re-cut of #5160)', () => {
     }
   });
 
-  test('legal_classification and content_sensitivity are values the admin API actually accepts (Codex P1 :238, P2 :179)', () => {
+  test('every admin-API enum-governed field on every seeded template row is a value the admin API actually accepts (Codex P1 :238, P2 :179; local pre-push audit round: extended past just legal_classification/content_sensitivity to mode/audience/message_priority/send_stream too)', () => {
     // Read the SAME enums admin-email-templates.js validates against,
     // rather than re-declaring the literals here (a hand-copied list would
-    // pass even after the API's enum changed underneath it).
+    // pass even after the API's enum changed underneath it). templateRow()
+    // writes six enum-governed fields (mode, legal_classification, audience,
+    // message_priority, content_sensitivity, send_stream) — all six are
+    // checked here, not just the two a prior round happened to check, so a
+    // future field this migration starts setting doesn't slip through
+    // unverified again.
     const routeSrc = require('fs').readFileSync(
       require.resolve('../routes/admin-email-templates.js'), 'utf8',
     );
-    const legalMatch = routeSrc.match(/LEGAL_CLASSIFICATIONS = new Set\(\[([^\]]+)\]\)/);
-    const sensitivityMatch = routeSrc.match(/SENSITIVITIES = new Set\(\[([^\]]+)\]\)/);
-    const legalValues = new Set(JSON.parse(`[${legalMatch[1]}]`.replace(/'/g, '"')));
-    const sensitivityValues = new Set(JSON.parse(`[${sensitivityMatch[1]}]`.replace(/'/g, '"')));
+    const enumSet = (name) => {
+      const match = routeSrc.match(new RegExp(`${name} = new Set\\(\\[([^\\]]+)\\]\\)`));
+      // STREAMS is written multi-line with a trailing comma before ']' —
+      // strip it so JSON.parse doesn't choke on a trailing comma.
+      const jsonArray = `[${match[1]}]`.replace(/'/g, '"').replace(/,(\s*])/g, '$1');
+      return new Set(JSON.parse(jsonArray));
+    };
+    const modeValues = enumSet('MODES');
+    const legalValues = enumSet('LEGAL_CLASSIFICATIONS');
+    const audienceValues = enumSet('AUDIENCES');
+    const priorityValues = enumSet('PRIORITIES');
+    const sensitivityValues = enumSet('SENSITIVITIES');
+    const streamValues = enumSet('STREAMS');
 
     for (const t of migration.TEMPLATES) {
       const row = migration.__private.templateRow(t);
+      expect(modeValues.has(row.mode)).toBe(true);
       expect(legalValues.has(row.legal_classification)).toBe(true);
+      expect(audienceValues.has(row.audience)).toBe(true);
+      expect(priorityValues.has(row.message_priority)).toBe(true);
       expect(sensitivityValues.has(row.content_sensitivity)).toBe(true);
+      expect(streamValues.has(row.send_stream)).toBe(true);
     }
 
     const nurture = migration.__private.templateRow(migration.TEMPLATES.find((t) => t.key === 'nurture.expired_1'));
