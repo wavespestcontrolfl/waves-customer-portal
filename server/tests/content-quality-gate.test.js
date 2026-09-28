@@ -777,6 +777,29 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       expect(result.reason).toMatch(/linked 0 so far/);
     });
 
+    test('links after a supported JSX expression\'s closing tag are not swallowed (Codex #4984 r7 P2)', () => {
+      // blankExpressionStringLiterals used to read `</span>`'s `/` as a
+      // regex opener (the same prevSig class as the comparison operator
+      // `<`), scan forward for the NEXT literal `/` in the document — which
+      // landed inside the first related link's own destination — and blank
+      // everything in between, swallowing "[A](" itself. The outer scan
+      // then jumped straight to that `/`, skipping past the expression's
+      // own closing `}` and corrupting every link that followed too.
+      const body = '{show && <span>Hello</span>} See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(checkBodySyntaxSupported({ body }).ok).toBe(true);
+      expect(result.ok).toBe(true);
+      // A bare fragment closing tag (`</>`) is the same `</` shape.
+      const fragmentBody = '{show && <>Hello</>} See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: fragmentBody },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
     test('brief entries that resolve to one URL count once (Codex #4984 r4 P2)', () => {
       const dupes = [
         { title: 'A', path: '/termite/a/' },

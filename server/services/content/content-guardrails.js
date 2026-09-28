@@ -1753,6 +1753,17 @@ function blankExpressionStringLiterals(text, { attrValues = true } = {}) {
     if (depth > 0 && c === '(') { parenCtl.push(CONTROL_FLOW_KEYWORDS.has(word) && !wordDot); prevSig = '('; word = ''; continue; } // member calls are not control flow
     if (depth > 0 && c === ')') { prevSig = parenCtl.pop() ? ';' : ')'; word = ''; continue; }
     if (depth > 0) {
+      // A JSX closing tag's `<` (immediately followed by `/`, as in
+      // `</span>` or a bare fragment `</>`) must not leave the FOLLOWING
+      // `/` in a regex-allowing position — `<` alone legitimately allows
+      // one (the rare `a < /x/.test(b)`), but `</` inside JSX-in-expression
+      // content (`{cond && <span>text</span>}`) is overwhelmingly a closing
+      // tag. Misreading it as a regex opener scans for the NEXT literal
+      // `/` in the document — which can be a markdown link's destination
+      // slash — and blanks everything in between (including the link's own
+      // `[label](` opener), then jumps the outer loop past the expression's
+      // own closing `}` entirely (Codex #4984 r7 P2).
+      if (c === '<' && s[i + 1] === '/') { prevSig = ')'; word = ''; continue; }
       if (c === '"' || c === "'" || c === '`') {
         let j = i + 1;
         for (; j < s.length; j += 1) { if (s[j] === '\\') { j += 1; continue; } if (s[j] === c) break; }
@@ -1817,6 +1828,12 @@ function closeOfExpressionAt(s, i) {
     const c = s[j];
     if (q) { if (c === '\\') { j += 1; continue; } if (c === q) q = null; continue; }
     if (c === '"' || c === "'" || c === '`') { q = c; prevSig = c; continue; }
+    // See the identical guard in blankExpressionStringLiterals (Codex #4984
+    // r7 P2) — kept in parity: a JSX closing tag's `<` before `/` must not
+    // leave that `/` reading as a regex opener, or this scan can jump past
+    // the expression's own closing `}` to whatever `}` follows the next
+    // unrelated `/` in the document.
+    if (depth > 0 && c === '<' && s[j + 1] === '/') { prevSig = ')'; word = ''; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '/') { while (j < s.length && s[j] !== '\n') j += 1; continue; }
     if (depth > 0 && c === '/' && s[j + 1] === '*') { const e = s.indexOf('*/', j + 2); if (e === -1) return -1; j = e + 1; continue; }
     if (depth > 0 && c === '/' && (prevSig === '' || '({[,=&|!?:;+-*%~^<>{'.includes(prevSig) || (REGEX_ALLOWING_KEYWORDS.has(word) && !wordDot))) {
@@ -1958,8 +1975,17 @@ const INVISIBLE_NAMED_ENTITY_TEXT = Object.freeze({
   zerowidthspace: '\u200b',
   nobreak: '\u2060',
   applyfunction: '\u2061',
+  // HTML5 defines both the long name and a short alias for these three
+  // invisible math-layout characters \u2014 af/it/ic decode to the SAME
+  // U+2061-U+2063 code points as ApplyFunction/InvisibleTimes/
+  // InvisibleComma above (Codex #4984 r7 P2: the aliases were absent, so
+  // e.g. [&af;](/a/) kept its serialized "&af;" spelling and read as
+  // visible punctuation to the later regex test).
+  af: '\u2061',
   invisibletimes: '\u2062',
+  it: '\u2062',
   invisiblecomma: '\u2063',
+  ic: '\u2063',
   shy: '\u00ad',
   zwnj: '\u200c',
   zwj: '\u200d',
