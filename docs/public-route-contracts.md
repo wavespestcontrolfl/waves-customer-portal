@@ -970,13 +970,11 @@ the CTA button, one per branch below, never composed from or naming a
 location or severity the structured field itself doesn't state (roach:
 "We noted roach activity during this visit — our cockroach control
 program is a focused two-treatment cleanout."; rodent: "We noted signs of
-rodent activity during this visit — …"; termite: "We noted possible
-termite activity during this visit — …" ("during this visit", never
+rodent activity during this visit — …" ("during this visit", never
 "today" — reopening an older report recomputes these reasons from the
 same visit's saved snapshot, so a same-day claim would misdate historical
-findings as current); season-mosquito: "Mosquito season is here in SW Florida — …";
-season-termite: "It's termite swarm season in SW Florida — …") — and
-`serviceKey` may resolve to two targets the ladder itself never picks:
+findings as current); season-mosquito: "Mosquito season is here in SW Florida — …")
+— and `serviceKey` may resolve to two targets the ladder itself never picks:
 `rodent_bait` and `mosquito`, priced through the SAME
 `buildCustomerPricingResponse` estimator path and per-application-only
 serialization rule as the existing ladder targets. Their prompts/labels
@@ -1012,24 +1010,40 @@ customer is already mid-program today) typed `cockroach` snapshot's
 `rodent_trapping` snapshot's `captures` count is > 0, OR a
 `rodent_bait_station` snapshot's `bait_consumption` is anything other than
 `'None'`, OR a `rodent_inspection` snapshot's `activity_found` is
-`'Yes'` (primary or companion, no exclusion); termite — a
-`termite_bait_station` snapshot's `termite_activity` is `'Active termites
-present'` or `'Previous feeding noted'`, OR a `termite_inspection`
-snapshot's `activity_status` is `'Active infestation'` (primary or
-companion, no exclusion; a merely historical `'Old / inactive damage'`
-value is NOT current activity and is not a signal). Mosquito has NO
-findings branch at all (removed 2026-09-28, a prior round: a mention count
+`'Yes'` (primary or companion, no exclusion). There is no termite findings
+signal (removed 2026-09-28, same round as the ladder change below — a
+termite reading has no production consumer left). Mosquito has NO findings
+branch at all (removed 2026-09-28, a prior round: a mention count
 in short structured text could not be tied reliably to genuine severity)
 — it is offered ONLY by season (America/New_York May–Oct) or the
-unchanged ladder. Season (May–Oct mosquito, Feb–May termite swarm season)
-runs only when no findings branch fired; May favors mosquito when neither
-is already owned. Never offers a family the customer already owns —
-reuses the ladder's own property-scoped ownership + plan-rate evidence,
-including the `termite_bait` → `termite` ownership mapping (this also
-covers a typed rodent/termite report's OWN identity — a `rodent_trapping`
-visit's own family is already counted owned by the ladder's existing
-report-identity corroboration, so no separate primary-exclusion rule is
-needed for rodent/termite the way roach's is). Gate off (default):
+unchanged ladder. Season (May–Oct mosquito) runs only when no findings
+branch fired. Termite is never offered from a report (owner ruling
+2026-09-28: report offers push the three pillars — pest, lawn, tree &
+shrub — so the ladder is `pest_control → lawn_care → tree_shrub`, a
+customer owning all three gets no card, and the former termite findings
+and swarm-season branches are gone). The SAME owner ruling applies to
+EVERY offer surface, not only the report ("three pillars is fine for now,
+yes applies there too"): the portal offer card and the photo-triage lane
+(`buildPortalOffer` / `buildPortalPurchaseBasis` / `resolvePortalOfferTarget`,
+and `buildOfferForFamily`) share the identical `OFFER_LADDER` and
+`pickOfferTarget` — a customer owning pest, lawn, AND tree & shrub gets no
+ladder-picked offer on any surface, and the portal's one-tap termite
+purchase path is gone with it. An explicit `requestedTargetKey: 'termite'`
+(e.g. a photo-triage identification of termite activity) is a DIFFERENT,
+deliberate code path — never the ladder's own pick — and is unaffected:
+`OFFER_PROMPTS`/`OFFER_LABELS`/`PREFERRED_OPTION_IDS` still carry `termite`
+so that request still prices normally. Never offers a family the customer
+already owns — reuses the ladder's own property-scoped ownership + plan-rate
+evidence, including the `termite_bait` → `termite` ownership mapping (this
+also covers a typed rodent/termite report's OWN identity — a
+`rodent_trapping` visit's own family is already counted owned by the
+ladder's existing report-identity corroboration, so no separate
+primary-exclusion rule is needed for rodent/termite the way roach's is). A
+recent, uncorroborated termite report identity still fails the WHOLE report
+card closed (the ambiguity guard's own `GUARDED_OWNERSHIP_FAMILIES` set
+keeps termite even though it left `OFFER_LADDER` — the same
+both-answers-wrong doctrine as a recent pest/lawn/tree identity). Gate off
+(default):
 `crossSell` is byte-identical to today's unchanged ladder pick and carries
 no `reason` field.
 

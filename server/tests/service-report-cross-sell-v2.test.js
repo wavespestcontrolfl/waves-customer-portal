@@ -13,9 +13,10 @@
 //   rodent_trapping: captures (count) > 0.
 //   rodent_bait_station: bait_consumption != 'None'.
 //   rodent_inspection: activity_found === 'Yes'.
-//   termite_bait_station: termite_activity in {'Active termites present',
-//     'Previous feeding noted'}.
-//   termite_inspection: activity_status === 'Active infestation'.
+// No termite signal (removed 2026-09-28, owner ruling: report offers push
+// the three pillars only — termite is never pitched from a report, so a
+// termite_bait_station/termite_inspection reading has no production
+// consumer left).
 // Mosquito has NO findings branch at all — season (May-Oct) or the ladder
 // only. An untyped (general pest) visit carries no typed snapshot → no
 // findings signal → season/ladder decides.
@@ -60,7 +61,7 @@ function withTypedSnapshot({ primary = null, companions = [] } = {}) {
 describe('detectReportFindingsSignal', () => {
   test('an untyped (general pest) visit with no typed snapshot at all → no signal on any pest', () => {
     const signal = detectReportFindingsSignal({ id: 'sr-1', service_data: '{}' });
-    expect(signal).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+    expect(signal).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 
   describe('cockroach (companion only)', () => {
@@ -108,10 +109,9 @@ describe('detectReportFindingsSignal', () => {
         companions: [
           { type: 'cockroach', delivery, values: { activity_level: 'Heavy' } },
           { type: 'rodent_trapping', delivery, values: { captures: 3 } },
-          { type: 'termite_bait_station', delivery, values: { termite_activity: 'Active termites present' } },
         ],
       });
-      expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+      expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false });
     }
   });
 
@@ -160,32 +160,11 @@ describe('detectReportFindingsSignal', () => {
     });
   });
 
-  describe('termite', () => {
-    test.each(['Active termites present', 'Previous feeding noted'])(
-      'termite_bait_station: termite_activity "%s" is the signal',
-      (value) => {
-        const service = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: value } } });
-        expect(detectReportFindingsSignal(service).termiteActivity).toBe(true);
-      },
-    );
-
-    test('termite_bait_station: termite_activity "None observed" is NOT a signal', () => {
-      const service = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'None observed' } } });
-      expect(detectReportFindingsSignal(service).termiteActivity).toBe(false);
-    });
-
-    test('termite_inspection: activity_status "Active infestation" is the signal', () => {
-      const service = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } });
-      expect(detectReportFindingsSignal(service).termiteActivity).toBe(true);
-    });
-
-    test.each(['No activity', 'Old / inactive damage'])(
-      'termite_inspection: activity_status "%s" is NOT a signal (not CURRENT activity)',
-      (value) => {
-        const service = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: value } } });
-        expect(detectReportFindingsSignal(service).termiteActivity).toBe(false);
-      },
-    );
+  test('a termite snapshot produces no signal at all (removed 2026-09-28: termite is never pitched from a report)', () => {
+    const active = withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'Active termites present' } } });
+    expect(detectReportFindingsSignal(active)).toEqual({ roachActivity: false, rodentEvidence: false });
+    const infested = withTypedSnapshot({ primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } });
+    expect(detectReportFindingsSignal(infested)).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 
   test('a recommendation/category-label string stashed under values is never read as a positive signal — only the exact typed key/option matters', () => {
@@ -202,7 +181,7 @@ describe('detectReportFindingsSignal', () => {
 
   test('an unrelated typed snapshot (e.g. tree_shrub) contributes no signal on any pest', () => {
     const service = withTypedSnapshot({ primary: { type: 'tree_shrub', values: { activity_level: 'Heavy' } } });
-    expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false, termiteActivity: false });
+    expect(detectReportFindingsSignal(service)).toEqual({ roachActivity: false, rodentEvidence: false });
   });
 });
 
@@ -347,7 +326,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
     expect(result).toBeNull();
   });
 
-  test('termite activity wins over mosquito when not already owned', async () => {
+  test('termite activity never produces an offer (owner 2026-09-28: three pillars only)', async () => {
     etDateString.mockReturnValue('2026-11-01');
     const result = await resolveReportCrossSellV2({
       service: withTypedSnapshot({ primary: { type: 'termite_bait_station', values: { termite_activity: 'Active termites present' } } }),
@@ -355,7 +334,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
       ladderEvidence: [],
       planRateFamilies: [],
     });
-    expect(result).toEqual({ targetKey: 'termite', reason: expect.stringMatching(/termite/i) });
+    expect(result).toBeNull();
   });
 
   test('termite activity is skipped when already owned (termite_bait maps to termite ownership)', async () => {
@@ -396,8 +375,6 @@ describe('resolveReportCrossSellV2 priority order', () => {
       ['2026-05-01', 'mosquito', 'May 1 → mosquito (checked first)'],
       ['2026-06-15', 'mosquito', 'June → mosquito'],
       ['2026-10-31', 'mosquito', 'Oct 31 → mosquito'],
-      ['2026-02-01', 'termite', 'Feb 1 → termite swarm season'],
-      ['2026-04-15', 'termite', 'April → termite swarm season'],
     ])('%s → %s (%s)', async (etDate, expectedKey) => {
       etDateString.mockReturnValue(etDate);
       const result = await resolveReportCrossSellV2({
@@ -409,8 +386,8 @@ describe('resolveReportCrossSellV2 priority order', () => {
       expect(result.targetKey).toBe(expectedKey);
     });
 
-    test('November and December: neither season window — null', async () => {
-      for (const etDate of ['2026-11-01', '2026-12-15']) {
+    test('outside mosquito season (Feb, April, November, December): null — termite swarm season is no longer an offer (owner 2026-09-28)', async () => {
+      for (const etDate of ['2026-02-01', '2026-04-15', '2026-11-01', '2026-12-15']) {
         etDateString.mockReturnValue(etDate);
         const result = await resolveReportCrossSellV2({
           service: { id: 'sr-1', service_data: '{}' },
@@ -422,7 +399,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
       }
     });
 
-    test('May, already owning mosquito: falls through to termite swarm season', async () => {
+    test('May, already owning mosquito: nothing else to offer — null (termite left the offers, owner 2026-09-28)', async () => {
       etDateString.mockReturnValue('2026-05-10');
       const result = await resolveReportCrossSellV2({
         service: { id: 'sr-1', service_data: '{}' },
@@ -430,7 +407,7 @@ describe('resolveReportCrossSellV2 priority order', () => {
         ladderEvidence: ['mosquito'],
         planRateFamilies: [],
       });
-      expect(result.targetKey).toBe('termite');
+      expect(result).toBeNull();
     });
 
     test('a live plan-rate row on the target (never property-scoped, suppress/demote only) also excludes it', async () => {
@@ -709,7 +686,6 @@ describe('findings reason copy never claims "today" on a reopened OLD report', (
   test.each([
     ['roach', { primary: { type: 'pest' }, companions: [{ type: 'cockroach', values: { activity_level: 'Moderate' } }] }],
     ['rodent', { primary: { type: 'rodent_trapping', values: { captures: 3 } } }],
-    ['termite', { primary: { type: 'termite_inspection', values: { activity_status: 'Active infestation' } } }],
   ])('%s finding reason omits "today" (and any other same-day claim) even when the visit is long past', async (label, snapshot) => {
     process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
     etDateString.mockReturnValue('2026-11-01'); // outside every season window — isolates the findings branch
@@ -814,5 +790,40 @@ describe('render/click parity for a findings-driven offer (service_data must rid
     expect(result.serviceKey).not.toBe('cockroach_control');
     const control = await buildReportCrossSell(withServiceData, db, { propertyLookup: missLookup });
     expect(control.serviceKey).toBe('cockroach_control');
+  });
+});
+
+// Owner ruling 2026-09-28 (pre-push P1 on the three-pillars change): owning
+// all three pillars means NO card, even with the V2 layer on and a V2
+// signal live — V2 must never pitch mosquito/rodent to a fully-covered
+// customer.
+describe('all three pillars owned → no card, even with GATE_REPORT_CROSS_SELL_V2 on', () => {
+  test('June (mosquito season) + pest, lawn, tree & shrub owned → null', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-06-15');
+    const result = await buildReportCrossSell(
+      SERVICE(),
+      dbFor({
+        serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
+  });
+
+  test('a rodent finding on a fully-covered customer → null too', async () => {
+    process.env.GATE_REPORT_CROSS_SELL_V2 = 'true';
+    etDateString.mockReturnValue('2026-11-01');
+    const service = { ...SERVICE(), ...withTypedSnapshot({ primary: { type: 'rodent_trapping', values: { captures: 3 } } }) };
+    const result = await buildReportCrossSell(
+      service,
+      dbFor({
+        serviceTypes: ['Pest Control', 'Lawn Care', 'Tree & Shrub Care'],
+        turfProfile: { customer_id: 'cust-1', lawn_sqft: 4500, grass_type: 'St. Augustine' },
+      }),
+      { propertyLookup: missLookup },
+    );
+    expect(result).toBeNull();
   });
 });
