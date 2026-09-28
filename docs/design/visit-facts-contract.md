@@ -646,7 +646,7 @@ means the field is legal on a primary OR a companion submission.
 | `stations_checked` | Stations checked | count | both | required | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
 | `stations_inaccessible` | Stations inaccessible | count | both | hidden | Station summary + counts (reconciledSummary) (termite-report-v2.js) |
 | `stations_with_activity` | Stations with termite activity | count | both | hidden | Activity summary + status resolution (termite-report-v2.js) |
-| `termite_activity` | Termite activity | select | both | required | Status resolution (termite-report-v2.js); Cross-sell V2 findings signal (termite) (cross-sell.js) |
+| `termite_activity` | Termite activity | select | both | required | Status resolution (termite-report-v2.js) |
 | `activity_signs` | Activity signs | chips | both | hidden | Status resolution (termite-report-v2.js) |
 | `active_station_location` | Active station number / location | text | both | hidden | Status resolution (active location) (termite-report-v2.js) |
 | `bait_consumption` | Bait consumption | select | both | required | Status resolution + "bait engaged" activity detail (termite-report-v2.js) |

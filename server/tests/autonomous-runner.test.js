@@ -26,6 +26,7 @@ const {
   dailyBatchLimit,
   firstReturnedId,
   queueInternalLinkTaskForDryRun,
+  citabilityAdvisoryMessages,
 } = _internals;
 
 const ORIGINAL_ENV = { ...process.env };
@@ -37,6 +38,22 @@ afterEach(() => {
   for (const k of Object.keys(ORIGINAL_ENV)) {
     if (k.startsWith('SHADOW_MODE_') || k.startsWith('AUTO_PUBLISH_')) process.env[k] = ORIGINAL_ENV[k];
   }
+});
+
+test('every citability soft failure is preserved as a separate advisory message', () => {
+  const soft_failures = [
+    { name: 'voice_match', reason: 'generic' },
+    { name: 'citability_named_sources', reason: 'no source' },
+    { name: 'citability_concrete_specifics', reason: 'no measurement' },
+    { name: 'citability_comparison', reason: 'no table' },
+    { name: 'citability_how_to_choose', reason: 'no criteria' },
+  ];
+  expect(citabilityAdvisoryMessages({ soft_failures })).toEqual([
+    { code: 'CITABILITY_NAMED_SOURCES', message: 'no source' },
+    { code: 'CITABILITY_CONCRETE_SPECIFICS', message: 'no measurement' },
+    { code: 'CITABILITY_COMPARISON', message: 'no table' },
+    { code: 'CITABILITY_HOW_TO_CHOOSE', message: 'no criteria' },
+  ]);
 });
 
 describe('internal-link dry-run queue helpers', () => {
@@ -2337,10 +2354,10 @@ describe('runNext Astro corpus loading', () => {
       const result = await runner.runNext();
 
       expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.uniqueness_gate_result).toMatchObject({ ok: false, error: 'GitHub unavailable' });
       expect(uniquenessGate.evaluate).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_required_corpus_1', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_required_corpus_1', 'gate_infrastructure_error', { claimToken: claimedAt });
     } finally {
       if (previousAstroDir === undefined) delete process.env.ASTRO_REPO_DIR;
       else process.env.ASTRO_REPO_DIR = previousAstroDir;
@@ -2617,14 +2634,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2693,8 +2711,8 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         error: 'seo_completion_gate_skipped_required',
@@ -2708,7 +2726,8 @@ describe('runNext post-publish bookkeeping', () => {
         pageType: 'supporting-blog',
       }));
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2770,14 +2789,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(result.reviewer_notes).toContain('seo_completion: P0=1');
-      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;

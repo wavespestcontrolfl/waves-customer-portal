@@ -47,6 +47,9 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+// Keep a transient gate outage from consuming both bounded attempts in the
+// same batch. The normal daily runner will pick the row up after this floor.
+const INFRASTRUCTURE_RETRY_BACKOFF_MS = 60 * 60 * 1000;
 
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
@@ -1000,13 +1003,17 @@ class AutonomousRunner {
         // meta-completeness contract. Resolution failure fails CLOSED to
         // the stricter blog contract — such a target cannot publish anyway.
         let targetPageType = 'supporting-blog';
+        let targetFilePath = null;
         try {
           const resolved = publisher?.resolveExistingAstroFileForTarget
             ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
             : null;
           if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+          if (resolved?.path) targetFilePath = String(resolved.path);
         } catch (_) { /* keep the stricter blog contract */ }
-        gateBrief = { ...brief, target_page_type: targetPageType };
+        // target_file_path lets the citability comparison signal skip legacy
+        // .md targets, which publishRefresh cannot give an MDX component.
+        gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
       }
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
@@ -1220,10 +1227,8 @@ class AutonomousRunner {
       // SERP) still route to review — those are content-risk signals a
       // redraft can't clear — as do the named-competitor and trust-build
       // paths below. Gate INFRA failures (module/corpus unavailable, thrown
-      // evaluate — the shapes that carry `.error`) also still park: a
-      // redraft can't fix a broken gate, and silently skipping would hide
-      // an engine fault (same fail-closed posture as the *_unavailable
-      // paths above).
+      // evaluate — the shapes that carry `.error`) get one delayed retry for
+      // unattended supporting blogs; other lanes stay visible for review.
       // content-quality-gate reports some infrastructure failures INSIDE
       // hard_failures (evaluator_threw:*, pii_scan_unavailable:*,
       // no_previous_version_to_compare) rather than as a top-level .error —
@@ -1232,6 +1237,14 @@ class AutonomousRunner {
         && qualityResult.hard_failures.some((f) => /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(String(f?.reason ?? f)));
       const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
+      if (!gatesPass && !brief.human_review_required && gateInfraError
+        && run.action_type === 'new_supporting_blog') {
+        return this._infrastructureRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken,
+          skipReason: 'gate_infrastructure_error',
+          notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+        });
+      }
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
         // Guardrails P2 nudges from the PASSING guardrails run still ride
@@ -1248,14 +1261,17 @@ class AutonomousRunner {
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
           notes,
           blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
+          advisoryMessages: citabilityAdvisoryMessages(qualityResult),
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
-      // errors, router-flagged briefs, named-competitor, trust-build ramp).
+      // errors outside unattended blogs, router-flagged briefs,
+      // named-competitor, trust-build ramp).
       // affiliate_review OUTRANKS named_competitor_review: the latter is an
       // email-approvable kind, and every affiliate-bearing draft must stay in
       // the script-only lane (Codex r1 P1).
-      const reason = !gatesPass ? 'gate_fail'
+      const reason = gateInfraError ? 'gate_infrastructure_error'
+        : !gatesPass ? 'gate_fail'
         : affiliateReview ? 'affiliate_review'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
@@ -1951,44 +1967,82 @@ class AutonomousRunner {
    * Second failure: skip silently. The gates themselves never loosen —
    * a repeat offender is discarded, not published and not parked.
    */
-  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes, blocking }) {
-    const alreadyRetried = !!opp.signal_metadata?.gate_retry;
+  async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+    claimToken, skipReason, notes, blocking, advisoryMessages = [],
+  }) {
+    const findings = (blocking || []).map((finding) => ({
+      severity: finding.severity,
+      code: finding.code,
+      message: String(finding.message || '').slice(0, 300),
+    }));
+    return this._boundedRetryOrSkip(queue, opp, run, t0, finalize, {
+      claimToken,
+      skipReason,
+      notes,
+      marker: 'gate_retry',
+      retryAt: new Date(),
+      // Optional quality signals must reach the redraft without becoming
+      // hard retry directives. The brief renderer labels these separately.
+      retryData: { findings, advisory_messages: advisoryMessages },
+      deferredOutcome: 'deferred_gate_retry',
+      deferredNote: 'deferred for one autonomous redraft with these findings fed back to the writer.',
+      exhaustedNote: 'redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).',
+      unrecordedNote: 'could not record retry feedback; skipped (exceptions-only review queue).',
+    });
+  }
+
+  async _infrastructureRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes }) {
+    const retryAt = new Date(Date.now() + INFRASTRUCTURE_RETRY_BACKOFF_MS);
+    return this._boundedRetryOrSkip(queue, opp, run, t0, finalize, {
+      claimToken,
+      skipReason,
+      notes,
+      marker: 'infrastructure_retry',
+      retryAt,
+      retryData: { retry_after: retryAt.toISOString() },
+      deferredOutcome: 'deferred_infrastructure_retry',
+      deferredNote: 'deferred for one autonomous retry after infrastructure recovery.',
+      exhaustedNote: 'infrastructure failed again after the bounded retry; skipped.',
+      unrecordedNote: 'could not record the bounded infrastructure retry; skipped.',
+    });
+  }
+
+  async _boundedRetryOrSkip(queue, opp, run, t0, finalize, config) {
+    const {
+      claimToken, skipReason, notes, marker, retryAt, retryData,
+      deferredOutcome, deferredNote, exhaustedNote, unrecordedNote,
+    } = config;
+    const alreadyRetried = Boolean(opp.signal_metadata?.[marker]);
     if (!alreadyRetried) {
       let recorded = false;
       try {
-        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
+        recorded = await this._recordRetryMarker(opp, marker, {
+          at: new Date().toISOString(),
+          skip_reason: skipReason,
+          ...retryData,
+        }, claimToken);
       } catch (err) {
-        logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
+        logger.warn(`[autonomous-runner] ${marker.replace(/_/g, '-')} record failed for ${opp.id}: ${err.message}`);
       }
       if (recorded) {
         const finalized = await finalize(run, t0, {
-          outcome: 'deferred_gate_retry',
+          outcome: deferredOutcome,
           skip_reason: skipReason,
-          reviewer_notes: `${notes} — deferred for one autonomous redraft with these findings fed back to the writer.`,
+          reviewer_notes: `${notes} — ${deferredNote}`,
         });
-        await this._deferClaimOrThrow(queue, opp.id, new Date(), { claimToken });
+        await this._deferClaimOrThrow(queue, opp.id, retryAt, { claimToken });
         return finalized;
       }
-      // Couldn't persist the feedback marker: a defer would retry blind and
-      // could loop. Fall through to the terminal skip instead.
     }
     const finalized = await finalize(run, t0, {
       outcome: 'skipped_gate_fail',
       skip_reason: skipReason,
-      reviewer_notes: alreadyRetried
-        ? `${notes} — redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).`
-        : `${notes} — could not record retry feedback; skipped (exceptions-only review queue).`,
+      reviewer_notes: `${notes} — ${alreadyRetried ? exhaustedNote : unrecordedNote}`,
     });
     await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
     return finalized;
   }
 
-  /**
-   * Persist the blocking gate findings onto the opportunity so the redraft's
-   * brief can feed them back to the writer. Returns true only when the row
-   * was actually written. Guarded to the active claim so a stale worker
-   * can't stamp feedback over another attempt.
-   */
   /**
    * The publisher refused to commit on the owner competitor list
    * (business-name-confirmer assertOwnerListForCommit). The verdict it
@@ -2027,33 +2081,42 @@ class AutonomousRunner {
     return finalized;
   }
 
-  // Company-check retry counter on the opportunity (same claim-guarded
-  // signal_metadata write as _recordGateRetry). True only when written.
+  // Company-check retry counter on the opportunity, claim-guarded. Writes
+  // only its own key atomically so it can never drop a concurrent retry
+  // marker (gate_retry / infrastructure_retry). True only when written.
   async _recordCompanyCheckRetry(opp, count, claimToken) {
-    const meta = { ...(opp.signal_metadata || {}), company_check_retries: count };
     const updated = await db('opportunity_queue')
       .where('id', opp.id)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
-      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
+      .update({
+        signal_metadata: db.raw(
+          'jsonb_set(COALESCE(signal_metadata, \'{}\'::jsonb), ARRAY[\'company_check_retries\']::text[], to_jsonb(?::int), true)',
+          [count]
+        ),
+        updated_at: new Date(),
+      });
     return updated > 0;
   }
 
-  async _recordGateRetry(opp, skipReason, blocking, claimToken) {
-    const findings = (blocking || []).map((f) => ({
-      severity: f.severity,
-      code: f.code,
-      message: String(f.message || '').slice(0, 300),
-    }));
-    const meta = {
-      ...(opp.signal_metadata || {}),
-      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
-    };
+  /** Persist one allowed retry marker atomically against the active claim. */
+  async _recordRetryMarker(opp, marker, retry, claimToken) {
+    if (!['gate_retry', 'infrastructure_retry'].includes(marker)) {
+      throw new Error(`unsupported_retry_marker:${marker}`);
+    }
     const updated = await db('opportunity_queue')
       .where('id', opp.id)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
-      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)", [marker])
+      .update({
+        signal_metadata: db.raw(
+          'jsonb_set(COALESCE(signal_metadata, \'{}\'::jsonb), ARRAY[?]::text[], ?::jsonb, true)',
+          [marker, JSON.stringify(retry)]
+        ),
+        updated_at: new Date(),
+      });
     return updated > 0;
   }
 
@@ -4411,6 +4474,15 @@ function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionR
   return blocking;
 }
 
+function citabilityAdvisoryMessages(qualityResult) {
+  return (qualityResult?.soft_failures || [])
+    .filter((failure) => String(failure?.name || '').startsWith('citability_'))
+    .map((failure) => ({
+      code: String(failure.name).toUpperCase(),
+      message: String(failure.reason || 'optional citability signal').slice(0, 300),
+    }));
+}
+
 function protectedPagePatch(prot = {}) {
   return {
     outcome: 'skipped_gate_fail',
@@ -4612,4 +4684,5 @@ module.exports._internals = {
   nextEtWeekStart,
   gbpLocationIdForCity,
   operatorBriefTextForComparisonGate,
+  citabilityAdvisoryMessages,
 };
