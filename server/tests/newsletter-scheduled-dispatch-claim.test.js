@@ -110,3 +110,18 @@ test('a version-bound claim that finds no row throws VERSION_CHANGED, never ALRE
   await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
     .rejects.toMatchObject({ code: 'VERSION_CHANGED' });
 });
+
+test.each([
+  ['draft', 'VERSION_CHANGED'],
+  ['scheduled', 'VERSION_CHANGED'],
+  ['sending', 'ALREADY_CLAIMED'],
+  ['sent', 'ALREADY_CLAIMED'],
+])('a lost version-bound claim on a row now %s reports %s (an edit is not a send race)', async (nowStatus, code) => {
+  wire({
+    newsletter_sends: [chain({ first: SEND }), chain({ returning: [] }), chain({ first: { status: nowStatus } })],
+    newsletter_subscribers: [chain()],
+  });
+
+  await expect(sendCampaign('send-pi-1', { expect: { status: 'scheduled', updatedAt: READ_AT, proofApprovedAt: APPROVED_AT } }))
+    .rejects.toMatchObject({ code });
+});

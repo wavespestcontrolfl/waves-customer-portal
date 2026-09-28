@@ -607,8 +607,24 @@ async function sendCampaign(sendId, opts = {}) {
       .update({ status: 'sending', sending_claim_token: claimToken, updated_at: new Date() })
       .returning('id');
     if (!claimed.length) {
-      const err = new Error(opts.expect ? 'row changed since the scheduler validated it' : 'already sent or in progress');
-      err.code = opts.expect ? 'VERSION_CHANGED' : 'ALREADY_CLAIMED';
+      // A version-bound claim finds nothing for two different reasons: the
+      // content was edited (the row is still draft/scheduled — nothing went
+      // out, VERSION_CHANGED), or another claimant (a tick, a second click)
+      // already took the row (sending/sent/failed — ALREADY_CLAIMED, the
+      // winner owns the outcome). Re-read to tell them apart, so a caller
+      // never reports "not sent" for a campaign the winner is sending
+      // (pre-push audit P1). A failed re-read falls back to VERSION_CHANGED.
+      let claimedElsewhere = !opts.expect;
+      if (opts.expect) {
+        try {
+          const current = await db('newsletter_sends').where({ id: send.id }).first('status');
+          claimedElsewhere = !!current?.status && !['draft', 'scheduled'].includes(current.status);
+        } catch (readErr) {
+          logger.warn(`[newsletter] claim re-read for ${send.id} failed: ${readErr.message}`);
+        }
+      }
+      const err = new Error(claimedElsewhere ? 'already sent or in progress' : 'row changed since it was validated');
+      err.code = claimedElsewhere ? 'ALREADY_CLAIMED' : 'VERSION_CHANGED';
       throw err;
     }
   }
