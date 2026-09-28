@@ -1472,7 +1472,7 @@ function statedSlot(commitment, after) {
 // whose own time disagrees stays a hint. schedule_visit only; the follow-up
 // pager applies the same slot test to its own evidence (appointmentSlot).
 async function slotBookingProof(conn, commitment, call, customerId, after) {
-  const slot = statedSlot(commitment, after);
+  const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
   if (!slot) return null;
   const v2 = await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
   const confirmed = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
@@ -1725,7 +1725,7 @@ async function resolveFulfillment(conn, commitment, call) {
         return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
       }
       if (!customerId) return null;
-      const slotProof = commitment.kind === "schedule_visit" && await slotBookingProof(conn, commitment, call, customerId, after);
+      const slotProof = await slotBookingProof(conn, commitment, call, customerId, after);
       if (slotProof) return slotProof;
       const visit = await conn("scheduled_services")
         .where("customer_id", customerId)
