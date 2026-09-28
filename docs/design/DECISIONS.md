@@ -2664,3 +2664,16 @@ date, or the series parent's own date when none exists yet) is deliberately
 excluded from the movable set, so a rider whose FIRST visit is still pending
 and mis-dated relative to the host stays untouched until it completes or an
 office edit fixes it by hand.
+
+Review round 2 (2026-09-28, pre-push audit): closed a TOCTOU where the
+host id used for locking came from a peek taken BEFORE either lock — the
+locked re-read of the rider now re-checks `rides_parent_id` against that
+peek and refuses (`skipped: 'host_changed'`) on a mismatch, writing
+nothing. `copyAddonRows` now fails closed (a read/insert error rolls back
+the whole rider sync in its savepoint) instead of logging and continuing
+without the add-ons. `topUpRecurringSeriesLocked`'s rider branch moved to
+AFTER the customer `FOR UPDATE` lock the function's own r3 P1 comment
+requires before any `scheduled_services` write — it was writing ahead of
+that lock. The plan-ending alert action now refuses (409,
+`RIDER_SYNC_INCOMPLETE`) instead of reporting success when the rider sync
+itself was skipped, and never resolves the alert on that path.

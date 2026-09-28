@@ -261,14 +261,14 @@ function buildRiderRowFromTemplate(template, scheduledDate, hostWindow, riderPar
   return row;
 }
 
+// FAILS CLOSED: a read or insert failure here throws straight out (no
+// try/catch) — a rider visit missing its billable add-ons is a silent
+// under-bill, never an acceptable "logged and moved on" outcome. The
+// caller runs the whole insert inside syncRiderSeries's savepoint, so the
+// throw rolls back just this rider's sync (skipped: 'error'); the nightly
+// reconcile retries.
 async function copyAddonRows(trx, fromServiceId, toServiceId) {
-  let rows = [];
-  try {
-    rows = await trx('scheduled_service_addons').where({ scheduled_service_id: fromServiceId });
-  } catch (err) {
-    logger.warn(`[rider-series] addon copy read failed for ${fromServiceId}: ${err.message}`);
-    return;
-  }
+  const rows = await trx('scheduled_service_addons').where({ scheduled_service_id: fromServiceId });
   if (!rows.length) return;
   const inserts = rows.map((r) => {
     const clone = { ...r };
@@ -277,11 +277,7 @@ async function copyAddonRows(trx, fromServiceId, toServiceId) {
     clone.scheduled_service_id = toServiceId;
     return clone;
   });
-  try {
-    await trx('scheduled_service_addons').insert(inserts);
-  } catch (err) {
-    logger.warn(`[rider-series] addon copy insert failed for ${toServiceId}: ${err.message}`);
-  }
+  await trx('scheduled_service_addons').insert(inserts);
 }
 
 /**
@@ -325,6 +321,17 @@ async function syncRiderSeries(conn, riderParentId, { dryRun = false, source = '
     const riderParent = await trx('scheduled_services').where({ id: riderParentId }).first();
     const hostParent = await trx('scheduled_services').where({ id: hostParentId }).first();
     if (!riderParent || !riderParent.rides_parent_id) return { ...empty(), skipped: 'not_a_rider' };
+    // TOCTOU: hostParentId was read from the pre-lock peek, before either
+    // lock was held — a concurrent admin edit could repoint rides_parent_id
+    // to a DIFFERENT host between that peek and here. Re-check the LOCKED
+    // row rather than trusting the peek: a mismatch means we locked and are
+    // about to read/write against the WRONG host. Never write on a stale
+    // link — return and let the nightly reconcile (or the next in-band
+    // trigger) pick up the fresh link with its own fresh locks.
+    if (String(riderParent.rides_parent_id) !== String(hostParentId)) {
+      logger.warn(`[rider-series] parent=${riderParentId} rides_parent_id changed between the pre-lock peek (${hostParentId}) and the locked read (${riderParent.rides_parent_id}) — deferring to the next sync`);
+      return { ...empty(), skipped: 'host_changed' };
+    }
     if (!hostParent) return { ...empty(), skipped: 'host_missing' };
     if (String(riderParent.customer_id) !== String(hostParent.customer_id)) {
       logger.warn(`[rider-series] parent=${riderParentId} rides_parent=${hostParentId} but the two series belong to different customers — refusing to sync`);

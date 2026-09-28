@@ -436,4 +436,120 @@ postgres('rider-series sync against migrated PostgreSQL', () => {
       expect(visit.status).toBe('open');
     }
   });
+
+  // Wraps a real (sub)transaction so the FIRST .first() lookup of
+  // `targetId` on scheduled_services answers with a STALE snapshot whose
+  // rides_parent_id is `staleHostId` — simulating a concurrent admin edit
+  // that repointed the link between syncRiderSeries's pre-lock peek and its
+  // locked re-read. Every other read/write passes through to the real sp.
+  function wrapForStalePeek(sp, targetId, staleHostId) {
+    let seen = false;
+    const wrapped = (table) => {
+      const qb = sp(table);
+      if (table !== 'scheduled_services') return qb;
+      const originalFirst = qb.first.bind(qb);
+      qb.first = async (...args) => {
+        const row = await originalFirst(...args);
+        if (!seen && row && row.id === targetId && row.rides_parent_id) {
+          seen = true;
+          return { ...row, rides_parent_id: staleHostId };
+        }
+        return row;
+      };
+      return qb;
+    };
+    wrapped.raw = (...args) => sp.raw(...args);
+    wrapped.transaction = (...args) => sp.transaction(...args);
+    wrapped.isTransaction = true;
+    Object.defineProperty(wrapped, 'client', { get: () => sp.client });
+    return wrapped;
+  }
+
+  test('rides_parent_id changing between the pre-lock peek and the locked read aborts the sync (TOCTOU)', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const before = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+
+    const staleHostId = randomUUID(); // a host id that never existed — the "old" link
+    const { syncRiderSeries } = require('../services/rider-series');
+    const fakeConn = {
+      isTransaction: false,
+      transaction: (fn) => trx.transaction((sp) => fn(wrapForStalePeek(sp, pestParent.id, staleHostId))),
+    };
+    const result = await syncRiderSeries(fakeConn, pestParent.id, { dryRun: false });
+
+    expect(result.skipped).toBe('host_changed');
+    expect(result.move).toEqual([]);
+    expect(result.insert).toEqual([]);
+    expect(result.cancel).toEqual([]);
+    const after = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+    expect(after).toEqual(before);
+  });
+
+  test('a failed add-on copy aborts the insert — the rider sync rolls back rather than going live without its add-ons', async () => {
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    const before = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+
+    const { syncRiderSeries } = require('../services/rider-series');
+    await trx.raw('ALTER TABLE scheduled_service_addons RENAME TO scheduled_service_addons_disabled_for_test');
+    let result;
+    try {
+      result = await syncRiderSeries(trx, pestParent.id, { dryRun: false });
+    } finally {
+      await trx.raw('ALTER TABLE scheduled_service_addons_disabled_for_test RENAME TO scheduled_service_addons');
+    }
+
+    expect(result.skipped).toBe('error');
+    expect(result.move).toEqual([]);
+    expect(result.insert).toEqual([]);
+    expect(result.cancel).toEqual([]);
+    const after = (await seriesRows(pestParent.id))
+      .map((r) => ({ id: r.id, date: r.scheduled_date.toISOString().slice(0, 10), status: r.status }));
+    expect(after).toEqual(before);
+  });
+
+  test('the plan-ending alert action refuses (never resolves the alert) when the rider sync is skipped', async () => {
+    const adminScheduleRouter = require('../routes/admin-schedule');
+    const { runRecurringAlertAction } = adminScheduleRouter._test;
+    const lawnTechId = randomUUID();
+    await trx('technicians').insert({ id: lawnTechId, name: 'Synthetic Lawn Tech' });
+    const lawnParent = await makeParent({ pattern: 'every_6_weeks', scheduledDate: LAWN_START, technicianId: lawnTechId });
+    await seedChildren(lawnParent, 'every_6_weeks', 9);
+    const pestParent = await makeParent({ pattern: 'quarterly', scheduledDate: PEST_START });
+    await seedChildren(pestParent, 'quarterly', 4);
+    await trx('scheduled_services').where({ id: pestParent.id }).update({ rides_parent_id: lawnParent.id });
+
+    await trx.raw('ALTER TABLE invoices RENAME TO invoices_disabled_for_test');
+    let outcome;
+    try {
+      outcome = await runRecurringAlertAction(trx, {
+        idParam: `derived-${pestParent.id}`, action: 'extend', count: 1, adminUserId: null,
+      });
+    } finally {
+      await trx.raw('ALTER TABLE invoices_disabled_for_test RENAME TO invoices');
+    }
+
+    expect(outcome.status).not.toBe(200);
+    expect(outcome.body.success).not.toBe(true);
+    expect(outcome.body.code).toBe('RIDER_SYNC_INCOMPLETE');
+    // No plan_ending alert was ever created or left resolved by this call.
+    const alerts = await trx('recurring_plan_alerts').where({ recurring_parent_id: pestParent.id });
+    expect(alerts.every((a) => !a.resolved_at)).toBe(true);
+  });
 });

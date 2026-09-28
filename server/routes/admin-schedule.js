@@ -18564,6 +18564,22 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
   const isOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
   if (!isOngoing) return { spawnedVisits: [], skipped: 'not_ongoing' };
 
+  // FOR UPDATE (Codex GitHub r3 P1): the SAME row lock PUT /:id/stage takes
+  // (admin-customers.js) before it writes pipeline_stage — same row, same
+  // lock kind, taken here BEFORE any scheduled_services write in this
+  // transaction (the stage route never locks scheduled_services, so this
+  // ordering can't form a new deadlock cycle with it). Without this, an
+  // unlocked read here could land between a concurrent active→churned
+  // stage save's own read and its commit, letting this run insert visits
+  // for a customer the OTHER transaction is one write away from churning.
+  // The rider branch just below also writes scheduled_services (via
+  // syncRiderSeries), so it must sit AFTER this lock too — never before it.
+  const customer = await conn('customers').where({ id: parent.customer_id })
+    .forUpdate()
+    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
+
   // Rider series never walk their own horizon top-up — resync from the
   // host instead (see runRecurringSeriesMaintenanceLocked's identical
   // guard for the completion path, and rider-series.js's own header).
@@ -18576,20 +18592,6 @@ async function topUpRecurringSeriesLocked(conn, parentId, { horizonDays = 365 } 
       return { spawnedVisits: [], skipped: 'rider_sync_failed' };
     }
   }
-
-  // FOR UPDATE (Codex GitHub r3 P1): the SAME row lock PUT /:id/stage takes
-  // (admin-customers.js) before it writes pipeline_stage — same row, same
-  // lock kind, taken here BEFORE any scheduled_services write in this
-  // transaction (the stage route never locks scheduled_services, so this
-  // ordering can't form a new deadlock cycle with it). Without this, an
-  // unlocked read here could land between a concurrent active→churned
-  // stage save's own read and its commit, letting this run insert visits
-  // for a customer the OTHER transaction is one write away from churning.
-  const customer = await conn('customers').where({ id: parent.customer_id })
-    .forUpdate()
-    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
-  const customerSkip = topupCustomerSkipReason(customer);
-  if (customerSkip) return { spawnedVisits: [], skipped: customerSkip };
 
   // TRY-lock the SAME per-customer annual-prepay advisory namespace term
   // CREATION serializes on (admin-customers.js's lockAndAssertNoAnnualPrepayOverlap
@@ -24686,6 +24688,22 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     // is set on real data (PR 2/3).
     if (cols.rides_parent_id && parent.rides_parent_id) {
       const riderSync = await require('../services/rider-series').syncRiderSeries(trx, parentId, { source: 'alert_action' });
+      if (riderSync.skipped) {
+        // A skip (lock contention, the host link changing under us, a
+        // failed immovable-row lookup, ...) means the rider was NOT
+        // resynced — never report success, and never fall through to this
+        // function's own alert-resolution path, on an incomplete sync. The
+        // office retries the action, or the nightly reconcile catches it.
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This plan could not be synced with its host right now — retry the action.',
+            code: 'RIDER_SYNC_INCOMPLETE',
+            reason: riderSync.skipped,
+          },
+        };
+        return;
+      }
       outcome = {
         status: 200,
         body: { success: true, action, created: (riderSync.insertedRows || []).length, riderSynced: true },
