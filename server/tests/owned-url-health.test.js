@@ -11,6 +11,7 @@ const {
   classifyOwnedUrlHealth,
   checkOwnedUrlHealth,
   collectCitedOwnedUrls,
+  getCitedUrlHealthDashboard,
   VERDICTS,
   BAD_VERDICTS,
 } = require('../services/seo/owned-url-health');
@@ -131,8 +132,10 @@ describe('verdict classification', () => {
     expect(result.verdict).toBe('canonical_elsewhere');
   });
 
+  const PAGE_BODY = '<html><head><title>Pest control costs</title></head><body><h1>Pest control costs in Southwest Florida</h1><p>What drives the price of a quarterly plan, and what each visit includes.</p></body></html>';
+
   test('a 301 chain landing on a clean ok page classifies as redirect_ok', () => {
-    const body = '<html><head><title>Pest control costs</title></head><body>ok</body></html>';
+    const body = PAGE_BODY;
     const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/old/', {
       finalUrl: 'https://wavespestcontrol.com/new/', status: 200, headers: {}, body,
       hops: [{ url: 'https://wavespestcontrol.com/old/', status: 301 }, { url: 'https://wavespestcontrol.com/new/', status: 200 }],
@@ -141,11 +144,26 @@ describe('verdict classification', () => {
   });
 
   test('a clean, directly-served 2xx page classifies as ok', () => {
-    const body = '<html><head><title>Pest control costs</title></head><body>ok</body></html>';
+    const body = PAGE_BODY;
     const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/x/', {
       finalUrl: 'https://wavespestcontrol.com/x/', status: 200, headers: {}, body, hops: [{ url: 'https://wavespestcontrol.com/x/', status: 200 }],
     });
     expect(result.verdict).toBe('ok');
+  });
+
+  // Codex r1 (PR #5123): a broken deploy or edge rule serving a blank page
+  // must never read as healthy.
+  test.each([
+    ['a blank 200', 200, ''],
+    ['a 204 No Content', 204, ''],
+    ['a script-only 200 with no visible text', 200, '<html><head><title></title><script>var a = 1;</script></head><body>  </body></html>'],
+  ])('%s classifies as soft_404 (empty_body), never ok', (_label, status, body) => {
+    const result = classifyOwnedUrlHealth('https://wavespestcontrol.com/x/', {
+      finalUrl: 'https://wavespestcontrol.com/x/', status, headers: {}, body, hops: [{ url: 'https://wavespestcontrol.com/x/', status }],
+    });
+    expect(result.verdict).toBe('soft_404');
+    expect(result.detail.reason).toBe('empty_body');
+    expect(BAD_VERDICTS.has(result.verdict)).toBe(true);
   });
 
   // codex pre-push audit finding: a truncated 2xx body must never be
@@ -247,23 +265,63 @@ describe('collectCitedOwnedUrls', () => {
     return jest.fn(() => builder);
   }
 
+  const MEASURED = { measurement_version: 2, answer_available: true, citations_complete: true };
+
   test('dedupes tracking-param variants, counts one citation credit per row, and drops non-owned URLs', async () => {
     const database = fakeDb([
-      { waves_cited_urls: JSON.stringify([
+      { ...MEASURED, waves_cited_urls: JSON.stringify([
         'https://wavespestcontrol.com/pest-control-costs/?utm_source=chatgpt',
         'https://wavespestcontrol.com/pest-control-costs/?utm_source=gemini', // same page, different tracking param, same row
         'https://example.org/not-owned/',
       ]) },
-      { waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/pest-control-costs/']) },
-      { waves_cited_urls: '[]' },
+      { ...MEASURED, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/pest-control-costs/']) },
+      { ...MEASURED, waves_cited_urls: '[]' },
     ]);
     const result = await collectCitedOwnedUrls({ database, now: new Date('2026-09-27T12:00:00Z') });
     expect(result).toEqual([{ url: 'https://wavespestcontrol.com/pest-control-costs/', citationCount: 2 }]);
+  });
+
+  // Codex r1 (PR #5123): only attributable V2 answers are citation evidence —
+  // legacy rows mixed search results and prose URLs into waves_cited_urls.
+  test('ignores legacy, unanswered and incomplete-citation rows', async () => {
+    const database = fakeDb([
+      { measurement_version: 1, answer_available: true, citations_complete: true, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/legacy-pool-url/']) },
+      { measurement_version: 2, answer_available: false, citations_complete: true, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/no-answer/']) },
+      { measurement_version: 2, answer_available: true, citations_complete: false, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/unresolved/']) },
+      { ...MEASURED, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/real-citation/']) },
+    ]);
+    const result = await collectCitedOwnedUrls({ database, now: new Date('2026-09-27T12:00:00Z') });
+    expect(result).toEqual([{ url: 'https://wavespestcontrol.com/real-citation/', citationCount: 1 }]);
   });
 
   test('an empty window returns an empty list', async () => {
     const database = fakeDb([]);
     const result = await collectCitedOwnedUrls({ database, now: new Date('2026-09-27T12:00:00Z') });
     expect(result).toEqual([]);
+  });
+});
+
+// Codex r1 (PR #5123): a cited URL with no health row yet is unverified —
+// the dashboard must report it so the panel never reads it as clean.
+describe('getCitedUrlHealthDashboard', () => {
+  function twoTableDb({ mentions, health }) {
+    return jest.fn((table) => {
+      if (table === 'seo_llm_mentions') {
+        const b = { where: () => b, whereNotNull: () => b, select: async () => mentions };
+        return b;
+      }
+      const b = { whereIn: () => b, orderBy: async () => health };
+      return b;
+    });
+  }
+  const MEASURED = { measurement_version: 2, answer_available: true, citations_complete: true };
+
+  test('counts cited URLs without a health row as unchecked, not clean', async () => {
+    const database = twoTableDb({
+      mentions: [{ ...MEASURED, waves_cited_urls: JSON.stringify(['https://wavespestcontrol.com/checked/', 'https://wavespestcontrol.com/new-citation/']) }],
+      health: [{ url: 'https://wavespestcontrol.com/checked/', checked_on: '2026-09-27', verdict: 'ok', final_url: null, http_status: '200' }],
+    });
+    const result = await getCitedUrlHealthDashboard({ database, now: new Date('2026-09-27T12:00:00Z') });
+    expect(result).toMatchObject({ candidates: 2, checked: 1, unchecked: 1, bad: 0 });
   });
 });

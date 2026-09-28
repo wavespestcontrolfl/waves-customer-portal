@@ -34,6 +34,7 @@ const logger = require('../logger');
 const registry = require('../content/content-registry');
 const { _internals: contactFinderInternals } = require('./contact-finder');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { ownedCitations } = require('./aeo-measurement');
 const { deliverOpsDigest } = require('../ops-digest');
 const { retireIfClean } = require('../ops-digest-fall-off');
 const sendgrid = require('../sendgrid-mail');
@@ -95,22 +96,22 @@ function isOwnedFleetUrl(value) {
  * Distinct normalized owned URLs cited in the trailing window, each with the
  * number of citation rows that named it (so a stale-but-uncited page never
  * shows up demanding attention, and a heavily-cited one is visibly urgent).
+ * Only attributable V2 answers count — the same rule the dashboard's
+ * citation rates use (aeo-measurement.js ownedCitations): legacy rows mixed
+ * search results and prose URLs into waves_cited_urls and are not citation
+ * evidence.
  */
 async function collectCitedOwnedUrls({ database = db, windowDays = CITATION_WINDOW_DAYS, now = new Date() } = {}) {
   const since = etDateString(addETDays(now, -(windowDays - 1)));
   const rows = await database('seo_llm_mentions')
     .where('check_date', '>=', since)
     .whereNotNull('waves_cited_urls')
-    .select('waves_cited_urls');
+    .select('waves_cited_urls', 'measurement_version', 'answer_available', 'citations_complete');
 
   const counts = new Map();
   for (const row of rows) {
-    let urls;
-    if (Array.isArray(row.waves_cited_urls)) urls = row.waves_cited_urls;
-    else {
-      try { urls = JSON.parse(row.waves_cited_urls || '[]'); } catch { urls = []; }
-    }
-    if (!Array.isArray(urls)) continue;
+    const urls = ownedCitations(row);
+    if (!urls.length) continue;
     const seenThisRow = new Set();
     for (const raw of urls) {
       const normalized = normalizeOwnedUrl(raw);
@@ -263,6 +264,16 @@ function extractCanonicalHref(html, requestedUrl) {
 const SOFT_404_RE = /\b(page not found|404[\s:—-]|we can.?t find that page|this page (doesn.?t|does not) exist)\b/i;
 const CHALLENGE_RE = /\b(just a moment|verify you are human|checking your browser|attention required|access denied|captcha|cf-browser-verification|please enable cookies)\b/i;
 
+const MIN_VISIBLE_TEXT_CHARS = 64;
+
+function visibleTextLength(html) {
+  return String(html || '')
+    .replace(/<script\b[\s\S]*?<\/script>|<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim().length;
+}
+
 function isNoindexSignal(metaRobots, headers) {
   const xRobots = String(headers?.['x-robots-tag'] || '');
   return /\bnoindex\b/i.test(metaRobots) || /\bnoindex\b/i.test(xRobots);
@@ -330,6 +341,14 @@ function classifyOwnedUrlHealth(requestedUrl, chain) {
     if (normalizedCanonical && normalizedFinal && normalizedCanonical !== normalizedFinal) {
       return { verdict: 'canonical_elsewhere', httpStatus: status, finalUrl, detail: { ...detailBase, title, canonicalUrl } };
     }
+  }
+
+  // A 204, or a 2xx with no visible text, is a page a human cannot read —
+  // never a clean result (e.g. a broken deploy or edge rule serving a blank
+  // body). Real fleet pages carry thousands of visible characters.
+  const visibleChars = visibleTextLength(body);
+  if (status === 204 || visibleChars < MIN_VISIBLE_TEXT_CHARS) {
+    return { verdict: 'soft_404', httpStatus: status, finalUrl, detail: { ...detailBase, title, reason: 'empty_body', visibleChars } };
   }
 
   const permanentRedirectChain = hops.length > 1 && hops.slice(0, -1).every((h) => h.status === 301 || h.status === 308);
@@ -501,7 +520,7 @@ async function runOwnedUrlHealthCheck({
  */
 async function getCitedUrlHealthDashboard({ database = db, windowDays = CITATION_WINDOW_DAYS, now = new Date() } = {}) {
   const candidates = await collectCitedOwnedUrls({ database, windowDays, now });
-  if (!candidates.length) return { checked: 0, bad: 0, badUrls: [], lastCheckedOn: null };
+  if (!candidates.length) return { candidates: 0, checked: 0, unchecked: 0, bad: 0, badUrls: [], lastCheckedOn: null };
 
   const urls = candidates.map((c) => c.url);
   const citationByUrl = new Map(candidates.map((c) => [c.url, c.citationCount]));
@@ -533,7 +552,10 @@ async function getCitedUrlHealthDashboard({ database = db, windowDays = CITATION
   }
   badUrls.sort((a, b) => b.citationCount - a.citationCount);
 
-  return { checked, bad: badUrls.length, badUrls, lastCheckedOn };
+  // A currently cited URL with no health row yet (before the first sweep, or
+  // newly cited since the last one) is UNVERIFIED — the panel must not read
+  // a partial check as a clean result.
+  return { candidates: candidates.length, checked, unchecked: candidates.length - checked, bad: badUrls.length, badUrls, lastCheckedOn };
 }
 
 module.exports = {

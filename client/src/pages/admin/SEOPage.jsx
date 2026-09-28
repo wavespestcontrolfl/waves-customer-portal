@@ -2076,15 +2076,27 @@ function BacklinksTab() {
               <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
                 Daily check of every owned URL an answer engine cited in the
                 last 30 days — a citation with no live page behind it is worse
-                than no citation. {llmDash.citedUrlHealth.checked} checked
+                than no citation. {llmDash.citedUrlHealth.checked} of{" "}
+                {llmDash.citedUrlHealth.candidates ??
+                  llmDash.citedUrlHealth.checked}{" "}
+                cited URLs checked
                 {llmDash.citedUrlHealth.lastCheckedOn
                   ? ` (last: ${llmDash.citedUrlHealth.lastCheckedOn})`
                   : ""}
-                , {llmDash.citedUrlHealth.bad} broken.
+                , {llmDash.citedUrlHealth.bad} broken
+                {llmDash.citedUrlHealth.unchecked > 0
+                  ? `, ${llmDash.citedUrlHealth.unchecked} not checked yet`
+                  : ""}
+                .
               </p>
               {llmDash.citedUrlHealth.badUrls.length === 0 ? (
                 <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
-                  No broken owned URLs detected.
+                  {llmDash.citedUrlHealth.checked === 0 &&
+                  llmDash.citedUrlHealth.unchecked > 0
+                    ? "Not checked yet — the daily check runs at 3:45 AM ET."
+                    : llmDash.citedUrlHealth.unchecked > 0
+                      ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the daily check runs at 3:45 AM ET.`
+                      : "No broken owned URLs detected."}
                 </p>
               ) : (
                 llmDash.citedUrlHealth.badUrls.map((b) => (

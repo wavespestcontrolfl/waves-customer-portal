@@ -76,7 +76,7 @@ function observationGroups(rows, keyFor) {
   return [...groups].map(([key, observations]) => ({ key, ...summarizeObservations(observations) }));
 }
 
-function buildDashboard(rows, queries) {
+function buildDashboard(rows, queries, { configuredPlatforms = null } = {}) {
   const questionMap = new Map(benchmark.questions.map(q => [q.query, q]));
   const managed = new Map(queries.map(q => [q.query, q]));
   const latest = new Map();
@@ -108,25 +108,36 @@ function buildDashboard(rows, queries) {
   }
   const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
   // "missing" (next to noAnswer): expected active-question x configured-engine
-  // pairs the fixed benchmark should have produced a measured observation for
-  // in this window, minus the pairs that actually did. "Configured engine"
-  // is read off what actually probed in the window (grid's platform set),
-  // not env presence, so a provider outage/removal shows up as gap growth
-  // rather than a silent drop in the denominator.
+  // pairs with NO observation of any kind in this window — measured,
+  // no-answer, legacy, unresolved and missing partition the expected pairs.
+  // The engine denominator is the CONFIGURED provider set (getDashboard
+  // passes the prober's own `providers`), never the engines that happened to
+  // succeed: runDaily skips null probes, so a newly enabled provider or one
+  // failing for the whole window has no rows, and deriving engines from rows
+  // would turn a total outage into apparent full coverage. Callers that pass
+  // no config fall back to the observed engines.
   const activeQuestionCount = benchmark.questions.filter(q => managed.has(q.query)).length;
-  const configuredEngines = [...new Set(grid.map(row => row.llm_platform))];
+  const observedEngines = [...new Set(grid.map(row => row.llm_platform))];
+  const configuredEngines = Array.isArray(configuredPlatforms) && configuredPlatforms.length
+    ? [...new Set(configuredPlatforms)]
+    : observedEngines;
+  const configuredSet = new Set(configuredEngines);
   // Restricted to currently-active questions: a deactivated benchmark
   // question's historical observations must not subtract from the active
-  // cohort's gap (codex pre-push audit finding) — deactivating a question
-  // should never silently shrink `missing` toward zero.
-  const observedFixedPairs = new Set(fixed.filter(isMeasuredAnswer).filter(row => managed.has(row.query)).map(row => `${row.query}::${row.llm_platform}`));
+  // cohort's gap — deactivating a question should never silently shrink
+  // `missing` toward zero. Restricted to configured engines for the same
+  // reason: a removed provider's old rows must not offset a live one's gap.
+  const observedFixedPairs = new Set(fixed
+    .filter(row => managed.has(row.query) && configuredSet.has(row.llm_platform))
+    .map(row => `${row.query}::${row.llm_platform}`));
   const expectedObservations = activeQuestionCount * configuredEngines.length;
   const missing = Math.max(0, expectedObservations - observedFixedPairs.size);
   return {
     summary: {
       ...summarizeObservations(grid),
       queriesTracked: new Set(grid.map(row => row.query)).size,
-      platforms: configuredEngines,
+      platforms: observedEngines,
+      configuredPlatforms: configuredEngines,
     },
     benchmark: {
       version: benchmark.version,
@@ -544,7 +555,9 @@ class LLMMentionProber {
       .where('check_date', '>=', since)
       .orderBy('check_date', 'desc');
     const queries = await this.getQueries();
-    return buildDashboard(rows.filter(row => queries.some(q => q.query === row.query)), queries);
+    return buildDashboard(rows.filter(row => queries.some(q => q.query === row.query)), queries, {
+      configuredPlatforms: Object.keys(this.providers),
+    });
   }
 }
 

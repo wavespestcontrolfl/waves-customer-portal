@@ -134,6 +134,33 @@ test('a deactivated question\'s historical observation cannot shrink the active 
   expect(dashboard.benchmark).toMatchObject({ activeQuestions: 2, expectedObservations: 2, missing: 2 });
 });
 
+// Codex r1 (PR #5123): the engine denominator is the configured provider set.
+// runDaily skips null probes, so an engine that is newly enabled or failing
+// for the whole window has no rows — deriving engines from rows would turn a
+// total outage into apparent full coverage.
+test('a configured engine with no observations in the window counts as missing', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured()]; // chatgpt only; perplexity configured but produced nothing
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt', 'perplexity'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 2, missing: 1 });
+  expect(dashboard.summary.configuredPlatforms).toEqual(['chatgpt', 'perplexity']);
+  expect(dashboard.summary.platforms).toEqual(['chatgpt']);
+});
+
+test('a no-answer observation is reported as noAnswer, not missing', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured({ answer_available: false })];
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 1, missing: 0, noAnswer: 1 });
+});
+
+test('a removed engine\'s leftover rows cannot offset a configured engine\'s gap', () => {
+  const oneQuestion = [{ query: benchmark.questions[0].query, active: true }];
+  const rows = [measured({ llm_platform: 'gemini' })]; // gemini no longer configured
+  const dashboard = buildDashboard(rows, oneQuestion, { configuredPlatforms: ['chatgpt'] });
+  expect(dashboard.benchmark).toMatchObject({ expectedObservations: 1, missing: 1 });
+});
+
 test('Gemini attributes only supported chunks and ignores thinking text', async () => {
   process.env.GEMINI_API_KEY = 'test-key';
   global.fetch.mockResolvedValue({ ok: true, json: async () => ({ candidates: [{
