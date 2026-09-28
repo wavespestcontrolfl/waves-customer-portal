@@ -524,6 +524,11 @@ describe('groundRescheduleAgreement', () => {
     }), `Caller: ${callerLine}\nAgent: We will see you Thursday at two.\nCaller: ${ACCEPT}`);
     expect(movedFri("I'm not going to be home tomorrow, but my appointment is Friday.", 'my appointment is Friday')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
     expect(movedFri("I'm not going to be home Friday.", "I'm not going to be home Friday").ok).toBe(true);
+    // Codex #5207 r2.
+    expect(movedFri("I'm not home tomorrow, but Friday works.", 'but Friday works')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(agreedAt(THURSDAY_2PM, 'No, we will see you Thursday at two PM or Friday at three PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "We'll see you tomorrow at 9, right.", { day: 'tomorrow', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-10-10T09:00:00-04:00', "We'll see you at 9 for your 10th appointment.", { day: '10th', hour: '9', period: null }).ok).toBe(false);
   });
 
   // The fixtures above inject the fields; this pins them to the stored V2

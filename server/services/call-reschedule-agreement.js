@@ -159,15 +159,18 @@ function sentencesAround(turn, quote) {
 // visit" still is.
 const AVAILABILITY_PHRASES = / (?:can t|cant|cannot|can not|won t|wont|will not|not going to|not gonna|am not|are not|re not|m not|not) (?:be )?(?:able to )?(?:be )?(?:home|there|around|available|in town|make it|make that|make the|make my|make our|do it|do that|do the|do my)(?= )/g;
 // Strips an availability phrase only where it governs the moved visit: the
-// moved date's own words follow it within a few words ("not going to be
-// home tomorrow" for tomorrow's visit). "I'm not home tomorrow, but my
+// moved date's own words follow it directly ("not going to be home
+// tomorrow" for tomorrow's visit). "I'm not home tomorrow, but my
 // appointment is Friday" keeps its negation for a Friday move.
 function stripAvailability(text, movedWords) {
   const padded2 = ` ${text} `;
   const mw = normalize(movedWords);
   return padded2.replace(AVAILABILITY_PHRASES, (m, offset) => {
-    const after = padded2.slice(offset + m.length, offset + m.length + mw.length + 20);
-    return ` ${after}`.includes(` ${mw}`) ? ' ' : m;
+    // The moved date's words must come next (after at most "on"/"the"),
+    // with no clause break between: "not home tomorrow, but Friday works"
+    // never strips for a Friday move.
+    const after = padded2.slice(offset + m.length).replace(/^ (?:on |the |on the )?/, ' ');
+    return after.startsWith(` ${mw} `) ? ' ' : m;
   }).trim();
 }
 
@@ -417,7 +420,7 @@ const AFTER_HOUR_WORDS = new Set([
   'we', 'will', 'ill', 'll', 'see', 'you', 'guys', 'the', 'a', 'tech', 'technician', 'call', 'text', 'much',
   'thank', 'thanks', 'okay', 'ok', 'great', 'perfect', 'good', 'sounds', 'works', 'that', 'is', 'it', 'its', 's',
   'all', 'set', 'be', 'there', 'have', 'nice', 'day', 'bye', 'yes', 'yeah', 'yep', 'for', 'your', 'appointment', 'visit',
-  'them', 'him', 'her', 'us', 'sure', 'alright', 'right', 'awesome', 'wonderful', 'then',
+  'them', 'him', 'her', 'us', 'sure', 'alright', 'awesome', 'wonderful', 'then',
 ]);
 // A caller may add "I'll let them know" after the hour; from the agent
 // "I will let you know" / "let me know" is a follow-up offer, not a booking.
@@ -474,7 +477,10 @@ function hourExactIn(text, words, callerTurn = false) {
   const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
   if (toks.some((t) => ALTERNATIVE_WORDS.has(t))) return false;
   // Tokens of the recorded day words ("October 10") are the date, not an hour.
+  // A day phrase describing an appointment ("your 10th appointment") is a
+  // count, not the date, and gets no exemption.
   const dayIdx = new Set((typeof words.day === 'string' ? spans(toks, words.day) : [])
+    .filter(([, b]) => !/^(?:appointment|appointments|visit|visits|treatment|service|time)$/.test(toks[b] || ''))
     .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
   const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
   const explained = new Set(dayIdx);
@@ -527,6 +533,10 @@ function commitsToSlot(quote, words, hour24, turns) {
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return holds(quote, words.hour) && periodIsTheHours(quote, withoutPeriod)
+    // Offering alternatives is not committing ("No, we'll see you Thursday
+    // at two or Friday at three"), and a trailing "right" asks ("see you
+    // at 9, right."); "right now" mid-sentence does not.
+    && !/ (?:or|either) /.test(padded(around)) && !/(?:^| )right$/.test(around)
     // The agent need not repeat the day when its sentence is plain
     // commitment ("Yep, we'll see them at 9", plainCommitment); otherwise it
     // must say the recorded day, and a same-day change's commitment names
@@ -557,7 +567,7 @@ const PLAIN_COMMIT_WORDS = new Set([
   'we', 'll', 'will', 'i', 'ill', 'see', 'you', 'them', 'him', 'her', 'guys', 'at', 'to', 'for', 'be', 'there', 'come',
   'out', 'pop', 'in', 'put', 'down', 'switch', 'it', 'move', 'moved', 'make', 'mark', 'get', 'have', 'the', 'a',
   'tech', 'technician', 'okay', 'ok', 'yep', 'yes', 'yeah', 'sure', 'sounds', 'good', 'great', 'perfect', 'then',
-  'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'right', 'over',
+  'so', 'and', 'all', 'set', 've', 'got', 'your', 'appointment', 'visit', 'just', 's', 'over',
   'o', 'clock', 'oclock', '00', 'thank', 'thanks', 'awesome', 'alright',
 ]);
 function plainCommitment(text, words) {
