@@ -149,6 +149,15 @@ async function logLatePaymentEmailAttempt({
 
 class BalanceReminder {
   async dailyCheck() {
+    // Retired (dunning unification, owner ruling 2026-09-27): the invoice
+    // follow-up ladder and the pre-visit balance reminder own these now.
+    // GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time (strict 'true');
+    // checked here too so a direct call bypassing the scheduler's own gate
+    // check is still inert.
+    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+      logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
+      return;
+    }
     const today = etDateString();
     const day7 = etDateString(addETDays(new Date(), 7));
 
@@ -666,6 +675,15 @@ class BalanceReminder {
   }
 
   async latePaymentCheck() {
+    // Retired (dunning unification, owner ruling 2026-09-27): the invoice
+    // follow-up ladder and the pre-visit balance reminder own these now.
+    // GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time (strict 'true');
+    // checked here too so a direct call bypassing the scheduler's own gate
+    // check is still inert.
+    if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+      logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
+      return;
+    }
     const customers = await db("customers")
       .where({ active: true })
       .whereNull("deleted_at")

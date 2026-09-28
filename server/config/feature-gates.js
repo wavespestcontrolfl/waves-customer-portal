@@ -3161,6 +3161,25 @@ const gates = {
   // for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
+
+  // Pre-visit balance reminder window widens from 3 to 5 days before the
+  // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead
+  // of the 72-hour appointment reminder. Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only:
+  // services/previsit-balance-reminder.js's leadDays() reads
+  // GATE_PREVISIT_BALANCE_5DAY at call time.
+  previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
+
+  // Retire the dormant legacy balance-reminder cron (dunning unification,
+  // owner ruling 2026-09-27): balanceReminder.dailyCheck() (gentle/firm/
+  // urgent pre-visit tiers) and .latePaymentCheck() (account-level 7/14/30/
+  // 60/90 late check) sent 0 messages in the last 30 days — the invoice
+  // follow-up ladder and the pre-visit balance reminder own these now.
+  // Ships DARK: off unless exactly 'true'. This entry is for logGateStatus
+  // only: scheduler.js's 11AM cron and services/workflows/balance-reminder.js's
+  // dailyCheck()/latePaymentCheck() read GATE_BALANCE_REMINDER_LEGACY_OFF at
+  // call time.
+  balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

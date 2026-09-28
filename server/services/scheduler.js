@@ -7124,6 +7124,14 @@ function initScheduledJobs() {
     logger.info('Running: balance reminders');
     try {
       await runExclusive('balance-reminders', async () => {
+        // Retired (dunning unification, owner ruling 2026-09-27): the
+        // invoice follow-up ladder and the pre-visit balance reminder own
+        // these now. GATE_BALANCE_REMINDER_LEGACY_OFF, read at call time
+        // (strict 'true'; unset = legacy behavior unchanged).
+        if (process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true') {
+          logger.info('[balance-reminders] retired: GATE_BALANCE_REMINDER_LEGACY_OFF, the invoice follow-up ladder and the pre-visit balance reminder own these');
+          return;
+        }
         const balanceReminder = require('./workflows/balance-reminder');
         if (balanceReminder.dailyCheck) {
           await balanceReminder.dailyCheck();
