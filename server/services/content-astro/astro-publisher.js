@@ -27,7 +27,7 @@ const fm = require('./frontmatter');
 const authorService = require('./author-service');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { matchStandaloneImageLine, isIdentificationPost } = require('../content/licensed-photo-library');
+const { isIdentificationPost, isLibraryPhotoSrc } = require('../content/licensed-photo-library');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const { applyCostGuidePriceRange } = require('./price-range');
 const contentGuardrails = require('../content/content-guardrails');
@@ -2891,216 +2891,14 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 // `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
 // and a legacy `.md` refresh written back in place) — decides whether raw
 // HTML blocks hide the Markdown inside them (renderedBodyView).
-// Licensed identification photos (C2/C3 follow-up, Codex P1 2026-09-28).
-// content-quality-gate's photo_slots_licensed_only already restricts a
-// diagnostic draft's pest/sign/look-alike images to EXACT licensed-catalog
-// URLs — but validateBodyImageRefs below rejects ANY body image that is not
-// already committed in the Astro repo, so a compliant draft embedding one
-// of those remote Wikimedia URLs would hard-fail BLOG_BODY_IMAGES_FAILED,
-// and (with generation still enabled) a draft that instead omitted the
-// slots could get the shortfall filled with AI art — exactly the case the
-// owner rule forbids. This pass fetches, verifies (exact catalog URL only,
-// real image content-type, size cap) and re-hosts each one under the SAME
-// public/images/blog/{slug}/body-N.webp convention every other body image
-// uses, BEFORE validateBodyImageRefs ever sees the body — it strips the
-// remote ref out (it can never pass "already committed", same as an
-// AI-generated image never appears in the draft body either) and remembers
-// its exact line position to splice the new local ref back in once the
-// rest of resolveBodyImages has run. AI generation is disabled entirely
-// for a diagnostic draft (see `need` below) so it can never compete for,
-// or silently fill, an identification slot a licensed photo left empty —
-// the safety rule applies to the whole body, not just the missing slot,
-// since this pipeline has no concept of "this prose section is the
-// identification slot" to exempt the rest.
-const LICENSED_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
-// Codex P1 (5th round): every other risk on this fetch was hardened (SSRF
-// host allowlist, no-follow redirects, streaming byte cap), but nothing
-// bounded the REQUEST ITSELF — a stalled TCP connection or an
-// unresponsive host would hang the async publish job forever. A fixed,
-// generous timeout fails closed (BLOG_BODY_IMAGES_FAILED) instead.
-const LICENSED_PHOTO_FETCH_TIMEOUT_MS = 20000;
-// Which placements count as a licensed identification photo is defined
-// ONCE, in licensed-photo-library.matchStandaloneImageLine, and shared with
-// content-quality-gate's photo_slots_licensed_only — so what the gate
-// approves is exactly what this pass re-hosts (Codex P1 r6-r8: every prior
-// split came from two hand-kept copies drifting). A bare inline image or a
-// src-only <img>, alone on its own line. Anything else is rejected at the
-// gate; if it ever reached here it would be left in the body and
-// validateBodyImageRefs would fail closed (park, never a hotlink).
-function licensedPhotoError(slug, url, detail) {
-  const err = new Error(`autonomous blog body images: licensed identification photo for ${slug} (${url}) ${detail}`);
-  err.code = 'BLOG_BODY_IMAGES_FAILED';
-  return err;
-}
-
-// NOT the existing fetchImageBuffer(): its `ext` always falls back to a
-// guessed value (never null) even for a non-image response, so it cannot
-// actually verify content-type — this is the real verification a
-// licensed-catalog fetch needs (same exact URL as the brief's own catalog
-// entry, a real image response, a byte cap).
-// Codex P1 (3rd round, defense-in-depth): photo.url reaches this function
-// from the persisted content_briefs JSONB (voice_constraints.photo_slots)
-// — today ALWAYS a hardcoded PHOTO_LIBRARY entry (licensed-photo-
-// library.js), never writer- or user-controlled, but nothing at the
-// point of the actual network call enforced that invariant. A host
-// allowlist here means a future editable-brief path, a review-tooling
-// bug, or a redirect target can never turn this fetch into an SSRF
-// primitive (an internal address, file://, or an unexpected host), even
-// if the upstream catalog guarantee is ever weakened.
-const LICENSED_PHOTO_ALLOWED_HOSTS = new Set(['upload.wikimedia.org']);
-function assertLicensedPhotoUrlAllowed(url, slug) {
-  let parsed;
-  try { parsed = new URL(url); } catch { throw licensedPhotoError(slug, url, 'is not a valid URL'); }
-  if (parsed.protocol !== 'https:') throw licensedPhotoError(slug, url, `uses a disallowed scheme (${parsed.protocol})`);
-  if (!LICENSED_PHOTO_ALLOWED_HOSTS.has(parsed.hostname.toLowerCase())) {
-    throw licensedPhotoError(slug, url, `is not on the licensed-photo host allowlist (${parsed.hostname})`);
-  }
-}
-
-// Codex P1 (3rd round): res.arrayBuffer() fully buffers the response
-// before the post-fetch length check runs — a chunked/no-content-length
-// response (or one lying about content-length) is buffered in full
-// regardless of actual size. Reads the stream manually and aborts the
-// instant the cap is crossed, so a compromised or spoofed endpoint can
-// never force an unbounded in-memory buffer.
-async function readCappedResponseBody(res, cap, slug, url) {
-  const reader = typeof res.body?.getReader === 'function' ? res.body.getReader() : null;
-  if (!reader) {
-    // No streaming body available (should not happen with the global
-    // fetch's Response) — fail closed rather than trust an unbounded read.
-    throw licensedPhotoError(slug, url, 'response body is not readable as a stream');
-  }
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    let chunk;
-    try {
-      chunk = await reader.read();
-    } catch (readErr) {
-      // Covers a mid-stream abort (the fetch timeout signal firing while
-      // bytes are still arriving) with the same BLOG_BODY_IMAGES_FAILED
-      // code every other failure on this path carries, not a raw
-      // AbortError the caller's error classification wouldn't recognize.
-      throw licensedPhotoError(slug, url, `stream read failed: ${readErr.message}`);
-    }
-    if (chunk.done) break;
-    total += chunk.value.length;
-    if (total > cap) {
-      await reader.cancel().catch(() => {});
-      throw licensedPhotoError(slug, url, `exceeds the ${cap}-byte cap while streaming (aborted at ${total} bytes)`);
-    }
-    chunks.push(Buffer.from(chunk.value));
-  }
-  return Buffer.concat(chunks);
-}
-
-async function fetchAndVerifyLicensedPhoto(url, slug) {
-  assertLicensedPhotoUrlAllowed(url, slug);
-  let res;
-  try {
-    // Codex P1 (4th round): 'follow' transparently chases ANY 3xx to
-    // whatever host it names — including an internal/private address —
-    // with no re-check against the allowlist, so the pre-fetch host check
-    // above proved nothing about where the bytes actually came from.
-    // 'manual' means the redirect is never taken at all; any 3xx (or the
-    // resulting opaqueredirect response) is a hard failure instead of a
-    // followed hop, so the allowlist check on the ORIGINAL url is the
-    // only host this function ever actually contacts.
-    // AbortSignal.timeout bounds the whole request lifecycle — the
-    // initial connect/headers AND any pending body-stream reads
-    // (readCappedResponseBody below), since both ride the same fetch
-    // signal in the WHATWG spec (Node's undici aborts an in-flight
-    // reader.read() the instant the request's own signal fires).
-    res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(LICENSED_PHOTO_FETCH_TIMEOUT_MS) });
-  } catch (fetchErr) {
-    throw licensedPhotoError(slug, url, `could not be fetched: ${fetchErr.message}`);
-  }
-  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
-    throw licensedPhotoError(slug, url, `redirected (HTTP ${res.status || 'opaque'}) — redirects are never followed for a licensed-photo fetch`);
-  }
-  if (!res.ok) throw licensedPhotoError(slug, url, `fetch failed (HTTP ${res.status})`);
-  const contentType = String(res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  if (!/^image\//.test(contentType)) throw licensedPhotoError(slug, url, `is not an image (content-type: ${contentType || 'none'})`);
-  const declaredLength = Number(res.headers.get('content-length') || 0);
-  if (declaredLength > LICENSED_PHOTO_MAX_BYTES) throw licensedPhotoError(slug, url, `exceeds the ${LICENSED_PHOTO_MAX_BYTES}-byte cap (${declaredLength} declared bytes)`);
-  const rawBuffer = await readCappedResponseBody(res, LICENSED_PHOTO_MAX_BYTES, slug, url);
-  if (!rawBuffer.length) throw licensedPhotoError(slug, url, 'fetched 0 bytes');
-  // Undecodable bytes behind an image/* content-type fail with the same
-  // BLOG_BODY_IMAGES_FAILED code as every other failure on this path, so
-  // the caller parks deterministically instead of retrying a raw error.
-  try {
-    return await compressToWebp(rawBuffer, { width: BODY_IMAGE_WIDTH });
-  } catch (err) {
-    throw licensedPhotoError(slug, url, `could not be decoded as an image: ${err.message}`);
-  }
-}
-
-// Same free-name convention the generation loop below uses (body-N.webp,
-// first name absent both from the repo and from this run's own takenNames).
-async function allocateLicensedPhotoName(slug, takenNames, counter) {
-  for (;;) {
-    counter.n += 1;
-    if (counter.n > BODY_IMAGE_NAME_SCAN_MAX) {
-      throw licensedPhotoError(slug, '(name allocation)', `— no free body-N name within ${BODY_IMAGE_NAME_SCAN_MAX}`);
-    }
-    const src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${counter.n}.webp`;
-    const repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${counter.n}.webp`;
-    if (takenNames.has(src)) continue;
-    const onMain = await gh.getFile(repoPath);
-    if (!onMain) return { src, repoPath };
-  }
-}
-
-
-async function rehostLicensedIdentificationPhotos({ body, slug, brief, mdx }) {
-  const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
-  const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
-  const none = { body, files: [], images: [], newAlts: [], placements: [] };
-  if (!byUrl.size) return none;
-
-  const lines = String(body || '').split('\n');
-  const files = [];
-  const images = [];
-  const placements = [];
-  const counter = { n: 0 };
-  const takenNames = new Set();
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const match = matchStandaloneImageLine(lines[i]);
-    const photo = match ? byUrl.get(match.url) : null;
-    if (!photo) { out.push(lines[i]); continue; }
-    const buffer = await fetchAndVerifyLicensedPhoto(photo.url, slug);
-    const { src, repoPath } = await allocateLicensedPhotoName(slug, takenNames, counter);
-    takenNames.add(src);
-    // The draft's own alt (the writer copied photo.alt verbatim per the
-    // prompt) wins when present; the catalog alt is the fallback.
-    const alt = match.alt || String(photo.alt || '').trim();
-    files.push({ path: repoPath, buffer });
-    images.push({ src, alt, reused: false, licensed: true, sourceUrl: photo.url });
-    placements.push({ insertAt: out.length, src, alt });
-  }
-  return { body: out.join('\n'), files, images, newAlts: [], placements };
-}
-
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
-  // ONE predicate with the merge-time check and the quality gate.
+  if (!bodyImagesEnabled()) return none;
+  // ONE predicate with the merge-time check and the quality gate. An
+  // identification post's photos are licensed-library files already
+  // committed in the Astro repo and embedded by local path (the quality gate
+  // enforces that); nothing is fetched or generated for it here.
   const isDiagnostic = isIdentificationPost(frontmatter);
-  if (!bodyImagesEnabled()) {
-    // GATE_BLOG_BODY_IMAGES only controls AI GENERATION. Licensed
-    // identification photos are re-hosted regardless (Codex r2 on #5216):
-    // with the gate off a diagnostic draft must still ship the verified
-    // local WebP, never a hotlink to the remote catalog URL.
-    if (!isDiagnostic) return none;
-    const licensed = await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx });
-    if (!licensed.placements.length) return none;
-    return {
-      ...none,
-      body: insertBodyImages(licensed.body, licensed.placements),
-      files: licensed.files,
-      images: licensed.images,
-    };
-  }
   // A refresh draft may RETAIN a publisher-managed reference while
   // rewriting its section: the picture then ships under prose it may no
   // longer describe, bypassing the reuse context check (GH r28). Managed
@@ -3116,21 +2914,14 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     for (const sec of sections) {
       for (const src of sec.images || []) {
         if (!String(src || '').startsWith(ownPrefix) || !/body-\d+\.webp$/i.test(String(src))) continue;
+        // A licensed-library photo is never the publisher's to strip (Codex
+        // r3 on #5216) — same lookup the quality gate approves it by.
+        if (isLibraryPhotoSrc(src)) continue;
         if (!reusableLiveBodyImage(existingFile, src, sec.heading, { title: frontmatter?.title, lead: sec.lead, mdx: liveFlavour })) stale.add(src);
       }
     }
     if (stale.size) body = stripManagedBodyImages(body, slug, { only: stale });
   }
-  // Licensed identification photos are stripped + re-hosted HERE — after
-  // every other edit to `body` (the refresh stale-strip above) and right
-  // before validation — so each placement's recorded line index is taken
-  // against the exact body the early-return path splices it back into;
-  // nothing between here and insertBodyImages() reassigns `body` (Codex P1
-  // r10: running this first let the stale-strip shift the indices).
-  const licensed = isDiagnostic
-    ? await rehostLicensedIdentificationPhotos({ body, slug, brief, mdx })
-    : { body, files: [], images: [], newAlts: [], placements: [] };
-  body = licensed.body;
   const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
@@ -3199,22 +2990,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // publisher-managed pictures (a refresh that replaces body-1/body-2 with
   // two authored images): those files are still publicly addressable and
   // hold managed names, so the sweep runs here too (GH r24).
-  if (need <= 0) {
-    // Byte-identical to before when there is nothing to splice back in —
-    // insertBodyImages() also .trim()s, which every non-diagnostic /
-    // no-licensed-photo draft taking this path must NOT pick up as a side
-    // effect.
-    const finalBody = licensed.placements.length ? insertBodyImages(body, licensed.placements) : body;
-    return {
-      ...none,
-      body: finalBody,
-      files: licensed.files,
-      images: licensed.images,
-      newAlts: licensed.newAlts,
-      pinned,
-      ...(await supersededBodyImages({ slug, kept: new Set([...draftSrcs, ...licensed.images.map((img) => img.src)]), superseded: [] })),
-    };
-  }
+  if (need <= 0) return { ...none, body, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
 
   const slots = bodyImageSlots(body, need, { title: frontmatter?.title, mdx });
   if (slots.length < need) {
@@ -5526,13 +5302,6 @@ module.exports = {
     compressToWebp,
     resolveAutonomousHero,
     resolveBodyImages,
-    rehostLicensedIdentificationPhotos,
-    matchLicensedPhotoLine: matchStandaloneImageLine,
-    fetchAndVerifyLicensedPhoto,
-    assertLicensedPhotoUrlAllowed,
-    readCappedResponseBody,
-    LICENSED_PHOTO_ALLOWED_HOSTS,
-    LICENSED_PHOTO_MAX_BYTES,
     bodyImageSlots,
     insertBodyImages,
     countBodyImages,

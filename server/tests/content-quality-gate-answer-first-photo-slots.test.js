@@ -196,22 +196,14 @@ describe('checkCtaAfterVerdictBox', () => {
 // ── photo_slots_licensed_only ───────────────────────────────────────
 
 // ── photo_slots_licensed_only ──────────────────────────────────────
-// Every licensed photo carries the full catalog entry (the composer only
-// ever attaches real PHOTO_LIBRARY entries) and the EXACT attribution line:
-//   Photo: [credit](source_page) ([license](license_url))
-const PHOTO_URL = 'https://upload.wikimedia.org/real-fire-ant.jpg';
-const PHOTO = {
-  url: PHOTO_URL,
-  alt: 'fire ant',
-  credit: 'Test Photographer',
-  license: 'CC BY 2.0',
-  license_url: 'https://creativecommons.org/licenses/by/2.0',
-  source_page: 'https://commons.wikimedia.org/wiki/File:Real_fire_ant.jpg',
-};
-const ATTR = `Photo: [${PHOTO.credit}](${PHOTO.source_page}) ([${PHOTO.license}](${PHOTO.license_url}))`;
-function photoBrief(photo = PHOTO, extra = []) {
-  return brief({ voice_constraints: { photo_slots: [{ slot: 'pest', photo, flagged_for_human: false }, ...extra] } });
-}
+// Codex r3 on #5216: identification photos are licensed-library files
+// already committed in the Astro repo, embedded by LOCAL path. The gate
+// looks each image up in the library by src — the same answer for a new
+// post, a refresh and a remediation revalidation, with no brief data.
+const { PHOTO_LIBRARY, photoAttributionLine } = require('../services/content/licensed-photo-library');
+const PHOTO = PHOTO_LIBRARY.find((e) => e.catalog_slug === 'fire-ant');
+const PHOTO_URL = PHOTO.src;
+const ATTR = photoAttributionLine(PHOTO);
 function diag(body, fm = {}) {
   return { frontmatter: { post_type: 'diagnostic', ...fm }, body };
 }
@@ -219,207 +211,103 @@ function diag(body, fm = {}) {
 describe('checkPhotoSlotsLicensedOnly', () => {
   test('defers on a non-diagnostic draft', () => {
     const r = checkPhotoSlotsLicensedOnly({ frontmatter: {}, body: '![a fire ant](https://example.com/ai-art.png)' }, brief());
-    expect(r.ok).toBe(true);
-    expect(r.reason).toBe('not_identification_post');
+    expect(r).toEqual({ ok: true, reason: 'not_identification_post' });
   });
 
-  test('a diagnostic draft with NO photo_slots on the brief still fails on any embedded image — never fails open (Codex P1)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag('![a fire ant](https://example.com/ai-art.png)'), brief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
-  });
-
-  test('a diagnostic draft with NO photo_slots and NO body image passes (nothing to enforce)', () => {
+  test('a diagnostic draft with no image passes (nothing to enforce)', () => {
     expect(checkPhotoSlotsLicensedOnly(diag('Fire ants sting. Call a pro.'), brief()).ok).toBe(true);
   });
 
-  test('fails when the body embeds an image URL NOT in the brief photo_slots (e.g. AI-generated art)', () => {
-    const b = photoBrief(PHOTO, [{ slot: 'sign', photo: null, flagged_for_human: true }]);
-    const r = checkPhotoSlotsLicensedOnly(diag('![a fire ant, ai generated](https://example.com/ai-art.png)'), b);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  test.each([
+    ['AI art', 'https://example.com/ai-art.png'],
+    ['the remote Commons original of a library photo', 'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg'],
+    ['a generated body image', '/images/blog/pest-control/fire-ant-id/body-1.webp'],
+    ['a library path on an absolute URL', `https://www.wavespestcontrol.com${PHOTO_URL}`],
+  ])('fails on %s', (_label, url) => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}](${url})\n\n${ATTR}`), brief());
+    expect(r).toEqual({ ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` });
   });
 
-  test('passes when the licensed image and its exact attribution line are present', () => {
-    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), photoBrief()).ok).toBe(true);
+  test('passes a library photo with its catalog alt and exact attribution line — no brief slots needed', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}\n\nMore.`), brief())).toEqual({ ok: true });
   });
 
-  test('fails when a licensed URL is reused with a MISLABELED alt (Codex P1)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![a termite](${PHOTO_URL})\n\n${ATTR}`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_alt_mismatch:/);
+  test('passes every library photo the same way', () => {
+    for (const photo of PHOTO_LIBRARY) {
+      const r = checkPhotoSlotsLicensedOnly(diag(`![${photo.alt}](${photo.src})\n\n${photoAttributionLine(photo)}`), brief());
+      expect(r).toEqual({ ok: true });
+    }
   });
 
-  test('fails when the attribution line is dropped from the body (Codex P1)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})`), photoBrief());
-    expect(r.ok).toBe(false);
+  test('the same lookup approves the photo on a refresh and on a remediation revalidation (Codex r3)', () => {
+    const body = `<BottomLineBox verdict="v" recommendation="r" />\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n${ATTR}`;
+    const refresh = brief({ action_type: 'refresh_existing_page', page_type: 'refresh' });
+    expect(checkPhotoSlotsLicensedOnly({ frontmatter: {}, body }, refresh, { liveFrontmatter: { post_type: 'diagnostic' }, previousVersion: { body: 'old' } })).toEqual({ ok: true });
+    // Remediation re-runs the gate on the committed Markdown with the stored brief.
+    expect(checkPhotoSlotsLicensedOnly(diag(body), brief({ voice_constraints: { photo_slots: [] } }))).toEqual({ ok: true });
+  });
+
+  test('fails when a library photo carries a MISLABELED alt (Codex P1)', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`![a termite](${PHOTO_URL})\n\n${ATTR}`), brief());
+    expect(r).toEqual({ ok: false, reason: `identification_photo_alt_mismatch:${PHOTO_URL}` });
+  });
+
+  test('fails when the attribution line is dropped', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}](${PHOTO_URL})`), brief()))
+      .toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+
+  test('another photo\'s attribution does not cover this one', () => {
+    const other = PHOTO_LIBRARY.find((e) => e.catalog_slug === 'wolf-spider');
+    const r = checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}](${PHOTO_URL})\n\n${photoAttributionLine(other)}`), brief());
     expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
-  test('fails closed on a catalog entry missing any attribution field', () => {
-    const { license_url: _drop, ...incomplete } = PHOTO;
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), photoBrief(incomplete));
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_catalog_entry_incomplete:/);
-  });
-
-  // Open item from r1 + Codex r2 on #5216: credit and license must be the
-  // LINK TEXT of the exact instructed form, not just present somewhere.
+  // Credit and license must be the LINK TEXT of the exact instructed form.
   test.each([
     ['bare credit/license text, no links', `Photo: ${PHOTO.credit} (${PHOTO.license})`],
     ['bare URLs as prose', `Photo: ${PHOTO.credit} (${PHOTO.license}) ${PHOTO.source_page} ${PHOTO.license_url}`],
-    ['links present but with generic link text', `Photo: [source](${PHOTO.source_page}) by ${PHOTO.credit}, [license](${PHOTO.license_url}) ${PHOTO.license}`],
-    ['credit linked to the license deed (swapped destinations)', `Photo: [${PHOTO.credit}](${PHOTO.license_url}) ([${PHOTO.license}](${PHOTO.source_page}))`],
+    ['links with generic link text', `Photo: [source](${PHOTO.source_page}) by ${PHOTO.credit}, [license](${PHOTO.license_url}) ${PHOTO.license}`],
+    ['swapped destinations', `Photo: [${PHOTO.credit}](${PHOTO.license_url}) ([${PHOTO.license}](${PHOTO.source_page}))`],
   ])('fails the exact-form check: %s', (_label, line) => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${line}`), photoBrief());
-    expect(r.ok).toBe(false);
+    const r = checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}](${PHOTO_URL})\n\n${line}`), brief());
     expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
-  // Codex r2 on #5216 ("Require visible licensed-photo attribution"): an
-  // attribution only inside a comment or code is not visible to readers.
+  // Codex r2: an attribution only inside a comment or code is not visible.
   test.each([
     ['an HTML comment', `<!-- ${ATTR} -->`],
     ['an MDX comment', `{/* ${ATTR} */}`],
     ['a fenced code block', '```\n' + ATTR + '\n```'],
     ['an inline code span', '`' + ATTR + '`'],
   ])('fails when the only attribution sits inside %s', (_label, hidden) => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${hidden}`), photoBrief());
-    expect(r.ok).toBe(false);
+    const r = checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}](${PHOTO_URL})\n\n${hidden}`), brief());
     expect(r.reason).toBe(`identification_photo_attribution_missing:${PHOTO_URL}`);
   });
 
-  test('passes when a flagged slot is correctly omitted (no image for it at all)', () => {
-    const b = photoBrief(PHOTO, [{ slot: 'look_alike', photo: null, flagged_for_human: true }]);
-    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}`), b).ok).toBe(true);
+  test('a raw <img> of a library photo is rejected (the publisher parks raw <img>)', () => {
+    const r = checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" alt="${PHOTO.alt}">\n\n${ATTR}`), brief());
+    expect(r).toEqual({ ok: false, reason: `identification_photo_unsupported_form:img:${PHOTO_URL}` });
   });
 
-  test('a raw <img> tag with an unlicensed src fails the gate (Codex P1 — raw <img> is explicitly accepted by content-guardrails)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag('<img src="https://ai-art.example.com/fake-fire-ant.png" alt="fire ant">'), brief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
+  test('a raw <img> with an unlicensed src or srcset fails', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag('<img src="https://ai-art.example.com/x.png" alt="fire ant">'), brief()).reason)
+      .toMatch(/^unlicensed_or_unknown_identification_photo:/);
+    expect(checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" srcset="https://ai-art.example.com/x-2x.png 2x" alt="${PHOTO.alt}">\n\n${ATTR}`), brief()).ok)
+      .toBe(false);
   });
 
-  test('a raw <img> tag whose src IS a licensed URL passes when alt/attribution match', () => {
-    expect(checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" alt="fire ant">\n\n${ATTR}`), photoBrief()).ok).toBe(true);
+  test('reference-style images: unlicensed fails as unlicensed, a library photo as an unsupported form', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag('![fire ant][pic]\n\n[pic]: https://ai-art.example.com/x.png'), brief()).reason)
+      .toMatch(/^unlicensed_or_unknown_identification_photo:/);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), brief()).reason)
+      .toBe(`identification_photo_unsupported_form:reference:${PHOTO_URL}`);
+    expect(checkPhotoSlotsLicensedOnly(diag(`![${PHOTO.alt}][]\n\n${ATTR}\n\n[${PHOTO.alt}]: ${PHOTO_URL}`), brief()).reason)
+      .toBe(`identification_photo_unsupported_form:reference:${PHOTO_URL}`);
   });
 
-  test('a raw <img> srcset entry with an unlicensed URL fails the gate even when src is licensed', () => {
-    const r = checkPhotoSlotsLicensedOnly(
-      diag(`<img src="${PHOTO_URL}" srcset="https://ai-art.example.com/fake-2x.png 2x" alt="fire ant">\n\n${ATTR}`),
-      photoBrief(),
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
-  });
-
-  test('a reference-style image (![alt][ref] + [ref]: url) with an unlicensed URL fails the gate', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag('![fire ant][pic]\n\n[pic]: https://ai-art.example.com/fake-fire-ant.png'), brief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^unlicensed_or_unknown_identification_photo:/);
-  });
-
-  test('a reference-style image resolving to a licensed URL is rejected as an unsupported form (publisher cannot re-host it)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant][pic]\n\n${ATTR}\n\n[pic]: ${PHOTO_URL}`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
-  });
-
-  test('collapsed reference form (![alt][]) resolves via the alt text as the label, and is likewise rejected as unsupported', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant][]\n\n${ATTR}\n\n[fire ant]: ${PHOTO_URL}`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_unsupported_form:reference:/);
-  });
-
-  test('incidental whitespace around the alt does not false-fail (matches the publisher)', () => {
-    for (const body of [`![  fire ant  ](${PHOTO_URL})\n\n${ATTR}`, `<img src="${PHOTO_URL}" alt=" fire ant ">\n\n${ATTR}`]) {
-      expect(checkPhotoSlotsLicensedOnly(diag(body), photoBrief()).ok).toBe(true);
-    }
-  });
-
-  test('a licensed standalone <img> whose alt contains ">" passes (Codex P1 r11)', () => {
-    const photo = { ...PHOTO, alt: 'workers can be > 1/4 inch' };
-    expect(checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" alt="${photo.alt}">\n\n${ATTR}`), photoBrief(photo)).ok).toBe(true);
-  });
-});
-
-// Codex P1 (7th round): the gate approves only placements the publisher's
-// re-hosting pass can actually re-host — standalone on its own line.
-describe('checkPhotoSlotsLicensedOnly — publishable placement', () => {
-  test('a licensed image placed MID-PARAGRAPH fails with a clear reason (it would never be re-hosted)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`See the photo ![fire ant](${PHOTO_URL}) below.\n\n${ATTR}`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
-  });
-
-  test('the same licensed URL used once standalone AND once inline still fails (counted per occurrence)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${PHOTO_URL})\n\n${ATTR}\n\nAgain: ![fire ant](${PHOTO_URL}) here.`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe(`identification_photo_not_standalone:${PHOTO_URL}`);
-  });
-
-  test('a standalone inline image and a standalone <img> tag both pass', () => {
-    for (const body of [`Intro.\n\n![fire ant](${PHOTO_URL})\n\n${ATTR}\n\nMore.`, `Intro.\n\n<img src="${PHOTO_URL}" alt="fire ant">\n\n${ATTR}\n\nMore.`]) {
-      expect(checkPhotoSlotsLicensedOnly(diag(body), photoBrief()).ok).toBe(true);
-    }
-  });
-
-  test('a standalone <img> carrying a srcset is rejected as unsupported (the publisher re-hosts src only)', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`<img src="${PHOTO_URL}" srcset="${PHOTO_URL} 2x" alt="fire ant">\n\n${ATTR}`), photoBrief());
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^identification_photo_unsupported_form:srcset:/);
-  });
-});
-
-// Codex r2 on #5216 ("Allow preserved licensed images through diagnostic
-// refreshes"): a refresh brief carries no photo_slots; the post's own
-// re-hosted photos are grandfathered from the LIVE previous version.
-describe('checkPhotoSlotsLicensedOnly — refresh grandfathering', () => {
-  const LOCAL = '/images/blog/pest-control/fire-ants/body-1.webp';
-  const refreshBrief = () => brief({ action_type: 'refresh_existing_page', page_type: 'refresh', voice_constraints: {} });
-  const liveBody = `<BottomLineBox verdict="v" recommendation="r" />\n\nIntro.\n\n![fire ant](${LOCAL})\n\n${ATTR}\n\nMore.`;
-  const ctx = (body = liveBody) => ({ previousVersion: { body }, liveFrontmatter: { post_type: 'diagnostic' } });
-
-  test('a preserved local photo with its attribution passes', () => {
-    const draft = diag(`<BottomLineBox verdict="v2" recommendation="r2" />\n\nNew intro.\n\n![fire ant](${LOCAL})\n\n${ATTR}\n\nNew more.`);
-    expect(checkPhotoSlotsLicensedOnly(draft, refreshBrief(), ctx())).toEqual({ ok: true });
-  });
-
-  test('the preserved photo fails once its attribution is dropped', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\nNo credit.`), refreshBrief(), ctx());
-    expect(r).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${LOCAL}` });
-  });
-
-  test('the preserved photo fails when its attribution survives only in a comment', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n<!-- ${ATTR} -->`), refreshBrief(), ctx());
-    expect(r.ok).toBe(false);
-  });
-
-  test('grants are per occurrence — a second copy of the same local photo is unlicensed', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}\n\n![fire ant](${LOCAL})`), refreshBrief(), ctx());
-    expect(r).toEqual({ ok: false, reason: `unlicensed_or_unknown_identification_photo:${LOCAL}` });
-  });
-
-  test('a relabeled alt is not grandfathered', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![a termite](${LOCAL})\n\n${ATTR}`), refreshBrief(), ctx());
-    expect(r.ok).toBe(false);
-  });
-
-  test('a local image the live body never carried (or carried without attribution) is not grandfathered', () => {
-    const other = '/images/blog/pest-control/fire-ants/body-2.webp';
-    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${other})\n\n${ATTR}`), refreshBrief(), ctx()).ok).toBe(false);
-    const unattributed = ctx(`Intro.\n\n![fire ant](${LOCAL})\n\nMore.`);
-    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), refreshBrief(), unattributed).ok).toBe(false);
-  });
-
-  test('a live photo that only appeared inside a comment grants nothing', () => {
-    const commented = ctx(`<!--\n![fire ant](${LOCAL})\n\n${ATTR}\n-->`);
-    expect(checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), refreshBrief(), commented).ok).toBe(false);
-  });
-
-  test('a new-post brief never grandfathers, even with a previousVersion in context', () => {
-    const r = checkPhotoSlotsLicensedOnly(diag(`![fire ant](${LOCAL})\n\n${ATTR}`), brief(), ctx());
-    expect(r.ok).toBe(false);
+  test('incidental whitespace around the alt does not false-fail', () => {
+    expect(checkPhotoSlotsLicensedOnly(diag(`![  ${PHOTO.alt}  ](${PHOTO_URL})\n\n${ATTR}`), brief()).ok).toBe(true);
   });
 });
 
@@ -502,3 +390,53 @@ test('checkCtaAfterVerdictBox: a link after a literal ">" inside a box prop is s
   expect(r.reason).toBe('link_inside_verdict_box');
 });
 
+
+// Codex r3 on #5216 ("Redact PII from next-step fields"): next_steps render
+// publicly, so the existing redaction gate scans each entry as the SAME
+// "[label](href)" text the guardrails synthesize — label and href, with the
+// query string decoded. Synthetic values only (no real customer data).
+describe('checkRedactionPassed — next_steps labels and hrefs', () => {
+  const { checkRedactionPassed } = require('../services/content/content-quality-gate')._internals;
+  const BODY = [
+    '## What Fire Ants Look Like',
+    '',
+    'Red imported fire ants are small, reddish-brown ants that build loose mounds of sandy soil in sunny lawns. When the mound is disturbed, workers pour out and sting repeatedly.',
+    '',
+    '## When to Call',
+    '',
+    'If you see mounds near play areas or along walkways, treat them before the colony spreads. Our team handles fire ants across Sarasota and Manatee counties.',
+  ].join('\n');
+  const run = (step) => checkRedactionPassed({ body: BODY, frontmatter: { next_steps: [step] } });
+
+  test('the body alone is clean (baseline)', () => {
+    expect(checkRedactionPassed({ body: BODY, frontmatter: {} })).toEqual({ ok: true });
+  });
+
+  test.each([
+    ['a name in the label', { label: 'Call Jane Doe', href: '/contact/' }, 'unredacted_name_in_next_steps'],
+    ['an email in the label', { label: 'Email jane.doe@example.com', href: '/contact/' }, 'email_in_next_steps'],
+    ['a phone in the label', { label: 'Text 941-555-0199', href: '/contact/' }, 'non_business_phone_number_in_next_steps:9415550199'],
+    ['an address in the label', { label: 'Visit 4867 Maple Street', href: '/contact/' }, 'unredacted_address_in_next_steps'],
+    ['a name in the href query', { label: 'Get a quote', href: '/contact/?name=Jane+Doe' }, 'unredacted_name_in_next_steps'],
+    ['a lowercase name in the href query', { label: 'Get a quote', href: '/contact/?name=jane%20doe' }, 'unredacted_name_in_next_steps'],
+    ['an email in the href query', { label: 'Get a quote', href: '/contact/?email=jane.doe%40example.com' }, 'email_in_next_steps'],
+    ['a phone in the href query', { label: 'Get a quote', href: '/contact/?phone=9415550199' }, 'non_business_phone_number_in_next_steps:9415550199'],
+    ['an address in the href query', { label: 'Get a quote', href: '/contact/?address=4867+Maple+Street' }, 'unredacted_address_in_next_steps'],
+  ])('fails on %s', (_label, step, reason) => {
+    expect(run(step)).toEqual({ ok: false, reason });
+  });
+
+  test('ordinary next-step labels and paths pass', () => {
+    const steps = [
+      { label: 'Found a live one?', href: '/contact/' },
+      { label: 'Get a free estimate', href: '/free-estimate/' },
+      { label: 'Seeing the damage, not the pest?', href: '/pest-control/' },
+    ];
+    expect(checkRedactionPassed({ body: BODY, frontmatter: { next_steps: steps } })).toEqual({ ok: true });
+  });
+
+  test('the scan uses the guardrails\' own [label](href) synthesis', () => {
+    const { nextStepsLinkMarkdown } = require('../services/content/content-guardrails');
+    expect(nextStepsLinkMarkdown({ next_steps: [{ label: ' Go ', href: ' /contact/ ' }] })).toBe('[Go](/contact/)');
+  });
+});

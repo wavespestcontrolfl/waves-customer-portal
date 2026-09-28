@@ -1,90 +1,184 @@
 /**
- * licensed-photo-library.js — the ONLY source of photo assets a writer may
- * place in the pest / sign / look-alike slots of an identification
- * ("diagnostic" post_type) brief (C3, blog work order 2026-09-28).
+ * licensed-photo-library.js — the ONLY photos a writer may place in the
+ * pest / sign / look-alike slots of an identification ("diagnostic"
+ * post_type) brief (C3, blog work order 2026-09-28).
  *
- * Every entry here is a REAL, licensed photo already vetted for a Waves
- * blog post — the same catalog shape and the same seven photos the B2
- * photo-accuracy pass placed on the astro site (see
- * ~/blog-engagement-research-20260926/photo-manifest.json and astro PR
- * #609/#613). This module does not generate, guess, or invent a photo for
- * a species this catalog does not carry: buildPhotoSlots() returns `photo:
- * null` for any slot with no verified match, and the writer prompt +
- * content-quality-gate's photo_slots_licensed_only check both treat that
- * as "omit this slot, flag for a human" — never a reason to fall back to
- * AI-generated art (owner rule: AI art is not allowed in an identification
- * slot, ever).
+ * Every entry is a real, licensed photo ALREADY COMMITTED in the Astro repo
+ * under public/images/ (vetted and license-checked, added by astro #613).
+ * The list mirrors the Astro file src/data/lookalikePhotos.ts (look-alike
+ * hubs, astro #625): the same local `src`, alt text and credit fields,
+ * copied verbatim, keyed by the same species-catalog slug. Only entries
+ * whose file exists on astro origin/main are listed (checked 2026-09-28
+ * with `git cat-file -e origin/main:public<src>`).
  *
- * Expanding the catalog is a deliberate, human-reviewed edit to this file
- * (or its DB-backed successor, if one is ever built) — never inferred at
- * generation time from a search or a generative model.
+ * The writer embeds the LOCAL path directly. Nothing is fetched at publish
+ * time: the bytes are pinned by the Astro commit that added them, so no
+ * digest or revision id is needed here, and there is no remote source that
+ * can change or time out under a vetted entry.
+ *
+ * Left out on purpose:
+ *   - brown-anole: public domain with no license URL, so it cannot carry
+ *     the exact attribution line (credit AND license as links) the gate
+ *     requires.
+ *   - the Astro "case-on-wall" photo: a household casebearer, not the
+ *     catalog's bagworm (the Astro file explains it).
+ *
+ * This module never generates, guesses or invents a photo. A slot with no
+ * library match comes back `photo: null` + flagged for a human, and the
+ * writer omits it — never AI art (owner rule). Adding a photo is a
+ * deliberate, reviewed edit here AND in the Astro file.
  */
 
-// Each entry: `species` is the canonical display name (shared across every
-// slot entry for that species); `aliases` are the phrases matched — as
-// WHOLE WORDS/PHRASES via a word-boundary regex, never a bare substring —
-// against the brief's topic string. `url`/`alt`/`credit`/`license`/
-// `license_url`/`source_page` are the exact attribution the writer must
-// reproduce verbatim (CC BY / BY-SA requires linking the license and,
-// where practicable, the source — never a bare credit/license STRING with
-// no link).
-const PHOTO_LIBRARY = Object.freeze([
+// Parens in a Commons file-page URL would end a Markdown link destination
+// early; the percent-encoded form is the same page.
+function encodeParens(url) {
+  return String(url).replace(/\(/g, '%28').replace(/\)/g, '%29');
+}
+
+// catalog_slug: the species-catalog slug (Astro speciesLookalikes.ts).
+// species / aliases: the display name and the topic phrases matched as
+// WHOLE words/phrases (see matchSpecies). An entry with no aliases is
+// never a topic on its own (a sign photo, e.g. the fire-ant mound).
+// Aliases are kept SPECIFIC: a bare "gecko" or "carpenter ant" would put
+// this photo on a different species' post (tokay gecko, black carpenter
+// ant). not_if lists more specific names that must not match.
+// sign / look_alikes: catalog slugs whose photos fill that slot for this
+// species (look-alike pairs come from the catalog's lookAlikes).
+const ENTRIES = [
   {
+    catalog_slug: 'ghost-ant',
+    species: 'ghost ant',
+    aliases: ['ghost ant'],
+    src: '/images/blog/dangerous-ants-in-florida/ghost-ants.webp',
+    alt: 'Ghost ants: tiny ants with dark heads and pale, see-through abdomens and legs',
+    credit: 'Dr.Kalesh Sadasivan',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Tapinoma_melanocephalum,_Kerala,_India,_Kalesh_Sadasivan.jpg',
+    license: 'CC BY-SA 3.0',
+    license_url: 'https://creativecommons.org/licenses/by-sa/3.0',
+  },
+  {
+    catalog_slug: 'american-cockroach',
     species: 'American cockroach',
     aliases: ['american cockroach', 'palmetto bug'],
-    slot: 'pest',
-    url: 'https://upload.wikimedia.org/wikipedia/commons/b/bd/American_cockroach.jpg',
-    source_page: 'https://commons.wikimedia.org/wiki/File:American_cockroach.jpg',
+    src: '/images/blog/pest-control/can-cockroaches-play-dead/american-cockroach.webp',
     alt: 'An adult American cockroach, the large reddish-brown roach Floridians call a palmetto bug',
+    credit: 'Muhammad Mahdi Karim',
+    source_page: 'https://commons.wikimedia.org/wiki/File:American_cockroach.jpg',
     license: 'CC BY-SA 2.5',
     license_url: 'https://creativecommons.org/licenses/by-sa/2.5',
-    credit: 'Muhammad Mahdi Karim',
   },
   {
+    catalog_slug: 'gecko',
+    species: 'house gecko',
+    aliases: ['house gecko'],
+    src: '/images/blog/pest-control/lizard-faeces-swfl-guide/house-gecko.webp',
+    alt: 'A tropical house gecko on a wooden wall at night',
+    credit: 'Donald Hobern from Copenhagen, Denmark',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Hemidactylus_mabouia_(14374998150).jpg',
+    license: 'CC BY 2.0',
+    license_url: 'https://creativecommons.org/licenses/by/2.0',
+  },
+  {
+    catalog_slug: 'huntsman-spider',
     species: 'huntsman spider',
     aliases: ['huntsman spider', 'florida huntsman'],
-    slot: 'pest',
-    url: 'https://upload.wikimedia.org/wikipedia/commons/8/84/Heteropoda_venatoria-Kadavoor-2017-05-22-001_%28cropped%29.jpg',
-    source_page: 'https://commons.wikimedia.org/wiki/File:Heteropoda_venatoria-Kadavoor-2017-05-22-001_%28cropped%29.jpg',
+    look_alikes: ['wolf-spider'],
+    src: '/images/blog/pest-control/florida-huntsman-spider/huntsman-adult.webp',
     alt: 'An adult huntsman spider (Heteropoda venatoria) with its legs spread sideways, crab-style',
+    credit: 'Jeevan Jose, Kerala, India',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Heteropoda_venatoria-Kadavoor-2017-05-22-001_(cropped).jpg',
     license: 'CC BY-SA 4.0',
     license_url: 'https://creativecommons.org/licenses/by-sa/4.0',
-    credit: 'Jeevan Jose, Kerala, India',
   },
   {
-    species: 'huntsman spider',
-    aliases: ['huntsman spider', 'florida huntsman'],
-    slot: 'look_alike',
-    url: 'https://upload.wikimedia.org/wikipedia/commons/c/c8/Hogna_carolinensis_female_dorsal.jpeg',
-    source_page: 'https://commons.wikimedia.org/wiki/File:Hogna_carolinensis_female_dorsal.jpeg',
+    catalog_slug: 'wolf-spider',
+    species: 'wolf spider',
+    aliases: ['wolf spider'],
+    look_alikes: ['huntsman-spider'],
+    src: '/images/blog/pest-control/florida-huntsman-spider/wolf-spider.webp',
     alt: 'A female Carolina wolf spider (Hogna carolinensis): stockier body, legs held under the body, not flattened sideways',
+    credit: 'codystricker',
+    source_page: 'https://www.inaturalist.org/photos/227529967',
     license: 'CC BY 4.0',
     license_url: 'https://creativecommons.org/licenses/by/4.0',
-    credit: 'codystricker',
   },
   {
+    catalog_slug: 'fire-ant',
     species: 'fire ant',
     aliases: ['fire ant', 'red imported fire ant'],
-    slot: 'pest',
-    url: 'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant_-_Solenopsis_invicta%2C_Okaloacoochee_Slough_State_Forest%2C_Felda%2C_Florida%2C_February_6%2C_2022_%2851872217415%29.jpg',
-    source_page: 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant_-_Solenopsis_invicta,_Okaloacoochee_Slough_State_Forest,_Felda,_Florida,_February_6,_2022_%2851872217415%29.jpg',
+    // Other catalog fire ants must not match the bare "fire ant" alias.
+    not_if: ['tropical fire ant', 'southern fire ant', 'black imported fire ant'],
+    sign: 'fire-ant-mound',
+    src: '/images/blog/dangerous-ants-in-florida/fire-ant-workers.webp',
     alt: 'Red imported fire ant workers swarming over sandy soil in Florida',
+    credit: 'Judy Gallagher',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant_-_Solenopsis_invicta,_Okaloacoochee_Slough_State_Forest,_Felda,_Florida,_February_6,_2022_(51872217415).jpg',
     license: 'CC BY 2.0',
     license_url: 'https://creativecommons.org/licenses/by/2.0',
-    credit: 'Judy Gallagher',
   },
   {
-    species: 'fire ant',
-    aliases: ['fire ant', 'red imported fire ant'],
-    slot: 'sign',
-    url: 'https://upload.wikimedia.org/wikipedia/commons/5/5b/Red_Imported_Fire_Ant_nest_-_Solenopsis_invicta%2C_Arthur_Marshall_Loxahatchee_National_Wildlife_Refuge%2C_Boynton_Beach%2C_Florida%2C_December_12%2C_2023_%2853578144030%29.jpg',
-    source_page: 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant_nest_-_Solenopsis_invicta,_Arthur_Marshall_Loxahatchee_National_Wildlife_Refuge,_Boynton_Beach,_Florida,_December_12,_2023_%2853578144030%29.jpg',
+    catalog_slug: 'fire-ant-mound',
+    species: 'fire ant mound',
+    aliases: [],
+    src: '/images/blog/dangerous-ants-in-florida/fire-ant-mound.webp',
     alt: 'A red imported fire ant mound of loose sandy soil in a Florida field',
+    credit: 'Judy Gallagher',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant_nest_-_Solenopsis_invicta,_Arthur_Marshall_Loxahatchee_National_Wildlife_Refuge,_Boynton_Beach,_Florida,_December_12,_2023_(53578144030).jpg',
     license: 'CC BY 2.0',
     license_url: 'https://creativecommons.org/licenses/by/2.0',
-    credit: 'Judy Gallagher',
   },
-]);
+  {
+    catalog_slug: 'carpenter-ant',
+    species: 'Florida carpenter ant',
+    aliases: ['florida carpenter ant'],
+    src: '/images/blog/dangerous-ants-in-florida/florida-carpenter-ant.webp',
+    alt: 'A Florida carpenter ant with a reddish-orange head and thorax and a black abdomen',
+    credit: 'User:MrX',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Florida_Carpenter_ant.jpg',
+    license: 'CC BY-SA 3.0',
+    license_url: 'https://creativecommons.org/licenses/by-sa/3.0',
+  },
+  {
+    catalog_slug: 'tawny-crazy-ant',
+    species: 'tawny crazy ant',
+    aliases: ['tawny crazy ant'],
+    src: '/images/blog/dangerous-ants-in-florida/tawny-crazy-ant.webp',
+    alt: 'A tawny crazy ant worker tending pupae',
+    credit: 'Insects Unlocked',
+    source_page: 'https://commons.wikimedia.org/wiki/File:Nylanderia_fulva_-_Tawny_Crazy_Ant_(31569780261).jpg',
+    license: 'CC0',
+    license_url: 'http://creativecommons.org/publicdomain/zero/1.0/deed.en',
+  },
+];
+
+const PHOTO_LIBRARY = Object.freeze(ENTRIES.map((e) => Object.freeze({
+  ...e,
+  aliases: Object.freeze([...(e.aliases || [])]),
+  not_if: Object.freeze([...(e.not_if || [])]),
+  look_alikes: Object.freeze([...(e.look_alikes || [])]),
+  source_page: encodeParens(e.source_page),
+})));
+const BY_SLUG = new Map(PHOTO_LIBRARY.map((e) => [e.catalog_slug, e]));
+const BY_SRC = new Map(PHOTO_LIBRARY.map((e) => [e.src, e]));
+
+// The photo object a brief slot carries (and the writer copies verbatim).
+function photoOf(entry) {
+  if (!entry) return null;
+  const { src, alt, credit, source_page, license, license_url } = entry;
+  return { src, alt, credit, source_page, license, license_url };
+}
+
+// ONE lookup for "is this a library photo": the quality gate (what it
+// approves), guardrail link allowances, and the publisher's stale-image
+// pass (what it must never strip) all go through here. Works the same for
+// new posts, refreshes and remediation revalidation — no grants, no
+// provenance.
+function libraryPhotoBySrc(src) {
+  return BY_SRC.get(String(src || '').trim()) || null;
+}
+function isLibraryPhotoSrc(src) {
+  return Boolean(libraryPhotoBySrc(src));
+}
 
 const SLOTS = Object.freeze([
   { slot: 'pest', captionTemplate: (species) => `A clear, correctly identified photo of ${species ? `the ${species}` : 'the pest'} itself.` },
@@ -92,128 +186,64 @@ const SLOTS = Object.freeze([
   { slot: 'look_alike', captionTemplate: (species) => `A commonly confused look-alike ${species ? `for the ${species}` : 'species'}, shown for contrast — never presented as the real thing.` },
 ]);
 
-function normalizeTopic(topic) {
-  return String(topic || '').trim().toLowerCase();
-}
-
 function escapeRegExp(value) {
   return value.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
 }
 
-// Every distinct species the catalog carries (aliases across its slot
-// entries are identical per species, so the first entry's list suffices).
-const SPECIES_ALIASES = (() => {
-  const bySpecies = new Map();
-  for (const entry of PHOTO_LIBRARY) {
-    if (!bySpecies.has(entry.species)) bySpecies.set(entry.species, entry.aliases);
-  }
-  return bySpecies;
-})();
-
-/**
- * matchSpecies(topic) → the ONE canonical species name whose alias matches
- * `topic` as a whole word/phrase (word-boundary regex, never a bare
- * substring — "ant" in "carpenter ant" must never match the "fire ant"
- * alias). Returns null when NO species matches, or when MORE THAN ONE
- * distinct species matches (an ambiguous multi-species topic, e.g. "wolf
- * spider vs huntsman spider" naming two catalog species, must never guess
- * which one the identification slots are about) — the caller then treats
- * every slot as unmatched rather than risk the wrong species' photo.
- */
-// Codex P1 (2 rounds): the "more than one CATALOG species matched" guard
-// alone missed a comparison topic naming ONE catalog species plus an
-// UNCATALOGUED one ("brown recluse vs huntsman spider" — only "huntsman
-// spider" is in the catalog, so it matched exactly one and would have
-// filled the pest slot with the huntsman photo even when the post is
-// actually about the brown recluse). Safety content can't risk presenting
-// a licensed-but-wrong species as THE pest, so ANY comparison-shaped topic
-// fails closed — deliberately broad (a wide connector list plus every
-// specific phrasing raised in review: and/between/compared to/than/
-// instead of/mistaken for/confused with/like/look-alike/difference).
-// Over-flagging for a human beats a confident wrong photo; a false
-// trigger just means one more slot goes to a human. This is a denylist,
-// not a parser — expand it on the same evidence standard as the rest of
-// this file's guardrails (a real example that slipped through), not
-// preemptively for every imaginable phrasing.
+// Comparison-shaped topics fail closed (Codex P1, 2 rounds): "brown recluse
+// vs huntsman spider" names one catalog species plus an uncatalogued one,
+// and a safety post must never show a licensed-but-wrong species as THE
+// pest. Deliberately broad; a false trigger only sends a slot to a human.
 const COMPARISON_RE = /\b(vs\.?|versus|or|from|not|and|between|compared\s+to|than|instead\s+of|mistaken\s+for|confused\s+with|like|look-?alikes?|difference|differences)\b/i;
 
-function matchSpecies(topic) {
-  const norm = normalizeTopic(topic);
-  if (!norm) return null;
-  if (COMPARISON_RE.test(norm)) return null;
+/**
+ * matchSpecies(topic) → the ONE library entry whose alias matches `topic`
+ * as a whole word/phrase, or null when none matches, more than one
+ * distinct species matches, or the topic is comparison-shaped.
+ */
+function matchSpeciesEntry(topic) {
+  const norm = String(topic || '').trim().toLowerCase();
+  if (!norm || COMPARISON_RE.test(norm)) return null;
   const matched = new Set();
-  for (const [species, aliases] of SPECIES_ALIASES) {
-    // Trailing e?s? tolerates the ordinary plural of the alias's last word
-    // ("fire ants", "cockroaches") without opening the door to an unrelated
-    // longer word ("fire antique" still fails the boundary check).
-    const hit = aliases.some((alias) => new RegExp(`\\b${escapeRegExp(alias)}e?s?\\b`, 'i').test(norm));
-    if (hit) matched.add(species);
+  for (const entry of PHOTO_LIBRARY) {
+    // Trailing e?s? tolerates the ordinary plural ("fire ants").
+    const hits = (phrases) => phrases.some((p) => new RegExp(`\\b${escapeRegExp(p)}e?s?\\b`, 'i').test(norm));
+    if (hits(entry.aliases) && !hits(entry.not_if)) matched.add(entry);
   }
+  // "florida carpenter ant" and "carpenter ant" are one entry; a topic
+  // matching two ENTRIES is ambiguous.
   return matched.size === 1 ? [...matched][0] : null;
 }
+function matchSpecies(topic) {
+  return matchSpeciesEntry(topic)?.species || null;
+}
 
-/**
- * findPhotoForSlot(topic, slot) → the catalog entry (plain object, safe to
- * spread into a brief) matching `topic` for `slot`, or null when the
- * catalog has no verified photo for that pairing, the topic names no
- * catalog species, or it names more than one (ambiguous — see
- * matchSpecies).
- */
-function findPhotoForSlot(topic, slot) {
-  if (!slot) return null;
-  const species = matchSpecies(topic);
-  if (!species) return null;
-  const entry = PHOTO_LIBRARY.find((e) => e.species === species && e.slot === slot);
+function entryForSlot(entry, slot) {
   if (!entry) return null;
-  const photo = { ...entry };
-  delete photo.aliases;
-  delete photo.slot;
-  delete photo.species;
-  return photo;
+  if (slot === 'pest') return entry;
+  if (slot === 'sign') return entry.sign ? BY_SLUG.get(entry.sign) || null : null;
+  if (slot === 'look_alike') return entry.look_alikes.map((s) => BY_SLUG.get(s)).find(Boolean) || null;
+  return null;
+}
+
+/** findPhotoForSlot(topic, slot) → the slot's photo object, or null. */
+function findPhotoForSlot(topic, slot) {
+  return photoOf(entryForSlot(matchSpeciesEntry(topic), slot));
 }
 
 /**
- * buildPhotoSlots(topic) → the 3 required identification photo slots
- * (pest / sign / look-alike) with a caption and, when the licensed library
- * has a verified, UNAMBIGUOUS match, the photo asset. A slot with no match
- * carries `photo: null` and `flagged_for_human: true` — the writer omits
- * that slot's image entirely rather than substituting AI art (owner rule,
- * C3). The caption names the matched CANONICAL species (never the raw,
- * possibly question-shaped topic string, which reads ungrammatically —
- * e.g. "is a huntsman spider dangerous" is never interpolated verbatim).
+ * buildPhotoSlots(topic) → the 3 identification photo slots (pest / sign /
+ * look-alike). A slot with no library photo carries `photo: null` and
+ * `flagged_for_human: true`; the writer omits it (never AI art). The
+ * caption names the matched canonical species, never the raw topic.
  */
 function buildPhotoSlots(topic) {
-  const species = matchSpecies(topic);
+  const entry = matchSpeciesEntry(topic);
   return SLOTS.map(({ slot, captionTemplate }) => {
-    const entry = species ? PHOTO_LIBRARY.find((e) => e.species === species && e.slot === slot) : null;
-    let photo = null;
-    if (entry) {
-      photo = { ...entry };
-      delete photo.aliases;
-      delete photo.slot;
-      delete photo.species;
-    }
-    return {
-      slot,
-      caption: captionTemplate(species),
-      photo,
-      flagged_for_human: !photo,
-    };
+    const photo = photoOf(entryForSlot(entry, slot));
+    return { slot, caption: captionTemplate(entry?.species || null), photo, flagged_for_human: !photo };
   });
 }
-
-// ── The ONE definition of a publishable identification-photo placement ──
-// content-quality-gate (what it approves) and astro-publisher (what it
-// re-hosts) both import this, so the two can never disagree about which
-// placements are valid — every prior gate/publisher split on #5216 came
-// from two hand-kept copies of this logic drifting. A placement is a bare
-// inline markdown image `![alt](url)` or a src-only `<img src alt>` tag,
-// ALONE on its own line. An <img> carrying srcset is not a match (the
-// publisher re-hosts src only and would silently drop the other sources).
-const STANDALONE_INLINE_IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/;
-// Quote-aware attrs (a literal `>` inside alt="… > 1/4 inch" must not end
-// the tag) — same shape as content-quality-gate's BOTTOM_LINE_BOX_TAG_RE.
-const STANDALONE_IMG_TAG_LINE_RE = /^\s*<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>\s*$/i;
 
 function htmlAttrValue(attrs, name) {
   const re = new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i');
@@ -221,60 +251,17 @@ function htmlAttrValue(attrs, name) {
   return m ? (m[2] ?? m[3] ?? '') : null;
 }
 
-// → { alt, url } for a standalone licensed-photo placement, or null.
-function matchStandaloneImageLine(line) {
-  const inline = STANDALONE_INLINE_IMAGE_LINE_RE.exec(String(line || ''));
-  if (inline) return { alt: String(inline[1] || '').trim(), url: String(inline[2] || '').trim() };
-  const tag = STANDALONE_IMG_TAG_LINE_RE.exec(String(line || ''));
-  if (!tag) return null;
-  const attrs = tag[1] || '';
-  if (htmlAttrValue(attrs, 'srcset') != null) return null;
-  const src = (htmlAttrValue(attrs, 'src') || '').trim();
-  if (!src) return null;
-  return { alt: String(htmlAttrValue(attrs, 'alt') || '').trim(), url: src };
-}
-
-// ONE predicate for "this post is an identification post" (Codex r2 on
-// #5216): the publisher's re-host / no-AI-art path, the merge-time image
-// assertion and the quality gate all read post_type through here, so they
-// can never disagree about which posts are exempt from the generated-image
-// minimum.
+// ONE predicate for "this post is an identification post": the publisher
+// (no AI art), the merge-time image check (minimum exemption) and the
+// quality gate all read post_type through here.
 function isIdentificationPost(frontmatter) {
   return String(frontmatter?.post_type || '').trim().toLowerCase() === 'diagnostic';
 }
 
-// The EXACT attribution line a licensed slot photo carries (the PHOTO
-// SLOTS writer instruction): credit and license are the visible LINK TEXT,
-// the source page and license deed are the link destinations. Shared by the
-// quality gate so the instruction and its check cannot drift.
+// The EXACT attribution line a library photo carries: credit and license
+// are the visible link TEXT; source page and license deed the destinations.
 function photoAttributionLine(photo) {
   return `Photo: [${photo.credit}](${photo.source_page}) ([${photo.license}](${photo.license_url}))`;
-}
-const PHOTO_ATTRIBUTION_LINE_RE = /^\s*Photo: \[([^\]\n]+)\]\(([^)\s]+)\) \(\[([^\]\n]+)\]\(([^)\s]+)\)\)\s*$/;
-// Our own committed body images (the re-hosted copies) live here.
-const LOCAL_BLOG_IMAGE_PREFIX = '/images/blog/';
-
-// Refresh grandfathering for re-hosted licensed photos (Codex r2 on #5216):
-// a refresh brief carries no photo_slots, so the gate recognizes a
-// preserved photo only from the LIVE previous version — a standalone local
-// /images/blog/ image line immediately followed (blank lines aside) by an
-// exact-form attribution line. `renderedPriorBody` must already have
-// comments/code blanked (content-guardrails.blankNonRenderedMarkdown) so a
-// commented-out example grants nothing. Returns one grant per occurrence:
-// { url, alt, attribution, sourcePage, licenseUrl }.
-function priorLicensedPhotoGrants(renderedPriorBody) {
-  const lines = String(renderedPriorBody || '').split('\n');
-  const grants = [];
-  for (let i = 0; i < lines.length; i++) {
-    const img = matchStandaloneImageLine(lines[i]);
-    if (!img || !img.url.startsWith(LOCAL_BLOG_IMAGE_PREFIX)) continue;
-    let j = i + 1;
-    while (j < lines.length && !lines[j].trim()) j++;
-    const attr = j < lines.length ? PHOTO_ATTRIBUTION_LINE_RE.exec(lines[j]) : null;
-    if (!attr) continue;
-    grants.push({ url: img.url, alt: img.alt, attribution: lines[j].trim(), sourcePage: attr[2], licenseUrl: attr[4] });
-  }
-  return grants;
 }
 
 module.exports = {
@@ -282,10 +269,9 @@ module.exports = {
   matchSpecies,
   findPhotoForSlot,
   buildPhotoSlots,
-  matchStandaloneImageLine,
+  libraryPhotoBySrc,
+  isLibraryPhotoSrc,
   htmlAttrValue,
   isIdentificationPost,
   photoAttributionLine,
-  priorLicensedPhotoGrants,
-  PHOTO_ATTRIBUTION_LINE_RE,
 };

@@ -1,134 +1,73 @@
 /**
- * Regression test (C3, blog work order 2026-09-28 + Codex pre-push review):
- * without this, every licensed Commons photo/attribution the PHOTO SLOTS
- * writer instruction requires hard-fails content-guardrails'
- * DISALLOWED_EXTERNAL_LINK P0 — upload.wikimedia.org, commons.wikimedia.org
- * and creativecommons.org are not on the trusted-citation-host allowlist.
- * deriveSyncGuardrailOptions threads the brief's photo_slots URLs into
- * photoAllowedUrls, an outbound-link-only exact-URL allowance
- * (content-guardrails.evaluate() feeds it to externalLinkFinding alone,
- * NEVER to priceFinding/findHardcodedPrice — see
- * content-guardrails-photo-allowed-urls.test.js for that separation; it
- * used to ride requiredSourceUrls itself, which also authorizes a
- * competitor-price citation, a real Codex P1 on 2026-09-28).
+ * Licensed identification photos in content-guardrails (C3; Codex r3 on
+ * #5216). Photos are licensed-library files already committed in the Astro
+ * repo and embedded by LOCAL path, so the image itself is never an
+ * outbound link. Only the attribution line's source-page and license-deed
+ * links need an allowance: evaluate() derives it from the library photos
+ * the rendered body actually shows (licensed-photo-library.libraryPhotoBySrc)
+ * — the same answer for a new post, a refresh and a remediation
+ * revalidation, with nothing threaded from the brief.
  */
 
 jest.mock('../models/db', () => jest.fn());
 
 const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
 const { evaluate } = require('../services/content/content-guardrails');
-const { PHOTO_LIBRARY } = require('../services/content/licensed-photo-library');
+const { PHOTO_LIBRARY, photoAttributionLine } = require('../services/content/licensed-photo-library');
 
-const PHOTO_SLOTS = [
-  {
-    slot: 'pest',
-    caption: 'A clear photo of the fire ant itself.',
-    flagged_for_human: false,
-    photo: {
-      url: 'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg',
-      source_page: 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant.jpg',
-      alt: 'Red imported fire ant workers swarming over sandy soil in Florida',
-      license: 'CC BY 2.0',
-      license_url: 'https://creativecommons.org/licenses/by/2.0',
-      credit: 'Judy Gallagher',
-    },
-  },
-  { slot: 'sign', caption: 'A photo of the mound.', flagged_for_human: true, photo: null },
-  { slot: 'look_alike', caption: 'A look-alike.', flagged_for_human: true, photo: null },
-];
+const HUB = { publishHosts: ['wavespestcontrol.com'] };
+function bodyWith(entry, { attribution = photoAttributionLine(entry), image = true } = {}) {
+  return [
+    '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
+    '',
+    'Some identifying prose about the pest in Florida yards.',
+    '',
+    image ? `![${entry.alt}](${entry.src})` : '',
+    '',
+    attribution,
+  ].join('\n');
+}
+const external = (result) => result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
 
-describe('deriveSyncGuardrailOptions — photo_slots photoAllowedUrls allowance', () => {
-  test('carries every populated slot photo URL (url + source_page + license_url) into photoAllowedUrls, and NEVER into requiredSourceUrls', () => {
-    const opts = deriveSyncGuardrailOptions(
-      { id: 'opp-1', bucket: 'customer_need' },
-      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: { photo_slots: PHOTO_SLOTS } },
-    );
-    expect(opts.photoAllowedUrls).toEqual(expect.arrayContaining([
-      'https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg',
-      'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant.jpg',
-      'https://creativecommons.org/licenses/by/2.0',
-    ]));
-    expect(opts.requiredSourceUrls).toEqual([]);
-  });
-
-  test('a flagged (photo: null) slot contributes nothing — no undefined/null entries', () => {
-    const opts = deriveSyncGuardrailOptions(
-      { id: 'opp-1', bucket: 'customer_need' },
-      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: { photo_slots: PHOTO_SLOTS } },
-    );
-    expect(opts.photoAllowedUrls.every((u) => typeof u === 'string' && u.length > 0)).toBe(true);
-  });
-
-  test('no photo_slots on the brief leaves photoAllowedUrls empty', () => {
-    const opts = deriveSyncGuardrailOptions(
-      { id: 'opp-1', bucket: 'customer_need' },
-      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: {} },
-    );
-    expect(opts.photoAllowedUrls).toEqual([]);
-  });
-
-  test('end-to-end: a diagnostic draft embedding the licensed photo + attribution links clears content-guardrails.evaluate (no DISALLOWED_EXTERNAL_LINK)', () => {
-    const opts = deriveSyncGuardrailOptions(
-      { id: 'opp-1', bucket: 'customer_need', service: 'pest' },
-      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', service: 'pest', voice_constraints: { photo_slots: PHOTO_SLOTS } },
-    );
-    const body = [
-      '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Keep pets and kids off the mound." />',
-      '',
-      'Fire ants build loose sandy mounds in open, sunny Florida yards.',
-      '',
-      '![Red imported fire ant workers swarming over sandy soil in Florida](https://upload.wikimedia.org/wikipedia/commons/c/ce/Red_Imported_Fire_Ant.jpg)',
-      '',
-      'Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant.jpg) ([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))',
-    ].join('\n');
-    const result = evaluate({ frontmatter: { post_type: 'diagnostic' }, body }, opts);
-    const externalLinkFailures = result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
-    expect(externalLinkFailures).toEqual([]);
-  });
-
-  test('end-to-end with the REAL catalog entries whose source_page/url contain encoded parentheses (Codex P1: earlier test used a simplified paren-free URL and missed this)', () => {
-    // Every PHOTO_LIBRARY entry whose source_page/url originally carried a
-    // literal unescaped "(" / ")" — the fire-ant pest+sign entries and the
-    // huntsman pest entry — run through the SAME markdown-link scanner the
-    // publish gate uses. A malformed/truncated destination here (the link
-    // closing at the first bare ")") would show up as an unmatched
-    // DISALLOWED_EXTERNAL_LINK even though requiredSourceUrls carries the
-    // correct, full, percent-encoded string.
-    const withParenUrls = PHOTO_LIBRARY.filter((e) => /\(|%28/.test(e.source_page) || /\(|%28/.test(e.url));
-    expect(withParenUrls.length).toBeGreaterThan(0); // sanity: the catalog still has these entries
-    for (const entry of withParenUrls) {
-      const photoSlots = [{ slot: entry.slot, caption: 'test', flagged_for_human: false, photo: entry }];
-      const opts = deriveSyncGuardrailOptions(
-        { id: 'opp-1', bucket: 'customer_need', service: 'pest' },
-        { action_type: 'new_supporting_blog', page_type: 'supporting-blog', service: 'pest', voice_constraints: { photo_slots: photoSlots } },
-      );
-      const body = [
-        '<BottomLineBox verdict="Yes." recommendation="Call a pro." />',
-        '',
-        'Some identifying prose.',
-        '',
-        `![${entry.alt}](${entry.url})`,
-        '',
-        `Photo: [${entry.credit}](${entry.source_page}) ([${entry.license}](${entry.license_url}))`,
-      ].join('\n');
-      const result = evaluate({ frontmatter: { post_type: 'diagnostic' }, body }, opts);
-      const externalLinkFailures = result.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK');
-      expect(externalLinkFailures).toEqual([]);
+describe('library photo attribution links', () => {
+  test('every library photo + its exact attribution clears DISALLOWED_EXTERNAL_LINK (incl. encoded-paren source pages)', () => {
+    for (const entry of PHOTO_LIBRARY) {
+      expect(external(evaluate({ frontmatter: { post_type: 'diagnostic' }, body: bodyWith(entry) }, HUB))).toEqual([]);
     }
   });
 
-  test('photoAllowedUrls is allowance-only: a draft that never embeds any photo_slots photo is never penalized for skipping them (Codex P1 double-check)', () => {
-    // Photo slots ride on EVERY supporting-blog/customer-question brief
-    // unconditionally (the writer decides post_type, not the composer) — a
-    // non-diagnostic draft, or one where every slot came back flagged, must
-    // never be treated as though it owed a citation to an unused photo URL.
+  test('works on a refresh with no brief data at all', () => {
+    const entry = PHOTO_LIBRARY[0];
+    const body = bodyWith(entry);
+    const r = evaluate({ frontmatter: {}, body: `${body}\n\nA new paragraph.` }, { ...HUB, isRefresh: true, priorBody: body });
+    expect(external(r)).toEqual([]);
+  });
+
+  test('without the library image in the rendered body, the attribution links are NOT allowed', () => {
+    const entry = PHOTO_LIBRARY[0];
+    expect(external(evaluate({ frontmatter: {}, body: bodyWith(entry, { image: false }) }, HUB)).length).toBeGreaterThan(0);
+    const commented = bodyWith(entry).replace(`![${entry.alt}](${entry.src})`, `<!-- ![${entry.alt}](${entry.src}) -->`);
+    expect(external(evaluate({ frontmatter: {}, body: commented }, HUB)).length).toBeGreaterThan(0);
+  });
+
+  test("one photo does not license another photo's links", () => {
+    const [a, b] = PHOTO_LIBRARY;
+    const body = `${bodyWith(a)}\n\n${photoAttributionLine(b)}`;
+    expect(external(evaluate({ frontmatter: {}, body }, HUB)).length).toBeGreaterThan(0);
+  });
+
+  test('deriveSyncGuardrailOptions no longer carries a brief-derived photo allowance', () => {
     const opts = deriveSyncGuardrailOptions(
-      { id: 'opp-1', bucket: 'customer_need', service: 'pest' },
-      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', service: 'pest', voice_constraints: { photo_slots: PHOTO_SLOTS } },
+      { id: 'opp-1', bucket: 'customer_need' },
+      { action_type: 'new_supporting_blog', page_type: 'supporting-blog', voice_constraints: { photo_slots: [{ slot: 'pest', photo: { src: PHOTO_LIBRARY[0].src } }] } },
     );
+    expect(opts.photoAllowedUrls).toBeUndefined();
+    expect(opts.requiredSourceUrls).toEqual([]);
+  });
+
+  test('a post with no photos is never penalized for skipping the slots', () => {
     const body = 'Fire ants build loose sandy mounds in open, sunny Florida yards. Learn more on the Waves blog.';
-    const result = evaluate({ frontmatter: { post_type: 'decision' }, body }, opts);
-    const photoRelatedFailures = result.findings.filter((f) => /photo|MISSING_SOURCE|REQUIRED_SOURCE/i.test(`${f.code} ${f.message}`));
-    expect(photoRelatedFailures).toEqual([]);
+    const result = evaluate({ frontmatter: { post_type: 'decision' }, body }, HUB);
+    expect(result.findings.filter((f) => /photo|MISSING_SOURCE|REQUIRED_SOURCE/i.test(`${f.code} ${f.message}`))).toEqual([]);
   });
 });

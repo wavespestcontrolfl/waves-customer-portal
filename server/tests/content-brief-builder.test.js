@@ -554,7 +554,7 @@ describe('_composeBrief photo_slots (C3, owner ruling 2026-09-28)', () => {
     expect(slots.map((s) => s.slot)).toEqual(['pest', 'sign', 'look_alike']);
     const pestSlot = slots.find((s) => s.slot === 'pest');
     expect(pestSlot.photo).not.toBeNull();
-    expect(pestSlot.photo.url).toEqual(expect.any(String));
+    expect(pestSlot.photo.src).toMatch(/^\/images\//);
     expect(pestSlot.flagged_for_human).toBe(false);
     // No look-alike photo exists for fire ants in the catalog — flagged, not AI art.
     const lookAlikeSlot = slots.find((s) => s.slot === 'look_alike');

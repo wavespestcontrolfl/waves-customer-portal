@@ -12,18 +12,59 @@ const {
 } = require('../services/content/licensed-photo-library');
 
 describe('PHOTO_LIBRARY catalog', () => {
-  test('every entry carries a real license + credit + source page', () => {
+  // Codex r3 on #5216: every photo is a file already committed in the
+  // Astro repo, referenced by local path — nothing is fetched at publish.
+  test('every entry is a local committed path with the full attribution', () => {
     for (const entry of PHOTO_LIBRARY) {
-      expect(typeof entry.url).toBe('string');
-      expect(entry.url.startsWith('https://')).toBe(true);
-      expect(typeof entry.license).toBe('string');
-      expect(entry.license.length).toBeGreaterThan(0);
-      expect(typeof entry.credit).toBe('string');
-      expect(entry.credit.length).toBeGreaterThan(0);
-      expect(typeof entry.alt).toBe('string');
-      expect(entry.alt.length).toBeGreaterThan(0);
-      expect(['pest', 'sign', 'look_alike']).toContain(entry.slot);
+      expect(entry.src).toMatch(/^\/images\/[a-z0-9/_.-]+\.(webp|jpe?g|png|avif)$/);
+      for (const field of ['alt', 'credit', 'license', 'catalog_slug']) {
+        expect(typeof entry[field]).toBe('string');
+        expect(entry[field].length).toBeGreaterThan(0);
+      }
+      expect(entry.source_page).toMatch(/^https:\/\//);
+      expect(entry.license_url).toMatch(/^https?:\/\/creativecommons\.org\//);
+      // Parens would end a Markdown link destination early.
+      expect(entry.source_page).not.toMatch(/[()]/);
     }
+  });
+
+  test('srcs and catalog slugs are unique', () => {
+    expect(new Set(PHOTO_LIBRARY.map((e) => e.src)).size).toBe(PHOTO_LIBRARY.length);
+    expect(new Set(PHOTO_LIBRARY.map((e) => e.catalog_slug)).size).toBe(PHOTO_LIBRARY.length);
+  });
+
+  test('every sign / look-alike reference names an entry in the library', () => {
+    const slugs = new Set(PHOTO_LIBRARY.map((e) => e.catalog_slug));
+    for (const entry of PHOTO_LIBRARY) {
+      for (const ref of [entry.sign, ...entry.look_alikes].filter(Boolean)) expect(slugs.has(ref)).toBe(true);
+    }
+  });
+
+  test('libraryPhotoBySrc / isLibraryPhotoSrc look photos up by exact local path only', () => {
+    const { libraryPhotoBySrc, isLibraryPhotoSrc } = require('../services/content/licensed-photo-library');
+    const entry = PHOTO_LIBRARY[0];
+    expect(libraryPhotoBySrc(entry.src)).toBe(entry);
+    expect(isLibraryPhotoSrc(entry.src)).toBe(true);
+    expect(isLibraryPhotoSrc(entry.src.toUpperCase())).toBe(false);
+    expect(isLibraryPhotoSrc(`https://www.wavespestcontrol.com${entry.src}`)).toBe(false);
+    expect(isLibraryPhotoSrc('/images/blog/some-post/body-1.webp')).toBe(false);
+  });
+
+  test('brief photo objects carry the local src and attribution, not catalog internals', () => {
+    const photo = findPhotoForSlot('fire ant identification', 'pest');
+    expect(Object.keys(photo).sort()).toEqual(['alt', 'credit', 'license', 'license_url', 'source_page', 'src']);
+    expect(photo.src).toBe('/images/blog/dangerous-ants-in-florida/fire-ant-workers.webp');
+  });
+});
+
+describe('matchSpecies — specific aliases never borrow another species\' photo', () => {
+  test.each([
+    ['tropical fire ant identification'],
+    ['southern fire ants in sarasota'],
+    ['tokay gecko in the attic'],
+    ['black carpenter ant damage'],
+  ])('%s → no photo', (topic) => {
+    expect(buildPhotoSlots(topic).every((s) => s.photo === null)).toBe(true);
   });
 });
 
@@ -62,7 +103,7 @@ describe('findPhotoForSlot', () => {
   test('never partial-token matches ("ant" must not match "fire ant")', () => {
     // A topic that mentions ants generically, with no fire-ant phrase, must
     // not accidentally return the fire ant photo.
-    expect(findPhotoForSlot('carpenter ant identification', 'sign')).toBeNull();
+    expect(findPhotoForSlot('ghost ant identification', 'sign')).toBeNull();
   });
 
   test('returns null for an empty/missing topic or slot', () => {
@@ -178,37 +219,3 @@ describe('buildPhotoSlots', () => {
   });
 });
 
-// Codex P1 (8th round): the gate (content-quality-gate) and the publisher
-// (astro-publisher) previously each kept their own copy of "is this line a
-// standalone licensed-photo placement" — every gate/publisher split on
-// #5216 came from those copies drifting. There is now exactly one.
-describe('matchStandaloneImageLine — the single shared placement definition', () => {
-  const { matchStandaloneImageLine } = require('../services/content/licensed-photo-library');
-  const URL_ = 'https://upload.wikimedia.org/x.jpg';
-
-  test('matches a bare inline image and a src-only <img>, each alone on its line', () => {
-    expect(matchStandaloneImageLine(`![a fire ant](${URL_})`)).toEqual({ alt: 'a fire ant', url: URL_ });
-    expect(matchStandaloneImageLine(`  <img src="${URL_}" alt="a fire ant">  `)).toEqual({ alt: 'a fire ant', url: URL_ });
-  });
-
-  test('rejects mid-paragraph placement, an <img> with srcset, and an <img> with no src', () => {
-    expect(matchStandaloneImageLine(`See ![a](${URL_}) here.`)).toBeNull();
-    expect(matchStandaloneImageLine(`<img src="${URL_}" srcset="${URL_} 2x" alt="a">`)).toBeNull();
-    expect(matchStandaloneImageLine('<img alt="a">')).toBeNull();
-  });
-
-  test('the publisher uses this exact function (no second copy)', () => {
-    jest.isolateModules(() => {
-      jest.doMock('../models/db', () => jest.fn());
-      const pub = require('../services/content-astro/astro-publisher');
-      const lib = require('../services/content/licensed-photo-library');
-      expect(pub._internals.matchLicensedPhotoLine).toBe(lib.matchStandaloneImageLine);
-    });
-  });
-});
-
-test('matchStandaloneImageLine: a literal ">" inside a quoted alt does not end the <img> tag (Codex P1 r11)', () => {
-  const { matchStandaloneImageLine } = require('../services/content/licensed-photo-library');
-  expect(matchStandaloneImageLine('<img src="https://upload.wikimedia.org/x.jpg" alt="workers can be > 1/4 inch">'))
-    .toEqual({ alt: 'workers can be > 1/4 inch', url: 'https://upload.wikimedia.org/x.jpg' });
-});

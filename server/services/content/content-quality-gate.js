@@ -787,6 +787,13 @@ function headingCustomerNamePair(headingText) {
   return null;
 }
 
+// Percent/plus-decoding for scanning only — a malformed escape keeps the
+// raw text rather than hiding it.
+function decodeLinkText(text) {
+  const plus = String(text || '').replace(/\+/g, ' ');
+  try { return decodeURIComponent(plus); } catch { return plus.replace(/%40/gi, '@').replace(/%20/g, ' '); }
+}
+
 function checkRedactionPassed(draft) {
   const body = String(draft.body || '');
   // Broad phone regex covers `941-555-1234`, `(941) 555-1234`, and compact
@@ -907,6 +914,14 @@ function checkRedactionPassed(draft) {
     const seoFields = [
       ['title', joinFields(draft.title, fm.title, draft.metaTitle, fm.metaTitle)],
       ['meta_description', joinFields(draft.meta_description, fm.meta_description, draft.metaDescription, fm.metaDescription)],
+      // Codex r3 on #5216: next_steps render publicly as links, so each
+      // entry is scanned as the SAME "[label](href)" text the guardrails
+      // synthesize (one synthesis, content-guardrails.nextStepsLinkMarkdown),
+      // with the href's query decoded ("name=Jane+Doe", "%40") so the
+      // redactor sees the value a visitor would. Title-cased like the title:
+      // link labels are UI furniture, and the heading-pair name check covers
+      // a lowercase name in a query string too.
+      ['next_steps', decodeLinkText(require('./content-guardrails').nextStepsLinkMarkdown(fm))],
     ];
     for (const [where, raw] of seoFields) {
       if (!raw.trim()) continue;
@@ -918,7 +933,7 @@ function checkRedactionPassed(draft) {
       }
       const stripped = stripWavesOfficeAddresses(raw);
       const fieldScan = redact(stripped);
-      const titleCased = where === 'title';
+      const titleCased = where === 'title' || where === 'next_steps';
       const fieldHit = (fieldScan.findings || [])
         .find((f) => BLOCKING_PII_TYPES.has(f.type) && (titleCased ? f.type !== 'name' : true));
       if (fieldHit) return { ok: false, reason: `unredacted_${fieldHit.type}_in_${where}` };
@@ -1164,54 +1179,35 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   return { ok: true };
 }
 
-// C3: an identification draft's pest/sign/look-alike photos are a CLOSED
-// set — exactly the licensed URLs voice_constraints.photo_slots supplied.
-// A diagnostic draft with no brief photo_slots has an EMPTY allowlist
-// (any image fails) — see checkPhotoSlotsLicensedOnly.
-// Codex P1: URL membership alone let a real licensed URL carry a
-// MISLABELED alt (e.g. the fire-ant photo captioned "Termite") with no
-// credit/license reproduced at all — both explicitly required by the
-// PHOTO SLOTS writer instruction. Every embedded slot photo must now match
-// its catalog entry's URL AND alt text exactly, and the body must carry
-// that entry's attribution line, not merely the bare image markdown.
-// Codex r2 on #5216: attribution is judged on the RENDERED view (comments
-// and code blanked — content-guardrails.blankNonRenderedMarkdown, the view
-// the guardrails use), and must be the EXACT instructed line, so the credit
-// and license are the visible link TEXT and the source page / license deed
-// the link DESTINATIONS: photoAttributionLine() →
+// C3: an identification draft's photos are a CLOSED set — the licensed
+// photo library (licensed-photo-library.js: photos already committed in the
+// Astro repo, embedded by their LOCAL path). Codex r3 on #5216: the gate
+// looks each image up in the library by src — one lookup that works the
+// same for a new post, a refresh and a remediation revalidation, with no
+// brief allowlist, grants or provenance. Anything else (AI art, a remote
+// URL, another post's image) fails.
+// Each library photo must carry its catalog alt exactly and the EXACT
+// attribution line on the RENDERED view (comments and code blanked — the
+// guardrails' blankNonRenderedMarkdown):
 //   Photo: [credit](source_page) ([license](license_url))
-// A credit hidden in a comment, a bare URL, or the parts scattered across
-// the body no longer pass.
 const PHOTO_CATALOG_FIELDS = ['credit', 'license', 'license_url', 'source_page'];
-function validateSlotPhotoAttribution(photo, alt, url, renderedBody) {
+function validateLibraryPhoto(photo, alt, url, renderedBody) {
   if (!photo) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
   if (alt !== photo.alt) return { ok: false, reason: `identification_photo_alt_mismatch:${url}` };
   if (PHOTO_CATALOG_FIELDS.some((field) => !photo[field])) return { ok: false, reason: `identification_photo_catalog_entry_incomplete:${url}` };
   if (!renderedBody.includes(photoAttributionLine(photo))) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
   return null;
 }
-// Codex P1: the inline-only regex saw NOTHING for a raw <img> (explicitly
-// accepted by content-guardrails as passive markup) or a reference-style
-// image (`![alt][ref]` / `![alt][]` + a `[ref]: url` definition elsewhere)
-// — either form slipped an unlicensed/AI photo past this hard gate on an
-// otherwise-empty allowlist. Every rendered image FORM the writer's MDX
-// subset can produce is collected here; an MDX component is deliberately
-// NOT a source of images today — SAFE_MDX_COMPONENTS (the closed component
-// vocabulary uncatalogedComponentFinding enforces) carries no component
-// with an image/src-shaped prop, so there is nothing to scan there unless
-// one is added later, at which point this function needs a matching entry.
+// Every rendered image FORM is collected (Codex P1: a raw <img> or a
+// reference-style image slipped past an inline-only scan). An MDX component
+// is not an image source today — SAFE_MDX_COMPONENTS carries none with an
+// image-shaped prop; add an entry here if one is ever added.
 const INLINE_IMAGE_RE = /!\[([^\]]*)\]\(([^)]+)\)/g;
-// Full (`![alt][ref]`) and collapsed (`![alt][]`) reference forms; the
-// shortcut form (`![alt]` with no second bracket) is not an image
-// reference in this writer's plain-Markdown subset and is left to the
-// general unsupported-body-syntax gate.
+// Full (`![alt][ref]`) and collapsed (`![alt][]`) reference forms.
 const REFERENCE_IMAGE_RE = /!\[([^\]]*)\]\[([^\]]*)\]/g;
 const RAW_IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi; // quote-aware (see BOTTOM_LINE_BOX_TAG_RE)
-const { htmlAttrValue: attrValue, matchStandaloneImageLine, isIdentificationPost, photoAttributionLine, priorLicensedPhotoGrants } = require('./licensed-photo-library');
-// alt is trimmed in every form, exactly as the shared matchStandaloneImage
-// Line (the publisher's re-host path) trims it — Codex P1 r9: an untrimmed
-// alt here false-failed identification_photo_alt_mismatch on a placement
-// the publisher would have re-hosted with the trimmed alt.
+const { htmlAttrValue: attrValue, isIdentificationPost, photoAttributionLine, libraryPhotoBySrc } = require('./licensed-photo-library');
+// alt is trimmed in every form.
 function collectBodyImageOccurrences(body) {
   const out = [];
   let m;
@@ -1244,80 +1240,18 @@ function collectBodyImageOccurrences(body) {
   return out;
 }
 
-// Codex P1 (7th round): the gate must approve ONLY the placements the
-// publisher's re-hosting pass (astro-publisher rehostLicensedIdentification
-// Photos / matchLicensedPhotoLine) can actually re-host — a bare inline
-// markdown image or a src-only <img> tag, ALONE on its own line. Anything
-// else (mid-paragraph, reference-style, srcset) previously passed here and
-// then hard-failed BLOG_BODY_IMAGES_FAILED at publish, so a green gate did
-// not mean a publishable draft. Standalone-ness comes from the SAME shared
-// matcher the publisher uses (licensed-photo-library.matchStandaloneImage
-// Line — Codex P1 r8: no second hand-kept copy to drift); per-URL
-// occurrence counts catch a URL used once standalone AND once inline.
-function standaloneImageUrlCounts(body) {
-  const counts = new Map();
-  for (const line of String(body || '').split('\n')) {
-    const match = matchStandaloneImageLine(line);
-    if (match) counts.set(match.url, (counts.get(match.url) || 0) + 1);
-  }
-  return counts;
-}
-function firstUnpublishablePlacement(occurrences, body) {
-  const standalone = standaloneImageUrlCounts(body);
-  const seen = new Map();
-  for (const { url, form } of occurrences) {
-    if (form === 'reference' || form === 'srcset') {
-      return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
-    }
-    seen.set(url, (seen.get(url) || 0) + 1);
-  }
-  for (const [url, n] of seen) {
-    if ((standalone.get(url) || 0) < n) return { ok: false, reason: `identification_photo_not_standalone:${url}` };
-  }
-  return null;
-}
-
-// Refresh grandfathering (Codex r2 on #5216): a refresh brief carries no
-// photo_slots, so a diagnostic post's OWN re-hosted photos
-// (/images/blog/<slug>/body-N.webp) are recognized from the live previous
-// version instead — per occurrence, same alt, and only while the exact
-// attribution line that accompanied it live is still rendered in the draft.
-function refreshPhotoGrants(brief, context) {
-  if (brief?.action_type !== 'refresh_existing_page') return [];
-  const prior = context?.previousVersion?.body;
-  if (typeof prior !== 'string' || !prior.trim()) return [];
-  return priorLicensedPhotoGrants(require('./content-guardrails').blankNonRenderedMarkdown(prior));
-}
-function consumeRefreshGrant(grants, alt, url, renderedBody) {
-  const idx = grants.findIndex((g) => g.url === url && g.alt === alt);
-  if (idx === -1) return { ok: false, reason: `unlicensed_or_unknown_identification_photo:${url}` };
-  const [grant] = grants.splice(idx, 1);
-  if (!renderedBody.includes(grant.attribution)) return { ok: false, reason: `identification_photo_attribution_missing:${url}` };
-  return null;
-}
-
 function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   if (!isIdentificationDraft(draft, brief, context)) return { ok: true, reason: 'not_identification_post' };
-  // Codex P1: an EMPTY or missing photo_slots list must NEVER fail open — a
-  // diagnostic draft on a page type the composer doesn't attach slots to
-  // (or a stored brief that predates this change) still carries the owner
-  // rule "AI art never fills an identification slot" unconditionally, so an
-  // empty list is an EMPTY ALLOWLIST: any body image at all is unlicensed.
-  const slots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
-  const byUrl = new Map(slots.filter((s) => s?.photo?.url).map((s) => [s.photo.url, s.photo]));
-  const grants = refreshPhotoGrants(brief, context);
   const body = String(draft.body || '');
   const renderedBody = require('./content-guardrails').blankNonRenderedMarkdown(body);
-  const occurrences = collectBodyImageOccurrences(body);
-  for (const { alt, url } of occurrences) {
-    const photo = byUrl.get(url);
-    const failure = photo || !grants.length
-      ? validateSlotPhotoAttribution(photo, alt, url, renderedBody)
-      : consumeRefreshGrant(grants, alt, url, renderedBody);
+  for (const { alt, url, form } of collectBodyImageOccurrences(body)) {
+    const failure = validateLibraryPhoto(libraryPhotoBySrc(url), alt, url, renderedBody);
     if (failure) return failure;
+    // The publisher only accepts plain Markdown images (validateBodyImage
+    // Refs parks a raw <img>), so a library photo in any other form would
+    // pass here and fail at publish.
+    if (form !== 'inline') return { ok: false, reason: `identification_photo_unsupported_form:${form}:${url}` };
   }
-  const placement = firstUnpublishablePlacement(occurrences, body);
-  if (placement) return placement;
   return { ok: true };
 }
 

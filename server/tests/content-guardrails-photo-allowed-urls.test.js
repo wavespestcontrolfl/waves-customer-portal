@@ -11,7 +11,6 @@
 jest.mock('../models/db', () => jest.fn());
 
 const guardrails = require('../services/content/content-guardrails');
-const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
 
 const COMMONS_URL = 'https://commons.wikimedia.org/wiki/File:Red_Imported_Fire_Ant.jpg';
 const LICENSE_URL = 'https://creativecommons.org/licenses/by/2.0';
@@ -32,17 +31,19 @@ describe('externalLinkFinding — photoAllowedUrls', () => {
 });
 
 describe('priceParagraphIsSourced / findHardcodedPrice — photoAllowedUrls must NEVER satisfy sourcing', () => {
-  test('a competitor price citing ONLY a photoAllowedUrls URL still HARD-fails HARDCODED_PRICE', () => {
-    const body = `Aptive's early-cancellation fee is $199 as of June 2026 per [source](${COMMONS_URL}).`;
-    // priceFinding/findHardcodedPrice do not even accept a photoAllowedUrls
-    // parameter — this proves it structurally, not just behaviorally: the
-    // exact same options object that satisfies externalLinkFinding (via
-    // photoAllowedUrls) leaves the citation UNRECOGNIZED for price sourcing
-    // (requiredSourceUrls stays empty).
-    const result = guardrails.evaluate(
-      { body },
-      { competitorPriceCitations: true, requiredSourceUrls: [], photoAllowedUrls: [COMMONS_URL] },
-    );
+  test('a competitor price citing ONLY a library photo\'s source page still HARD-fails HARDCODED_PRICE', () => {
+    // The body shows a library photo, so its source page IS allowed as an
+    // outbound link — but that allowance never reaches price sourcing.
+    const { PHOTO_LIBRARY, photoAttributionLine } = require('../services/content/licensed-photo-library');
+    const photo = PHOTO_LIBRARY[0];
+    const body = [
+      `![${photo.alt}](${photo.src})`,
+      '',
+      photoAttributionLine(photo),
+      '',
+      `Aptive's early-cancellation fee is $199 as of June 2026 per [source](${photo.source_page}).`,
+    ].join('\n');
+    const result = guardrails.evaluate({ body }, { competitorPriceCitations: true, requiredSourceUrls: [] });
     expect(result.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
     // ...but the link itself is still permitted (not a DOUBLE penalty).
     expect(result.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
@@ -55,41 +56,5 @@ describe('priceParagraphIsSourced / findHardcodedPrice — photoAllowedUrls must
       { competitorPriceCitations: true, requiredSourceUrls: [COMMONS_URL] },
     );
     expect(result.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
-  });
-});
-
-describe('guardrail-options.deriveSyncGuardrailOptions — photo URLs ride photoAllowedUrls, not requiredSourceUrls', () => {
-  test('photo/source/license URLs land in photoAllowedUrls', () => {
-    const brief = {
-      action_type: 'new_supporting_blog',
-      page_type: 'supporting-blog',
-      voice_constraints: {
-        photo_slots: [
-          {
-            slot: 'pest',
-            photo: { url: PHOTO_URL, source_page: COMMONS_URL, license_url: LICENSE_URL, alt: 'x', credit: 'Judy Gallagher', license: 'CC BY 2.0' },
-            flagged_for_human: false,
-          },
-        ],
-      },
-    };
-    const opts = deriveSyncGuardrailOptions({ id: 'opp-1', bucket: 'customer_need' }, brief);
-    expect(opts.photoAllowedUrls).toEqual(expect.arrayContaining([PHOTO_URL, COMMONS_URL, LICENSE_URL]));
-  });
-
-  test('photo/source/license URLs are NOT duplicated into requiredSourceUrls', () => {
-    const brief = {
-      action_type: 'new_supporting_blog',
-      page_type: 'supporting-blog',
-      voice_constraints: {
-        photo_slots: [
-          { slot: 'pest', photo: { url: PHOTO_URL, source_page: COMMONS_URL, license_url: LICENSE_URL, alt: 'x' }, flagged_for_human: false },
-        ],
-      },
-    };
-    const opts = deriveSyncGuardrailOptions({ id: 'opp-1', bucket: 'customer_need' }, brief);
-    expect(opts.requiredSourceUrls).not.toEqual(expect.arrayContaining([PHOTO_URL]));
-    expect(opts.requiredSourceUrls).not.toEqual(expect.arrayContaining([COMMONS_URL]));
-    expect(opts.requiredSourceUrls).not.toEqual(expect.arrayContaining([LICENSE_URL]));
   });
 });

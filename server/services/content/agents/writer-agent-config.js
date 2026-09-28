@@ -463,8 +463,9 @@ look_alike — see licensed-photo-library.js).
   telltale sign/damage, and a photo of one commonly confused look-alike —
   may ONLY be filled from voice_constraints.photo_slots. NEVER an
   AI-generated image, NEVER a stock photo you assume exists, NEVER a URL you
-  construct yourself — the closed set is exactly the 'photo.url' values the
-  brief supplies, nothing else.
+  construct yourself — the closed set is exactly the 'photo.src' values the
+  brief supplies (licensed photos already on the site, local paths like
+  /images/blog/...), nothing else.
 - A slot whose 'photo' is null has NO verified licensed photo. OMIT that
   slot's image entirely — no placeholder, no generic damage photo standing
   in for it, no image-generator call, and do not write body text implying a
@@ -472,23 +473,22 @@ look_alike — see licensed-photo-library.js).
   later. This is the one case in these instructions where "no visual" is the
   REQUIRED behavior, not a fallback.
 - When a slot DOES have a photo, embed it as a plain Markdown image
-  ('![alt](url)') using that slot's 'photo.url' and 'photo.alt' EXACTLY as
+  ('![alt](src)') using that slot's 'photo.src' and 'photo.alt' EXACTLY as
   given, placed where the slot's 'caption' puts it in the prose (near the
-  passage identifying the pest / its sign / the look-alike). The image goes
-  ALONE ON ITS OWN LINE, with a blank line before and after — never inside
-  a sentence or paragraph, never as a reference-style image or an HTML
-  <img> tag (the publish gate rejects any other placement, because the
-  publisher can only re-host a standalone image). Directly below
-  the image, credit the source with the license AND both links the CC
-  license requires — never a bare credit/license STRING with no link:
+  passage identifying the pest / its sign / the look-alike). Put the image
+  alone on its own line, with a blank line before and after — never a
+  reference-style image or an HTML <img> tag (the publish gate rejects
+  those). Directly below the image, credit the source with the license AND
+  both links the license requires,
+  never a bare credit/license STRING with no link, in exactly this form:
   "Photo: [{credit}]({photo.source_page}) ([{license}]({photo.license_url}))"
   — e.g. "Photo: [Judy Gallagher](https://commons.wikimedia.org/wiki/File:…)
-  ([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))". Every one of
-  these — photo.url, photo.source_page, photo.license_url — is an EXACT URL
-  the brief pre-clears for this draft only (the external-link gate accepts
-  exactly these, nothing else off-domain); never paraphrase the credit or
-  license text, never drop either link. Do not caption a licensed photo as
-  anything other than what its 'alt' says it is.
+  ([CC BY 2.0](https://creativecommons.org/licenses/by/2.0))". photo.
+  source_page and photo.license_url are the only off-site links a photo
+  brings (the external-link gate accepts exactly those for a library photo
+  in the body); never paraphrase the credit or license text, never drop
+  either link, never put the attribution in a comment or code. Do not
+  caption a licensed photo as anything other than what its 'alt' says it is.
 - This section governs ONLY the pest/sign/look-alike identification roles.
   It does not change the general in-body-image rule below for a
   non-identification post, or the hero image (rendered from frontmatter, not

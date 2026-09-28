@@ -12,7 +12,6 @@ jest.mock('../models/db', () => jest.fn());
 
 const guardrails = require('../services/content/content-guardrails');
 const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
-const { PHOTO_LIBRARY, photoAttributionLine } = require('../services/content/licensed-photo-library');
 
 const BODY = 'Fire ants build mounds in sunny turf after summer rain. Look for the raised soil and the swarming workers when disturbed.';
 const HUB = ['wavespestcontrol.com'];
@@ -159,31 +158,5 @@ describe('deriveSyncGuardrailOptions supplies the resolved publish host', () => 
     expect(deriveSyncGuardrailOptions({}, spokeBrief).publishHosts).toEqual(['bradentonflpestcontrol.com']);
     delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
     expect(deriveSyncGuardrailOptions({}, spokeBrief).publishHosts).toEqual(['wavespestcontrol.com']);
-  });
-});
-
-// Codex r2 on #5216 (refresh half of "Allow preserved licensed images"):
-// a refresh brief has no photo_slots, so the attribution links of the
-// post's own re-hosted photos are grandfathered from the live prior body.
-describe('refresh: licensed-photo attribution links are grandfathered from the live body', () => {
-  const photo = PHOTO_LIBRARY[0];
-  const LOCAL = '/images/blog/pest-control/roaches/body-1.webp';
-  const prior = `${BODY}\n\n![${photo.alt}](${LOCAL})\n\n${photoAttributionLine(photo)}\n\nMore prose here.`;
-
-  test('the preserved attribution does not trip DISALLOWED_EXTERNAL_LINK', () => {
-    const r = guardrails.evaluate({ frontmatter: {}, body: `${prior}\n\nA new paragraph.` }, { isRefresh: true, priorBody: prior, publishHosts: HUB });
-    expect(r.findings.map((f) => f.code)).not.toContain('DISALLOWED_EXTERNAL_LINK');
-  });
-
-  test('a Commons link the live body never carried is still disallowed', () => {
-    const body = `${prior}\n\nSee [another photo](https://commons.wikimedia.org/wiki/File:Something_else.jpg).`;
-    const r = guardrails.evaluate({ frontmatter: {}, body }, { isRefresh: true, priorBody: prior, publishHosts: HUB });
-    expect(r.findings.map((f) => f.code)).toContain('DISALLOWED_EXTERNAL_LINK');
-  });
-
-  test('an attribution that only appeared in a comment of the live body grants nothing', () => {
-    const commentedPrior = `${BODY}\n\n<!--\n![${photo.alt}](${LOCAL})\n\n${photoAttributionLine(photo)}\n-->`;
-    const r = guardrails.evaluate({ frontmatter: {}, body: prior }, { isRefresh: true, priorBody: commentedPrior, publishHosts: HUB });
-    expect(r.findings.map((f) => f.code)).toContain('DISALLOWED_EXTERNAL_LINK');
   });
 });

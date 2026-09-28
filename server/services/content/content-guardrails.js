@@ -5209,6 +5209,20 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
   return null;
 }
 
+// Source-page + license-deed URLs of every licensed-library photo the
+// rendered body embeds (licensed-photo-library.libraryPhotoBySrc).
+const BODY_IMAGE_SRC_RE = /!\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+function libraryPhotoAttributionUrls(body) {
+  const { libraryPhotoBySrc } = require('./licensed-photo-library');
+  const urls = [];
+  const rendered = blankNonRenderedMarkdown(String(body || ''));
+  for (const m of rendered.matchAll(BODY_IMAGE_SRC_RE)) {
+    const photo = libraryPhotoBySrc(m[1]);
+    if (photo) urls.push(photo.source_page, photo.license_url);
+  }
+  return urls;
+}
+
 // ── C2 frontmatter links: next_steps / related_posts (Codex r2 on #5216) ──
 // These fields render on the published post exactly like body links, so
 // they are judged by the SAME chokepoints body links go through — never a
@@ -6656,7 +6670,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], photoAllowedUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], publishHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], relatedPostLinksLive = true, staleRelatedPostLinks = [], publishHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6721,15 +6735,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     }
   }
 
-  // A refresh brief carries no photo_slots, yet a diagnostic post this
-  // pipeline created keeps its licensed-photo attribution links (Commons
-  // source page + CC deed). Those exact URLs are grandfathered from the
-  // live prior body — only the ones that sit in an exact-form attribution
-  // line under one of our own committed images (Codex r2 on #5216).
-  const refreshPhotoUrls = refreshPriorBody
-    ? require('./licensed-photo-library').priorLicensedPhotoGrants(blankNonRenderedMarkdown(refreshPriorBody))
-      .flatMap((g) => [g.sourcePage, g.licenseUrl])
-    : [];
+  // Licensed identification photos (C3) are committed Astro files embedded
+  // by local path; their attribution line links the photo's source page and
+  // license deed. Those two exact URLs are allowed for each library photo
+  // the RENDERED body actually shows — the same library lookup the quality
+  // gate uses, so a new post, a refresh and a remediation revalidation all
+  // get the same answer with no brief data (Codex r3 on #5216).
+  const photoAllowedUrls = libraryPhotoAttributionUrls(body);
 
   const findings = [
     // Price must cover everything that ships: body AND meta. Third-party
@@ -6741,7 +6753,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
-    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls: [...(Array.isArray(photoAllowedUrls) ? photoAllowedUrls : []), ...refreshPhotoUrls] }),
+    externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls, photoAllowedUrls }),
     // Affiliate links: blog bodies reference registry product IDs through
     // <AffiliateLink> only (raw tracking URLs stay DISALLOWED_EXTERNAL_LINK
     // above, no bypass). affiliateComponentFindings owns registration,
@@ -6863,6 +6875,9 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  // next_steps as the "[label](href)" text they render as — the redaction
+  // gate scans the same synthesis the guardrails do.
+  nextStepsLinkMarkdown,
   maskJsxAttrQuotes,
   blankComments,
   blankNonRenderedMarkdownWithDepths,

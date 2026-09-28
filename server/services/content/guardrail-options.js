@@ -91,26 +91,6 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   const relatedTargetMatches = selectedRelatedHosts != null
     && frozenRelatedHosts.length === effectiveRelatedHosts.length
     && frozenRelatedHosts.every((host, index) => host === effectiveRelatedHosts[index]);
-  // Photo-slot licensed URLs (C3, 2026-09-28) need an outbound-link
-  // allowance — without it every licensed Commons photo/attribution the
-  // PHOTO SLOTS writer instruction requires would hard-fail
-  // DISALLOWED_EXTERNAL_LINK (upload.wikimedia.org / commons.wikimedia.org
-  // / creativecommons.org are not on the trusted-host allowlist). Exact
-  // URLs only, never the whole host.
-  // Codex P1 (2026-09-28): these must NOT ride requiredSourceUrls —
-  // content-guardrails.js also feeds that array to priceFinding
-  // (priceParagraphIsSourced), so a competitor-intercept brief that also
-  // matched a photo slot could otherwise cite the Commons photo/license
-  // page as evidence for a competitor's dollar figure. They ride the
-  // SEPARATE `photoAllowedUrls` option instead, which
-  // content-guardrails.evaluate() feeds ONLY to externalLinkFinding — never
-  // a must-appear/must-cite check either way, so a brief whose writer
-  // lands on a non-diagnostic post_type, or omits a slot, is never
-  // penalized for not embedding a photo it was never obliged to use.
-  const photoSlots = Array.isArray(brief?.voice_constraints?.photo_slots) ? brief.voice_constraints.photo_slots : [];
-  const photoAllowedUrls = photoSlots
-    .flatMap((s) => [s?.photo?.url, s?.photo?.source_page, s?.photo?.license_url])
-    .filter(Boolean);
   const isRefresh = brief.action_type === 'refresh_existing_page';
   // A supporting-blog run IS a blog target: the affiliate gate builds its
   // product index only for blog targets, so without this every valid
@@ -142,7 +122,6 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
       ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
       ...(Array.isArray(opp?.signal_metadata?.intercept_brief?.sources) ? opp.signal_metadata.intercept_brief.sources : []),
     ],
-    photoAllowedUrls,
     operatorCitations: Boolean(operatorBrief),
     // Competitor-price citations are STRICTER: category/spoke seeds share
     // the operator_intercept bucket (and get citation hosts above) but
