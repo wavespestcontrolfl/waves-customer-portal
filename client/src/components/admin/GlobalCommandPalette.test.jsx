@@ -459,6 +459,27 @@ describe('auto-growing composer', () => {
     } finally { restore(); }
   });
 
+  it('re-measures on a viewport resize or rotation that re-wraps the text without a render', async () => {
+    let perLine = 20;
+    const desc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight');
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() { return perLine * Math.max(1, String(this.value).split('\n').length); },
+    });
+    try {
+      await mount();
+      const box = screen.getByPlaceholderText('Ask anything...');
+      fireEvent.change(box, { target: { value: 'a\nb' } });
+      expect(box.style.height).toBe('40px');
+      perLine = 40; // narrower box: each line now wraps onto two
+      act(() => { window.dispatchEvent(new Event('resize')); });
+      expect(box.style.height).toBe('80px');
+    } finally {
+      if (desc) Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', desc);
+      else delete HTMLTextAreaElement.prototype.scrollHeight;
+    }
+  });
+
   it('a draft kept across close and reopen is sized when the box mounts again', async () => {
     const restore = stubLineHeight();
     try {
