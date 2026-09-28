@@ -516,15 +516,40 @@ function classifyFreshness(event) {
  * @param {{ admin_status: string, start_at?: string|Date, event_url?: string, event_type: string, freshness_status: string, times_featured?: number }} event
  * @returns {boolean}
  */
-function isEligibleForFreshDigest(event, reference = new Date()) {
-  if (event.admin_status === 'rejected') return false;
+/**
+ * Stage 1: absolute hard rejects — none of these are ever bypassed by a star,
+ * a debut, or the first-of-year carve-out. Pure functions of the row itself;
+ * order among them doesn't matter since every branch here only ever returns
+ * `true` (reject) and none depends on another's result.
+ */
+function isHardRejectedForFreshDigest(event) {
+  if (event.admin_status === 'rejected') return true;
   // A row merged into another event is permanently ineligible, regardless of
   // any later admin_status change — keeps a merge durable (a re-approved
   // duplicate must never re-enter a newsletter after calendars were repointed
   // to the survivor). Callers must select merged_into for this to fire; the
   // digest/approved queries also enforce it at the SQL level.
-  if (event.merged_into) return false;
-  if (!event.event_url) return false;
+  if (event.merged_into) return true;
+  if (!event.event_url) return true;
+  if (event.freshness_status === 'expired') return true;
+  // An operator's needs_review blocks every path, including the debut and
+  // first-of-year carve-outs below — checked unconditionally, before either
+  // carve-out is even computed.
+  if (event.freshness_status === 'needs_review') return true;
+  return false;
+}
+
+/**
+ * Stage 2: recurrence / editorial-newness. Resolves the series-debut and
+ * pool-verified first-of-year carve-outs, the star's newness-only bypass, and
+ * the stale_recurring hard block — everything that decides whether this
+ * IDENTITY is allowed to be new again, as opposed to stage 3's plain
+ * date/type checks. Returns `rejected` plus the resolved `isSeriesDebut` flag
+ * stage 3 also needs (a continuity-proven, non-debut-worded routine row still
+ * carries classifyFreshness's stored 'stale_recurring'/no-type-match
+ * classification, so stage 3 needs the same override to admit it).
+ */
+function evaluateFreshDigestNewness(event, reference) {
   // Series-debut carve-out: a routine-recurring row passes only while its
   // stored classification says fresh_series_launch AND the debut evidence
   // still holds on a never-featured row. The first feature bumps
@@ -537,13 +562,15 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // way to check on its own (owner ruling 2026-09-27).
   const isSeriesDebut = (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event))
     || event.__recurringFirstOfYear === true;
-  if (isRoutineRecurringEvent(event) && !isSeriesDebut) return false;
+  if (isRoutineRecurringEvent(event) && !isSeriesDebut) return { rejected: true, isSeriesDebut };
+
   // Admin 'featured' = deliberately starred for the upcoming issue. It
   // overrides the once-only newness rejection — covering rows whose counters
   // were advanced by the retired click-increment behavior, and any event the
   // operator explicitly re-stars. The star is consumed on ship
   // (markEventsFeatured demotes featured → approved), so it can't re-admit
-  // the same event issue after issue. Every other hard gate still applies.
+  // the same event issue after issue. Every other hard gate still applies —
+  // the star bypasses NEWNESS only.
   //
   // __recurrenceOccurrenceCount is the same pool-verified marker pattern as
   // __recurringFirstOfYear above: this pure, pool-less function has no way to
@@ -558,19 +585,22 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // __identityRecurring: the pool-verified identity verdict (identityIsRecurring),
   // which covers a row re-labeled one_time whose earlier rows were weekly.
   const recurring = event.__identityRecurring === true ? true : null;
-  if (!isEditoriallyNewEvent(event, reference, { occurrenceCount, recurring }) && event.admin_status !== 'featured') return false;
+  if (!isEditoriallyNewEvent(event, reference, { occurrenceCount, recurring }) && event.admin_status !== 'featured') {
+    return { rejected: true, isSeriesDebut };
+  }
 
   // Hard reject on terminal freshness states regardless of event_type. A
   // continuity-proven (non-debut) routine row still carries the stored
   // 'stale_recurring' classification from classifyFreshness (which has no
   // pool access and can't know about continuity) — isSeriesDebut is the
   // pool-verified override for that one case.
-  if (event.freshness_status === 'expired') return false;
-  // An operator's needs_review blocks every path, including the debut and
-  // first-of-year carve-outs below.
-  if (event.freshness_status === 'needs_review') return false;
-  if (event.freshness_status === 'stale_recurring' && !isSeriesDebut) return false;
+  if (event.freshness_status === 'stale_recurring' && !isSeriesDebut) return { rejected: true, isSeriesDebut };
 
+  return { rejected: false, isSeriesDebut };
+}
+
+/** Stage 3: plain date/type eligibility, once newness has already cleared. */
+function isFreshDigestDateTypeEligible(event, reference, isSeriesDebut) {
   if (event.start_at) {
     const startDate = new Date(event.start_at);
     const nowET = parseETDateTime(`${etDateString(reference)}T00:00:00`);
@@ -594,6 +624,15 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   if (event.event_type === 'unknown') return false;
 
   return false;
+}
+
+function isEligibleForFreshDigest(event, reference = new Date()) {
+  if (isHardRejectedForFreshDigest(event)) return false;
+
+  const newness = evaluateFreshDigestNewness(event, reference);
+  if (newness.rejected) return false;
+
+  return isFreshDigestDateTypeEligible(event, reference, newness.isSeriesDebut);
 }
 
 // ── scoreFreshEvent ──────────────────────────────────────────────────
@@ -831,6 +870,7 @@ module.exports = {
   ROUTINE_RECURRENCE_TYPES,
   FLAGSHIP_SEND_HOUR_ET,
   FLAGSHIP_SEND_TOLERANCE_MINUTES,
+  FEATURED_ISSUE_LOOKAHEAD_MS,
   isRoutineRecurringEvent,
   isSeriesDebutEvent,
   isAnnualEvent,

@@ -22,6 +22,7 @@ const {
   identityOccurrenceCount,
   isPreviouslyFeaturedIdentity,
   assessFlagshipEventSelection,
+  isFirstOccurrenceOfYear,
 } = require('../services/newsletter-event-selection');
 
 const REFERENCE = new Date('2026-07-20T12:00:00Z'); // Monday, mid-2026
@@ -466,6 +467,58 @@ describe('operator star override still bypasses the calendar-year rule', () => {
       reference: REFERENCE, identityPool: [advanced], yearPool: [advanced],
     });
     expect(rows.map((r) => r.id)).toEqual(['same-row']);
+    expect(rows[0].__recurringFirstOfYear).toBe(true);
+  });
+
+  // Codex round 12, 2026-09-28: last_featured_occurrence_at is NULL on every
+  // row featured before migration 20260928110000. A recurring RSS/iCal row
+  // featured before that deploy and later advanced IN PLACE into next year
+  // has no sibling and no occurrence stamp — hasLegacyContinuityEvidence
+  // recovers prior-year continuity from last_featured_at + the issue
+  // lookahead instead, but fails closed on an ambiguous late-December send.
+  test('a legacy row featured well before December, then advanced in place to January, proves continuity', () => {
+    const advanced = weeklyEvent('legacy-row', {
+      start_at: '2027-01-09T15:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-08-01T10:00:00Z',
+      last_featured_occurrence_at: null,
+    });
+    expect(isFirstOccurrenceOfYear(advanced, [advanced], new Date('2027-01-05T12:00:00Z'))).toBe(true);
+  });
+
+  test('a legacy row featured in the ambiguous last-8-days-of-December window is not proven by legacy continuity', () => {
+    const advanced = weeklyEvent('legacy-ambiguous', {
+      start_at: '2027-01-15T15:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-12-28T10:00:00Z',
+      last_featured_occurrence_at: null,
+    });
+    expect(isFirstOccurrenceOfYear(advanced, [advanced], new Date('2027-01-05T12:00:00Z'))).toBe(false);
+  });
+
+  test('legacy continuity via a same-identity sibling: planning admits the row and stamps continuity', async () => {
+    // The previously-featured evidence lives on a DIFFERENT ingestion row of
+    // the same identity, itself already advanced into the current ET year
+    // (its own start_at is no longer prior-year evidence) — only its
+    // last_featured_at proves it shipped a prior-year occurrence.
+    const legacySibling = weeklyEvent('legacy-sibling', {
+      start_at: '2027-01-20T14:00:00Z',
+      times_featured: 1,
+      last_featured_at: '2026-08-01T10:00:00Z',
+      last_featured_occurrence_at: null,
+    });
+    const candidate = weeklyEvent('first-2027', {
+      start_at: '2027-01-09T15:00:00Z',
+      times_featured: 0,
+      last_featured_at: null,
+      last_featured_occurrence_at: null,
+    });
+    const rows = await filterRepeatedDateIdentities([candidate], {
+      reference: new Date('2027-01-05T12:00:00Z'),
+      identityPool: [legacySibling, candidate],
+      yearPool: [legacySibling, candidate],
+    });
+    expect(rows.map((r) => r.id)).toEqual(['first-2027']);
     expect(rows[0].__recurringFirstOfYear).toBe(true);
   });
 });

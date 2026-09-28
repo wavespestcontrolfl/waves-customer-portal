@@ -35,6 +35,7 @@ const {
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
   getActiveNewsletterTuesday,
+  FEATURED_ISSUE_LOOKAHEAD_MS,
 } = require('./event-freshness');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
@@ -326,6 +327,28 @@ function hasEarlierOccurrenceThisYear(event, pool, reference = new Date()) {
   });
 }
 
+/**
+ * Legacy continuity evidence for a row (or sibling) featured BEFORE
+ * last_featured_occurrence_at existed (migration 20260928110000 — NULL on
+ * every such row). last_featured_at is only the SEND time, and an issue
+ * covers events up to FEATURED_ISSUE_LOOKAHEAD_MS after it ships, so the
+ * featured occurrence's real date could fall anywhere in
+ * [last_featured_at, last_featured_at + lookahead]. When that WHOLE window
+ * still falls in the prior ET year, the occurrence certainly shipped last
+ * year — genuine continuity. When the window crosses into the current ET
+ * year (a send in the last FEATURED_ISSUE_LOOKAHEAD_MS of December), which
+ * year it actually shipped in is ambiguous, so this fails closed and does
+ * NOT count as continuity (Codex round 12, 2026-09-28).
+ */
+function hasLegacyContinuityEvidence(row, eventYear, reference = new Date()) {
+  if (!row?.last_featured_at || row.last_featured_occurrence_at) return false;
+  const lastFeatured = new Date(row.last_featured_at);
+  if (Number.isNaN(lastFeatured.getTime())) return false;
+  const lookaheadEnd = new Date(lastFeatured.getTime() + FEATURED_ISSUE_LOOKAHEAD_MS);
+  return etYearOf(lastFeatured, reference) === eventYear - 1
+    && etYearOf(lookaheadEnd, reference) === eventYear - 1;
+}
+
 function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   if (!event?.start_at) return false;
   const start = new Date(event.start_at).getTime();
@@ -351,9 +374,19 @@ function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
   // occurrence stamped last year (last_featured_occurrence_at) on this row or
   // a sibling. The stamp matters because RSS/iCal feeds advance the same
   // GUID/UID row in place, leaving no separate prior-year row behind.
+  //
+  // Preserve continuity for pre-migration featured rows: last_featured_occurrence_at
+  // is NULL on every row featured before migration 20260928110000, so a
+  // recurring RSS/iCal row featured before that deploy and later advanced in
+  // place into this year has no sibling and no occurrence stamp of its own —
+  // hasLegacyContinuityEvidence recovers that evidence from last_featured_at
+  // (fails closed on an ambiguous late-December send).
   const inPriorYear = (value) => Boolean(value) && etYearOf(value, reference) === eventYear - 1;
   const hasPriorYearOccurrence = inPriorYear(event.last_featured_occurrence_at)
-    || siblings.some((sibling) => inPriorYear(sibling.start_at) || inPriorYear(sibling.last_featured_occurrence_at));
+    || hasLegacyContinuityEvidence(event, eventYear, reference)
+    || siblings.some((sibling) => inPriorYear(sibling.start_at)
+      || inPriorYear(sibling.last_featured_occurrence_at)
+      || hasLegacyContinuityEvidence(sibling, eventYear, reference));
   if (hasPriorYearOccurrence) return true; // (b) continuity
 
   if (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true; // (b) debut
@@ -433,6 +466,48 @@ async function loadSharedYearPool(knex, rows, reference = new Date()) {
 }
 
 /**
+ * The ONE recurrence-policy stage shared by planning (filterRepeatedDateIdentities)
+ * and final send validation (assessFlagshipEventSelection), so the two can
+ * never re-derive a different verdict for the same event (Codex round 12,
+ * 2026-09-28 — the two re-deriving the same decisions independently is what
+ * kept letting a structural finding reappear).
+ *
+ * `debut`: when the caller already has pool-position-verified debut evidence
+ * (assessFlagshipEventSelection's issue-window pool — a stricter check than
+ * the plain classification test below, since it also confirms this row is
+ * the earliest in that pool), pass it through and it's used as-is. Otherwise
+ * this derives the plain (unpositioned) debut-evidence check — the same one
+ * isFirstOccurrenceOfYear's own continuity check and the starred-row
+ * carve-out use.
+ *
+ * Returns the pool-verified markers exactly as planning stamps them today:
+ * `__recurrenceOccurrenceCount` always rides along (isEligibleForFreshDigest
+ * needs it to recognize a repeated recurrence_type='unknown' identity as
+ * recurring at all); `__identityRecurring` only when the identity is
+ * recurring; `__recurringFirstOfYear` only for a continuity-proven ROUTINE
+ * row that isn't debut-proven (a verified debut needs no continuity marker —
+ * its own classification already clears isEligibleForFreshDigest's routine
+ * hard block).
+ */
+function evaluateRecurrence(event, { yearPool = [], reference = new Date(), debut = null } = {}) {
+  const occurrenceCount = identityOccurrenceCount(event, yearPool);
+  const isRecurringIdentity = identityIsRecurring(event, yearPool, occurrenceCount);
+  const firstOfYear = isRecurringIdentity ? isFirstOccurrenceOfYear(event, yearPool, reference) : true;
+  const isDebut = debut != null
+    ? Boolean(debut)
+    : (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event));
+
+  const markers = {
+    __recurrenceOccurrenceCount: occurrenceCount,
+    ...(isRecurringIdentity ? { __identityRecurring: true } : {}),
+    ...(isRecurringIdentity && firstOfYear && !isDebut && isRoutineRecurringEvent(event)
+      ? { __recurringFirstOfYear: true } : {}),
+  };
+
+  return { occurrenceCount, isRecurringIdentity, firstOfYear, debut: isDebut, markers };
+}
+
+/**
  * The ONE predicate that exempts a recurring identity from the same-issue
  * repeated-title rejection, shared verbatim by the planning filter
  * (filterRepeatedDateIdentities, below — reaching this branch never even
@@ -484,50 +559,31 @@ async function filterRepeatedDateIdentities(
     // Owner ruling 2026-09-27: ANY recurring identity — including the
     // annual/seasonal/unknown-with-repeats types the routine list above
     // never covered — is eligible only for its first occurrence of the ET
-    // calendar year.
-    const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
-    const isRecurringIdentity = identityIsRecurring(event, calendarYearPool, occurrenceCount);
+    // calendar year. evaluateRecurrence is the ONE stage that decides this,
+    // shared with assessFlagshipEventSelection so the two can't diverge.
+    const rec = evaluateRecurrence(event, { yearPool: calendarYearPool, reference });
 
     if (event?.admin_status === 'featured') {
       // The star bypasses this filter's drops, but still carries the same
       // verified recurrence evidence final validation computes, so the
       // downstream isEligibleForFreshDigest check judges a starred
       // continuity-proven series exactly as validation will.
-      if (!isRecurringIdentity) return event;
-      const starredFirstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
-      const starredDebut = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
-      if (starredFirstOfYear && !starredDebut && isRoutineRecurringEvent(event)) {
-        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
-      }
-      return { ...event, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
+      return rec.isRecurringIdentity ? { ...event, ...rec.markers } : event;
     }
 
-    if (isRecurringIdentity) {
-      const firstOfYear = isFirstOccurrenceOfYear(event, calendarYearPool, reference);
+    if (rec.isRecurringIdentity) {
       // Reaching here already proves isRecurringFirstOfYearExempt(true, firstOfYear)
       // decides this branch's fate — spelled out via the shared predicate so
       // this stays provably the same rule assessFlagshipEventSelection uses,
       // not a parallel re-implementation.
-      if (!isRecurringFirstOfYearExempt(isRecurringIdentity, firstOfYear)) return null;
-      const debutProof = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+      if (!isRecurringFirstOfYearExempt(rec.isRecurringIdentity, rec.firstOfYear)) return null;
       // Debut evidence alone already proves recurring-ness (isRoutineRecurring
-      // Event's own metadata check) — no occurrenceCount needed, and object
-      // identity is preserved unchanged, same as the plain debut carve-out
-      // below.
-      if (debutProof) return event;
-      if (isRoutineRecurringEvent(event)) {
-        // Proven by continuity, not debut wording — isEligibleForFreshDigest's
-        // routine hard-block only recognizes debut evidence on its own, so
-        // stamp the pool-verified marker it also accepts.
-        return { ...event, __recurringFirstOfYear: true, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
-      }
-      // Annual/seasonal/unknown-with-repeats: __recurrenceOccurrenceCount
-      // rides along so a LATER isEligibleForFreshDigest(row) call —
-      // event-curation.js's fetchCurationCandidates runs it right after this
-      // filter — can also correctly recognize a repeated
-      // recurrence_type='unknown' identity as recurring (Codex P2,
-      // 2026-09-27; see event-freshness.js's own use of this marker).
-      return { ...event, __recurrenceOccurrenceCount: occurrenceCount, __identityRecurring: true };
+      // Event's own metadata check) — no marker needed, and object identity
+      // is preserved unchanged, same as the plain debut carve-out below.
+      if (rec.debut) return event;
+      // Continuity (routine) or annual/seasonal/unknown-with-repeats: stamp
+      // the pool-verified markers isEligibleForFreshDigest also accepts.
+      return { ...event, ...rec.markers };
     }
 
     if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
@@ -535,6 +591,83 @@ async function filterRepeatedDateIdentities(
     if (repeatedTitles.has(normalizeDigestTitle(event?.title))) return null;
     return event;
   }).filter(Boolean);
+}
+
+/**
+ * Whether one locked event, already resolved to its recurrence verdict
+ * (`rec`, from evaluateRecurrence) and its issue-window facts (`ctx`), still
+ * clears every final-validation gate. Split out of assessFlagshipEventSelection's
+ * loop body purely to keep that loop's own complexity low — same checks, same
+ * order, same short-circuiting.
+ */
+function isLockedEventStillEligible(event, rec, ctx) {
+  const {
+    approved, inIssueWindow, starred, debut, repeatedTitles, featuredHistory, reference, yearIdentityPool,
+    eligibilityCheckEvent,
+  } = ctx;
+
+  if (!approved || !inIssueWindow) return false;
+
+  // Codex P1, 2026-09-27: a verified recurring first-of-year occurrence is
+  // exempt from the repeated-title rejection here exactly as it is in
+  // filterRepeatedDateIdentities (isRecurringFirstOfYearExempt) — without
+  // this, a continuity-proven weekly/monthly row that planning already
+  // admitted fails final validation the instant a later sibling of the
+  // same series exists anywhere in the reloaded pool, which for a real
+  // recurring series is always.
+  if (!starred && !debut && !isRecurringFirstOfYearExempt(rec.isRecurringIdentity, rec.firstOfYear)
+      && repeatedTitles.has(normalizeDigestTitle(event.title))) return false;
+
+  if (!starred && rec.isRecurringIdentity && !rec.firstOfYear) return false;
+
+  if (!isEligibleForFreshDigest(eligibilityCheckEvent, reference)) return false;
+
+  if (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
+    occurrenceCount: rec.occurrenceCount,
+    identityRecurring: rec.isRecurringIdentity,
+    firstOfYear: !hasEarlierOccurrenceThisYear(event, yearIdentityPool, reference),
+  })) return false;
+
+  return true;
+}
+
+/**
+ * Resolve one locked event's issue-window facts, recurrence verdict, and
+ * final eligibility in one place — the per-event work
+ * assessFlagshipEventSelection's loop used to do inline, split out purely to
+ * keep that loop's own complexity low (same checks, same order).
+ */
+function resolveLockedEventEligibility(event, {
+  windowStart, windowEnd, issueIdentityPool, yearIdentityPool, reference, featuredHistory, repeatedTitles,
+}) {
+  const start = event.start_at ? new Date(event.start_at) : null;
+  const inIssueWindow = start && !Number.isNaN(start.getTime())
+    && start >= windowStart && start <= windowEnd;
+  const approved = ['approved', 'featured'].includes(event.admin_status);
+  // Same carve-outs as the planning filters, or the final proof/send gate
+  // would reject a lineup planning deliberately admitted: a STAR bypasses
+  // the repeated-title and identity-history checks; a series DEBUT bypasses
+  // repeated-title only (prior shipped history disproves debut). This debut
+  // check is pool-POSITION-verified (isFirstOccurrenceInPool against the
+  // issue window pool) — stricter than evaluateRecurrence's own plain
+  // classification check — since final validation is the last line of
+  // defense; passed into evaluateRecurrence so its markers agree.
+  const starred = event.admin_status === 'featured';
+  const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
+    && isFirstOccurrenceInPool(event, issueIdentityPool);
+
+  // Owner ruling 2026-09-27: any recurring identity — including the
+  // annual/seasonal/unknown-with-repeats types the repeated-title check
+  // above never covered — is eligible only for its first occurrence of the
+  // ET calendar year. evaluateRecurrence is the ONE stage that decides this,
+  // shared with filterRepeatedDateIdentities so the two can't diverge.
+  const rec = evaluateRecurrence(event, { yearPool: yearIdentityPool, reference, debut });
+  const eligibilityCheckEvent = { ...event, ...rec.markers };
+
+  return isLockedEventStillEligible(event, rec, {
+    approved, inIssueWindow, starred, debut, repeatedTitles, featuredHistory, reference, yearIdentityPool,
+    eligibilityCheckEvent,
+  });
 }
 
 function assessFlagshipEventSelection(
@@ -569,58 +702,10 @@ function assessFlagshipEventSelection(
   const repeatedTitles = repeatedDateTitleKeys(issueIdentityPool);
   const eligible = [];
   for (const event of ordered) {
-    const start = event.start_at ? new Date(event.start_at) : null;
-    const inIssueWindow = start && !Number.isNaN(start.getTime())
-      && start >= windowStart && start <= windowEnd;
-    const approved = ['approved', 'featured'].includes(event.admin_status);
-    // Same carve-outs as the planning filters, or the final proof/send gate
-    // would reject a lineup planning deliberately admitted: a STAR bypasses
-    // the repeated-title and identity-history checks; a series DEBUT
-    // bypasses repeated-title only (prior shipped history disproves debut).
-    const starred = event.admin_status === 'featured';
-    const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
-      && isFirstOccurrenceInPool(event, issueIdentityPool);
-
-    // Owner ruling 2026-09-27: any recurring identity — including the
-    // annual/seasonal/unknown-with-repeats types the repeated-title check
-    // above never covered — is eligible only for its first occurrence of the
-    // ET calendar year. A continuity-proven (not debut-worded) routine
-    // occurrence also needs isEligibleForFreshDigest's own hard block
-    // cleared, so it gets the same pool-verified marker
-    // filterRepeatedDateIdentities stamps.
-    const occurrenceCount = identityOccurrenceCount(event, yearIdentityPool);
-    const isRecurringIdentity = identityIsRecurring(event, yearIdentityPool, occurrenceCount);
-    const firstOfYear = !isRecurringIdentity || isFirstOccurrenceOfYear(event, yearIdentityPool, reference);
-    // __recurrenceOccurrenceCount rides along regardless of the
-    // __recurringFirstOfYear branch, same reasoning as
-    // filterRepeatedDateIdentities: isEligibleForFreshDigest needs it to
-    // recognize a repeated recurrence_type='unknown' identity as recurring
-    // at all (Codex P2, 2026-09-27).
-    const eligibilityCheckEvent = {
-      ...event,
-      ...(isRecurringIdentity && firstOfYear && isRoutineRecurringEvent(event) && !debut
-        ? { __recurringFirstOfYear: true } : {}),
-      __recurrenceOccurrenceCount: occurrenceCount,
-      ...(isRecurringIdentity ? { __identityRecurring: true } : {}),
-    };
-
-    // Codex P1, 2026-09-27: a verified recurring first-of-year occurrence is
-    // exempt from the repeated-title rejection here exactly as it is in
-    // filterRepeatedDateIdentities (isRecurringFirstOfYearExempt) — without
-    // this, a continuity-proven weekly/monthly row that planning already
-    // admitted fails final validation the instant a later sibling of the
-    // same series exists anywhere in the reloaded pool, which for a real
-    // recurring series is always.
-    if (!approved || !inIssueWindow
-        || (!starred && !debut && !isRecurringFirstOfYearExempt(isRecurringIdentity, firstOfYear)
-          && repeatedTitles.has(normalizeDigestTitle(event.title)))
-        || (!starred && isRecurringIdentity && !firstOfYear)
-        || !isEligibleForFreshDigest(eligibilityCheckEvent, reference)
-        || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference, {
-          occurrenceCount,
-          identityRecurring: isRecurringIdentity,
-          firstOfYear: !hasEarlierOccurrenceThisYear(event, yearIdentityPool, reference),
-        }))) {
+    const eligibleEvent = resolveLockedEventEligibility(event, {
+      windowStart, windowEnd, issueIdentityPool, yearIdentityPool, reference, featuredHistory, repeatedTitles,
+    });
+    if (!eligibleEvent) {
       errors.push(`Locked event is no longer eligible: ${event.title || event.id}.`);
       continue;
     }
@@ -686,7 +771,11 @@ module.exports = {
   isMergedAwaySibling,
   isRecurringFirstOfYearExempt,
   identityOccurrenceCount,
+  identityIsRecurring,
+  hasEarlierOccurrenceThisYear,
+  hasLegacyContinuityEvidence,
   isFirstOccurrenceOfYear,
+  evaluateRecurrence,
   loadYearIdentityPool,
   loadSharedYearPool,
   isPreviouslyFeaturedIdentity,
