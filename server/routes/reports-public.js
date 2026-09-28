@@ -2177,11 +2177,22 @@ router.get('/:token', async (req, res, next) => {
       // must re-render the cached document.
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
+      // Hoisted here (rather than redeclared further down, where it used to
+      // live right before resolveCanonicalLawnRender) so the photo-set
+      // signature's lawn-photo resolution and the canonical lawn render
+      // below read the exact SAME propertyHistoryEnabled value, instead of
+      // each independently re-deriving its own default from the gate
+      // (Sonnet fallback-audit P1, 2026-09-28). A bare env-flag read, so
+      // hoisting it earlier changes nothing about when the gate is checked.
+      const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
       // Photo-set key component + render fence: closeout photo recovery can
       // attach rows while this untracked render runs (Codex #4091 P1). The
       // parked-summary marker is derived from THIS loaded snapshot; the
       // post-render re-read below sees live state (photo-set-signature.js).
-      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
+      // lawnFields: `service` is already service_records.* (loaded above) —
+      // reuse it so the lawn-photo identity lookup skips a second
+      // service_records read (Sonnet fallback-audit P1, 2026-09-28).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -2236,7 +2247,9 @@ router.get('/:token', async (req, res, next) => {
         // ONE canonical lookup feeds BOTH the pin and the storage-key component
         // (#3172 r1) — two lookups can straddle a selection change and cache a
         // B-pinned PDF under A's key, which is the race this closes.
-        const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+        // propertyHistoryEnabled is hoisted above (before photoSetSignature),
+        // not re-read here, so every lawn-identity resolution in this handler
+        // shares the exact same value.
         const canonical = await resolveCanonicalLawnRender(service, db, { propertyHistoryEnabled });
         const canonicalPin = canonical.pin;
         laRenderSignature = canonical.signature;
@@ -2336,7 +2349,7 @@ router.get('/:token', async (req, res, next) => {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
           logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
-        } else if (await reportPhotoSetPdfSignature(service.id, db) !== photoSetSignature) {
+        } else if (await reportPhotoSetPdfSignature(service.id, db, { propertyHistoryEnabled }) !== photoSetSignature) {
           // Recovered closeout photos landed mid-render: this output describes
           // the OLD photo set and must not become the cached document.
           logger.warn(`[reports-public] photo set changed during PDF render for ${service.id} — not caching this render`);
