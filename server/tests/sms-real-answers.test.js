@@ -168,9 +168,8 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
     let prompt = buildSystemPrompt();
     expect(prompt).toMatch(/HELD FOR A PERSON: billing disputes, chemical\/medical concerns, legal threats\./);
-    expect(prompt).toContain(
-      '- COMPLAINTS: answer from the facts, acknowledge what happened, and — if it fits — offer a free re-service using 2–3 SPECIFIC times from OPEN TIMES, adding {"type":"book_appointment"} once they confirm one.'
-    );
+    // Codex r6 P1: the offer is gated on the FREE RE-SERVICE eligibility fact
+    expect(prompt).toContain('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible');
     expect(prompt).not.toContain('BILLING DISPUTES: answer from the facts only');
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
 
@@ -1646,5 +1645,85 @@ describe('replyQuotesUngroundedAmount — amounts are authorized by MEANING (Cod
   test('a reply that states both, each backed by its own fact → grounded', () => {
     const context = { billing: { outstandingBalance: 120.5, recentPayments: [{ amount: 95 }] } };
     expect(replyQuotesUngroundedAmount('We received your $95 payment; your remaining balance is $120.50.', context)).toBe(false);
+  });
+});
+
+describe('free re-service is an entitlement resolved through the existing mechanism (Codex r6 P1)', () => {
+  const prior = { ra: process.env.GATE_SMS_REAL_ANSWERS, c: process.env.GATE_SMS_AGENT_COMPLAINTS };
+  const restore = () => {
+    for (const [k, v] of [['GATE_SMS_REAL_ANSWERS', prior.ra], ['GATE_SMS_AGENT_COMPLAINTS', prior.c]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  };
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; });
+  afterEach(() => { restore(); jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../models/db'); jest.resetModules(); });
+
+  const CONTEXT = { summary: 'Dana — Quarterly Pest, Venice', upcomingServices: [] };
+
+  test('prompt: the complaint rule offers a free re-service only off the FREE RE-SERVICE fact, via the re-service link, never OPEN TIMES', () => {
+    const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible');
+    expect(prompt).toContain('{"type":"escalate","note":"send_reservice_link"}');
+    expect(prompt).toContain('NEVER quote OPEN TIMES for a re-service');
+    expect(prompt).not.toContain('offer a free re-service using 2–3 SPECIFIC times from OPEN TIMES');
+  });
+
+  test('facts block: the line renders only with BOTH gates on, and fails closed to "not eligible"', () => {
+    const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest', 'lawn'] })).toContain('FREE RE-SERVICE: eligible for pest and lawn');
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: [] })).toContain('FREE RE-SERVICE: not eligible');
+    expect(buildFactsBlock(CONTEXT)).toContain('FREE RE-SERVICE: not eligible'); // no lanes passed
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
+    process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+    delete process.env.GATE_SMS_REAL_ANSWERS;
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
+  });
+
+  function loadWith({ lanes = ['pest'], selfServe = true, row = { id: 'cust-1', active: true }, throws = false } = {}) {
+    jest.resetModules();
+    const reserviceLanesForCustomer = jest.fn(async () => { if (throws) throw new Error('boom'); return lanes; });
+    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => selfServe, reserviceLanesForCustomer }));
+    jest.doMock('../models/db', () => {
+      const db = jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+      return db;
+    });
+    return { drafter: require('../services/sms-shadow-drafter'), reserviceLanesForCustomer };
+  }
+
+  test('fetchReserviceLanes: eligible lanes come from reserviceLanesForCustomer on the live customer row', async () => {
+    const { drafter, reserviceLanesForCustomer } = loadWith({ lanes: ['pest', 'lawn'] });
+    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['pest', 'lawn']);
+    expect(reserviceLanesForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }));
+  });
+
+  test('fetchReserviceLanes fails closed: self-serve off, inactive/missing customer, no id, or a lookup error → []', async () => {
+    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
+    await expect(loadWith({ row: { id: 'cust-1', active: false } }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
+    await expect(loadWith({ row: null }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
+    await expect(loadWith({}).drafter.fetchReserviceLanes({ customerId: null })).resolves.toEqual([]);
+    await expect(loadWith({ throws: true }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
+  });
+
+  test('fetchReserviceLanes: either gate off → null (no fact rendered, mechanism never consulted)', async () => {
+    delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+    const { drafter, reserviceLanesForCustomer } = loadWith({});
+    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toBeNull();
+    expect(reserviceLanesForCustomer).not.toHaveBeenCalled();
+  });
+
+  test('validateReserviceOffer: a free-visit offer is a violation unless the facts say eligible', () => {
+    const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+    const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+    for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary visit is on us.']) {
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: 'no such line' }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: eligible }).ok).toBe(true);
+    }
+    expect(validateReserviceOffer({ reply: 'I am sorry about that — a manager will reach out within the hour.', factsBlock: notEligible }).ok).toBe(true);
+    delete process.env.GATE_SMS_REAL_ANSWERS; // gate off: the check does not run
+    expect(validateReserviceOffer({ reply: 'We can come back for a free re-service.', factsBlock: notEligible }).ok).toBe(true);
   });
 });

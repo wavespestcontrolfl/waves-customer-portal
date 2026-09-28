@@ -245,7 +245,14 @@ function realAnswersHandoffBullets() {
       : "- Every category that used to hold for a person now answers from the facts instead — see the category rules below.",
   ];
   if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) {
-    lines.push('- COMPLAINTS: answer from the facts, acknowledge what happened, and — if it fits — offer a free re-service using 2–3 SPECIFIC times from OPEN TIMES, adding {"type":"book_appointment"} once they confirm one.');
+    // Codex r6 P1: a free callback is an entitlement, not a courtesy — the
+    // existing mechanism (reservice-scheduler.reserviceLanesForCustomer)
+    // grants it only to eligible active pest/lawn lanes and the customer
+    // books it on the /reservice page, which shows its OWN availability.
+    // Eligibility therefore rides in as a per-draft FACT, and the offer
+    // routes to that link through an escalation a teammate owns — never
+    // generic OPEN TIMES, never a promise the facts don't back.
+    lines.push('- COMPLAINTS: answer from the facts and acknowledge what happened. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists — then add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts their free re-service booking link (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says not eligible, or is absent, never offer or imply a free visit: acknowledge, add {"type":"escalate"}, and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.');
   }
   if (gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES')) {
     lines.push('- BILLING DISPUTES: answer from the facts only — state the real numbers from BILLING, never resolve the dispute or offer a credit/refund/discount that is not in the facts.');
@@ -333,6 +340,62 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // fast-resolving fetch too, not just on an actual timeout).
     if (timer) clearTimeout(timer);
   }
+}
+
+// Free re-service eligibility for the facts block (Codex r6 P1), through
+// the EXISTING mechanism — reservice-scheduler.reserviceLanesForCustomer,
+// the same check the composer's /reservice-link helper and the public
+// /reservice page run. Only when the real-answers AND complaints gates are
+// on. Fail-closed everywhere: self-serve off, an inactive or missing
+// customer, a lookup error or a timeout all resolve to [] (not eligible).
+// Returns null when the gates are off (no fact is rendered at all).
+async function fetchReserviceLanes({ customerId } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
+  if (!customerId) return [];
+  let timer = null;
+  try {
+    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) return [];
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const lookup = (async () => {
+      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
+      if (!row || row.active === false) return [];
+      return reserviceLanesForCustomer(row);
+    })();
+    const lanes = await Promise.race([lookup, timeout]);
+    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+  } catch (err) {
+    logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The rendered fact line, and its reader. One line, fixed wording, so the
+// deterministic check below and a frozen replay read the same thing.
+const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
+function reserviceFactLine(lanes) {
+  const list = Array.isArray(lanes) ? lanes : [];
+  return list.length
+    ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
+    : `${RESERVICE_FACT_LABEL} not eligible`;
+}
+function factsSayReserviceEligible(factsBlock) {
+  return String(factsBlock || '').split('\n').some((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible`));
+}
+
+// Deterministic backstop: a reply that offers a free visit while the facts
+// do not say eligible is a violation, fed into the same revise/verify loop
+// (and enforced in single-pass mode, where no verifier would catch it).
+const FREE_RESERVICE_OFFER_RE = /\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b[^.?!\n]{0,60}\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|service|callback|come back|return)\b|\b(?:re-?service|re-?treat(?:ment)?|re-?spray|visit|treatment|callback|come back|return)\b[^.?!\n]{0,60}\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\b/i;
+function validateReserviceOffer({ reply, factsBlock }) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  if (!FREE_RESERVICE_OFFER_RE.test(String(reply || ''))) return { ok: true, violations: [] };
+  if (factsSayReserviceEligible(factsBlock)) return { ok: true, violations: [] };
+  return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
 }
 
 // The service a live (non-estimate) scheduling reply is about: the next
@@ -1083,6 +1146,12 @@ function buildFactsBlock(context, extras = {}) {
   const slaSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
+  // Free re-service eligibility (Codex r6 P1) — only when the real-answers
+  // AND complaints gates are on; a caller that passes no lanes renders
+  // "not eligible" (fail closed). Resolved upstream (fetchReserviceLanes).
+  const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS') && gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+    ? `${reserviceFactLine(extras.reserviceLanes)}\n`
+    : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
   // grounding from ANY untrusted text — property notes, call summaries, and
@@ -1338,7 +1407,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${openTimesSection}${slaSection}BILLING:
+${openTimesSection}${slaSection}${reserviceSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -1625,7 +1694,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes, estimateId, serviceType,
     });
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
+  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
+  // draft resolves eligibility through the existing re-service mechanism.
+  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -1678,6 +1750,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock });
+    if (!singlePassReservice.ok) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push(...singlePassReservice.violations);
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -1708,6 +1785,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
+    if (!reserviceCheck.ok) {
+      timesCheck.ok = false;
+      timesCheck.violations.push(...reserviceCheck.violations);
+    }
 
     let verdict;
     if (!timesCheck.ok) {
@@ -2212,4 +2294,7 @@ module.exports = {
   replyQuotesUngroundedAmount,
   replyBindsDeclaredDays,
   liveServiceType,
+  fetchReserviceLanes,
+  reserviceFactLine,
+  validateReserviceOffer,
 };

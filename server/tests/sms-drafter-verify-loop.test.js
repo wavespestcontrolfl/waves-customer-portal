@@ -493,3 +493,45 @@ describe('generateGroundedDraft — single-pass mode requires the reply to name 
     expect(r.openTimesSnapshot).toBeNull();
   });
 });
+
+// Codex r6 P1: an ineligible customer must never be promised a free visit.
+describe('generateGroundedDraft — a free re-service offer needs the facts to say eligible', () => {
+  const prior = { ra: process.env.GATE_SMS_REAL_ANSWERS, c: process.env.GATE_SMS_AGENT_COMPLAINTS };
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; });
+  afterEach(() => {
+    for (const [k, v] of [['GATE_SMS_REAL_ANSWERS', prior.ra], ['GATE_SMS_AGENT_COMPLAINTS', prior.c]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    jest.dontMock('../services/reservice-scheduler'); jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  function setup(lanes) {
+    jest.resetModules();
+    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true, reserviceLanesForCustomer: jest.fn(async () => lanes) }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
+    const drafter = require('../services/sms-shadow-drafter');
+    jest.spyOn(drafter, 'fetchReserviceLanes'); // observed only; the real one runs
+    return drafter;
+  }
+  const args = (client) => ({
+    client, context: { ...CTX, customer: { id: 'cust-1' } }, inboundMessage: 'I still have ants after the treatment',
+    intent: { intent: 'complaint' }, schedulingIntent: false, city: 'Venice',
+  });
+
+  test('NOT eligible: the offer is caught deterministically, then a revision that escalates instead converges', async () => {
+    const drafter = setup([]);
+    const db = require('../models/db');
+    if (db.mockImplementation) db.mockImplementation(() => ({ where: () => ({ first: async () => ({ id: 'cust-1', active: true }) }) }));
+    const client = makeClient([
+      { reply: 'So sorry — we will come back for a free re-service.', intended_actions: [], missing_info: null },
+      { reply: 'So sorry about that — a manager will reach out within the hour.', intended_actions: [{ type: 'escalate' }], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    const r = await drafter.generateGroundedDraft(args(client));
+    expect(r.factsBlock).toContain('FREE RE-SERVICE: not eligible');
+    expect(r.converged).toBe(true);
+    expect(r.passes).toBe(2);
+    expect(client.calls).toHaveLength(3); // draft + revise + verify — the first failure never reached the verifier
+    expect(r.parsed.reply).not.toMatch(/free/i);
+  });
+});
