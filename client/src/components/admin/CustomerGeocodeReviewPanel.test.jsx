@@ -55,6 +55,7 @@ describe("CustomerGeocodeReviewPanel", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("hides the whole feature when the server gate is off", async () => {
@@ -102,6 +103,34 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.queryByText("internal_zero_results")).not.toBeInTheDocument();
   });
 
+  it("opens the linked customer directly when no draft is open", async () => {
+    const onSelectCustomer = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+    render(<CustomerGeocodeReviewPanel onSelectCustomer={onSelectCustomer} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Synthetic Customer" }));
+    expect(onSelectCustomer).toHaveBeenCalledWith("customer-1");
+  });
+
+  it("confirms before discarding an active draft to open the linked customer", async () => {
+    const onSelectCustomer = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<CustomerGeocodeReviewPanel onSelectCustomer={onSelectCustomer} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Do not lose this draft." } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Synthetic Customer" }));
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(onSelectCustomer).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Evidence")).toHaveValue("Do not lose this draft.");
+
+    window.confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Synthetic Customer" }));
+    expect(onSelectCustomer).toHaveBeenCalledWith("customer-1");
+  });
+
   it.each([
     ["provider_unavailable", "Retry saved address", "retry"],
     ["verified", "Revoke verification", "revoke"],
@@ -118,6 +147,7 @@ describe("CustomerGeocodeReviewPanel", () => {
       },
     });
     const calls = [];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
       calls.push([String(url), options]);
       return response({ enabled: true, ...detail });
@@ -125,9 +155,29 @@ describe("CustomerGeocodeReviewPanel", () => {
     render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
     fireEvent.click(await screen.findByRole("button", { name: /Primary service location review/ }));
     fireEvent.click(screen.getByRole("button", { name: buttonName }));
+    if (action === "revoke") expect(window.confirm).toHaveBeenCalledOnce();
     await waitFor(() => expect(calls.some(([, options]) => options.method === "POST")).toBe(true));
     const post = calls.find(([, options]) => options.method === "POST");
     expect(JSON.parse(post[1].body)).toEqual({ revision: "revision-1", action });
+  });
+
+  it("does not revoke a pin when the confirmation is declined", async () => {
+    const detail = record({
+      customer: { ...record().customer, latitude: 27.49, longitude: -82.57 },
+      review: { status: "verified", reason: "opaque_internal_reason", latitude: 27.49, longitude: -82.57 },
+    });
+    const calls = [];
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      calls.push([String(url), options]);
+      return response({ enabled: true, ...detail });
+    }));
+    render(<CustomerGeocodeReviewPanel customerId="customer-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /Primary service location review/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke verification" }));
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(calls.some(([, options]) => options.method === "POST")).toBe(false);
+    expect(screen.getByRole("button", { name: "Revoke verification" })).toBeInTheDocument();
   });
 
   it("keeps the current-page draft and disables pagination until it is closed", async () => {
@@ -619,6 +669,69 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(await screen.findByText("No addresses need review.")).toBeInTheDocument();
     expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument();
     expect(screen.queryByText(/current saved review is unavailable/i)).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale refresh conflict for a draft that was already canceled", async () => {
+    const original = record();
+    const changedElsewhere = record({
+      revision: "revision-2",
+      customer: { ...record().customer, latitude: 27.55, longitude: -82.65 },
+    });
+    const pendingRefresh = deferred();
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      reads += 1;
+      if (reads === 1) return response({ enabled: true, records: [original], total: 1 });
+      if (reads === 2) return pendingRefresh.promise;
+      return response({ enabled: true, records: [changedElsewhere], total: 1 });
+    }));
+
+    const view = render(<CustomerGeocodeReviewPanel refreshToken={1} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Will be canceled before the refresh lands." } });
+
+    view.rerender(<CustomerGeocodeReviewPanel refreshToken={2} />);
+    await screen.findByText("Loading address review…");
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument();
+
+    await act(async () => pendingRefresh.resolve(await response({ enabled: true, records: [changedElsewhere], total: 1 })));
+
+    // The canceled draft must not reopen as an orphaned, stuck conflict —
+    // there is no form left to show "I reviewed the latest record" on, and
+    // the row's normal actions must still work.
+    expect(screen.queryByRole("button", { name: "I reviewed the latest record" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review location" })).toBeEnabled();
+  });
+
+  it("keeps the queue enabled and drops only the vanished record on a customer_not_found 404", async () => {
+    const target = record({
+      customer: { ...record().customer, latitude: null, longitude: null },
+      review: { status: "provider_unavailable" },
+    });
+    const remaining = record({
+      customer: { ...record().customer, id: "customer-2", first_name: "Still", last_name: "Queued" },
+    });
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ error: "Customer not found", code: "customer_not_found" }, 404);
+      reads += 1;
+      return reads === 1
+        ? response({ enabled: true, records: [target], total: 1 })
+        : response({ enabled: true, records: [remaining], total: 1 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel onSelectCustomer={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry saved address" }));
+
+    // A missing single customer must not be treated like the whole route or
+    // gate going away — the queue stays live and simply reloads.
+    expect(await screen.findByRole("button", { name: "Still Queued" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Address review queue/ })).toBeInTheDocument();
   });
 
   it("does not let an old customer save refresh or replace the next customer", async () => {

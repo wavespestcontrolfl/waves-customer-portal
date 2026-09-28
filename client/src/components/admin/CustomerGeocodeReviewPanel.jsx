@@ -87,14 +87,23 @@ function ReviewEvidence({ review }) {
   );
 }
 
-function ReviewSummary({ record, onSelectCustomer }) {
+function ReviewSummary({ record, active, onSelectCustomer }) {
   const { status, label, help } = reviewStatus(record.review);
   return (
     <>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {onSelectCustomer ? (
-            <button type="button" className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring" onClick={() => onSelectCustomer(record.customer.id)}>{customerName(record.customer)}</button>
+            <button
+              type="button"
+              className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring"
+              onClick={() => {
+                if (active && !window.confirm("Opening this customer will discard the unsaved address review draft. Continue?")) return;
+                onSelectCustomer(record.customer.id);
+              }}
+            >
+              {customerName(record.customer)}
+            </button>
           ) : <div className="text-14 font-medium text-zinc-900">Primary service location</div>}
           <div className="text-14 text-ink-secondary break-words">{addressText(record.customer) || "No complete address on file"}</div>
         </div>
@@ -113,7 +122,19 @@ function ReviewActions({ record, disabled, saving, onEdit, onResolve }) {
     <div className="flex flex-wrap gap-2 mt-2">
       <Button variant="secondary" disabled={disabled} onClick={onEdit}>Review location</Button>
       {retryAvailable && <Button variant="secondary" disabled={disabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "retry" })}>Retry saved address</Button>}
-      {canRevokePin(record) && <Button variant="secondary" disabled={disabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "revoke" })}>Revoke verification</Button>}
+      {canRevokePin(record) && (
+        <Button
+          variant="secondary"
+          disabled={disabled}
+          loading={saving}
+          onClick={() => {
+            if (!window.confirm("Revoke this verified location? This clears the customer's, primary property's, and any matching future visit's routing coordinates until it is reviewed again.")) return;
+            onResolve({ revision: record.revision, action: "revoke" });
+          }}
+        >
+          Revoke verification
+        </Button>
+      )}
     </div>
   );
 }
@@ -123,7 +144,7 @@ function ReviewRecord({ record, active, actionsDisabled, saving, error, conflict
     <div className="py-3 border-t border-hairline border-zinc-200 first:border-t-0">
       {!unavailable && (
         <>
-          <ReviewSummary record={record} onSelectCustomer={onSelectCustomer} />
+          <ReviewSummary record={record} active={active} onSelectCustomer={onSelectCustomer} />
           {!active && <ReviewActions record={record} disabled={actionsDisabled} saving={saving} onEdit={onEdit} onResolve={onResolve} />}
         </>
       )}
@@ -184,7 +205,12 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     }
     setState({ enabled: true, records, total });
     setLoadError("");
-    if (previousRecord && refreshedRecord && previousRecord.revision !== refreshedRecord.revision) {
+    // editingId is captured when the request starts; if the admin canceled
+    // the draft before this response arrived, activeIdRef no longer matches
+    // it and there is no open form left to acknowledge a conflict on — treat
+    // this the same as no conflict rather than re-opening a stale one.
+    const stillEditing = editingId && activeIdRef.current === editingId;
+    if (stillEditing && previousRecord && refreshedRecord && previousRecord.revision !== refreshedRecord.revision) {
       setConflictId(editingId);
       setError("This review changed elsewhere. Your entries are preserved, but saving is paused until you review the latest address and pin.");
     } else if (!preserveDraft) setError("");
@@ -257,6 +283,23 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     return () => abortRef.current?.abort();
   }, [load, refreshToken]);
 
+  // A resolve 404 means either the whole review route/gate went away, or
+  // (distinguished by code) just the one record this admin was looking at.
+  // Split out so `resolve`'s own branching stays under the complexity cap.
+  const handleResolveNotFound = useCallback(async (saveError) => {
+    if (saveError.code !== "customer_not_found") {
+      setState({ enabled: false, records: [], total: 0 });
+      return;
+    }
+    // This one queued customer disappeared (deleted elsewhere) — the review
+    // route and gate are still live. Drop the stale draft and reload so
+    // only that record clears from the queue.
+    activeIdRef.current = null;
+    setActiveId(null);
+    setConflictId(null);
+    await load({ preserveDraft: false });
+  }, [load]);
+
   const resolve = async (record, body) => {
     if (saveAbortRef.current) return;
     const scope = scopeRef.current;
@@ -287,7 +330,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
     } catch (saveError) {
       if (saveError.name === "AbortError" || !current()) return;
       if (saveError.status === 404) {
-        setState({ enabled: false, records: [], total: 0 });
+        await handleResolveNotFound(saveError);
         return;
       }
       if (saveError.status === 409) {
