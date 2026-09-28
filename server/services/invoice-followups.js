@@ -50,6 +50,8 @@ const {
   billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
+const { anchorInvoiceOf } = require('./collections/account-anchor');
+const { etDateString } = require('../utils/datetime-et');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -100,9 +102,13 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
+// invoiceIds (combined touch, GATE_DUNNING_COMBINED_MESSAGE): every quoted
+// invoice must be eligible, not just one — rail-guard.js's aggregate-rail
+// contract. Omitted (the single-invoice path's every call site), the
+// verdict is scoped to `invoiceId` alone, unchanged.
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false, invoiceIds = null) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
+    customerId, invoiceId, invoiceIds, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
   });
 }
 
@@ -303,6 +309,37 @@ function ladderThrough90Live() {
 function followupSteps() {
   return ladderThrough90Live() ? config.stepsThrough90 : config.steps;
 }
+
+// GATE_DUNNING_COMBINED_MESSAGE (dunning unification PR 2b), read at call
+// time (strict 'true'): a customer with 2+ overdue invoices whose follow-up
+// touches are due in the SAME run gets ONE combined text and ONE combined
+// email instead of one per invoice. Off: byte-identical to today (every due
+// row fires through fireStep exactly as before). Dark: off unless exactly
+// 'true'. Wording awaits owner approval — do not flip until it is signed
+// off (see the seed migration).
+function combinedMessageLive() {
+  return process.env.GATE_DUNNING_COMBINED_MESSAGE === 'true';
+}
+
+// SMS/email template keys for the combined touch, keyed by the SAME step id
+// FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID uses (stable across the Day 90 ladder
+// gate — see config/invoice-followups.js).
+const COMBINED_SMS_TEMPLATE_BY_STEP_ID = {
+  d3_friendly: 'invoice_followup_combined_3day',
+  d7_reminder: 'invoice_followup_combined_10day',
+  d14_firmer: 'invoice_followup_combined_17day',
+  d30_final: 'invoice_followup_combined_30day',
+  d60_reminder: 'invoice_followup_combined_60day',
+  d90_final_notice: 'invoice_followup_combined_90day',
+};
+const COMBINED_EMAIL_TEMPLATE_BY_STEP_ID = {
+  d3_friendly: 'invoice.followup_combined_3_day',
+  d7_reminder: 'invoice.followup_combined_10_day',
+  d14_firmer: 'invoice.followup_combined_17_day',
+  d30_final: 'invoice.followup_combined_30_day',
+  d60_reminder: 'invoice.followup_combined_60_day',
+  d90_final_notice: 'invoice.followup_combined_90_day',
+};
 
 function sequenceAnchor(row) {
   return row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at || row.invoice_created_at || row.created_at;
@@ -630,44 +667,106 @@ async function runPending() {
     );
 
   let sent = 0, skipped = 0;
+  if (!combinedMessageLive()) {
+    // Gate off: byte-identical to before this lane — one loop, one row at a
+    // time, retiming/stale-skip and the fire immediately follow each other
+    // for that row (resolveDueTouch below is a pure extraction of this same
+    // logic, not a behavior change).
+    for (const batchRow of rows) {
+      let row = batchRow;
+      try {
+        const resolved = await resolveDueTouch(row, now, ladder);
+        if (resolved.earlyRow) continue;
+        if (resolved.skipCount) skipped++;
+        if (resolved.fireRow) {
+          await fireStep(resolved.fireRow);
+          sent++;
+        }
+      } catch (err) {
+        logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
+        skipped++;
+      }
+    }
+    logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
+    return { sent, skipped };
+  }
+
+  // Gate on: resolve every row's due-ness first (same per-row logic as
+  // above), THEN group the ones actually due by customer_id so a customer
+  // with 2+ due rows fires ONE combined touch instead of one per invoice.
+  const readyRows = [];
   for (const batchRow of rows) {
     let row = batchRow;
     try {
-      // A legacy-cadence touch moved to its Day 90 ladder day is processed
-      // on that new day in this same run when the new day is today (pre-push
-      // audit P1): skipping it would let the next tick find it past its
-      // stale grace and pass it over.
-      const retimed = ladder ? await deferToLadderDay(row) : await restoreLegacyDay(row, now);
-      if (retimed === EARLY_ROW) continue;
-      if (retimed) {
-        if (!retimed.moved || retimed.due.getTime() > now.getTime()) { skipped++; continue; }
-        row = { ...row, next_touch_at: retimed.due };
-      }
-      if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
-        const skip = await skipStaleTouches(row, now);
-        skipped++;
-        // The landing step can itself be due THIS run (a step went stale over
-        // a weekend and the next one anchors to today) — fire it now, or the
-        // next tick would find it past ITS eligible day and stale-skip it too
-        // (Codex r1 P2). fireStep revalidates against the just-persisted
-        // step/due under the invoice lock, so a concurrent change no-ops.
-        if (skip.updated && skip.nextAt
-            && skip.nextAt.getTime() <= now.getTime()
-            && !isStaleTouch(skip.nextAt, now)) {
-          await fireStep({ ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt });
-          sent++;
-        }
-        continue;
-      }
-      await fireStep(row);
-      sent++;
+      const resolved = await resolveDueTouch(row, now, ladder);
+      if (resolved.earlyRow) continue;
+      if (resolved.skipCount) skipped++;
+      if (resolved.fireRow) readyRows.push(resolved.fireRow);
     } catch (err) {
       logger.error(`[invoice-followups] step fire failed for invoice ${row.invoice_id}: ${err.message}`);
       skipped++;
     }
   }
+  const groups = new Map();
+  for (const row of readyRows) {
+    const key = String(row.customer_id);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  for (const groupRows of groups.values()) {
+    try {
+      if (groupRows.length < 2) await fireStep(groupRows[0]);
+      else await fireCombinedTouch(groupRows);
+      sent++;
+    } catch (err) {
+      logger.error(`[invoice-followups] step fire failed for customer ${groupRows[0]?.customer_id}: ${err.message}`);
+      skipped++;
+    }
+  }
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+/**
+ * Decide whether ONE due row (from runPending's batch select) should fire
+ * this run — the retiming (Day 90 ladder day-move) and stale-touch-skip
+ * logic, pulled out of runPending's loop so both the gate-off single-row
+ * path and the gate-on grouping pass share it verbatim (GATE_DUNNING_COMBINED_MESSAGE
+ * needs every row's due-ness resolved BEFORE it can group them by customer;
+ * gate off never groups, so this is a pure extraction, not a behavior
+ * change). `earlyRow` mirrors the old `continue` for EARLY_ROW (nothing
+ * counted); `skipCount` mirrors the old unconditional `skipped++`;
+ * `fireRow` is the row to fire now, or null.
+ */
+async function resolveDueTouch(row, now, ladder) {
+  // A legacy-cadence touch moved to its Day 90 ladder day is processed on
+  // that new day in this same run when the new day is today (pre-push
+  // audit P1): skipping it would let the next tick find it past its stale
+  // grace and pass it over.
+  const retimed = ladder ? await deferToLadderDay(row) : await restoreLegacyDay(row, now);
+  if (retimed === EARLY_ROW) return { earlyRow: true, skipCount: false, fireRow: null };
+  if (retimed) {
+    if (!retimed.moved || retimed.due.getTime() > now.getTime()) {
+      return { earlyRow: false, skipCount: true, fireRow: null };
+    }
+    row = { ...row, next_touch_at: retimed.due };
+  }
+  if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
+    const skip = await skipStaleTouches(row, now);
+    // The landing step can itself be due THIS run (a step went stale over a
+    // weekend and the next one anchors to today) — fire it now, or the next
+    // tick would find it past ITS eligible day and stale-skip it too (Codex
+    // r1 P2). The caller's fireStep/fireCombinedTouch revalidates against
+    // the just-persisted step/due under the invoice lock, so a concurrent
+    // change no-ops.
+    const fireRow = (skip.updated && skip.nextAt
+      && skip.nextAt.getTime() <= now.getTime()
+      && !isStaleTouch(skip.nextAt, now))
+      ? { ...row, step_index: skip.nextIndex, next_touch_at: skip.nextAt }
+      : null;
+    return { earlyRow: false, skipCount: true, fireRow };
+  }
+  return { earlyRow: false, skipCount: false, fireRow: row };
 }
 
 /**
@@ -850,93 +949,121 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Claim ONE due sequence row: lock its invoice, revalidate the batch
+ * snapshot against the live sequence (still active, same step, actually
+ * due, ownership unchanged), and stamp `touch_claimed_at`. Extracted from
+ * fireStep (gate-off single-invoice path, unchanged) so the combined-touch
+ * path (GATE_DUNNING_COMBINED_MESSAGE, dark) can claim several rows for one
+ * customer under the SAME lock discipline instead of a second
+ * implementation. Returns `{ claimedSeq, claimedInvoice }` or null — the
+ * caller decides what "not claimed" means for its own row (fireStep skips
+ * the touch; the combined path drops the row from its included set).
+ */
+async function claimTouchRow(row, claimStamp) {
+  let claimedSeq = null;
+  let claimedInvoice = null;
+  // Claim inside a transaction that locks the INVOICE row first.
+  // InvoiceService.update locks the same row before re-checking the claim,
+  // so Postgres strictly orders an edit against this claim — without a
+  // common row lock, both single-statement writes could pass on
+  // pre-commit snapshots of each other. The transaction holds no external
+  // work: it commits before any rendering or sending.
+  await db.transaction(async (trx) => {
+    const lockedInvoice = await trx('invoices')
+      .where({ id: row.invoice_id })
+      .forUpdate()
+      .first();
+    if (!lockedInvoice) return;
+    // Post-claim... now post-LOCK revalidation: the caller's row is a
+    // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
+    // commits atomically with its invoice edit) can postpone
+    // next_touch_at, or an admin can pause/stop/advance the sequence.
+    // Fire only if it is still active, on the same step, and actually
+    // due; progress from the LIVE anchor so a postponed timeline is
+    // never overwritten from the stale snapshot.
+    const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
+    if (
+      !liveSeq ||
+      liveSeq.status !== 'active' ||
+      liveSeq.step_index !== row.step_index ||
+      !liveSeq.next_touch_at ||
+      new Date(liveSeq.next_touch_at).getTime() > Date.now()
+    ) {
+      return;
+    }
+    // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
+    //
+    // `row` is a batch snapshot from runPending's join (or sendNextTouchNow's).
+    // An ownership change that committed between that SELECT and this lock
+    // (a customer merge repoints BOTH the invoice and its sequence) leaves
+    // `row.customer_id` naming the previous owner — nothing above re-read it.
+    // fireTouch would then render this invoice's bearer /pay/:token and
+    // text/email one customer's bill to a DIFFERENT customer.
+    //
+    // Refuse rather than re-target: an ownership flip means the state this
+    // batch row was built from is gone, and re-deriving a send from half-
+    // refreshed fields is how the original bug happened. Skipping leaves the
+    // sequence active and due, so the next cron pass re-selects it fresh.
+    // Sequence and invoice must also agree with EACH OTHER — a split between
+    // them is exactly the state the undo's child probe refuses to create, so
+    // seeing it here means something else diverged: fail closed.
+    if (
+      String(liveSeq.customer_id) !== String(row.customer_id) ||
+      String(lockedInvoice.customer_id) !== String(row.customer_id)
+    ) {
+      logger.warn(
+        `[invoice-followups] ownership changed under the lock for sequence ${row.id} (invoice ${row.invoice_id}) — skipping this touch; the next run re-selects it fresh`,
+      );
+      return;
+    }
+    const claimed = await trx('invoice_followup_sequences')
+      .where({ id: row.id })
+      .where(function () {
+        this.whereNull('touch_claimed_at').orWhere(
+          'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
+        );
+      })
+      // The claim stamps updated_at too: "a worker is mid-send on this
+      // sequence" is precisely the activity an ownership-change check must
+      // see, and
+      // it is the backstop for the ownership gate above — a claim taken
+      // before the undo's verification pass makes the undo refuse instead of
+      // repointing a sequence out from under an in-flight touch.
+      .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+    if (claimed) {
+      claimedSeq = liveSeq;
+      claimedInvoice = lockedInvoice;
+    }
+  });
+  return claimedSeq ? { claimedSeq, claimedInvoice } : null;
+}
+
+/**
+ * Send a single step for one sequence row.
+ *
+ * Serialized against delivered-invoice edits (2026-07-17 lane): a short
+ * claim is stamped on the sequence row before rendering/sending, and
+ * InvoiceService.update refuses (pre-check + atomic predicate) while a
+ * fresh claim exists — so a reminder can't quote amounts an admin is
+ * rewriting mid-send. The claim clears in `finally`; a crashed sender
+ * self-heals via the TTL window.
+ */
 async function fireStep(row, { operatorInitiated = false } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
   // in-flight reminder.
   const claimStamp = new Date();
-  let claimedSeq = null;
-  let claimedInvoice = null;
+  let claim = null;
   try {
-    // Claim inside a transaction that locks the INVOICE row first.
-    // InvoiceService.update locks the same row before re-checking the claim,
-    // so Postgres strictly orders an edit against this claim — without a
-    // common row lock, both single-statement writes could pass on
-    // pre-commit snapshots of each other. The transaction holds no external
-    // work: it commits before any rendering or sending.
-    await db.transaction(async (trx) => {
-      const lockedInvoice = await trx('invoices')
-        .where({ id: row.invoice_id })
-        .forUpdate()
-        .first();
-      if (!lockedInvoice) return;
-      // Post-claim... now post-LOCK revalidation: the caller's row is a
-      // batch snapshot — a due-date edit (rescheduleForInvoiceEdit, which
-      // commits atomically with its invoice edit) can postpone
-      // next_touch_at, or an admin can pause/stop/advance the sequence.
-      // Fire only if it is still active, on the same step, and actually
-      // due; progress from the LIVE anchor so a postponed timeline is
-      // never overwritten from the stale snapshot.
-      const liveSeq = await trx('invoice_followup_sequences').where({ id: row.id }).first();
-      if (
-        !liveSeq ||
-        liveSeq.status !== 'active' ||
-        liveSeq.step_index !== row.step_index ||
-        !liveSeq.next_touch_at ||
-        new Date(liveSeq.next_touch_at).getTime() > Date.now()
-      ) {
-        return;
-      }
-      // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
-      //
-      // `row` is a batch snapshot from runPending's join (or sendNextTouchNow's).
-      // An ownership change that committed between that SELECT and this lock
-      // (a customer merge repoints BOTH the invoice and its sequence) leaves
-      // `row.customer_id` naming the previous owner — nothing above re-read it.
-      // fireTouch would then render this invoice's bearer /pay/:token and
-      // text/email one customer's bill to a DIFFERENT customer.
-      //
-      // Refuse rather than re-target: an ownership flip means the state this
-      // batch row was built from is gone, and re-deriving a send from half-
-      // refreshed fields is how the original bug happened. Skipping leaves the
-      // sequence active and due, so the next cron pass re-selects it fresh.
-      // Sequence and invoice must also agree with EACH OTHER — a split between
-      // them is exactly the state the undo's child probe refuses to create, so
-      // seeing it here means something else diverged: fail closed.
-      if (
-        String(liveSeq.customer_id) !== String(row.customer_id) ||
-        String(lockedInvoice.customer_id) !== String(row.customer_id)
-      ) {
-        logger.warn(
-          `[invoice-followups] ownership changed under the lock for sequence ${row.id} (invoice ${row.invoice_id}) — skipping this touch; the next run re-selects it fresh`,
-        );
-        return;
-      }
-      const claimed = await trx('invoice_followup_sequences')
-        .where({ id: row.id })
-        .where(function () {
-          this.whereNull('touch_claimed_at').orWhere(
-            'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
-          );
-        })
-        // The claim stamps updated_at too: "a worker is mid-send on this
-        // sequence" is precisely the activity an ownership-change check must
-        // see, and
-        // it is the backstop for the ownership gate above — a claim taken
-        // before the undo's verification pass makes the undo refuse instead of
-        // repointing a sequence out from under an in-flight touch.
-        .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
-      if (claimed) {
-        claimedSeq = liveSeq;
-        claimedInvoice = lockedInvoice;
-      }
-    });
+    claim = await claimTouchRow(row, claimStamp);
   } catch (err) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
     return;
   }
-  if (!claimedSeq) {
+  if (!claim) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
     return;
   }
@@ -946,11 +1073,11 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   // select. invoice_payer_id especially: fireTouch's Bill-To guard reads it to
   // decide whether sending would leak the payer's bearer link, and a payer
   // assigned since the batch SELECT would otherwise be invisible to it.
-  row.anchor_at = claimedSeq.anchor_at;
-  row.customer_id = claimedSeq.customer_id;
-  row.invoice_payer_id = claimedInvoice.payer_id ?? null;
-  row.invoice_status = claimedInvoice.status;
-  row.token = claimedInvoice.token;
+  row.anchor_at = claim.claimedSeq.anchor_at;
+  row.customer_id = claim.claimedSeq.customer_id;
+  row.invoice_payer_id = claim.claimedInvoice.payer_id ?? null;
+  row.invoice_status = claim.claimedInvoice.status;
+  row.token = claim.claimedInvoice.token;
   try {
     await fireTouch(row, { operatorInitiated });
   } finally {
@@ -962,6 +1089,396 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
       .catch((err) => logger.warn(
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
       ));
+  }
+}
+
+/**
+ * One combined SMS + one combined email for a customer with 2+ overdue
+ * invoices whose follow-up touches are due in the same run
+ * (GATE_DUNNING_COMBINED_MESSAGE, dark; runPending groups due rows by
+ * customer_id before calling this — a customer with exactly one due row
+ * never reaches here). Claims every row with the SAME lock discipline
+ * fireStep uses (claimTouchRow), then hands off to fireCombinedTouchClaimed
+ * once 2+ rows actually claimed; a row that loses its claim, or that the
+ * remaining guards exclude, is skipped exactly as fireTouch would skip it —
+ * never sent separately in this run.
+ */
+async function fireCombinedTouch(rowsForCustomer) {
+  const claimStamp = new Date();
+  const claimedRows = [];
+  try {
+    for (const row of rowsForCustomer) {
+      let claim = null;
+      try {
+        claim = await claimTouchRow(row, claimStamp);
+      } catch (err) {
+        logger.error(`[invoice-followups] combined touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
+        continue;
+      }
+      if (!claim) {
+        logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; excluded from combined touch`);
+        continue;
+      }
+      row.anchor_at = claim.claimedSeq.anchor_at;
+      row.customer_id = claim.claimedSeq.customer_id;
+      row.invoice_payer_id = claim.claimedInvoice.payer_id ?? null;
+      row.invoice_status = claim.claimedInvoice.status;
+      row.token = claim.claimedInvoice.token;
+      claimedRows.push(row);
+    }
+    if (!claimedRows.length) return;
+    // Only one row survived the claim — the normal per-invoice path (same
+    // POST-LOCK state fireStep would hand it, since we already hold its
+    // claim; fireStep itself would try to re-claim and find nothing).
+    if (claimedRows.length === 1) {
+      await fireTouch(claimedRows[0], {});
+      return;
+    }
+    await fireCombinedTouchClaimed(claimedRows);
+  } finally {
+    if (claimedRows.length) {
+      await db('invoice_followup_sequences')
+        .whereIn('id', claimedRows.map((r) => r.id))
+        .where('touch_claimed_at', claimStamp)
+        .update({ touch_claimed_at: null, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(
+          `[invoice-followups] could not clear combined touch claims for customer ${rowsForCustomer[0]?.customer_id}: ${err.message}`,
+        ));
+    }
+  }
+}
+
+/**
+ * Render and send the combined message for a customer's already-claimed
+ * rows (2+). Mirrors fireTouch's own early guards (Bill-To ownership,
+ * soft-deleted customer, a fresh paid/prepaid re-check) to decide the
+ * INCLUDED set; a row the guards exclude gets the same sequence update
+ * fireTouch would give it and drops out — never sent separately here.
+ *
+ * Deliberately narrower than fireTouch in two ways, both accepted scope
+ * reductions for this dark lane (see the PR's own notes): no per-invoice
+ * account-credit draw-down before dunning (the combined total reflects
+ * credit already applied to each invoice, not a fresh draw this touch
+ * would need to reverse on failure — fireTouch's credit dance is real
+ * complexity this PR does not duplicate for an aggregate amount), and no
+ * quiet-hours queueing of a blocked leg onto the scheduled-SMS rail — a
+ * leg that can't send now is simply not sent this run; the sequence stays
+ * on its current step and the next run tries again.
+ */
+async function fireCombinedTouchClaimed(rows) {
+  const customerId = rows[0].customer_id;
+  const includedIdsOf = (list) => list.map((r) => r.invoice_id);
+
+  const customer = await db('customers').where({ id: customerId }).first();
+  if (customer?.deleted_at) {
+    await db('invoice_followup_sequences').whereIn('id', rows.map((r) => r.id)).update({
+      updated_at: db.fn.now(), status: 'paused', next_touch_at: null,
+    });
+    logger.info(`[invoice-followups] paused ${rows.length} sequence(s) for customer ${customerId} — customer is soft-deleted (combined touch)`);
+    return;
+  }
+  if (!customer) {
+    logger.warn(`[invoice-followups] skipped combined touch for customer ${customerId} — customer is missing`);
+    return;
+  }
+
+  // Per-invoice guards fireTouch applies before rendering: a live Bill-To
+  // re-read, a fresh paid/prepaid re-check, and micro-deposit-pending
+  // diversion. The combined message has no verification-nudge variant, so
+  // an mdPending invoice drops out here and is picked up by its own
+  // per-invoice touch on a later run, same as any other excluded row.
+  const included = [];
+  for (const row of rows) {
+    const liveInvoice = await db('invoices').where({ id: row.invoice_id })
+      .first('payer_id', 'scheduled_send_error', 'total', 'credit_applied', 'status', 'title',
+        'token', 'due_date', 'invoice_number', 'stripe_payment_intent_id', 'service_date', 'created_at')
+      .catch(() => undefined);
+    if (liveInvoice === undefined) {
+      await db('invoice_followup_sequences').where({ id: row.id }).where({ status: 'active' })
+        .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
+        .catch(() => {});
+      logger.warn(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch for customer ${customerId} — could not re-read ownership; retrying in 30m`);
+      continue;
+    }
+    const payerId = liveInvoice.payer_id ?? null;
+    if (payerId || invoiceWithdrawnFromCustomer({ scheduled_send_error: liveInvoice.scheduled_send_error })) {
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(), status: 'paused', next_touch_at: null,
+      });
+      logger.info(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch — billed to a third-party payer`);
+      continue;
+    }
+    if (['prepaid', 'paid'].includes(String(liveInvoice.status || '').toLowerCase())) {
+      await stopOnPayment(row.invoice_id).catch(() => {});
+      continue;
+    }
+    if (isTerminalInvoice(liveInvoice)) continue; // void/canceled etc — a race landed it here
+    const mdPending = gates.divertMicrodepositDunning
+      && await StripeService.isInvoiceAwaitingMicrodepositVerification({
+        id: row.invoice_id, stripe_payment_intent_id: liveInvoice.stripe_payment_intent_id,
+      }).catch(() => false);
+    if (mdPending) {
+      logger.info(`[invoice-followups] excluded invoice ${row.invoice_id} from combined touch — awaiting micro-deposit verification`);
+      continue;
+    }
+    included.push({ ...row, ...liveInvoice, invoice_id: row.invoice_id, sequence_id: row.id });
+  }
+
+  if (!included.length) return;
+  if (included.length === 1) {
+    const soleRow = rows.find((r) => r.invoice_id === included[0].invoice_id);
+    await fireTouch(soleRow, {});
+    return;
+  }
+
+  // Step from the OLDEST included invoice (account-anchor.js) — the
+  // account-level framing the combined message uses even when the included
+  // invoices sit at different points of their own cadence.
+  const anchorInvoice = anchorInvoiceOf(included);
+  const anchorRow = rows.find((r) => r.invoice_id === anchorInvoice.invoice_id);
+  const step = followupSteps()[anchorRow.step_index];
+  if (!step) return; // exhausted cadence on the anchor invoice — nothing to send
+
+  const smsTemplateKey = COMBINED_SMS_TEMPLATE_BY_STEP_ID[step.id];
+  const emailTemplateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+  if (!smsTemplateKey && !emailTemplateKey) return;
+
+  const category = 'invoice'; // mdPending invoices are excluded above
+  let explicitChannels = null;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+    explicitChannels = explicitBillingChannels(prefs || {}, category);
+  } catch (err) {
+    logger.warn(`[invoice-followups] skipped combined touch for customer ${customerId} — channel preferences unavailable: ${err.message}`);
+    return;
+  }
+  const nonEmailChannels = explicitChannels === null ? ['sms']
+    : ['push', 'sms'].filter((channel) => explicitChannels.includes(channel));
+  const emailSelected = explicitChannels === null || explicitChannels.includes('email');
+  const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
+
+  const includedIds = includedIdsOf(included);
+  const ownLedgerIdsPerRow = await Promise.all(included.map((inv) => {
+    const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+    return currentStepLedgerIds(originalRow, step, policyChannels).catch(() => []);
+  }));
+  const excludeLedgerIds = [...new Set(ownLedgerIdsPerRow.flat())];
+
+  const policyResults = await Promise.all(policyChannels.map((channel) =>
+    collectionsChannelPermitted(customer.id, null, channel, excludeLedgerIds, true, includedIds)));
+  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+  if (!Object.values(channelPolicy).some(Boolean)) {
+    logger.info(`[invoice-followups] collections policy denied every selected channel for combined touch (customer ${customerId}) — deferred to a later run`);
+    return;
+  }
+
+  const totalDueNum = included.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+  const totalDue = totalDueNum.toFixed(2);
+
+  const { buildPayBalanceLink } = require('./composer-customer-links');
+  let payUrl = null;
+  try {
+    const balanceLink = await buildPayBalanceLink([customer.id]);
+    payUrl = balanceLink?.url || null;
+  } catch (err) {
+    logger.warn(`[invoice-followups] combined pay-balance link failed for customer ${customerId}: ${err.message}`);
+  }
+  if (!payUrl) {
+    payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${anchorRow.token}`, {
+      kind: 'invoice', entityType: 'invoices', entityId: anchorRow.invoice_id, customerId: customer.id,
+      codePrefix: invoiceShortCodePrefix(anchorRow),
+    });
+  }
+
+  const etDay = etDateString(new Date());
+  const combinedLedgerKey = (channel) => `invoice_followups:combined:${customerId}:${step.id}:${etDay}:${channel}`;
+  const ContactLedger = require('./collections/contact-ledger');
+
+  // ONE text leg, on the best available channel the customer selected
+  // (sms preferred; push only when sms is unavailable/unselected) — "one
+  // combined text", not one attempt per selected channel.
+  let smsChannel = null;
+  if (nonEmailChannels.includes('sms') && channelPolicy.sms === true && customer.phone) smsChannel = 'sms';
+  else if (nonEmailChannels.includes('push') && channelPolicy.push === true) smsChannel = 'push';
+
+  let smsOk = false;
+  if (smsChannel && smsTemplateKey) {
+    const body = await smsTemplatesRouter.getTemplate(smsTemplateKey, {
+      first_name: customer.first_name || 'there',
+      invoice_count: String(included.length),
+      total_due: totalDue,
+      pay_url: payUrl,
+    }, { workflow: 'invoice_followup_combined', entity_type: 'customer', entity_id: customer.id });
+    if (!body) {
+      logger.warn(`[invoice-followups] combined SMS template ${smsTemplateKey} missing/disabled for customer ${customerId}`);
+    } else {
+      let ledger = null;
+      try {
+        ledger = await ContactLedger.recordContact({
+          customerId: customer.id, channel: smsChannel, purpose: 'invoice_followup',
+          invoiceIds: includedIds, source: 'invoice_followups',
+          metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
+          idempotencyKey: combinedLedgerKey(smsChannel),
+        });
+      } catch (err) {
+        logger.warn(`[invoice-followups] combined ${smsChannel} ledger unavailable for customer ${customerId}: ${err.message}`);
+      }
+      if (ledger) {
+        const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
+        if (claim.delivered) smsOk = true;
+        else if (claim.allowed) {
+          let result;
+          try {
+            result = await sendCustomerMessage({
+              to: smsChannel === 'sms' ? customer.phone : undefined,
+              body, channel: smsChannel, audience: 'customer', purpose: 'payment_link',
+              customerId: customer.id, invoiceId: anchorRow.invoice_id, entryPoint: 'invoice_followup_sequence_combined',
+              metadata: {
+                original_message_type: 'invoice_followup_combined',
+                notificationEventKey: `invoice-followup-combined:${customer.id}:${step.id}`,
+                billingDeliveryCategory: category, billingDeliveryLeg: smsChannel,
+                invoice_ids: includedIds, rendered_amount: totalDue, collections_ledger_id: ledger.id,
+                ...(smsChannel === 'push' ? { appOnly: true } : {}),
+              },
+              hasEmailLeg: emailSelected,
+              preDispatchCheck: invoiceHelpers.selfPayAtDispatch(anchorRow.invoice_id, db),
+            });
+          } catch (err) {
+            result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+          }
+          const delivery = billingLegDeliveryState(smsChannel, result || {});
+          if (delivery) {
+            smsOk = true;
+            const occurredAt = billingLegContactTime(result);
+            if (typeof ContactLedger.markDelivered === 'function') {
+              await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []));
+            }
+          } else {
+            await ContactLedger.markSendFailed(ledger, { code: result?.code || 'not_sent' });
+          }
+        }
+      }
+    }
+  }
+
+  let emailOk = false;
+  if (emailSelected && channelPolicy.email === true && emailTemplateKey) {
+    let emailLedger = null;
+    try {
+      emailLedger = await ContactLedger.recordContact({
+        customerId: customer.id, channel: 'email', purpose: 'invoice_followup',
+        invoiceIds: includedIds, source: 'invoice_followups',
+        metadata: { step_id: step.id, combined: true, invoice_ids: includedIds },
+        idempotencyKey: combinedLedgerKey('email'),
+      });
+    } catch (err) {
+      logger.warn(`[invoice-followups] combined email ledger unavailable for customer ${customerId}: ${err.message}`);
+    }
+    if (emailLedger) {
+      const claim = typeof ContactLedger.claimAttempt === 'function' ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
+      if (claim.delivered) emailOk = true;
+      else if (claim.allowed) {
+        const emailResult = await sendCombinedFollowupEmail({
+          customer, step, anchorInvoiceId: anchorRow.invoice_id,
+          payload: {
+            invoice_count: String(included.length),
+            total_due: `$${totalDue}`,
+            pay_url: payUrl,
+            customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
+            invoices: included.map((inv) => ({
+              invoice_number: inv.invoice_number || '',
+              invoice_title: inv.title || 'your service',
+              amount_due: currency(invoiceAmountDue(inv)),
+            })),
+          },
+        });
+        // settleFollowupEmailLedger stamps the ledger row (delivered /
+        // send_failed) and returns whether the step should stay HELD —
+        // delivery itself is emailResult.ok.
+        await settleFollowupEmailLedger(ContactLedger, emailLedger, emailResult, true, []);
+        emailOk = emailResult.ok === true;
+      }
+    }
+  }
+
+  if (!smsOk && !emailOk) {
+    logger.warn(`[invoice-followups] combined touch for customer ${customerId} step ${step.id} delivered nothing — ${included.length} sequence(s) left at their current step for the next run`);
+    return;
+  }
+
+  for (const inv of included) {
+    const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
+    const nextIndex = originalRow.step_index + 1;
+    const anchorAt = originalRow.anchor_at || originalRow.invoice_sent_at
+      || originalRow.invoice_sms_sent_at || originalRow.invoice_created_at || originalRow.created_at;
+    const nextAt = computeNextTouchAt(anchorAt, nextIndex);
+    await db('invoice_followup_sequences').where({ id: originalRow.id }).update({
+      updated_at: db.fn.now(),
+      touches_sent: originalRow.touches_sent + 1,
+      step_index: nextIndex,
+      last_touch_at: new Date(),
+      next_touch_at: nextAt,
+      status: nextAt ? 'active' : 'completed',
+    });
+    try {
+      await db('customer_interactions').insert({
+        customer_id: customer.id,
+        interaction_type: smsOk ? 'sms_outbound' : 'email_outbound',
+        subject: `Invoice follow-up (combined) — ${step.label} (${inv.invoice_number || inv.invoice_id})`,
+        body: `Combined step fired for ${included.length} invoices totaling $${totalDue}. This invoice: ${currency(invoiceAmountDue(inv))}.`,
+        metadata: JSON.stringify({
+          invoice_id: inv.invoice_id, step_id: step.id, combined: true, invoice_ids: includedIds,
+          sms_sent: smsOk, email_sent: emailOk,
+        }),
+      });
+    } catch { /* non-critical */ }
+  }
+}
+
+/**
+ * Combined-touch twin of sendFollowupEmail: same billing-authority
+ * recipient resolution, provider handoff and outcome settlement, rendering
+ * the combined template with the per-customer payload built by
+ * fireCombinedTouchClaimed (invoice_count/total_due/pay_url/invoices) plus
+ * the resolved recipient's first name.
+ */
+async function sendCombinedFollowupEmail({ customer, step, anchorInvoiceId, payload }) {
+  const templateKey = COMBINED_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
+  if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
+  const authorityInput = {
+    customerId: customer.id, invoiceId: anchorInvoiceId, channel: 'email',
+    metadata: { billingDeliveryCategory: 'invoice' },
+  };
+  const { recipient, to, refusal } = await billingEmailRecipient(authorityInput, 'invoice-followups');
+  if (refusal) return refusal;
+  const finalPayload = {
+    ...payload,
+    first_name: firstToken(recipient.name) || firstToken(customer.first_name) || 'there',
+  };
+  const log = (fields) => logFollowupEmailAttempt({
+    customerId: customer.id, invoiceId: anchorInvoiceId, stepId: step.id, templateKey, ...fields,
+  });
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  try {
+    const result = await EmailTemplateLibrary.sendTemplate({
+      templateKey,
+      to,
+      payload: finalPayload,
+      recipientType: 'customer',
+      recipientId: customer.id,
+      triggerEventId: `invoice_followup_combined:${customer.id}:${step.id}`,
+      idempotencyKey: `invoice_followup_combined_email:${customer.id}:${step.id}`,
+      categories: ['invoice_followup', 'combined', step.id],
+      suppressionGroupKey: 'transactional_required',
+      withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+        input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
+      }),
+    });
+    return await billingEmailSendOutcome(result, state, log);
+  } catch (err) {
+    return billingEmailSendFailure(err, state.handoffStarted, log, {
+      logTag: 'invoice-followups', label: `combined ${step.id} for customer ${customer.id}`,
+    });
   }
 }
 

@@ -14,6 +14,13 @@ const SENDER_RENDERED_TEMPLATES = new Set([
   'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
   // The Day 90 ladder's steps (GATE_DUNNING_LADDER_90).
   'invoice.followup_60_day', 'invoice.followup_90_day',
+  // The combined-message steps (GATE_DUNNING_COMBINED_MESSAGE, dunning
+  // unification PR 2b) — same doctrine: the amount, invoice count and
+  // included invoices can all change before a retry, so the sender
+  // re-renders fresh from live data at the next stage rather than
+  // replaying a stored copy.
+  'invoice.followup_combined_3_day', 'invoice.followup_combined_10_day', 'invoice.followup_combined_17_day',
+  'invoice.followup_combined_30_day', 'invoice.followup_combined_60_day', 'invoice.followup_combined_90_day',
   // The dunning diversion's email arm (microdeposit-verification-email.js).
   'payment.microdeposit_verification',
   // The legacy pre-visit balance email (no billing channel choice). The

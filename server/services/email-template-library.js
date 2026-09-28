@@ -311,6 +311,23 @@ function normalizeBlocks(blocks) {
         rows: Array.isArray(block.rows)
           ? block.rows.map((r) => ({ label: String(r.label || ''), value: String(r.value || '') }))
           : [],
+        // rowsFromVariable + rowTemplate: one row PER ITEM of a payload
+        // array (the combined dunning email's per-invoice line items —
+        // invoice-followups.js's fireCombinedTouch), rather than a fixed
+        // admin-authored row list. Additive to the existing block type
+        // (never a new one): a template with no rowsFromVariable renders
+        // exactly as before. rowTemplate's {{var}} tokens resolve against
+        // the ITEM's own fields merged over the send payload (see
+        // renderBlocks below), so an item field can share a name with an
+        // existing top-level variable without colliding across templates
+        // that don't use this feature.
+        ...(block.rowsFromVariable ? { rowsFromVariable: String(block.rowsFromVariable) } : {}),
+        ...(block.rowsFromVariable && block.rowTemplate ? {
+          rowTemplate: {
+            label: String(block.rowTemplate.label || ''),
+            value: String(block.rowTemplate.value || ''),
+          },
+        } : {}),
       };
     }
     if (type === 'cta') {
@@ -371,11 +388,24 @@ function renderBlocks(blocks, payload) {
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     } else if (block.type === 'details') {
-      const rows = (block.rows || []).map((row) => {
-        const labelHtml = renderInline(row.label, payload);
-        const valueHtml = renderInline(row.value, payload);
-        const labelText = renderInline(row.label, payload, { html: false });
-        const valueText = renderInline(row.value, payload, { html: false });
+      // rowsFromVariable: one row per item of a payload array, rendered
+      // against that item's own fields merged over the send payload — used
+      // by the combined dunning email to list every included invoice
+      // without a fixed admin-authored row count (normalizeBlocks above).
+      // A non-array or missing variable renders no generated rows (the
+      // template's static `rows`, if any, still render below).
+      const itemsForRows = Array.isArray(payload?.[block.rowsFromVariable]) ? payload[block.rowsFromVariable] : [];
+      const generatedRows = (block.rowsFromVariable && block.rowTemplate ? itemsForRows : []).map((item) => {
+        const itemPayload = { ...payload, ...(item && typeof item === 'object' ? item : {}) };
+        return { label: block.rowTemplate.label, value: block.rowTemplate.value, __payload: itemPayload };
+      });
+      const staticRows = (block.rows || []).map((row) => ({ ...row, __payload: payload }));
+      const rows = [...staticRows, ...generatedRows].map((row) => {
+        const rowPayload = row.__payload || payload;
+        const labelHtml = renderInline(row.label, rowPayload);
+        const valueHtml = renderInline(row.value, rowPayload);
+        const labelText = renderInline(row.label, rowPayload, { html: false });
+        const valueText = renderInline(row.value, rowPayload, { html: false });
         return { labelHtml, valueHtml, labelText, valueText };
       }).filter((row) => String(row.valueText || '').trim() !== '');
       if (rows.length && block.variant === 'faq') {

@@ -3161,6 +3161,15 @@ const gates = {
   // for logGateStatus only: services/invoice-followups.js reads
   // GATE_DUNNING_LADDER_90 at call time.
   dunningLadder90: process.env.GATE_DUNNING_LADDER_90 === 'true',
+
+  // Combined dunning message (dunning unification PR 2b): when a customer
+  // has 2+ overdue invoices whose follow-up touches are due in the same
+  // run, send ONE combined text and ONE combined email instead of one per
+  // invoice. Ships DARK: off unless exactly 'true'. This entry is for
+  // logGateStatus only: services/invoice-followups.js reads
+  // GATE_DUNNING_COMBINED_MESSAGE at call time. Wording awaits owner
+  // approval — do not flip until it is signed off.
+  dunningCombinedMessage: process.env.GATE_DUNNING_COMBINED_MESSAGE === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
