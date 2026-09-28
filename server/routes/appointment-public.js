@@ -43,7 +43,8 @@ const db = require('../models/db');
 const { isEnabled, visitPrepPhotosLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, addETDays, formatETDate } = require('../utils/datetime-et');
+const NotificationService = require('../services/notification-service');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql } = require('../services/stamped-address');
@@ -1310,6 +1311,68 @@ async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId,
   return eligibility.eligible ? svc : null;
 }
 
+// Office feed item — PR 3b (customer-visit-photos scope doc §5.4 item 3,
+// §9 decision 2: "one quiet item in the notification feed that links to
+// the customer... nothing to resolve, no text to the office number").
+// Plain word for the chip topic the customer picked; visit-prep.js's TOPICS
+// enum is the validation source, this is only display copy for the bell.
+const VISIT_PREP_TOPIC_LABELS = {
+  pest: 'pest',
+  lawn: 'lawn',
+  tree_shrub: 'trees & shrubs',
+  other: 'something else',
+};
+
+// Called only after createVisitPrepSubmission's own transaction has already
+// committed a NEW submission (never a duplicate-only resubmit — the caller
+// only invokes this when result.created is true). Awaited by the route as a
+// BOUNDED best-effort step (same shape as estimate-measurement-review.js's
+// sendOfficeNotification and requests.js's own notifyAdmin call): every
+// query here is a fast local DB round trip, never a network call to a
+// push/SMS/email provider, so it can add latency but never hang the
+// response. NotificationService.notifyAdmin/create for recipientType
+// 'admin' does exactly one thing: insert a row into `notifications`. It
+// never calls PushService (sendToAdmins/sendToAdminUser are separate,
+// explicitly-called-elsewhere functions this file never touches) and never
+// calls notification-dispatcher.js or sendCustomerMessage (both
+// customer-only) — so this can never become a push, SMS, or email,
+// whatever the admin bell policy gate is set to. Category
+// 'visit_prep_photos' is on notification-bell-policy.js's
+// DEFAULT_ON_CATEGORIES, so the item is admitted into the feed even while
+// GATE_ADMIN_BELL_POLICY is on (with an owner override to silence the
+// category later from Settings -> Notifications) — never a dead letterbox.
+// Every error here is caught and logged: it must never fail or delay the
+// customer's already-sent response beyond its own bounded work above.
+async function notifyOfficeVisitPrepSubmission(svc, topic) {
+  try {
+    // Customer's display name is read fresh here, never hardcoded or
+    // carried from loadByToken (which deliberately omits it — the token is
+    // shared with whoever received the reminder text).
+    const customer = await db('customers').where({ id: svc.customer_id }).first('first_name', 'last_name');
+    const name = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : '';
+    const dateStr = apptDateStr(svc.scheduled_date);
+    // Noon-UTC construction (same shape as estimate-public.js's own
+    // date-only -> formatETDate call) so a date-only column never reads a
+    // day early/late across a DST boundary.
+    const when = dateStr ? formatETDate(new Date(`${dateStr}T12:00:00Z`)) : 'an upcoming visit';
+    const topicLabel = VISIT_PREP_TOPIC_LABELS[topic] || null;
+    const notif = await NotificationService.notifyAdmin(
+      'visit_prep_photos',
+      'Customer sent photos for a visit',
+      `${name || 'A customer'} sent photos${topicLabel ? ` about ${topicLabel}` : ''} ahead of the ${when} visit.`,
+      {
+        link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
+        metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id },
+      },
+    );
+    if (!notif) {
+      logger.warn(`[visit-prep] office notification insert failed for scheduled_service ${svc.id}`);
+    }
+  } catch (err) {
+    logger.warn(`[visit-prep] office notification failed for scheduled_service ${svc.id}: ${err.message}`);
+  }
+}
+
 router.post(
   '/:token/photos',
   visitPrepPreParserGuard,
@@ -1369,6 +1432,21 @@ router.post(
         // pool.
         recheck: (trx) => reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx),
       });
+      // Office feed item — ONE per NEW submission, never a duplicate-only
+      // resubmit (result.created is false for those). The write already
+      // committed inside createVisitPrepSubmission; this is a bounded
+      // best-effort await (same shape as estimate-measurement-review.js's
+      // sendOfficeNotification and requests.js's own notifyAdmin call —
+      // NotificationService.notifyAdmin never throws, it catches and
+      // returns null/suppressed on any failure) that adds at most one or
+      // two fast local DB round trips, never a network call to a
+      // push/SMS/email provider, so it can never hang the response the way
+      // an external send could. A failure is caught and logged, never
+      // surfaced to the customer (see the function for exactly how this
+      // stays in-app-feed-only).
+      if (result.created) {
+        await notifyOfficeVisitPrepSubmission(req.visitPrepSvc, req.body?.topic);
+      }
       // Never photo URLs/keys, the note, or any customer identity — the
       // token is shared with whoever received the visit text, and nothing
       // submitted through it is ever shown back.
@@ -1427,6 +1505,8 @@ router._test = {
   pageStateForGroup,
   memberServiceLabel,
   confirmedRowStillShown,
+  notifyOfficeVisitPrepSubmission,
+  VISIT_PREP_TOPIC_LABELS,
 };
 
 module.exports = router;

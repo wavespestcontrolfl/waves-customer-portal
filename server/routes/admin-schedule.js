@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, visitPrepPhotosLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -5721,6 +5721,38 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    // Customer-sent visit-prep photos chip (customer-visit-photos scope doc
+    // §5.4 item 2, PR 3b) — ONE batched query over the whole day's stops,
+    // never per-row, and dark unless visitPrepPhotosLive() (gate off keeps
+    // the payload byte-identical: the field is omitted below, not sent
+    // false). Stops are grouped the SAME way the client does (routeStops.js
+    // stopKeyOf: rows sharing a non-null visit_id are one stop, otherwise a
+    // row is its own stop), read fresh off THIS request's own `services`
+    // rows — the same CURRENT-membership rule visitPrepSummary/
+    // stopMemberIds apply in services/visit-prep.js: a grouped stop shows
+    // the chip once, and a member moved out of the group since the photos
+    // were submitted takes its own (denormalized at submission time)
+    // photos with it, since the flag is never read off a stale visit_id.
+    const prepPhotosLive = visitPrepPhotosLive();
+    const customerSentPhotosByServiceId = new Map();
+    if (prepPhotosLive) {
+      const memberIdsByVisitId = new Map();
+      for (const s of services) {
+        if (!s.visit_id) continue;
+        if (!memberIdsByVisitId.has(s.visit_id)) memberIdsByVisitId.set(s.visit_id, []);
+        memberIdsByVisitId.get(s.visit_id).push(s.id);
+      }
+      const allServiceIds = services.map((s) => s.id);
+      const photoRows = allServiceIds.length
+        ? await db('visit_prep_photos').whereIn('scheduled_service_id', allServiceIds).distinct('scheduled_service_id')
+        : [];
+      const serviceIdsWithPhotos = new Set(photoRows.map((r) => r.scheduled_service_id));
+      for (const s of services) {
+        const memberIds = s.visit_id ? (memberIdsByVisitId.get(s.visit_id) || [s.id]) : [s.id];
+        customerSentPhotosByServiceId.set(s.id, memberIds.some((id) => serviceIdsWithPhotos.has(id)));
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -5933,6 +5965,7 @@ router.get('/', async (req, res, next) => {
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        ...(prepPhotosLive ? { customerSentPhotos: customerSentPhotosByServiceId.get(s.id) === true } : {}),
         // Verdict computed once per row; traceVariant drives the tracer's
         // capture mode client-side (codex P2 r3: typed lawn visits must
         // outline the lawn, not run the building-perimeter workflow).
