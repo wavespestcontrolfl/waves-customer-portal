@@ -5154,6 +5154,14 @@ const BLOCKED_SERVICE_ALIASES = new Map([
   ['palmetto-bug', 'cockroach'],
   ['stinging-insects', 'wasp'], // canonical blog tag "Stinging Insects"
   ['stinging-insect', 'wasp'],
+  // Lawn pests by name → the blocked lawn-pest id. A chinch-bug topic is a
+  // lawn-pest topic; without these a "chinch bugs" question or tag carries
+  // only the broad service 'lawn' and keeps its FAQ.
+  ['chinch-bug', 'lawn-pest'],
+  ['sod-webworm', 'lawn-pest'],
+  ['mole-cricket', 'lawn-pest'],
+  ['grub', 'lawn-pest'],
+  ['armyworm', 'lawn-pest'],
 ]);
 
 function blockedServiceCandidates(service) {
@@ -6653,6 +6661,10 @@ module.exports = {
   // generators/gates can never contradict the publish-time guard.
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
+  // Topic-name aliases onto blocked ids — the miner's specialty-topic
+  // derivation matches these names too, so it can never miss a topic the
+  // publish-time guard blocks.
+  BLOCKED_SERVICE_ALIASES,
   KEYWORD_DENSITY_MAX,
   // single source of truth for the raw-markdown-table policy — consumed by
   // content-quality-gate's no_raw_markdown_tables hard check so the two
