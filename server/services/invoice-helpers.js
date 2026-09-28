@@ -150,19 +150,46 @@ function selfPayAtDispatch(invoiceId, database) {
  * the anchor's clearance, and the homeowner is sent a dunning message for
  * debt now owned by the payer (Codex r1 P1). Fails closed on the first
  * ineligible or unreadable invoice.
+ *
+ * expectedCents (Codex r2 P1): the combined message's total_due/per-line
+ * amounts are snapshotted once (resolveCombinedPayLink's own read) and then
+ * several awaits — channel prefs, the collections-policy consult, the
+ * ledger id lookups — run before this, the LAST check before the provider
+ * request. A payment, credit application, or edit landing in that window
+ * would otherwise let the send go out quoting a stale amount. When passed
+ * (a { [invoiceId]: cents } map — the combined lane's own lineCents), each
+ * invoice's CURRENT amount due (invoiceAmountDue in cents, same formula
+ * pay-combined.js's amountDueCents uses) is compared against its
+ * snapshotted share; a mismatch refuses the send as retryable — a hold for
+ * the next run to re-quote and re-send, not a terminal failure, since the
+ * debt itself is still perfectly collectible. Omitted (every other caller),
+ * no amount check runs — byte-identical to before.
  */
-function selfPayAtDispatchMany(invoiceIds, database) {
+function selfPayAtDispatchMany(invoiceIds, database, expectedCents = null) {
   const ids = [...new Set((invoiceIds || []).map(String))];
   return async () => {
     if (!ids.length) return { ok: false, code: 'INVOICE_UNREADABLE', reason: 'no invoices to verify before dispatch' };
     try {
-      const rows = await database('invoices').whereIn('id', ids).select('id', 'payer_id', 'scheduled_send_error');
+      const columns = ['id', 'payer_id', 'scheduled_send_error'];
+      if (expectedCents) columns.push('total', 'credit_applied');
+      const rows = await database('invoices').whereIn('id', ids).select(...columns);
       const byId = new Map(rows.map((row) => [String(row.id), row]));
       for (const id of ids) {
         const live = byId.get(id);
         if (!live) return { ok: false, code: 'INVOICE_UNREADABLE', reason: `invoice ${id} could not be re-read before dispatch` };
         if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
           return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: `invoice ${id} is billed to a third-party payer` };
+        }
+        if (expectedCents && Object.prototype.hasOwnProperty.call(expectedCents, id)) {
+          const liveCents = Math.round(invoiceAmountDue(live) * 100);
+          if (liveCents !== expectedCents[id]) {
+            return {
+              ok: false,
+              code: 'INVOICE_AMOUNT_CHANGED',
+              retryable: true,
+              reason: `invoice ${id} amount due changed from ${expectedCents[id]}c to ${liveCents}c since the message was composed`,
+            };
+          }
         }
       }
       return { ok: true };

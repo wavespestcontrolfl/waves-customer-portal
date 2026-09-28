@@ -132,6 +132,7 @@ afterEach(() => {
 function fakeTable(initialRows) {
   const rows = new Map(initialRows.map((r) => [String(r.id), { ...r }]));
   const updateCalls = [];
+  const insertCalls = [];
   function matches(filters) {
     let list = [...rows.values()];
     if (filters.id !== undefined) list = list.filter((r) => String(r.id) === String(filters.id));
@@ -167,14 +168,21 @@ function fakeTable(initialRows) {
       updateCalls.push({ filters: { ...filters }, patch });
       return found.length;
     });
-    q.insert = jest.fn(async () => [{ id: 'interaction-1' }]);
+    q.insert = jest.fn(async (patch) => {
+      insertCalls.push(patch);
+      const id = `interaction-${insertCalls.length}`;
+      rows.set(id, { id, ...patch });
+      return [{ id }];
+    });
     // Some callers (currentStepLedgerIds/currentCombinedStepLedgerIds)
     // await the query directly, with no .first()/.update() — same
     // thenable shape the batch-select mock already uses.
     q.then = (resolve, reject) => Promise.resolve(matches(filters)).then(resolve, reject);
     return q;
   }
-  return { query, rows, updateCalls };
+  return {
+    query, rows, updateCalls, insertCalls,
+  };
 }
 
 function seqRow(overrides = {}) {
@@ -201,12 +209,12 @@ function invoiceRow(overrides = {}) {
 // advance table ('invoice_followup_sequences'), invoices, and customers.
 function setupCombinedDb({
   batchRows, invoices, customers = [{ id: 'cust-1', first_name: 'Taylor', phone: '+19410000000', deleted_at: null }],
-  ledgerRows = [],
+  ledgerRows = [], notificationPrefs = [],
 }) {
   const seqTable = fakeTable(batchRows);
   const invoiceTable = fakeTable(invoices);
   const customerTable = fakeTable(customers);
-  const notificationPrefsTable = fakeTable([]);
+  const notificationPrefsTable = fakeTable(notificationPrefs);
   const customerInteractionsTable = fakeTable([]);
   const contactLedgerTable = fakeTable(ledgerRows);
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
@@ -229,7 +237,7 @@ function setupCombinedDb({
     throw new Error(`unexpected table in test: ${table}`);
   });
   return {
-    seqTable, invoiceTable, customerTable, contactLedgerTable,
+    seqTable, invoiceTable, customerTable, contactLedgerTable, notificationPrefsTable, customerInteractionsTable,
   };
 }
 
@@ -727,8 +735,11 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
   test('the SMS/push provider handoff re-verifies EVERY included invoice, not just the anchor', async () => {
     twoInvoiceSetup();
     await runPending();
+    // Third arg (Codex r2 P1): the snapshotted per-invoice lineCents, so the
+    // provider-boundary check also revalidates each invoice's live amount
+    // due — see the dedicated amount-mismatch tests below.
     expect(invoiceHelpers.selfPayAtDispatchMany).toHaveBeenCalledWith(
-      expect.arrayContaining(['inv-A', 'inv-B']), expect.anything(),
+      expect.arrayContaining(['inv-A', 'inv-B']), expect.anything(), expect.anything(),
     );
     const call = invoiceHelpers.selfPayAtDispatchMany.mock.calls.find(
       (c) => Array.isArray(c[0]) && c[0].includes('inv-A') && c[0].includes('inv-B'),
@@ -752,7 +763,7 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     const [{ preSendCheck }] = dispatchUnderBillingEmailAuthority.mock.calls[0];
     await preSendCheck();
     expect(invoiceHelpers.selfPayAtDispatchMany).toHaveBeenCalledWith(
-      expect.arrayContaining(['inv-A', 'inv-B']), expect.anything(),
+      expect.arrayContaining(['inv-A', 'inv-B']), expect.anything(), expect.anything(),
     );
   });
 
@@ -810,5 +821,184 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith('invoice_followup_combined_3day', expect.anything(), expect.anything());
     expect(sendCustomerMessage).toHaveBeenCalledTimes(2); // individual fallback
     expect(seqTable.rows.get('seq-A').step_index).toBe(1);
+  });
+
+  // Codex round-2 findings (six threads) — each test below exercises one
+  // finding end-to-end through runPending, mirroring how the rest of this
+  // file already tests the combined lane.
+  describe('Codex r2 findings', () => {
+    // P1 PRRT_...se18: revalidate every quoted amount at the provider
+    // boundary. lineCents rides the SMS preDispatchCheck (and the email
+    // preSendCheck — see the "provider handoff" tests above, which assert
+    // the wiring); this test proves the WHOLE-LANE effect when the live
+    // amount no longer matches what was quoted — a HOLD, not a terminal
+    // failure.
+    test('a live amount mismatch at the SMS provider boundary holds the touch as retryable, not a terminal failure', async () => {
+      const { seqTable } = twoInvoiceSetup();
+      // Mirror send-customer-message.js's own preDispatchCheck handling
+      // (services/messaging/send-customer-message.js ~L806-841) closely
+      // enough to prove the wiring actually holds the send.
+      sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+        const verdict = await preDispatchCheck();
+        if (!verdict || verdict.ok !== true) {
+          return {
+            sent: false,
+            blocked: true,
+            deliveryOutcome: 'not_sent',
+            code: verdict?.code || 'PRE_DISPATCH_CHECK_FAILED',
+            reason: verdict?.reason,
+            ...(verdict?.retryable === true ? { retryable: true } : {}),
+          };
+        }
+        return { sent: true, deliveryOutcome: 'accepted' };
+      });
+      invoiceHelpers.selfPayAtDispatchMany.mockReturnValue(async () => ({
+        ok: false,
+        code: 'INVOICE_AMOUNT_CHANGED',
+        retryable: true,
+        reason: 'invoice inv-B amount due changed from 8000c to 3000c since the message was composed',
+      }));
+      const result = await runPending();
+      expect(result).toEqual({ sent: 1, skipped: 0 });
+      // Held (re-timed), not paused and not advanced — a HOLD, not a
+      // terminal failure, per the finding.
+      expect(seqTable.rows.get('seq-A').step_index).toBe(0);
+      expect(seqTable.rows.get('seq-A').status).toBe('active');
+      expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+      expect(seqTable.rows.get('seq-B').status).toBe('active');
+    });
+
+    // P1 PRRT_...se2A: zero-delivery combined touches must be re-timed or
+    // paused, mirroring fireTouch's own end-of-touch disposition exactly.
+    test('nothing delivered and neither leg held pauses every included sequence, instead of leaving them completely untouched forever', async () => {
+      const { seqTable, customerTable } = twoInvoiceSetup();
+      customerTable.rows.get('cust-1').phone = null; // SMS leg: no channel to use at all
+      billingEmailSendOutcome.mockImplementation(async () => ({ ok: false, reason: 'missing_email' }));
+      const result = await runPending();
+      expect(result).toEqual({ sent: 1, skipped: 0 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(seqTable.rows.get('seq-A').status).toBe('paused');
+      expect(seqTable.rows.get('seq-A').paused_reason).toBe('no_customer_phone');
+      expect(seqTable.rows.get('seq-A').next_touch_at).toBeNull();
+      expect(seqTable.rows.get('seq-B').status).toBe('paused');
+      expect(seqTable.rows.get('seq-B').paused_reason).toBe('no_customer_phone');
+      expect(seqTable.rows.get('seq-B').next_touch_at).toBeNull();
+    });
+
+    test('nothing delivered, neither held, but a reason string on fireTouch\'s own transient list leaves the group armed — mirrors fireTouch\'s exact string check, not a durable/transient distinction', async () => {
+      const { seqTable } = twoInvoiceSetup();
+      // A DURABLE sms denial: smsHold stays false (nothing transient left to
+      // wait on) but the skip reason string is still 'collections_policy_denied'
+      // — fireTouch's own disposition reads that STRING, so this leaves the
+      // group armed rather than pausing it, exactly like fireTouch would for
+      // one invoice under the identical denial.
+      collectionsChannelPermitted.mockImplementation(async ({ channel }) => (
+        channel === 'sms' ? { allowed: false, durable: true } : { allowed: true, durable: false }
+      ));
+      billingEmailSendOutcome.mockImplementation(async () => ({ ok: false, reason: 'missing_email' }));
+      await runPending();
+      expect(seqTable.rows.get('seq-A').status).toBe('active'); // left armed, not paused
+      expect(seqTable.rows.get('seq-A').step_index).toBe(0);
+      expect(seqTable.rows.get('seq-A').next_touch_at).not.toBeNull();
+    });
+
+    // P1 PRRT_...se2P: balanceIncomplete on any consulted channel holds the
+    // WHOLE combined touch, same as billing-reminder-delivery.js's
+    // sendReminderChannels — even though the channel itself reads "allowed".
+    test('a channel verdict carrying balanceIncomplete holds the whole combined touch even though the channel is "allowed"', async () => {
+      const { seqTable } = twoInvoiceSetup();
+      collectionsChannelPermitted.mockImplementation(async ({ channel }) => (
+        channel === 'sms'
+          ? { allowed: true, durable: false, balanceIncomplete: 'policy evaluation failed' }
+          : { allowed: true, durable: false }
+      ));
+      const result = await runPending();
+      expect(result).toEqual({ sent: 1, skipped: 0 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+      expect(seqTable.rows.get('seq-A').step_index).toBe(0);
+      expect(seqTable.rows.get('seq-A').status).toBe('active');
+      const expectedFloor = new Date('2026-08-06T04:00:00Z').getTime();
+      expect(new Date(seqTable.rows.get('seq-A').next_touch_at).getTime()).toBe(expectedFloor);
+      expect(seqTable.rows.get('seq-B').step_index).toBe(0);
+    });
+
+    // P2 PRRT_...se2E: a deduped retry (claim.delivered from an earlier
+    // attempt) carries the ledger's ORIGINAL occurrence into last_touch_at
+    // and writes no fresh outbound interaction rows.
+    test('a deduped SMS retry carries the ledger\'s original occurrence into last_touch_at and writes no new interaction rows', async () => {
+      const ORIGINAL_AT = new Date('2026-08-04T15:00:00Z');
+      const { seqTable, customerInteractionsTable } = twoInvoiceSetup();
+      // Email leg durably denied so it never actually sends — isolates the
+      // dedup effect to the SMS leg alone (the whole touch's freshDelivery
+      // is OR'd across both legs, so a fresh email would mask this).
+      collectionsChannelPermitted.mockImplementation(async ({ channel }) => (
+        channel === 'email' ? { allowed: false, durable: true } : { allowed: true, durable: false }
+      ));
+      ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey, channel }) => ({
+        id: `ledger-${idempotencyKey}`,
+        occurred_at: channel === 'sms' ? ORIGINAL_AT : undefined,
+      }));
+      ContactLedger.claimAttempt.mockImplementation(async (ledger) => (
+        ledger.id.endsWith(':sms') ? { allowed: true, delivered: true } : { allowed: true }
+      ));
+      const result = await runPending();
+      expect(result).toEqual({ sent: 1, skipped: 0 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled(); // deduped — no fresh provider call
+      // Step still advances (a deduped delivery IS a delivery)...
+      expect(seqTable.rows.get('seq-A').step_index).toBe(1);
+      expect(seqTable.rows.get('seq-B').step_index).toBe(1);
+      // ...but last_touch_at carries the ORIGINAL occurrence, not "now".
+      expect(new Date(seqTable.rows.get('seq-A').last_touch_at).getTime()).toBe(ORIGINAL_AT.getTime());
+      expect(new Date(seqTable.rows.get('seq-B').last_touch_at).getTime()).toBe(ORIGINAL_AT.getTime());
+      // ...and no fresh customer_interactions rows were written.
+      expect(customerInteractionsTable.insertCalls).toHaveLength(0);
+    });
+
+    // P2 PRRT_...se2K: push-only combined touches record app_outbound, not
+    // sms_outbound — the channel actually used, not a hardcoded assumption.
+    test('a push-only combined touch records app_outbound, not sms_outbound', async () => {
+      const { customerInteractionsTable } = twoInvoiceSetup({
+        notificationPrefs: [{ customer_id: 'cust-1', invoice_channels: ['push'] }],
+      });
+      const result = await runPending();
+      expect(result).toEqual({ sent: 1, skipped: 0 });
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'push' }));
+      expect(customerInteractionsTable.insertCalls.length).toBeGreaterThan(0);
+      for (const patch of customerInteractionsTable.insertCalls) {
+        expect(patch.interaction_type).toBe('app_outbound');
+      }
+    });
+
+    // P2 PRRT_...se2T: whether the channel selection was explicit threads
+    // into settleFollowupEmailLedger, so a default-channel email keeps its
+    // never_contacted stamp on a retryable pre-provider refusal.
+    test('a default-channel (no explicit preference) email keeps its never_contacted stamp on a retryable pre-provider refusal', async () => {
+      twoInvoiceSetup(); // no notificationPrefs row → explicit === false, same as fireTouch's selectedChannels === null
+      billingEmailSendOutcome.mockImplementation(async () => ({
+        ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'pre_provider_refusal',
+      }));
+      await runPending();
+      const emailFailCall = ContactLedger.markSendFailed.mock.calls.find(
+        (c) => c[0]?.id && String(c[0].id).endsWith(':email'),
+      );
+      expect(emailFailCall).toBeDefined();
+      expect(emailFailCall[1]).toMatchObject({ never_contacted: true });
+    });
+
+    test('an EXPLICIT channel selection does NOT get the never_contacted stamp on the same retryable refusal — explicit path unchanged', async () => {
+      twoInvoiceSetup({
+        notificationPrefs: [{ customer_id: 'cust-1', invoice_channels: ['sms', 'email'] }],
+      });
+      billingEmailSendOutcome.mockImplementation(async () => ({
+        ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'pre_provider_refusal',
+      }));
+      await runPending();
+      const emailFailCall = ContactLedger.markSendFailed.mock.calls.find(
+        (c) => c[0]?.id && String(c[0].id).endsWith(':email'),
+      );
+      expect(emailFailCall).toBeDefined();
+      expect(emailFailCall[1]).not.toMatchObject({ never_contacted: true });
+    });
   });
 });
