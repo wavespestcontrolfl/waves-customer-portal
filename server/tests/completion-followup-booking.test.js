@@ -21,6 +21,8 @@ jest.mock('../services/typed-followup-obligation', () => ({
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn(async () => {}) }));
 jest.mock('../services/scheduling/window-rules', () => ({
   probeSlotOverlap: jest.fn(async () => []),
+  // The real validator — the on-the-hour invariant is what's under test.
+  assertAdminAppointmentWindow: jest.requireActual('../services/scheduling/window-rules').assertAdminAppointmentWindow,
   slotOverlapWarning: (date) => `overlap on ${date}`,
   ADMIN_OCCUPANCY_EXCLUDE_STATUSES: ['cancelled', 'completed', 'skipped', 'no_show'],
 }));
@@ -215,4 +217,24 @@ test('an existing follow-up matching every pin is the idempotent success', async
     expectedWindow: { start: '09:00', end: '10:00' }, expectedTechnicianId: 'tech-1', expectedCustomerId: 'cust-1',
   });
   expect(out).toEqual({ status: 200, body: expect.objectContaining({ success: true, alreadyScheduled: true }) });
+});
+
+test('an inherited off-hour window (legacy :15 start) refuses before preview or write — never copied onto the follow-up', async () => {
+  const { writes } = install();
+  const src = require('../models/db');
+  const orig = src.getMockImplementation();
+  src.mockImplementation((table) => {
+    const chain = orig(table);
+    const first = chain.first;
+    chain.first = async (...a) => {
+      const row = await first(...a);
+      return row && row.id === 'svc-1' ? { ...row, window_start: '09:15', window_end: '10:15' } : row;
+    };
+    return chain;
+  });
+  const preview = await bookCompletionFollowup({ serviceId: 'svc-1', useSuggestedDate: true, dryRun: true, isAdmin: true });
+  expect(preview).toEqual({ status: 409, body: expect.objectContaining({ code: 'followup_window_invalid', error: expect.stringMatching(/start on the hour/) }) });
+  const commit = await bookCompletionFollowup({ serviceId: 'svc-1', date: '2026-10-05', isAdmin: true });
+  expect(commit.body.code).toBe('followup_window_invalid');
+  expect(writes).toEqual([]);
 });

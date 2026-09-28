@@ -39,7 +39,9 @@ const { parseJsonObject, serviceDateOnly } = require('./complete-scheduled-servi
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { typedFollowupVerdict, FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('./scheduling/window-rules');
+const {
+  probeSlotOverlap, slotOverlapWarning, assertAdminAppointmentWindow, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+} = require('./scheduling/window-rules');
 const { findConflictingVisits } = require('./scheduling/occupancy');
 const { assertAssignableTechnician } = require('./technician-eligibility');
 const { etDateString } = require('../utils/datetime-et');
@@ -110,9 +112,8 @@ async function bookCompletionFollowup(input = {}) {
   }
 
   const insertData = buildFollowupInsert(svc, cols, { date, windowStart, windowEnd, technicianOverride });
-  if (expectedWindow !== undefined && windowDiffers(insertData, expectedWindow)) {
-    return reply(409, { error: 'The follow-up window changed since it was approved — ask again for a fresh card.', code: 'followup_window_changed' });
-  }
+  const badWindow = windowRefusal(insertData, expectedWindow);
+  if (badWindow) return badWindow;
   if (dryRun) return followupPreview({ date, insertData, technicianOverride });
 
   let committed;
@@ -315,6 +316,27 @@ function followupAlertResolver(svc, actorId) {
     }
   };
   return resolveOpenFollowupAlerts;
+}
+
+// Appointment windows start on the hour (AGENTS.md scheduling invariant):
+// the resolved window — typed or inherited from a legacy/imported source
+// visit — passes the same admin validator every staff booking uses before
+// it is previewed or written; an off-hour start refuses instead of being
+// copied onto the new visit.
+// expectedWindow (IB closeout repair): the approved window must still be
+// the resolved one.
+function windowRefusal(insertData, expectedWindow) {
+  if (insertData.window_start) {
+    try {
+      assertAdminAppointmentWindow({ windowStart: insertData.window_start, windowEnd: insertData.window_end });
+    } catch (err) {
+      return reply(409, { error: `${err.message} — book this follow-up from Dispatch with a valid window.`, code: 'followup_window_invalid' });
+    }
+  }
+  if (expectedWindow !== undefined && windowDiffers(insertData, expectedWindow)) {
+    return reply(409, { error: 'The follow-up window changed since it was approved — ask again for a fresh card.', code: 'followup_window_changed' });
+  }
+  return null;
 }
 
 function windowDiffers(row, expectedWindow) {
