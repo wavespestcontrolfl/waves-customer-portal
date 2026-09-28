@@ -12,8 +12,10 @@
  */
 
 let mockAppointmentRow = null;
+let mockCustomerRow = null;
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => ({
+  const customersQb = { where: () => customersQb, first: async () => mockCustomerRow };
+  const db = jest.fn((table) => (table === 'customers' ? customersQb : {
     leftJoin: () => db.__qb,
     where: () => db.__qb,
     first: async () => mockAppointmentRow,
@@ -70,13 +72,27 @@ beforeEach(() => {
     status: 'confirmed',
     scheduled_date: '2026-10-02',
     service_type: 'pest_control',
-    first_name: 'Synthia',
-    last_name: 'Tester',
+    customer_id: 'cust-synthetic-1',
   };
+  mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
   mockInvoicePreview.mockResolvedValue([]);
   mockUnresolvedAfterVoid.mockResolvedValue(false);
   mockCreditPreview.mockResolvedValue(null);
   mockNoticeVerdict.mockResolvedValue('none');
+});
+
+// The proposal-side fingerprint must hash EXACTLY the scheduled_services
+// row tools.js's cancelAppointment re-reads under FOR UPDATE — customer
+// name/address columns must never ride into it, or every confirm would
+// refuse as drifted.
+test('identity fingerprint covers only the scheduled_services row, not the customer columns shown on the card', async () => {
+  mockCardHoldPreview.mockResolvedValue({ held: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockApptCardPreview.mockResolvedValue({ secured: false, feeApplies: false, rule: { code: 'no_card' } });
+  mockCustomerRow = { ...mockCustomerRow, address_line1: '999 Other Rd', city: 'Sarasota', state: 'FL', zip: '34231' };
+  const { computeRowFingerprint } = require('../services/appointment-cancel-impact');
+  const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
+  expect(impact.appointment.customer_name).toBe('Synthia Tester');
+  expect(impact.identity_fingerprint).toBe(computeRowFingerprint({ ...mockAppointmentRow }));
 });
 
 test('returns null for an appointment that no longer exists', async () => {
@@ -283,8 +299,8 @@ describe('appointment.address (Codex round-4 P1: show the visit\'s effective ser
       ...mockAppointmentRow,
       service_address_line1: '123 Main St', service_address_line2: null,
       service_address_city: 'Bradenton', service_address_state: 'FL', service_address_zip: '34209',
-      customer_address_line1: '999 Other Rd', customer_city: 'Sarasota', customer_state: 'FL', customer_zip: '34231',
     };
+    mockCustomerRow = { ...mockCustomerRow, address_line1: '999 Other Rd', city: 'Sarasota', state: 'FL', zip: '34231' };
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.appointment.address).toBe('123 Main St, Bradenton, FL, 34209');
   });
@@ -294,8 +310,8 @@ describe('appointment.address (Codex round-4 P1: show the visit\'s effective ser
     mockAppointmentRow = {
       ...mockAppointmentRow,
       service_address_line1: null,
-      customer_address_line1: '999 Other Rd', customer_city: 'Sarasota', customer_state: 'FL', customer_zip: '34231',
     };
+    mockCustomerRow = { ...mockCustomerRow, address_line1: '999 Other Rd', city: 'Sarasota', state: 'FL', zip: '34231' };
     const impact = await computeCancelAppointmentImpact('svc-synthetic-1');
     expect(impact.appointment.address).toBe('999 Other Rd, Sarasota, FL, 34231');
   });

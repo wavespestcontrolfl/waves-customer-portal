@@ -171,24 +171,31 @@ function computeRowFingerprint(row) {
 }
 
 async function loadAppointmentFacts(scheduledServiceId) {
-  const row = await db('scheduled_services as s')
-    .leftJoin('customers as c', 's.customer_id', 'c.id')
-    .where('s.id', scheduledServiceId)
-    .first(
-      // The WHOLE row (Codex round-2 through round-4 P1s — see
-      // computeRowFingerprint above): selecting s.* rather than a
-      // hand-picked column list means a future column need not be added
-      // here by hand to be covered by the identity fingerprint.
-      's.*',
-      'c.first_name', 'c.last_name',
-      // Fallback address source ONLY (effectiveAddress above) — a legacy
-      // row with no stamped service_address_* uses the customer's current
-      // primary address instead. Aliased to avoid colliding with any
-      // scheduled_services column of the same short name.
-      'c.address_line1 as customer_address_line1', 'c.address_line2 as customer_address_line2',
-      'c.city as customer_city', 'c.state as customer_state', 'c.zip as customer_zip',
-    );
-  if (!row) return null;
+  // The WHOLE row (Codex round-2 through round-4 P1s — see
+  // computeRowFingerprint above), read EXACTLY as tools.js's cancelAppointment
+  // re-reads it under its FOR UPDATE lock — trx('scheduled_services')
+  // .where('id').first() — so the two fingerprints hash the same column set.
+  // Customer columns come from a SEPARATE read: joined into this query they
+  // would ride into the proposal-side hash but never the locked one, and
+  // every confirm would refuse as drifted.
+  const serviceRow = await db('scheduled_services').where('id', scheduledServiceId).first();
+  if (!serviceRow) return null;
+  const customer = serviceRow.customer_id
+    ? await db('customers').where('id', serviceRow.customer_id)
+      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : null;
+  // Fallback address source ONLY (effectiveAddress above) — a legacy row with
+  // no stamped service_address_* uses the customer's current primary address.
+  const row = {
+    ...serviceRow,
+    first_name: customer?.first_name ?? null,
+    last_name: customer?.last_name ?? null,
+    customer_address_line1: customer?.address_line1 ?? null,
+    customer_address_line2: customer?.address_line2 ?? null,
+    customer_city: customer?.city ?? null,
+    customer_state: customer?.state ?? null,
+    customer_zip: customer?.zip ?? null,
+  };
   const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ').trim() || null;
   return {
     facts: {
@@ -210,7 +217,7 @@ async function loadAppointmentFacts(scheduledServiceId) {
     // A hash, not the raw row: keeps the impact object's own shape small
     // (the fingerprint is what the drift check needs, not a second copy of
     // every column's current value) while still covering the whole row.
-    identityFingerprint: computeRowFingerprint(row),
+    identityFingerprint: computeRowFingerprint(serviceRow),
     row,
   };
 }
