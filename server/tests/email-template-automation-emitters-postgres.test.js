@@ -22,7 +22,9 @@
  *    show the caller's transition still commits (codex P1 round 5);
  *  - the customer email fan-out's jsonb predicates really retarget a
  *    pending estimate.expired marker to the corrected address, and leave
- *    another customer's / a settled marker alone (codex P1 round 5).
+ *    another customer's / a settled marker alone (codex P1 round 5);
+ *  - a marker pending past the 24h replay shelf life settles stale in the
+ *    real range UPDATE and is never replayed (pre-push audit P1).
  */
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -232,6 +234,50 @@ jest.mock('../services/email-template-automation-executor', () => ({
       })).rejects.toBe(rollback);
     } finally {
       await cleanup({ customerIds: [customerId], markerIds: [pendingId, processedId, tenantId, strangerId] });
+    }
+  });
+
+  // pre-push audit P1 on 37af26ca7b: a marker pending past the 24h replay
+  // shelf life (e.g. the backlog of an off → live flip) settles stale and
+  // is never replayed; a fresh one still replays in the same tick.
+  test('a marker past the replay shelf life settles unrecoverable/stale and is never replayed; a fresh one still replays', async () => {
+    const staleId = randomUUID();
+    const freshId = randomUUID();
+    await db('email_template_automation_intents').insert([
+      {
+        id: staleId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-stale',
+        occurred_at: new Date(Date.now() - emitters.INTENT_MAX_AGE_MS - 60 * 60 * 1000),
+        status: 'pending',
+        payload: JSON.stringify({ id: 'est-pg-stale', customer_email: 'sweep-qa@example.com' }),
+      },
+      {
+        id: freshId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-fresh-shelf',
+        occurred_at: new Date(Date.now() - 10 * 60 * 1000),
+        status: 'pending',
+        payload: JSON.stringify({ id: 'est-pg-fresh-shelf', customer_email: 'sweep-qa@example.com' }),
+      },
+    ]);
+
+    try {
+      await emitters.sweepMissedLifecycleEvents();
+
+      const replayed = AutomationExecutor.processTrigger.mock.calls.map((c) => c[0].entityId);
+      expect(replayed).not.toContain('est-pg-stale');
+      expect(replayed).toContain('est-pg-fresh-shelf');
+      const staleAfter = await db('email_template_automation_intents').where({ id: staleId }).first();
+      expect(staleAfter.status).toBe('unrecoverable');
+      expect(staleAfter.last_error).toMatch(/^stale/);
+      expect(staleAfter.attempts).toBe(0);
+      const freshAfter = await db('email_template_automation_intents').where({ id: freshId }).first();
+      expect(freshAfter.status).toBe('processed');
+    } finally {
+      await cleanup({ markerIds: [staleId, freshId] });
     }
   });
 

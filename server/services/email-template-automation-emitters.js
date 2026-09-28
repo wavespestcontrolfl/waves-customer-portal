@@ -123,7 +123,7 @@ async function settleUndispatchable(intentId, reason) {
 // intentId is optional (a caller with no marker — e.g. a future direct
 // emitter that hasn't adopted the outbox yet — behaves exactly as before).
 async function emitTrigger(eventKey, args, intentId = null) {
-  if (!isEnabled('emailTemplateAutomations')) return null; // gate off: any marker stays 'pending' — replayed once the gate is live/shadow
+  if (!isEnabled('emailTemplateAutomations')) return null; // gate off: any marker stays 'pending' — replayed once the gate is live/shadow (within INTENT_MAX_AGE_MS)
   try {
     const AutomationExecutor = require('./email-template-automation-executor');
     const result = await AutomationExecutor.processTrigger({ triggerEventKey: eventKey, executeImmediately: true, ...args });
@@ -277,6 +277,21 @@ async function recordAutomationIntents(conn, entries) {
 const INTENT_MIN_AGE_MS = 5 * 60 * 1000;
 const INTENT_ROW_LIMIT = 100;
 
+// Replay shelf life (pre-push audit P1 on 37af26ca7b): a marker still
+// 'pending' this long after its transition is never replayed — a lifecycle
+// email days or weeks after the event (the backlog a mode flip off → live
+// would otherwise release all at once: markers keep accumulating while the
+// mode is 'off', and estimate.expired's only replay-time revalidation is
+// status === 'expired', which stays true forever) is worse than none. Same
+// precedent as the first-touch hold shelf life (FIRST_TOUCH_HOLD_MAX_AGE_DAYS:
+// a first touch weeks late is never sent). 24h comfortably covers the whole
+// retry budget (MAX_INTENT_ATTEMPTS ≈ 2h15m of 15-minute ticks) plus a
+// deploy or an overnight outage. Such markers settle 'unrecoverable' with a
+// 'stale' last_error (the status set stays pending | processed |
+// unrecoverable) in ONE statement before the replay batch is read.
+const INTENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const STALE_INTENT_ERROR = 'stale: pending past the 24h replay shelf life — not replayed';
+
 // The retry safety net (codex P2 x2 round 2, restructured P1 x3 + P2 round
 // 3, attempts ceiling pre-push audit P1): replays 'pending' intent markers.
 // No row can pin the LIMIT window: every marker the loop visits leaves it
@@ -290,10 +305,23 @@ async function retryPendingIntents() {
   // Mirrors emitTrigger's own gate read: with the boolean gate off every
   // replay would be a no-op that settles nothing, so don't query at all.
   if (!isEnabled('emailTemplateAutomations')) return 0;
+  const staleCutoff = new Date(Date.now() - INTENT_MAX_AGE_MS);
+  try {
+    await db('email_template_automation_intents')
+      .where('status', 'pending')
+      .where('occurred_at', '<', staleCutoff)
+      .update({ status: 'unrecoverable', last_error: STALE_INTENT_ERROR, updated_at: new Date() });
+  } catch (err) {
+    // Fail closed: without the stale settle the batch below could replay a
+    // weeks-old marker. Skip this tick; the next one tries again.
+    logger.warn(`[email-template-automation-emitters] stale-intent settle failed: ${safeErrorText(err)}`);
+    return 0;
+  }
   let markers;
   try {
     markers = await db('email_template_automation_intents')
       .where('status', 'pending')
+      .where('occurred_at', '>=', staleCutoff)
       .where('occurred_at', '<=', new Date(Date.now() - INTENT_MIN_AGE_MS))
       .orderBy([{ column: 'attempts', order: 'asc' }, { column: 'occurred_at', order: 'asc' }])
       .limit(INTENT_ROW_LIMIT);
@@ -335,8 +363,9 @@ async function retryPendingIntents() {
 // or here — wrapped HERE so a direct test/manual call gets the same
 // single-flight guarantee as the cron tick). No-op, no query at all, when
 // the mode is 'off' — matches every other reader's off-mode contract; a
-// marker recorded while off simply accumulates until the gate is live or
-// shadow, then replays.
+// marker recorded while off accumulates until the gate is live or shadow,
+// then replays only while inside the 24h replay shelf life
+// (INTENT_MAX_AGE_MS); older ones settle stale, never sent.
 async function sweepMissedLifecycleEvents() {
   if (emailTemplateAutomationsMode() === 'off') return { intentsRetried: 0 };
   const { runExclusive } = require('../utils/cron-lock');
@@ -347,6 +376,7 @@ async function sweepMissedLifecycleEvents() {
 }
 
 module.exports = {
+  INTENT_MAX_AGE_MS,
   MAX_INTENT_ATTEMPTS,
   emitEstimateExpired,
   emitReviewLinked5Star,

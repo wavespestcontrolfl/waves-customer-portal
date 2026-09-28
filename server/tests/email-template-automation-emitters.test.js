@@ -19,7 +19,7 @@ const db = require('../models/db');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const {
-  MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
+  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
 } = require('../services/email-template-automation-emitters');
 
 beforeEach(() => {
@@ -419,6 +419,51 @@ describe('recordAutomationIntent / recordAutomationIntents', () => {
 });
 
 describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
+  // pre-push audit P1 on 37af26ca7b — replay shelf life. The in-memory
+  // table mock above ignores range predicates, so these pin the statements
+  // themselves; the real-SQL proof is in the -postgres suite.
+  function recordingBuilders({ updateError = null } = {}) {
+    const builders = [];
+    db.mockImplementation(() => {
+      const b = { wheres: [], patch: null };
+      b.where = jest.fn((...args) => { b.wheres.push(args); return b; });
+      b.orderBy = jest.fn(() => b);
+      b.limit = jest.fn(() => b);
+      b.update = jest.fn(async (patch) => { b.patch = patch; if (updateError) throw updateError; return 0; });
+      b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      builders.push(b);
+      return b;
+    });
+    return builders;
+  }
+
+  test('settles markers past the 24h replay shelf life stale BEFORE reading the batch, and the batch excludes them', async () => {
+    const builders = recordingBuilders();
+    const before = Date.now();
+
+    await sweepMissedLifecycleEvents();
+
+    const [stale, batch] = builders;
+    expect(INTENT_MAX_AGE_MS).toBe(24 * 60 * 60 * 1000);
+    expect(stale.wheres[0]).toEqual(['status', 'pending']);
+    const [col, op, cutoff] = stale.wheres[1];
+    expect([col, op]).toEqual(['occurred_at', '<']);
+    expect(Math.abs(cutoff.getTime() - (before - INTENT_MAX_AGE_MS))).toBeLessThan(5000);
+    expect(stale.patch).toEqual(expect.objectContaining({ status: 'unrecoverable', last_error: expect.stringMatching(/^stale/) }));
+    expect(batch.wheres).toContainEqual(['occurred_at', '>=', cutoff]);
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('a failed stale settle skips the tick (fail closed) — nothing is read or replayed', async () => {
+    const builders = recordingBuilders({ updateError: new Error('db unavailable') });
+
+    const result = await sweepMissedLifecycleEvents();
+
+    expect(result).toEqual({ intentsRetried: 0 });
+    expect(builders).toHaveLength(1);
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+
   test('no-op (no query at all) when the mode is off', async () => {
     emailTemplateAutomationsMode.mockReturnValue('off');
     mockIntentsTable([{ id: 'intent-1', trigger_event_key: 'estimate.expired' }]);
@@ -499,7 +544,8 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
 
     await sweepMissedLifecycleEvents();
 
-    const query = db.mock.results[0].value;
+    // results[0] is the stale-marker settle (replay shelf life); [1] is the batch read.
+    const query = db.mock.results[1].value;
     expect(query.orderBy).toHaveBeenCalledWith([
       { column: 'attempts', order: 'asc' },
       { column: 'occurred_at', order: 'asc' },
