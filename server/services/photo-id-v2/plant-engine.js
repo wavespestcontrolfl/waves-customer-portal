@@ -1481,31 +1481,30 @@ async function runEscalation(run, identity, conditions) {
   };
 }
 
-/** How far a lane's top could actually be NAMED (Codex #5186 r2 P2) —
- * answer eligibility outranks a raw number when identify mode picks a lawn
- * lane: 3 = a checked, approved catalog candidate with a clean visible cue
- * (can read pretty_sure); 2 = a checked, approved catalog candidate (can
- * read likely); 1 = a catalog candidate that is unchecked, uncovered or
- * unapproved; 0 = off-catalog or nothing. */
-function laneEligibilityRank(top) {
-  if (!top?.entry) return 0;
-  if (top.uncovered || !top.checked || !isApproved(top.entry)) return 1;
-  return top.verified ? 3 : 2;
+/** How far a lane's top could actually be NAMED (Codex #5186 r2 P2, and the
+ * pre-push audit on it): the real answer the builder would give that top
+ * under the lane's own escalation flags — 2 = `pretty_sure`, 1 = `likely`,
+ * 0 = not nameable (off-catalog, uncovered, unapproved, disagreed, or below
+ * the 0.55 threshold). A verified turf at 0.10 therefore ranks below a
+ * checked weed at 0.90 with no visible cue (a `likely`). */
+function laneEligibilityRank(top, flags = {}) {
+  const named = identityEntryLevelAnswer(top || null, flags);
+  if (!named) return 0;
+  return named.wording === 'pretty_sure' ? 2 : 1;
 }
 
 /** Identify mode's one identity lane (Codex #5186 r1 P1): the host for
  * tree_shrub/palm; for a lawn, whichever of turf/weeds is populated; when
- * both are, the lane whose top is more eligible to be named
- * (`laneEligibilityRank`) — a verified turf at 0.85 beats an off-catalog
- * weed guess at 0.95 (Codex #5186 r2 P2) — then the higher confidence,
- * turf on a tie. */
-function identifyLaneFor(subject, slots) {
+ * both are, the lane whose top is more nameable (`laneEligibilityRank`) — a
+ * verified turf at 0.85 beats an off-catalog weed guess at 0.95 (Codex
+ * #5186 r2 P2) — then the higher confidence, turf on a tie. */
+function identifyLaneFor(subject, slots, identityFlags = {}) {
   if (subject !== 'lawn') return 'host';
   const [turfTop] = slots.turf;
   const [weedTop] = slots.weeds;
   if (!weedTop) return 'turf';
   if (!turfTop) return 'weeds';
-  const rankGap = laneEligibilityRank(weedTop) - laneEligibilityRank(turfTop);
+  const rankGap = laneEligibilityRank(weedTop, identityFlags.weeds) - laneEligibilityRank(turfTop, identityFlags.turf);
   if (rankGap !== 0) return rankGap > 0 ? 'weeds' : 'turf';
   return weedTop.confidence > turfTop.confidence ? 'weeds' : 'turf';
 }
@@ -1638,7 +1637,7 @@ async function identifyPlantV2({
   if (failure) return { ok: false, reason: failure };
 
   const quality = photoReadFor(identity, conditions, escalation);
-  const lane = mode === 'identify' ? identifyLaneFor(subject, escalation.slots) : null;
+  const lane = mode === 'identify' ? identifyLaneFor(subject, escalation.slots, escalation.identityFlags) : null;
   const v2 = lane ? assembleIdentity(run, escalation, quality, lane) : assembleWorkup(run, escalation, quality);
   return { ok: true, v2, internal: internalFor(run, { identity, conditions, escalation }, lane) };
 }

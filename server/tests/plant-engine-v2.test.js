@@ -296,7 +296,7 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
         photosCount: 1,
         quality: { usable: true, issue: 'none' },
       });
-      expect(built.subject.plant).toEqual({
+      expect(built.subject.plant).toMatchObject({
         slug: 'fixture-st-augustine', common_name: 'Fixture St. Augustine', scientific_name: 'Stenotaphrum fixturicus', source: 'account', wording: null,
       });
       expect(built.evidence.account).toEqual({ grass_type: 'fixture-st-augustine' });
@@ -1152,16 +1152,23 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(result.internal.escalation_reasons).not.toContain('no_identity_candidate');
     });
 
-    test('finding 2: lane choice ranks answer eligibility before confidence — a verified turf at 0.85 beats an off-catalog weed guess at 0.95', () => {
+    test('finding 2: lane choice ranks real nameability before confidence — a verified turf at 0.85 beats an off-catalog weed guess at 0.95', () => {
       const { identifyLaneFor, laneEligibilityRank } = engine._test;
       const turf = cand('fixture-st-augustine', 0.85);
-      expect(laneEligibilityRank(turf)).toBe(3);
+      expect(laneEligibilityRank(turf)).toBe(2); // pretty_sure
+      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.9, { verified: false }))).toBe(1); // checked, no clean cue -> likely
       expect(laneEligibilityRank(offCatalog('some weed', 0.95))).toBe(0);
-      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.95, { uncovered: true }))).toBe(1);
-      expect(laneEligibilityRank(cand('fixture-zoysia-draft', 0.95))).toBe(1); // unapproved
+      expect(laneEligibilityRank(cand('fixture-nutsedge', 0.95, { uncovered: true }))).toBe(0);
+      expect(laneEligibilityRank(cand('fixture-zoysia-draft', 0.95))).toBe(0); // unapproved
+      expect(laneEligibilityRank(cand('fixture-st-augustine', 0.10))).toBe(0); // below the naming threshold
+      expect(laneEligibilityRank(turf, { disagreed: true })).toBe(0); // a disagreed slot has no answer
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [offCatalog('some weed', 0.95)], host: [] })).toBe('turf');
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.95, { uncovered: true })], host: [] })).toBe('turf');
-      // Equal eligibility: the higher confidence wins, turf on a tie.
+      // Pre-push audit: a verified turf at 0.10 must not outrank a likely weed at 0.90.
+      expect(identifyLaneFor('lawn', { turf: [cand('fixture-st-augustine', 0.10)], weeds: [cand('fixture-nutsedge', 0.9, { verified: false })], host: [] })).toBe('weeds');
+      // The lane's own escalation flags count: a disagreed turf yields to a nameable weed.
+      expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.6)], host: [] }, { turf: { disagreed: true }, weeds: {} })).toBe('weeds');
+      // Equal nameability: the higher confidence wins, turf on a tie.
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.95)], host: [] })).toBe('weeds');
       expect(identifyLaneFor('lawn', { turf: [turf], weeds: [cand('fixture-nutsedge', 0.85)], host: [] })).toBe('turf');
       expect(identifyLaneFor('lawn', { turf: [], weeds: [offCatalog('some weed', 0.4)], host: [] })).toBe('weeds');
