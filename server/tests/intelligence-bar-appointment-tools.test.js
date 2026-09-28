@@ -368,6 +368,28 @@ describe('create_appointment', () => {
     expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
+  test('a terminal status the recheck could not act on (a transient read failure there) still vetoes the confirmation (Codex r9)', async () => {
+    const adminSchedule = require('../routes/admin-schedule');
+    const spy = jest.spyOn(adminSchedule, 'cancelSpawnedReminderIfVisitTerminal').mockResolvedValue(false);
+    const cancelledRow = () => chain({ first: jest.fn().mockResolvedValue({ status: 'cancelled' }) });
+    try {
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+          chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+        scheduled_services: [chain(), chain(), cancelledRow(), cancelledRow(), cancelledRow(), cancelledRow()],
+      });
+      const result = await executeTool('create_appointment', {
+        customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+      });
+      expect(result.success).toBe(true);
+      expect(spy).toHaveBeenCalled();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),

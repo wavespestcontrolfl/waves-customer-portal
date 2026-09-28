@@ -3185,7 +3185,7 @@ async function createAppointment(input, actionContext = {}) {
   // visit awaiting rebooking is not a visit to send "see you then" for
   // either. Read once, after registration, on db — same status this
   // customer-portal reschedule flow just committed.
-  let visitAwaitingRebooking = false;
+  let visitNotLive = false;
   const AppointmentReminders = require('../appointment-reminders');
   try {
     // The Schedule create's own options: fromCommittedRow reads the time
@@ -3213,8 +3213,13 @@ async function createAppointment(input, actionContext = {}) {
       // registration itself succeeded) — it only means the confirmation send
       // proceeds exactly as it did before this check existed.
       try {
+        // Any not-live status vetoes the send (Codex r9): 'rescheduled' keeps
+        // its reminder armed, and a terminal status the recheck above could
+        // not act on (a transient read failure there) must still never get
+        // a "see you then".
+        const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
         const visitNow = await db('scheduled_services').where({ id: appointment.id }).first('status');
-        visitAwaitingRebooking = String(visitNow?.status || '').toLowerCase() === 'rescheduled';
+        visitNotLive = TERMINAL_STATUSES.includes(String(visitNow?.status || '').toLowerCase());
       } catch (statusErr) {
         logger.warn(`[intelligence-bar] post-registration rescheduled-status check failed for appointment ${appointment.id}: ${statusErr.message}`);
       }
@@ -3237,7 +3242,7 @@ async function createAppointment(input, actionContext = {}) {
   // exactly what the recheck above exists to prevent — nor one that instead
   // turned 'rescheduled' (awaiting rebooking): the reminder stays armed, but
   // "see you then" for a visit with no settled time is exactly as wrong.
-  if (!reminderWarning && !visitWentTerminal && !visitAwaitingRebooking) {
+  if (!reminderWarning && !visitWentTerminal && !visitNotLive) {
     setImmediate(async () => {
       try {
         await AppointmentReminders.sendConfirmation(appointment.id);
