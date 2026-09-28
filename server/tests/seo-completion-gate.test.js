@@ -2360,12 +2360,39 @@ describe('sourced competitor prices survive the SEO price check (r13)', () => {
     expect(detectHardcodedPrice(sourced, brief)).toBe(false);
   });
 
-  test('an UNSOURCED intercept price still parks', () => {
-    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(true);
+  // Owner ruling 2026-09-28 ("list them, we don't have to link to their
+  // site, or say verified or not verified") retired the source-and-date
+  // requirement — a deliberate contract change, not a review rewrite. An
+  // attributed competitor price with no link or date is accepted; a Waves
+  // price on the same intercept brief still parks.
+  test('an unlinked, undated intercept competitor price is accepted; a Waves price still parks', () => {
+    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(false);
+    expect(detectHardcodedPrice('Our quarterly service is $89 per application.', brief)).toBe(true);
   });
 
   test('a non-intercept brief keeps the full guard', () => {
     expect(detectHardcodedPrice(sourced, { gsc_signal: { bucket: 'seasonal_rising' } })).toBe(true);
+  });
+
+  // Codex r9 on #5191: the source moved off the page, not away. The brief's
+  // Aptive source covers Aptive above; an Orkin figure needs Orkin's source
+  // in the draft's notes_for_reviewer, exactly as the guardrails require.
+  test('a competitor price with no source for THAT company parks; the draft\'s evidence notes clear it', () => {
+    const orkin = 'Orkin charges a $199 cancellation fee.';
+    expect(detectHardcodedPrice(orkin, brief)).toBe(true);
+    expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.orkin.com/pricing' })).toBe(false);
+    expect(detectHardcodedPrice(orkin, brief, { notes_for_reviewer: 'Evidence sources: https://www.terminix.com/pricing' })).toBe(true);
+  });
+
+  test('evaluate() hands the draft\'s evidence notes to the price check', () => {
+    const interceptBrief = { ...baseBrief(), ...brief };
+    const draft = (notes) => baseDraft({
+      body: `${baseDraft().body}\n\nOrkin charges a $199 cancellation fee.`,
+      notes_for_reviewer: notes,
+    });
+    const priceP0 = (r) => r.findings.some((f) => f.code === 'P0_HARDCODED_PRICE_NOT_APPROVED');
+    expect(priceP0(SeoCompletionGate.evaluate({ draft: draft(null), brief: interceptBrief, shadowMode: true }))).toBe(true);
+    expect(priceP0(SeoCompletionGate.evaluate({ draft: draft('Evidence sources: https://www.orkin.com/pricing'), brief: interceptBrief, shadowMode: true }))).toBe(false);
   });
 });
 

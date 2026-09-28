@@ -193,6 +193,30 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
   });
 
+  test('a refreshed SERVICE page body that links a competitor is refused before any branch (owner rulings 2026-09-28: every page; refuse, don\'t rewrite)', async () => {
+    await expect(pub.publishRefresh(refreshDraft({
+      body: 'Fresh Sarasota guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a competitor page listed in notes_for_reviewer reaches the editorial review as evidence, never the page (Codex r6 on #5191)', async () => {
+    const editorialEvidence = require('../services/content/editorial-evidence');
+    const filesSpy = jest.spyOn(editorialEvidence, 'filesForDocument').mockResolvedValue([]);
+    try {
+      const res = await pub.publishRefresh({
+        ...refreshDraft({ body: 'Fresh Sarasota guidance. Per the published terms, plans renew yearly.' }),
+        notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms',
+      }, BRIEF);
+      expect(res.status).toBe('pr_open');
+      expect(filesSpy).toHaveBeenCalledWith(expect.objectContaining({ evidenceUrls: ['https://www.orkin.com/terms'] }));
+      expect(gh.putFile.mock.calls[0][0].content).not.toMatch(/orkin\.com/);
+    } finally {
+      filesSpy.mockRestore();
+    }
+  });
+
   test('no_changes when body and meta are identical to live', async () => {
     const draft = {
       type: 'draft',
@@ -420,6 +444,38 @@ describe('publishRefresh blog-schema validation gate', () => {
       pub.publishRefresh(blogRefreshDraft({ frontmatter: { meta_description: tooLong } }), BLOG_BRIEF),
     ).rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
     expect(gh.putFile).not.toHaveBeenCalled();
+  });
+
+  test('a blog-target refresh that links a competitor is refused too (Codex r1 P2)', async () => {
+    await expect(pub.publishRefresh(blogRefreshDraft({
+      body: 'Refreshed guidance. Per [the published terms](https://www.orkin.com/terms) plans renew yearly; see [UF/IFAS](https://edis.ifas.ufl.edu/x).',
+    }), BLOG_BRIEF)).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('a metadata rewrite is refused when its meta, or a service page\'s untouched frontmatter, links a competitor (owner ruling: every page)', async () => {
+    gh.getFile.mockResolvedValue({ content: VALID_BLOG, sha: 'blog-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: BLOG_FILE_PATH,
+      title: 'Drywood Termite Signs vs Orkin',
+      meta_description: 'Compare our approach with https://www.orkin.com/terms and see what Waves techs check first for drywood termite signs in Sarasota homes today.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/blog/drywood-termite-signs-sarasota/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    const svcWithLink = EXISTING.replace(
+      'pageType: "city-hub"',
+      'pageType: "city-hub"\nsourceNote: "Compare to https://www.orkin.com/terms"',
+    );
+    gh.getFile.mockResolvedValue({ content: svcWithLink, sha: 'svc-sha' });
+    await expect(pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'ignored (protected metaTitle)',
+      meta_description: 'A brand-new Sarasota pest control meta description for the service page rewrite lane.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' })).rejects.toMatchObject({ code: 'COMPETITOR_LINK' });
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('does NOT blog-validate a non-blog (service) page refresh', async () => {
