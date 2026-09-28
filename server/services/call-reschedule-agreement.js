@@ -405,7 +405,16 @@ function namesAnyDay(quote) {
 // ("at two AM" -> am), so a commitment in the other half never counts.
 const HALF_WORDS = { am: 'am', morning: 'am', pm: 'pm', afternoon: 'pm', evening: 'pm', tonight: 'pm', night: 'pm' };
 function halvesSaid(quote) {
-  return normalize(quote).split(' ').filter((t) => Object.hasOwn(HALF_WORDS, t)).map((t) => HALF_WORDS[t]);
+  const toks = normalize(quote).split(' ');
+  return toks.filter((t, i) => Object.hasOwn(HALF_WORDS, t) && (t !== 'am' || amIsMeridiem(toks[i - 1])))
+    .map((t) => HALF_WORDS[t]);
+}
+
+// "Am" is also the verb ("I am moving you to two"): it is the morning only
+// right after a number, "o'clock" or a day ("10 AM", "Thursday AM").
+function amIsMeridiem(prev) {
+  return Boolean(prev) && (/^\d+$/.test(prev) || Object.hasOwn(HOUR_WORDS, prev) || prev === 'clock' || prev === 'oclock'
+    || DAY_WORDS.has(prev));
 }
 
 // The recorded words the slot quote must hold.
