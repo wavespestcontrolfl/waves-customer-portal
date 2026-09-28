@@ -1575,7 +1575,8 @@ async function publishAstro(postId) {
     applyCostGuidePriceRange(data, liveFile ? liveFrontmatterOf(liveFile) : null);
     assertValidBlogFrontmatter(data);
     const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(data, finalBody + '\n', { validate: assertValidBlogFrontmatter });
-    const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath });
+    const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath,
+      evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(null, competitorUnlinked) });
 
     await gh.createBranch(branch);
     branchCreated = true;
@@ -3435,7 +3436,8 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // actually changed. Merge in the capture-time removals so the PR notes
   // show the whole story.
   const capturedCompetitorUnlinked = Array.isArray(draft.competitor_links_unlinked) ? draft.competitor_links_unlinked : [];
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
 
   await gh.createBranch(branch);
   // Reused body pictures are pinned to the blob they were judged on; a
@@ -3647,7 +3649,8 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
   await gh.createBranch(branch);
   if (editorialFiles.length) {
     const current = await gh.getFile(filePath, branch);
@@ -3915,7 +3918,8 @@ async function publishRefresh(draft, brief = {}) {
   }
   const finalBody = refreshImages.body;
   const { markdown, unlinked: competitorUnlinked } = competitorFreeMarkdown(nextFrontmatter, `${finalBody}\n`, { validate: isBlogTarget(filePath) ? assertValidBlogFrontmatter : null });
-  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief });
+  const editorialFiles = await editorialEvidence.filesForDocument({ document: markdown, path: filePath, brief,
+    evidenceUrls: editorialEvidence.unlinkedCompetitorUrls(draft, competitorUnlinked) });
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;

@@ -129,6 +129,13 @@ const ANCHOR_RE = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi;
 const HREF_ATTR_RE = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|([^\s>]+))/i;
 const COMPONENT_TAG_RE = /<([A-Z][\w.]*)\b([^<>]*?)(\/?)>/g;
 const URL_ATTR_RE = /\s+([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/g;
+// A component's visible label, when it has one ("Visit Orkin").
+const LABEL_ATTR_RE = /(?:^|\s)(?:ctaLabel|label|text|title|alt|ariaLabel|aria-label)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/i;
+const IMG_TAG_RE = /<img\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi;
+const SRC_ATTR_RE = /(?:^|\s)src\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|([^\s>]+))/i;
+const ALT_ATTR_RE = /(?:^|\s)alt\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\})/i;
+// Any remaining HTML / JSX tag, quote- and brace-aware.
+const ANY_TAG_RE = /<\/?[A-Za-z][\w.:-]*(?:[^<>"'{}]|"[^"]*"|'[^']*'|\{[^{}]*\})*>/g;
 const AUTOLINK_RE = /<((?:https?:\/\/|www\.)[^<>\s]+)>/gi;
 
 const normLabel = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -138,9 +145,15 @@ const stripAngles = (s) => String(s || '').replace(/^<|>$/g, '');
  * unlinkCompetitorLinks(text) → { text, unlinked: [{ url, text }] }
  * Replaces every link whose destination is a competitor host with its anchor
  * text: Markdown inline links (an image becomes its alt text), reference
- * links (their definitions are dropped), HTML anchors, component URL props
- * (the prop is dropped), autolinks and bare URLs (reduced to the plain,
- * non-linking domain, e.g. "orkin.com").
+ * links (their definitions are dropped), HTML anchors, HTML images (their
+ * alt text), a self-closing component with a competitor URL prop (its label,
+ * else the plain domain — never the component minus the prop, which a CTA
+ * would render with its default Waves link), autolinks and bare URLs in
+ * prose (reduced to the plain, non-linking domain, e.g. "orkin.com").
+ * Markup it cannot rewrite safely (a competitor URL in an iframe, a
+ * component with children, a template-literal prop) is left exactly as
+ * written, so the publisher's survivor check refuses the commit instead of
+ * shipping a broken or re-pointed link (Codex r2).
  */
 function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
   let text = String(input ?? '');
@@ -197,18 +210,31 @@ function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
     return inner;
   });
 
+  text = text.replace(IMG_TAG_RE, (whole, attrs) => {
+    const m = SRC_ATTR_RE.exec(attrs);
+    const url = m ? (m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]) : '';
+    if (!url || !isCompetitorUrl(url, hosts)) return whole;
+    const alt = ALT_ATTR_RE.exec(attrs);
+    const label = alt ? (alt[1] ?? alt[2] ?? alt[3] ?? alt[4]) : '';
+    record(url, label);
+    return label;
+  });
+
   text = text.replace(COMPONENT_TAG_RE, (whole, name, attrs, selfClose) => {
-    let changed = false;
-    const nextAttrs = attrs.replace(URL_ATTR_RE, (attr, key, dq, sq, edq, esq) => {
-      const url = dq ?? sq ?? edq ?? esq;
+    let url = null;
+    for (const m of attrs.matchAll(URL_ATTR_RE)) {
+      const value = m[2] ?? m[3] ?? m[4] ?? m[5];
       // URL-valued props only (entities decoded) — a plain-text prop that
       // merely names a domain is wording, not a link.
-      if (!/^(?:https?:)?\/\/|^www\./i.test(decodeHTML(url).trim()) || !isCompetitorUrl(url, hosts)) return attr;
-      changed = true;
-      record(url, `${name} ${key}`);
-      return '';
-    });
-    return changed ? `<${name}${nextAttrs}${selfClose}>` : whole;
+      if (/^(?:https?:)?\/\/|^www\./i.test(decodeHTML(value).trim()) && isCompetitorUrl(value, hosts)) { url = value; break; }
+    }
+    // A component with children is left for the survivor check: its closing
+    // tag and children sit outside this match.
+    if (!url || !selfClose) return whole;
+    const label = LABEL_ATTR_RE.exec(attrs);
+    const textOut = label ? (label[1] ?? label[2] ?? label[3] ?? label[4]) : plainDomain(url);
+    record(url, textOut);
+    return textOut;
   });
 
   text = text.replace(AUTOLINK_RE, (whole, url) => {
@@ -217,12 +243,18 @@ function unlinkCompetitorLinks(input, hosts = competitorHosts()) {
     return plainDomain(url);
   });
 
+  // Bare URLs in PROSE only: every remaining tag is set aside first, so an
+  // attribute no pass above rewrote keeps its URL intact instead of becoming
+  // a broken relative one (src="orkin.com").
+  const tags = [];
+  text = text.replace(ANY_TAG_RE, (tag) => { tags.push(tag); return `<\u0000${tags.length - 1}\u0000>`; });
   text = text.replace(BARE_URL_RE, (whole) => {
     const url = whole.replace(TRAILING_PUNCT_RE, '');
     if (!isCompetitorUrl(url, hosts)) return whole;
     record(url, plainDomain(url));
     return plainDomain(url) + whole.slice(url.length);
   });
+  text = text.replace(/<\u0000(\d+)\u0000>/g, (whole, i) => tags[Number(i)]);
 
   return { text, unlinked };
 }

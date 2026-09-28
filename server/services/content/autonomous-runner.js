@@ -47,6 +47,9 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+// Most Wayback snapshot requests one intercept run starts (the same bound as
+// intercept-brief-seeder's body sweep).
+const SNAPSHOT_SOURCE_LIMIT = 10;
 
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
@@ -2073,11 +2076,14 @@ class AutonomousRunner {
       const unlinkedCompetitorUrls = Array.isArray(draft?.competitor_links_unlinked)
         ? draft.competitor_links_unlinked.map((u) => u?.url).filter(Boolean)
         : [];
+      // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
+      // itself, but manifest sources and capture-time removals add to it,
+      // and the outer timeout below cannot cancel snapshots already started.
       const sources = Array.from(new Set([
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
         ...unlinkedCompetitorUrls,
-      ]));
+      ])).filter((s) => /^https?:\/\//i.test(String(s || '').trim())).slice(0, SNAPSHOT_SOURCE_LIMIT);
       if (sources.length === 0) return;
 
       const totalTimeout = envInt('INTERCEPT_SNAPSHOT_TOTAL_TIMEOUT_MS', 90_000);

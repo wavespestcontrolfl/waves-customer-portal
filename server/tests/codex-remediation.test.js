@@ -315,6 +315,7 @@ describe('runRemediationForPr', () => {
       document: reviewedDocument,
       path: 'src/content/blog/pest-control/roaches.md',
       brief: editorialBrief,
+      evidenceUrls: [],
     });
     expect(gh._calls.putFile).toHaveLength(0);
     expect(gh._calls.commitFiles).toEqual([{

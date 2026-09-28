@@ -982,11 +982,12 @@ function priceFinding(body, opts = {}) {
 }
 
 // Third-party price attribution (owner ruling 2026-08-01). A dollar figure
-// is reporting — not a Waves price claim — when the surrounding copy names
-// WHOSE price it is and that party isn't us. Two ways to qualify:
-//   1. a curated competitor brand name / alias sits in the window, or
-//   2. a generic third-party framing ("other companies charge…", "the
-//      previous provider's fee").
+// is reporting — not a Waves price claim — when its sentence names WHOSE
+// price it is: a curated competitor brand name / alias. Since the owner
+// ruling of 2026-09-28 a competitor price carries no link and no as-of date,
+// so an anonymous framing ("other companies charge…", "the industry
+// average is…") would publish a figure nobody can check; it is not exempt
+// (Codex r2 on #5191). The writer names the company or drops the figure.
 // First-person framing anywhere in the window disqualifies it outright, so
 // "we charge $199" can never ride in on a competitor mention elsewhere in
 // the sentence. Waves prices stay banned everywhere — link the calculator.
@@ -1016,18 +1017,13 @@ function hasFirstPartyMarker(sentence) {
 // $129" must not let the Orkin predicate own the second amount (pre-push
 // Codex P0). Splitting here only ever NARROWS the exemption.
 const CLAUSE_SPLIT_RE = /[,;:—–]|\b(?:but|while|whereas|however|though|although|yet|meanwhile|and|or|plus)\b/gi;
-// Explicit third-party SUBJECTS only. Deliberately excludes vague nouns like
-// "the industry" or "a typical charge" — those describe a market, not a party
-// that owns a price, and they let ordinary marketing copy through
-// ("The industry-leading quarterly plan costs $129" — pre-push Codex P0).
-const GENERIC_THIRD_PARTY_RE = /\b(competitors?|other (?:companies|providers|firms)|national (?:chains?|companies|brands?)|big(?:-| )box (?:companies|chains?|providers?)|another company|(?:previous|current|prior|former|existing) (?:provider|company|contractor|exterminator)|most (?:companies|providers)|many (?:companies|providers)|industry average)\b/i;
 
 // A third party OWNS the amount only in an explicit pricing construction —
 // naming them earlier in the clause is not enough ("Avoid Orkin by choosing
 // quarterly pest control for $129" — pre-push Codex P0). Two shapes, both
 // requiring the third party to be the SUBJECT:
 //   (A) <party> …short filler… <pricing verb> … $amount
-//       "Orkin charges a $199 fee", "other companies typically charge $25"
+//       "Orkin charges a $199 fee", "Aptive typically charges $25"
 //   (B) <party>'s <price noun> is/was/starts at … $amount
 //       "Orkin's cancellation fee is $199"
 // Bare copulas ("is"/"are") are NOT accepted in shape A: "Orkin is expensive
@@ -1089,11 +1085,6 @@ function attributionBindsToAmount(between) {
 // plan price is $129" (pre-push Codex P0) while keeping "Orkin's cancellation
 // fee is $199".
 const POSSESSIVE_PRICE_RE = /^(?:'s|’s)\s+(?:[A-Za-z-]+\s+){0,2}(?:fee|fees|price|prices|pricing|rate|rates|charge|charges|cost|costs|quote|quotes|minimum)\s+(?:is|was|are|were|starts?\s+at|runs?|comes?\s+to)\s*$/i;
-//   (C) benchmark subject + copula: "the industry average is $145". The
-//       phrase names a market statistic, so it can never denote a Waves
-//       price — a bare copula is safe here (it is not in shape A).
-const BENCHMARK_SUBJECT_RE = /^(?:industry average)$/i;
-const BENCHMARK_COPULA_RE = /^[^.!?]{0,20}?\b(?:is|was|are|were|runs?|comes? to|sits? at|hovers? around)\b[^.!?]{0,15}?$/i;
 
 function buildNameAlternation(names) {
   // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
@@ -1364,7 +1355,7 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
   if (!clause) return false;
   const clauseAmountIndex = localAmountIndex - clauseOffset;
-  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+  for (const re of competitorNamePatterns()) {
     if (!re) continue;
     const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     let m;
@@ -1376,8 +1367,6 @@ function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
       if (attributionBindsToAmount(between)) return true;
       // (B) possessive price noun: "Orkin's cancellation fee is $199".
       if (POSSESSIVE_PRICE_RE.test(between)) return true;
-      // (C) benchmark subject + copula: "the industry average is $145".
-      if (BENCHMARK_SUBJECT_RE.test(m[0].trim()) && BENCHMARK_COPULA_RE.test(between)) return true;
     }
   }
   return false;

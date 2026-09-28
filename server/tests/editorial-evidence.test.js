@@ -421,6 +421,19 @@ test('source extraction ignores image assets and fleet links, deduplicates evide
   expect(evidence.sourceUrls('[IFAS](https://edis.ifas.ufl.edu/fact) ![x](https://example.org/x.webp) https://wavespestcontrol.com/about',
     { required_sources: ['https://edis.ifas.ufl.edu/fact'] })).toEqual(['https://edis.ifas.ufl.edu/fact']);
 });
+test('prepareDraft hands the review the competitor pages capture unlinked (Codex r2 on #5191)', async () => {
+  reviewer.review.mockResolvedValueOnce(passing());
+  await evidence.prepareDraft({ frontmatter: { title: 'How to inspect a door' }, body: "Per Orkin's terms, plans renew yearly.",
+    competitor_links_unlinked: [{ url: 'https://www.orkin.com/terms', text: "Orkin's terms" }] }, { page_type: 'supporting-blog' });
+  expect(reviewer.review).toHaveBeenCalledWith(expect.objectContaining({ sourceUrls: ['https://www.orkin.com/terms'] }));
+});
+test('competitor pages the no-link rule removed are still review evidence, never published (Codex r2 on #5191)', () => {
+  const draft = { competitor_links_unlinked: [{ url: 'https://www.orkin.com/terms', text: 'terms' }, { url: 'https://www.orkin.com/terms', text: 'dup' }] };
+  expect(evidence.unlinkedCompetitorUrls(draft, [{ url: 'https://www.terminix.com/fees' }])).toEqual(['https://www.orkin.com/terms', 'https://www.terminix.com/fees']);
+  expect(evidence.unlinkedCompetitorUrls(null)).toEqual([]);
+  expect(evidence.sourceUrls("Per Orkin's terms, plans renew yearly.", {}, ['https://www.orkin.com/terms']))
+    .toEqual(['https://www.orkin.com/terms']);
+});
 test('source extraction preserves a balanced parenthesis inside a URL and trims only an unmatched wrapping one', () => {
   expect(evidence.sourceUrls('Per the report at https://example.org/report_(2026) prevalence rose.'))
     .toEqual(['https://example.org/report_(2026)']);

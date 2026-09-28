@@ -25,6 +25,20 @@ describe('competitor host matcher', () => {
     }
   });
 
+  test('every competitor domain the SEO tools track is a competitor host (Codex r2 on #5191)', () => {
+    // Read from the tools' own source, so a domain added there without
+    // reaching this matcher fails here.
+    const fs = require('fs');
+    const path = require('path');
+    const src = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const tracked = /TRACKED_COMPETITORS = \[([^\]]*)\]/.exec(src('services/seo/rank-tracker.js'))[1].match(/'([^']+)'/g).map((q) => q.slice(1, -1));
+    const seeded = [...src('routes/admin-seo-v2.js').matchAll(/domain: '([^']+)', market_area/g)].map((m) => m[1]);
+    expect(tracked.length).toBeGreaterThan(3);
+    expect(seeded.length).toBeGreaterThan(3);
+    const hosts = competitorHosts();
+    for (const d of [...tracked, ...seeded]) expect([d, isCompetitorHost(d, hosts)]).toEqual([d, true]);
+  });
+
   test('matches www / m / subdomains of a competitor host, never lookalikes', () => {
     const hosts = competitorHosts();
     for (const h of ['www.orkin.com', 'm.orkin.com', 'careers.orkin.com', 'ORKIN.COM']) expect(isCompetitorHost(h, hosts)).toBe(true);
@@ -77,16 +91,31 @@ describe('unlinkCompetitorLinks', () => {
     expect(competitorLinkUrls(r.text)).toEqual([]);
   });
 
-  test('HTML anchors keep their inner text; component URL props (CTAs) are dropped', () => {
-    const r = un('<a href="https://www.masseyservices.com/x" rel="nofollow">Massey\'s site</a> and <InlineCTA headline="Compare" ctaHref="https://www.orkin.com/quote" ctaLabel="Go" />');
-    expect(r.text).toBe('Massey\'s site and <InlineCTA headline="Compare" ctaLabel="Go" />');
+  test('HTML anchors keep their inner text; a competitor CTA becomes its label, never the component minus its link', () => {
+    // InlineCTA without ctaHref renders the Waves quote link, so dropping only
+    // the prop would re-point a competitor-labeled CTA at Waves.
+    const r = un('<a href="https://www.masseyservices.com/x" rel="nofollow">Massey\'s site</a> and <InlineCTA headline="Compare" ctaHref="https://www.orkin.com/quote" ctaLabel="Visit Orkin" />');
+    expect(r.text).toBe('Massey\'s site and Visit Orkin');
+  });
+
+  test('raw HTML: an image becomes its alt text; markup it cannot rewrite is left intact for the survivor check (Codex r2 on #5191)', () => {
+    expect(un('<img src="https://orkin.com/logo.png" alt="Orkin logo">').text).toBe('Orkin logo');
+    expect(un('<img alt="" src=\'https://www.terminix.com/x.png\' />').text).toBe('');
+    // Never a broken relative URL: no rewrite inside any other tag…
+    for (const raw of ['<iframe src="https://www.orkin.com/video"></iframe>', '<Card href="https://orkin.com/x">Orkin</Card>']) {
+      expect(un(raw).text).toBe(raw);
+      // …so the publisher's survivor check sees it and refuses the commit.
+      expect(competitorLinkUrls(raw)).toHaveLength(1);
+    }
+    // Prose around tags still unlinks.
+    expect(un('See https://www.orkin.com/pricing<br/>now').text).toBe('See orkin.com<br/>now');
   });
 
   test('entity-encoded hrefs, next-line reference destinations and protocol-relative links are caught (pre-push audit)', () => {
     expect(un('<a href="https://orkin&#46;com/">Orkin</a>').text).toBe('Orkin');
     expect(un('See [their terms][t].\n\n[t]:\n  //orkin.com/terms\n').text).toBe('See their terms.\n\n');
     expect(un('[plans](//www.orkin.com/a) and <a href="//terminix.com">Terminix</a>').text).toBe('plans and Terminix');
-    expect(un('<Cta ctaHref="https://orkin&#46;com/q" caption="Source: orkin.com" />').text).toBe('<Cta caption="Source: orkin.com" />');
+    expect(un('<Cta ctaHref="https://orkin&#46;com/q" caption="Source: orkin.com" />').text).toBe('orkin.com');
     // Detection reads decoded text, so an encoded survivor is still caught.
     expect(competitorLinkUrls('raw https://orkin&#46;com/x')).toEqual(['https://orkin.com/x']);
     expect(competitorLinkUrls('[x](//orkin.com/a)')).toEqual(['//orkin.com/a']);
@@ -115,8 +144,8 @@ describe('unlinkCompetitorLinks', () => {
   });
 
   test('MDX string-expression link props ({"…"} / {\'…\'}) are recognized structurally (Codex r1 P2)', () => {
-    const r = un('<a href={"https://www.orkin.com/x"}>Orkin</a> and <InlineCTA ctaHref={\'https://orkin.com/y\'} caption="ok" />');
-    expect(r.text).toBe('Orkin and <InlineCTA caption="ok" />');
+    const r = un('<a href={"https://www.orkin.com/x"}>Orkin</a> and <InlineCTA ctaHref={\'https://orkin.com/y\'} ctaLabel="Compare plans" />');
+    expect(r.text).toBe('Orkin and Compare plans');
     expect(r.unlinked.map((u) => u.url)).toEqual(['https://www.orkin.com/x', 'https://orkin.com/y']);
   });
 

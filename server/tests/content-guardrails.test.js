@@ -3866,7 +3866,6 @@ describe('third-party price citations and trusted sources', () => {
   test('a competitor price needs NO citation link and NO as-of date (owner ruling 2026-09-28)', () => {
     for (const body of [
       'Orkin charges a $199 cancellation fee.',
-      'Other companies charge a $199 cancellation fee.',
       'Aptive charges from $49 to $99 per month for comparable plans.',
       "Orkin's cancellation fee is $199.",
       // Any old citation shape is simply irrelevant now — not required, not
@@ -3876,6 +3875,21 @@ describe('third-party price citations and trusted sources', () => {
     ]) {
       expect(findHardcodedPrice(body, OP)).toBeNull();
       expect(findHardcodedPrice(body, { thirdPartyCitations: true })).toBeNull();
+    }
+  });
+
+  // With no link or date to check, an ANONYMOUS figure would publish a price
+  // nobody can trace (Codex r2 on #5191): only a named curated competitor
+  // owns an exempt amount.
+  test('an anonymous competitor price is not exempt: the sentence must name the company (Codex r2 on #5191)', () => {
+    for (const body of [
+      'Other companies charge a $199 cancellation fee.',
+      'Other companies typically charge $25 per month more for the same coverage.',
+      'Your previous provider may bill a $99 fee for ending service early.',
+      'The industry average is $145 per quarterly visit.',
+      SRC + 'The industry average is $145 per quarterly visit.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
     }
   });
 
@@ -4222,8 +4236,6 @@ describe('third-party price citations and trusted sources', () => {
       // puts a second subject before the verb and is deliberately NOT
       // exempt (see the rigid-template note in content-guardrails).
       'Terminix charges a $150 early-termination fee on annual plans.',
-      'Other companies typically charge $25 per month more for the same coverage.',
-      'Your previous provider may bill a $99 fee for ending service early.',
     ]) {
       expect(findHardcodedPrice(SRC + body, OP)).toBeNull();
     }
@@ -4367,7 +4379,6 @@ describe('third-party price citations and trusted sources', () => {
 
   test('possessive price constructions are attributed', () => {
     expect(findHardcodedPrice(SRC + "Orkin's cancellation fee is $199 in most contracts.", OP)).toBeNull();
-    expect(findHardcodedPrice(SRC + 'The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
   test('unlisted non-government domains still require the exact brief source', () => {

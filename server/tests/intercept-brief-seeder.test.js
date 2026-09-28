@@ -510,6 +510,22 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
 
     expect(seeder.snapshotSources).toHaveBeenCalledWith(['https://www.orkin.com/terms']);
   });
+
+  test('the snapshot cap applies to the FINAL deduplicated list, capture-time removals included (Codex r2 on #5191)', async () => {
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const removed = Array.from({ length: 14 }, (_, i) => ({ url: `https://www.orkin.com/page-${i}`, text: `page ${i}` }));
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: ['https://example.com/a/', 'Orkin published terms (a note, not a URL)'] } },
+    };
+    await runner._snapshotInterceptSources(opp, { body: 'Plain body.', competitor_links_unlinked: removed }, {});
+    const sent = seeder.snapshotSources.mock.calls[0][0];
+    expect(sent).toHaveLength(10);
+    expect(sent[0]).toBe('https://example.com/a/');
+    expect(sent.every((u) => /^https:\/\//.test(u))).toBe(true);
+  });
 });
 
 // ── manifest source contract: URLs (snapshot targets) vs directives ─

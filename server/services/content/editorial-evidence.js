@@ -62,11 +62,16 @@ function trimTrailingUrlNoise(url) {
   return out;
 }
 
-function sourceUrls(document, brief = {}) {
+// `evidenceUrls`: sources that support the text but are not published with it —
+// the competitor pages the no-competitor-links rule unlinked (owner ruling
+// 2026-09-28). The review still reads them, so a claim sourced from a
+// competitor's own page keeps its evidence without the post linking it
+// (Codex r2 on #5191).
+function sourceUrls(document, brief = {}, evidenceUrls = []) {
   // Public citation URLs only; the transport independently checks DNS/IP/redirects.
   // Parentheses are allowed inside the match (URLs can legitimately contain
   // them); trimTrailingUrlNoise strips only what's unmatched.
-  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}`;
+  const text = `${fm.parse(document).content}\n${JSON.stringify(brief.required_sources || [])}\n${JSON.stringify(brief.facts_pack || [])}\n${(Array.isArray(evidenceUrls) ? evidenceUrls : []).join('\n')}`;
   return [...new Set((text.match(/https:\/\/[^\s<>"'\]}]+/g) || [])
     .map(trimTrailingUrlNoise)
     .filter((url) => {
@@ -93,7 +98,7 @@ function reviewError(result) {
   return error;
 }
 
-async function evaluate(document, brief = {}) {
+async function evaluate(document, brief = {}, { evidenceUrls = [] } = {}) {
   const parsed = fm.parse(document);
   const domain = resolveDomainContext(parsed.data.domains);
   if (!domain) {
@@ -101,7 +106,7 @@ async function evaluate(document, brief = {}) {
       findings: [{ action: 'Editorial evidence domain could not be resolved from this document\'s frontmatter domains; retry once it is unambiguous.' }] }] });
   }
   return require('./editorial-review').review({ document, title: parsed.data.title || parsed.data.metaTitle || '',
-    domain, sourceUrls: sourceUrls(document, brief), factsPack: brief.facts_pack || null });
+    domain, sourceUrls: sourceUrls(document, brief, evidenceUrls), factsPack: brief.facts_pack || null });
 }
 
 // Refresh document assembly: starts from the live page's frontmatter
@@ -154,12 +159,19 @@ async function refreshReviewFrontmatter(draft, brief) {
 // Review/repair loop: evaluates the assembled document, attempts one repair
 // pass on a clean (non-error) failure, then re-evaluates. Frontmatter is
 // frozen for the whole loop — repair may only change the body bytes.
+// The competitor URLs taken out of a draft (capture time, plus any the
+// publisher's commit pass took out: `extra`) — evidence, never published.
+function unlinkedCompetitorUrls(draft, extra = []) {
+  return [...new Set([...(Array.isArray(draft?.competitor_links_unlinked) ? draft.competitor_links_unlinked : []), ...extra]
+    .map((u) => u?.url).filter(Boolean))];
+}
+
 async function reviewAndRepairDraft(draft, reviewFrontmatter, brief) {
   const original = fm.stringify(reviewFrontmatter, draft.body || '');
   let document = original;
   let result;
   for (let attempt = 0; attempt < 2; attempt++) {
-    result = await evaluate(document, brief);
+    result = await evaluate(document, brief, { evidenceUrls: unlinkedCompetitorUrls(draft) });
     if (result?.pass === true) {
       const body = fm.parse(document).content;
       return { ...draft, body, editorial_review: result };
@@ -194,13 +206,13 @@ async function prepareDraft(draft, brief = {}) {
   return reviewAndRepairDraft(draft, reviewFrontmatter, brief);
 }
 
-async function filesForDocument({ document, path, brief = {} }) {
+async function filesForDocument({ document, path, brief = {}, evidenceUrls = [] }) {
   if (!enabled() || !applicable(path)) return [];
   const contract = require('../../../packages/editorial-evidence/index.cjs');
   if (!process.env.EDITORIAL_REVIEW_PRIVATE_KEY || !process.env.EDITORIAL_REVIEW_PUBLIC_KEY) {
     throw reviewError({ checks: [{ name: 'source_support', status: 'error', findings: [{ action: 'Editorial signing keys are unavailable; retry after configuration recovers.' }] }] });
   }
-  const result = await evaluate(document, brief);
+  const result = await evaluate(document, brief, { evidenceUrls });
   if (result?.pass !== true) throw reviewError(result);
   // evaluate() above already resolved this document's domain successfully,
   // so this is never null here.
@@ -388,4 +400,4 @@ async function verifyEvidenceOnlyAdvance({ pinnedSha, headSha }, deps = {}) {
 const evidenceDomain = (document) => domainContextFromDocument(document)?.hostname || null;
 
 module.exports = { enabled, applicable, prepareDraft, filesForDocument, assertPrEvidence,
-  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain };
+  verifyEvidenceOnlyAdvance, sourceUrls, reviewError, evidenceDomain, unlinkedCompetitorUrls };
