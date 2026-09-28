@@ -16047,8 +16047,10 @@ async function resolveScheduledServiceCharge({
     const refusal = siblingCoverageRefusal(verdict, { hasOwnPrice });
     if (refusal) return refusal;
   }
-  // Owner ruling — REFUSE AFTER A VOID: the priced row is never refused
-  // here. The unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
+  // Owner ruling — REFUSE AFTER A VOID: an ordinary priced row (not a
+  // confirmed priced covered member, which the gate above already sent
+  // through the sibling verdict — #5237) is never refused here. The
+  // unpriced-sibling verdict above (siblingInvoiceCoverageVerdict)
   // already covers "the combined invoice died" — a priced visit's own mint
   // always proceeds to completionInvoiceAmount below, exactly as before the
   // round-10 priced-branch detour (removed; replaced by the single rule).
