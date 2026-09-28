@@ -497,7 +497,7 @@ describe("Finance workflow preservation", () => {
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-open/bank-change")?.body)
         .toEqual({ action: "apply", expected: { plaidModified: { amount: 9, direction: "debit", txn_date: "2026-09-07", description: "FIXED 2" }, plaidRemoved: null } }));
   });
-  it("keeps bank-change Dismiss reachable after the Plaid feed is switched off", async () => {
+  it("keeps bank-change Dismiss and Disconnect reachable after the Plaid feed is switched off", async () => {
     overrides.set("GET /api/admin/tax/bank-import/status", () =>
       response({ enabled: true, plaidEnabled: false, bankChanges: 1, counts: {} }));
     overrides.set("GET /api/admin/tax/bank-import/coverage", () => response({ months: [] }));
@@ -507,8 +507,18 @@ describe("Finance workflow preservation", () => {
         amount: 10, description: "Withdrawn purchase", status: "matched_expense", suggestion: { plaidRemoved: true } }],
     }));
     overrides.set("POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change", () => response({ success: true }));
+    // a connection still in place: listed with Disconnect only
+    overrides.set("GET /api/admin/tax/bank-import/plaid/status", () => response({
+      configured: true, tokenKey: true, env: "sandbox", existingLabels: [],
+      items: [{ id: "item-1", institutionName: "Synthetic Bank", status: "active", tokenReadable: true, lastSyncedAt: null, lastError: null,
+        accounts: [{ id: "acct-1", name: "Card", mask: "1234", accountLabel: "card", accountType: "card", syncFrom: "2026-09-01", enabled: true }] }],
+    }));
     open(TaxPage);
     await taxSection("Expenses", "Import");
+    expect(await screen.findByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.getByText(/Live bank feeds are switched off/)).toBeInTheDocument();
+    for (const name of ["Connect a bank", "Sync now", "Edit accounts"])
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }));
     await waitFor(() =>
       expect(requests.find((r) => r.key === "POST /api/admin/tax/bank-import/plaid/rows/row-gone/bank-change")?.body)

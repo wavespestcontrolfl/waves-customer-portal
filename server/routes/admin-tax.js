@@ -1891,13 +1891,16 @@ const { PlaidError } = require('../services/plaid-client');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// With the feed switched off, rows it already imported can still carry a
-// bank change that blocks every claim — resolving it (local only) and
-// revoking a connection stay available; connecting and syncing do not.
-const PLAID_ROUTES_OPEN_WHEN_OFF = /^\/(rows\/[^/]+\/bank-change|items\/[^/]+\/disconnect)$/;
+// With the feed switched off, what it already left behind stays
+// manageable: rows carrying a bank change that blocks every claim can be
+// resolved (local only), and a connection — which still counts as CSV
+// coverage for its label — can be seen and revoked. Connecting, setup and
+// syncing stay off.
+const PLAID_POSTS_OPEN_WHEN_OFF = /^\/(rows\/[^/]+\/bank-change|items\/[^/]+\/disconnect)$/;
 
 router.use('/bank-import/plaid', (req, res, next) => {
-  if (!gateEnvValue('GATE_PLAID_SYNC') && !PLAID_ROUTES_OPEN_WHEN_OFF.test(req.path)) return res.status(404).json({ error: 'not found' });
+  const openWhenOff = req.method === 'GET' ? req.path === '/status' : PLAID_POSTS_OPEN_WHEN_OFF.test(req.path);
+  if (!gateEnvValue('GATE_PLAID_SYNC') && !openWhenOff) return res.status(404).json({ error: 'not found' });
   next();
 });
 

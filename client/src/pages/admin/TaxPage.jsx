@@ -5036,7 +5036,10 @@ function PlaidAccountsForm({ item, existingLabels, busy, onSave, onCancel }) {
   );
 }
 
-function PlaidFeedsPanel({ onSynced }) {
+// feedOn = GATE_PLAID_SYNC. Off, the panel only lists connections still in
+// place (each still counts as coverage for statement uploads on its label)
+// with Disconnect — no connect, sync, re-login or account edits.
+function PlaidFeedsPanel({ feedOn, onSynced }) {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState("");
@@ -5126,7 +5129,7 @@ function PlaidFeedsPanel({ onSynced }) {
 
   // back from a bank's OAuth page: finish the Link session it interrupted
   useEffect(() => {
-    if (!new URLSearchParams(window.location.search).has("oauth_state_id")) return;
+    if (!feedOn || !new URLSearchParams(window.location.search).has("oauth_state_id")) return;
     const receivedRedirectUri = window.location.href;
     window.history.replaceState(null, "", window.location.pathname);
     const resume = readLinkResume();
@@ -5137,8 +5140,8 @@ function PlaidFeedsPanel({ onSynced }) {
         error: true,
         text: "The bank sent you back, but this browser no longer has the connection in progress — connect again.",
       });
-    // once, on the redirect landing
-  }, []);
+    // once, on the redirect landing (the query is stripped on that run)
+  }, [feedOn]);
 
   if (loadError)
     return (
@@ -5146,7 +5149,7 @@ function PlaidFeedsPanel({ onSynced }) {
         Could not load bank feeds: {loadError}
       </ActionFeedback>
     );
-  if (!status) return null;
+  if (!status || (!feedOn && status.items.length === 0)) return null;
 
   return (
     <Card style={{ padding: 16, marginBottom: 16 }}>
@@ -5154,20 +5157,23 @@ function PlaidFeedsPanel({ onSynced }) {
         <div>
           <div className="text-14 font-medium">Live bank feeds</div>
           <div className="text-14 text-ink-secondary">
-            Read-only via Plaid. New transactions land here every hour for
-            review, the same as an uploaded statement.
+            {feedOn
+              ? "Read-only via Plaid. New transactions land here every hour for review, the same as an uploaded statement."
+              : "Live bank feeds are switched off — nothing syncs. A connection still in place keeps covering its label's days for statement uploads; disconnect it to import those days from a statement instead."}
             {status.env === "sandbox" ? " (Plaid sandbox — test data)" : ""}
           </div>
         </div>
-        <Button
-          type="button"
-          disabled={!!busy || !status.configured || !status.tokenKey}
-          onClick={() => openLink(null)}
-        >
-          {busy === "connect" ? "Connecting…" : "Connect a bank"}
-        </Button>
+        {feedOn && (
+          <Button
+            type="button"
+            disabled={!!busy || !status.configured || !status.tokenKey}
+            onClick={() => openLink(null)}
+          >
+            {busy === "connect" ? "Connecting…" : "Connect a bank"}
+          </Button>
+        )}
       </div>
-      {!status.configured && (
+      {feedOn && !status.configured && (
         <ActionFeedback className="mt-3">
           Plaid keys are not set on the server (PLAID_CLIENT_ID,
           PLAID_SECRET, PLAID_ENV).
@@ -5202,7 +5208,7 @@ function PlaidFeedsPanel({ onSynced }) {
               </span>
             )}
             <span className="ml-auto flex flex-wrap gap-2">
-              {item.status === "login_required" && (
+              {feedOn && item.status === "login_required" && (
                 <Button
                   type="button"
                   disabled={!!busy}
@@ -5211,7 +5217,7 @@ function PlaidFeedsPanel({ onSynced }) {
                   {busy === `reconnect-${item.id}` ? "Opening…" : "Log in again"}
                 </Button>
               )}
-              {item.status !== "setup" && (
+              {feedOn && item.status !== "setup" && (
                 <>
                   <Button
                     type="button"
@@ -5278,7 +5284,7 @@ function PlaidFeedsPanel({ onSynced }) {
               {item.lastError}
             </div>
           )}
-          {item.status === "setup" || editing === item.id ? (
+          {feedOn && (item.status === "setup" || editing === item.id) ? (
             <PlaidAccountsForm
               key={`${item.id}-${item.accounts.map((a) => a.accountLabel).join("|")}`}
               item={item}
@@ -5337,6 +5343,7 @@ function BankImportTab() {
   const [categoryAttempt, setCategoryAttempt] = useState(0);
   const [counts, setCounts] = useState({});
   const [plaidEnabled, setPlaidEnabled] = useState(false);
+  const [importEnabled, setImportEnabled] = useState(false);
   const [bankChanges, setBankChanges] = useState(0);
   const [rows, setRows] = useState([]);
   const [coverage, setCoverage] = useState([]);
@@ -5426,6 +5433,7 @@ function BankImportTab() {
       .then((s) => {
         setCounts(s?.counts || {});
         setPlaidEnabled(!!s?.plaidEnabled);
+        setImportEnabled(!!s?.enabled);
         setBankChanges(s?.bankChanges || 0);
         setCountsReady(true);
         setReadErrors((prev) => ({
@@ -5686,7 +5694,9 @@ function BankImportTab() {
         )}
       </div>
 
-      {plaidEnabled && <PlaidFeedsPanel onSynced={load} />}
+      {importEnabled && (
+        <PlaidFeedsPanel feedOn={plaidEnabled} onSynced={load} />
+      )}
 
       <Card
         style={{
