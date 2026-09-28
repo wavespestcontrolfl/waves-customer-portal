@@ -29,7 +29,11 @@ const {
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
 } = require('../config/visit-facts-contract');
 const { PROJECT_TYPES } = require('../services/project-types');
-const { REQUIRED_FINDINGS_FIELDS } = require('../services/service-report/activity-indicators');
+const {
+  REQUIRED_FINDINGS_FIELDS,
+  ACTIVITY_INDICATORS,
+  requiredFindingsFieldsFor,
+} = require('../services/service-report/activity-indicators');
 const { renderTypedFactsBlock, BLOCK_START, BLOCK_END } = require('../scripts/generate-visit-facts-doc');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
@@ -188,6 +192,20 @@ describe('visit facts contract registry', () => {
           if ((fact.writers || []).length) problems.push(`${id}: null storage but writers declared`);
         } else if (typeof fact.storage !== 'string' || !/^[a-z_]+(\.[A-Za-z0-9_]+(\[\])?)+$/.test(fact.storage)) {
           problems.push(`${id}: storage must be one dotted path`);
+        }
+        // companionStorage (a `both`-applicability typed fact's second,
+        // companion-context storage path — same shape rule as storage, and
+        // only meaningful alongside a real primary `storage`) and
+        // companionWhenMissing (that same fact's companion-context
+        // requiredness) are optional, but must be valid when present.
+        if (fact.companionStorage !== undefined) {
+          if (fact.storage === null) problems.push(`${id}: companionStorage without a primary storage`);
+          else if (typeof fact.companionStorage !== 'string' || !/^[a-z_]+(\.[A-Za-z0-9_]+(\[\])?)+$/.test(fact.companionStorage)) {
+            problems.push(`${id}: companionStorage must be one dotted path`);
+          }
+        }
+        if (fact.companionWhenMissing !== undefined && !WHEN_MISSING.has(fact.companionWhenMissing)) {
+          problems.push(`${id}: companionWhenMissing`);
         }
         if (fact.status !== 'gap' && !(fact.writers || []).length) problems.push(`${id}: no writers`);
         for (const writer of fact.writers || []) {
@@ -390,6 +408,11 @@ describe('visit facts contract registry', () => {
         continue;
       }
       const required = new Set(REQUIRED_FINDINGS_FIELDS[def.typedForm] || []);
+      // The full companion-context required set (base + this form's
+      // COMPANION_REQUIRED_FINDINGS_FIELDS extras, e.g. tree_shrub's
+      // treatments_completed) — a companionOnly field's ONLY context, and a
+      // `both` field's second context alongside `required` above.
+      const requiredCompanion = new Set(requiredFindingsFieldsFor(def.typedForm, { companion: true }));
       const fields = new Map(cfg.findingsFields.map((f) => [f.key, f]));
       for (const key of required) {
         if (!fields.has(key)) problems.push(`${line}: REQUIRED_FINDINGS_FIELDS.${def.typedForm} names ${key}, not a field of the form`);
@@ -413,13 +436,57 @@ describe('visit facts contract registry', () => {
         }
       }
       for (const fact of typed) {
-        const shouldRequire = required.has(fact.key);
-        if ((fact.whenMissing === 'required') !== shouldRequire) {
-          problems.push(`${line}.${fact.key}: whenMissing ${fact.whenMissing}, REQUIRED_FINDINGS_FIELDS says ${shouldRequire ? 'required' : 'optional'}`);
-        }
         const field = fields.get(fact.key);
+        const isCompanionOnly = !!field.companionOnly;
+        // A companionOnly field has only ONE context (companion) — its single
+        // whenMissing is decided by the full companion-context required set.
+        // A `both` field's whenMissing is its PRIMARY-context requiredness
+        // (base REQUIRED_FINDINGS_FIELDS); its companion-context requiredness
+        // (codex P2 round 5, e.g. tree_shrub's treatments_completed) is
+        // `companionWhenMissing` when it differs, else the same as
+        // `whenMissing`.
+        const shouldRequire = isCompanionOnly ? requiredCompanion.has(fact.key) : required.has(fact.key);
+        if ((fact.whenMissing === 'required') !== shouldRequire) {
+          problems.push(`${line}.${fact.key}: whenMissing ${fact.whenMissing}, ${isCompanionOnly ? 'companion-required set' : 'REQUIRED_FINDINGS_FIELDS'} says ${shouldRequire ? 'required' : 'optional'}`);
+        }
+        if (isCompanionOnly) {
+          if (fact.companionStorage !== undefined) problems.push(`${line}.${fact.key}: companionOnly fact should not declare companionStorage (its storage already IS the companion path)`);
+          if (fact.companionWhenMissing !== undefined) problems.push(`${line}.${fact.key}: companionOnly fact should not declare companionWhenMissing (its whenMissing already IS the companion value)`);
+        } else {
+          // `both` fields are legal on either a primary OR a companion
+          // submission of the same form (codex P2 round 5) — the registry
+          // must record BOTH storage paths and BOTH writer-edge pairs, not
+          // just the primary one.
+          const expectedCompanionStorage = `service_data.companionReportSnapshots[].values.${fact.key}`;
+          if (fact.companionStorage !== expectedCompanionStorage) {
+            problems.push(`${line}.${fact.key}: companionStorage missing/incorrect for a 'both' fact (expected ${expectedCompanionStorage})`);
+          }
+          const hasSymbol = (sym) => fact.writers.some((w) => w && typeof w === 'object' && w.writerSymbol === sym);
+          if (!hasSymbol('companionReportSnapshots') || !hasSymbol('companionFindings')) {
+            problems.push(`${line}.${fact.key}: 'both' fact missing companion writer edges (companionReportSnapshots / companionFindings)`);
+          }
+          const shouldRequireCompanion = requiredCompanion.has(fact.key);
+          const declaredCompanion = fact.companionWhenMissing !== undefined
+            ? fact.companionWhenMissing === 'required'
+            : fact.whenMissing === 'required';
+          if (declaredCompanion !== shouldRequireCompanion) {
+            problems.push(`${line}.${fact.key}: companion-context requiredness ${declaredCompanion ? 'required' : 'optional'}, companion-required set says ${shouldRequireCompanion ? 'required' : 'optional'}`);
+          }
+        }
         if (fact.label !== field.label || fact.fieldType !== field.type) problems.push(`${line}.${fact.key}: label/type differ from project-types.js`);
       }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test('typed activity score is registered exactly on typed lines whose form has an ACTIVITY_INDICATORS entry', () => {
+    const problems = [];
+    for (const [line, def] of typedLines) {
+      const fact = def.facts.find((f) => f.key === 'typed_activity_score');
+      const indicator = ACTIVITY_INDICATORS[def.typedForm];
+      if (indicator && !fact) problems.push(`${line}: ${def.typedForm} has an ACTIVITY_INDICATORS entry but no typed_activity_score fact`);
+      if (!indicator && fact) problems.push(`${line}: typed_activity_score registered but ${def.typedForm} has no ACTIVITY_INDICATORS entry`);
+      if (fact && fact.typedForm !== undefined) problems.push(`${line}.typed_activity_score: should not carry typedForm (not a findingsFields entry)`);
     }
     expect(problems).toEqual([]);
   });

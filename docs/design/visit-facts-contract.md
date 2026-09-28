@@ -111,6 +111,17 @@ stay internal, without a decision either way.
 | `customer_recap` | derived, voice, tap | `structured_notes.customerRecap` | Visit summary paragraph | fallback to the generated summary |
 | `customer_interaction` | voice, tap | `structured_notes.customerInteraction` | Customer interaction line | hidden |
 | `visit_outcome` | prefill, tap | `structured_notes.visitOutcome` | No-application copy branch | fallback `completed` |
+| `reentry_exterior_minutes` | prefill, tap | `service_records.advisory.exterior_reentry_min` | Re-entry ready-time summary (`reentry.js`) | fallback to the computed default |
+| `reentry_interior_minutes` | prefill, tap | `service_records.advisory.interior_reentry_min` | Re-entry ready-time summary (`reentry.js`) | fallback to the computed default |
+
+`reentry_exterior_minutes` / `reentry_interior_minutes` are NOT
+`structured_notes` keys — they live on the `service_records.advisory` jsonb
+column (same one `technician_notes`/`finding_rows` sit outside of), frozen by
+the SAME unconditional block (`if (serviceRecordCols.advisory &&
+useServiceReportV1)`, not gated on typed vs. untyped) that computes the
+product-label REI / service-line default and applies the tech's stepper
+override. `reentry.js` reads both back to build the customer-facing
+"ready at …" summary the report and the delivery paths use.
 
 `technician_notes` is **not** a customer-facing fact. The column is the
 tech's notes box, which can hold access or billing notes, and AGENTS.md
@@ -197,7 +208,16 @@ requires. Internal optional fields are office-only data, not report facts.
 - **when missing** is `required` exactly when `REQUIRED_FINDINGS_FIELDS`
   (`activity-indicators.js`) lists the key, and `hidden` otherwise. A
   `requiredUnless` field (flea `activity_areas`) stays `hidden` with a note,
-  because the validator enforces it only conditionally.
+  because the validator enforces it only conditionally. A `both`-applicability
+  field's requiredness can also differ when the SAME form runs as a
+  **companion** section: `activity-indicators.js`
+  `COMPANION_REQUIRED_FINDINGS_FIELDS` adds fields the companion validator
+  requires beyond the base list (today only `tree_shrub`'s
+  `treatments_completed` — hidden on a primary submission, rejected as
+  missing on a companion one, codex P2 round 5). When that companion-context
+  value differs from `whenMissing`, the fact also carries
+  `companionWhenMissing` (a `companionOnly` field has no primary context at
+  all, so its single `whenMissing` is already the companion-context value).
 - **Readers**: every non-internal field renders in the generic typed
   findings list (`activity-indicators.js` `buildTypedReportSnapshot`). Named
   readers come from the builders' own key lists: `report-data.js`
@@ -214,16 +234,25 @@ requires. Internal optional fields are office-only data, not report facts.
   (`buildTypedReportSnapshot` called once per companion section,
   `companion.values` sourced from the client's `companionFindings` array),
   never into the primary `typedReportSnapshot`; a primary submission
-  carrying one is rejected as unknown. The two-program combos retired on
-  2026-08-31 (`20260831000070`) also keep their (non-companion-only) keys
-  under `service_data.companionReportSnapshots[].values.<key>` for their
+  carrying one is rejected as unknown. A `both` field is the opposite case: it
+  is legal on EITHER a primary or a companion submission of the same form, and
+  `complete-scheduled-service.js` freezes it into whichever snapshot the
+  submission actually was — so the fact ALSO carries `companionStorage`
+  (`service_data.companionReportSnapshots[].values.<key>`, same key, not a
+  second fact) naming the second path (codex P2 round 5: advertising only the
+  primary path let a storage-driven consumer miss the field whenever the
+  visit was a companion, e.g. `tree_shrub`'s `plant_groups` /
+  `landscape_condition` on a T&S-as-companion visit). The two-program combos
+  retired on 2026-08-31 (`20260831000070`) also keep their (non-companion-only)
+  keys under `service_data.companionReportSnapshots[].values.<key>` for their
   residual frozen visits, which `report-data.js` and `termite-report-v2.js`
   still read.
-- **Writers** are `project-types.js` (declares the key), and — for a `both`
-  field — the form (`typedFindings`) and the completion service
-  (`typedReportSnapshot`); for a `companion`-only field, the form's
-  `companionFindings` array and the completion service's
-  `companionReportSnapshots`.
+- **Writers** are `project-types.js` (declares the key); for a `companion`-only
+  field, the form's `companionFindings` array and the completion service's
+  `companionReportSnapshots`; for a `both` field, BOTH writer pairs — the
+  primary form (`typedFindings`) / completion service (`typedReportSnapshot`)
+  edge AND the companion form (`companionFindings`) / completion service
+  (`companionReportSnapshots`) edge, matching its two storage paths above.
 
 The test re-derives all of this on its own. A typed line must carry exactly
 its form's fields, with requiredness matching `REQUIRED_FINDINGS_FIELDS`. A
@@ -238,13 +267,19 @@ The Complete Service form is the SAME form for a typed or an untyped
 completion — a typed submission layers `structuredFindings` on top of it, it
 never replaces it. `complete-scheduled-service.js` freezes
 `customerRecap`, `customerInteraction`, `protocolActionsCompleted`,
-`recommendations`, `techTips`, `visitOutcome` and the `technician_notes`
-column into the record unconditionally, and `report-data.js` reads them the
-same way for a typed report (`buildProtocolPayload`; the visit-summary
-resolution that falls back from `customerRecap` to the screened
-`technicianReportCustomerCopy` parse of `technician_notes`; the no-application
-copy branch keyed on `visitOutcome`). Every typed line below adds this subset
-of [the basic form facts](#basic-form-facts-genericcompletionfacts) — sourced
+`recommendations`, `formRecommendations`, `techTips`, `visitOutcome`, the
+`technician_notes` column and the re-entry timing pair
+(`reentry_exterior_minutes` / `reentry_interior_minutes`, on
+`service_records.advisory`) into the record unconditionally, and
+`report-data.js` / `reentry.js` read them the same way for a typed report
+(`buildProtocolPayload`; the visit-summary resolution that falls back from
+`customerRecap` to the screened `technicianReportCustomerCopy` parse of
+`technician_notes`; the no-application copy branch keyed on `visitOutcome`;
+`formRecommendations` is the provenance-guaranteed copy the "What we
+recommend" section actually renders, since the merged `recommendations` value
+can carry raw `[Next]` technician-note lines that must never egress — codex P2
+round 5). Every typed line below adds this subset of
+[the basic form facts](#basic-form-facts-genericcompletionfacts) — sourced
 from `genericCompletionFacts` itself, never hand-copied — beside its
 generated typed facts.
 
@@ -258,6 +293,33 @@ technician-reviewed AI photo summary (`typedPhotoSummary` on the client,
 a field inside it. `report-data.js` renders it on every typed report; the
 rodent-trapping line adds `rodent-report-narrative.js`'s own read of the same
 field as an extra reader.
+
+### Typed activity score (`typedActivityScoreFacts`)
+
+A typed line whose form has an `ACTIVITY_INDICATORS` entry
+(`activity-indicators.js`) also adds `typed_activity_score` — the 0-5 gauge
+value the customer ActivityCard and its cross-visit trend chart read
+(codex P2 round 5: nothing else here registered it, so a storage-driven
+consumer had no way to see the ONLY record of a manually-scored gauge).
+`complete-scheduled-service.js` freezes the score onto
+`service_data.typedReportSnapshot.activity.{score,source,derivedFrom}` AND
+inserts it as its OWN `service_activity_scores` row (`score` / `source` /
+`derived_from`) in the same transaction; `activity-scores-store.js`'s
+`loadActivityCustomerView` is what actually builds the gauge + history chart
+from that table, so it is the registered reader.
+
+Not every typed form has a gauge: `typedActivityScoreFacts(typedForm)` is
+called uniformly on every typed line and returns nothing when the form has no
+`ACTIVITY_INDICATORS` entry (`tree_shrub`, `palm_injection`,
+`rodent_sanitation`, `mosquito_event`, `one_time_lawn_treatment` — sanitation
+deliberately has none: contamination is a cleanup measure, not an activity
+trend). The nine lines that DO get it: `cockroach`, `termite_bait`,
+`rodent_trapping`, `rodent_exclusion`, `rodent_bait_station`, `wildlife`,
+`flea`, `termite_treatment`, `rodent_inspection`. A form with `derive` (a
+findings-field prefill, e.g. cockroach's `activity_level`) captures
+`prefill, voice, tap` — the tech can still touch/override the prefilled value;
+a manually-scored form (`derive: null`, e.g. rodent trapping) captures only
+`voice, tap`.
 
 ## Per-line facts
 
@@ -333,11 +395,14 @@ Each typed line below is one typed form. Its typed facts are listed in the
 generated [Typed form facts](#typed-form-facts-generated) tables. Every line
 also adds the [shared facts above](#shared-facts-every-typed-line-also-carries-typedsharedcompletionfacts)
 (`customer_recap`, `customer_interaction`, `protocol_actions_completed`,
-`recommendations`, `tech_tips`, `technician_notes`); only the *other* facts
-each line adds by hand are named here.
+`recommendations`, `form_recommendations`, `tech_tips`, `technician_notes`,
+`reentry_exterior_minutes`, `reentry_interior_minutes`) and, on the nine lines
+with a gauge, [`typed_activity_score`](#typed-activity-score-typedactivityscorefacts);
+only the *other* facts each line adds by hand are named here.
 
 - **Tree & shrub** (`tree_shrub`, form `tree_shrub`): `tree_shrub_program`,
-  `tree_shrub_6week`, `tree_shrub_quarterly`. Adds the typed photo summary,
+  `tree_shrub_6week`, `tree_shrub_quarterly`. No gauge (`ACTIVITY_INDICATORS`
+  has no `tree_shrub` entry). Adds the typed photo summary,
   `tree_shrub_assessment_observations` and `tree_shrub_assessment_ai_summary`
   (`tree_shrub_assessments.observations` / `.ai_summary` — same
   observations-then-AI-summary fallback as lawn; `tree_shrub_assessments` has
@@ -348,9 +413,16 @@ each line adds by hand are named here.
   (`applicability: 'companion'` in the generated table, storage
   `service_data.companionReportSnapshots[].values.<key>`) — they only ever
   populate when tree_shrub runs as a COMPANION section beside a different
-  primary type.
+  primary type. `treatments_completed` is the opposite shape: it's `both`
+  (recorded on a primary submission too, `autoFilled`), but the companion
+  validator additionally REQUIRES it (`COMPANION_REQUIRED_FINDINGS_FIELDS`) —
+  the server can't derive a companion T&S's own treatments from the visit's
+  ONE shared products list, so the fact carries `companionWhenMissing:
+  'required'` alongside its primary `whenMissing: 'hidden'`.
 - **Cockroach** (`cockroach`, form `cockroach`): `cockroach_control`,
-  `german_roach`, `german_roach_initial`. Adds the typed photo summary,
+  `german_roach`, `german_roach_initial`. Has a gauge
+  (`typed_activity_score`, `roach_activity`, derived from `activity_level`).
+  Adds the typed photo summary,
   product facts, photos and the `cockroach_work_from_products` **gap**. The
   cross-sell V2 roach signal reads `activity_level` only from a **companion**
   cockroach snapshot under a non-cockroach primary, so it is not a reader on
@@ -532,7 +604,7 @@ means the field is legal on a primary OR a companion submission.
 | `plant_groups` | Plant groups serviced | multi_select | both | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
 | `landscape_condition` | Overall landscape condition | select | both | required | Today's Result tree & shrub story (buildTodaysResult) (activity-indicators.js) |
 | `observed_conditions` | Observed plant conditions | multi_select | companion | hidden | — |
-| `treatments_completed` | Treatment completed | multi_select | both | hidden | — |
+| `treatments_completed` | Treatment completed | multi_select | both | hidden (companion: required) | — |
 | `palms_serviced` | Palms serviced | count | companion | hidden | — |
 | `palm_condition` | Palm condition | select | companion | hidden | — |
 | `palm_nutrient_stress` | Palm nutrient stress | select | companion | hidden | — |

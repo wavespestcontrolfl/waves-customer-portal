@@ -47,7 +47,10 @@ function renderTypedFactsBlock() {
     for (const fact of def.facts) {
       if (fact.typedForm !== def.typedForm) continue;
       const internal = fact.readers.some((r) => r.readerSymbol === 'buildTypedReportSnapshot') ? '' : ' (internal)';
-      out.push(`| \`${fact.key}\` | ${cell(fact.label)}${internal} | ${fact.fieldType} | ${fact.applicability} | ${fact.whenMissing} | ${cell(namedReaders(fact))} |`);
+      const whenMissing = fact.companionWhenMissing !== undefined
+        ? `${fact.whenMissing} (companion: ${fact.companionWhenMissing})`
+        : fact.whenMissing;
+      out.push(`| \`${fact.key}\` | ${cell(fact.label)}${internal} | ${fact.fieldType} | ${fact.applicability} | ${whenMissing} | ${cell(namedReaders(fact))} |`);
     }
   }
   out.push('', BLOCK_END);

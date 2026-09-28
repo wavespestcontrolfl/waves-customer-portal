@@ -62,7 +62,11 @@
 'use strict';
 
 const { PROJECT_TYPES } = require('../services/project-types');
-const { REQUIRED_FINDINGS_FIELDS } = require('../services/service-report/activity-indicators');
+const {
+  REQUIRED_FINDINGS_FIELDS,
+  ACTIVITY_INDICATORS: ACTIVITY_INDICATOR_DEFS,
+  requiredFindingsFieldsFor,
+} = require('../services/service-report/activity-indicators');
 const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-report/cockroach-report-v2');
 
 /**
@@ -119,7 +123,21 @@ const { COCKROACH_V2_DASHBOARD_FIELD_KEYS } = require('../services/service-repor
  *   storage key, a VisitFactWriter its writerSymbol.
  * @property {VisitFactReader[]} readers - empty array = no report section
  *   reads this fact yet (must pair with `status: 'gap'`).
- * @property {WhenMissing} whenMissing
+ * @property {WhenMissing} whenMissing - requiredness in the fact's PRIMARY
+ *   context (or its only context, for a `companion`-applicability fact).
+ * @property {string} [companionStorage] - generated typed facts only, `both`
+ *   applicability: the SECOND path complete-scheduled-service.js can freeze
+ *   this same field into when the form runs as a COMPANION section instead
+ *   of primary ('service_data.companionReportSnapshots[].values.<key>') —
+ *   same last-segment key as `storage`, not a second fact. Absent for a
+ *   `companion`-applicability fact (its single `storage` already IS this
+ *   path) and for every hand-written fact.
+ * @property {WhenMissing} [companionWhenMissing] - generated typed facts
+ *   only, `both` applicability: requiredness when the SAME field is
+ *   submitted as a companion, present ONLY when it differs from `whenMissing`
+ *   (activity-indicators.js COMPANION_REQUIRED_FINDINGS_FIELDS names a field
+ *   the companion validator requires beyond the base
+ *   REQUIRED_FINDINGS_FIELDS).
  * @property {string} [notes]
  * @property {string} [qualifiedBy] - on a measurement fact, the key of the
  *   fact on the same line that holds its unit (a value without its unit is
@@ -185,6 +203,8 @@ const COCKROACH_REPORT_V2 = 'server/services/service-report/cockroach-report-v2.
 const TERMITE_REPORT_V2 = 'server/services/service-report/termite-report-v2.js';
 const RODENT_REPORT_NARRATIVE = 'server/services/service-report/rodent-report-narrative.js';
 const KNOWLEDGE_BRIDGE = 'server/services/knowledge-bridge.js';
+const REENTRY = 'server/services/service-report/reentry.js';
+const ACTIVITY_SCORES_STORE = 'server/services/service-report/activity-scores-store.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -524,6 +544,30 @@ function genericCompletionFacts(opts = {}) {
       whenMissing: 'fallback',
       notes: 'Defaults to \'completed\' when the form sends nothing.',
     },
+    {
+      key: 'reentry_exterior_minutes',
+      label: 'Re-entry timing — exterior (technician-confirmed dry-down minutes)',
+      capture: ['prefill', 'tap'],
+      storage: 'service_records.advisory.exterior_reentry_min',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'reentryExteriorMinutes')],
+      readers: withExtra('reentry_exterior_minutes', [
+        { file: REENTRY, section: 'Re-entry ready-time summary (exterior dry-down), read by the report and delivery paths' },
+      ]),
+      whenMissing: 'fallback',
+      notes: 'Prefilled from the product label REI / service-line default (productReentryFloor, getAdvisoryDefaults); the tech\'s stepper only raises or lowers it, and a lowering override is dropped when the applied product\'s REI is unverifiable (the computed default stands unmarked). Absent a tech adjustment, the computed default is what persists here — never a missing value.',
+    },
+    {
+      key: 'reentry_interior_minutes',
+      label: 'Re-entry timing — interior (technician-confirmed dry-down minutes)',
+      capture: ['prefill', 'tap'],
+      storage: 'service_records.advisory.interior_reentry_min',
+      writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'reentryInteriorMinutes')],
+      readers: withExtra('reentry_interior_minutes', [
+        { file: REENTRY, section: 'Re-entry ready-time summary (interior dry-down), read by the report and delivery paths' },
+      ]),
+      whenMissing: 'fallback',
+      notes: 'Prefilled from the service-line default (getAdvisoryDefaults) and normalized by treatment scope (buildCompletionAdvisory); the tech\'s stepper overrides it directly.',
+    },
   ];
 }
 
@@ -534,13 +578,20 @@ function genericCompletionFacts(opts = {}) {
  * `structuredFindings` on top of it, never replaces it — and
  * complete-scheduled-service.js freezes these into structured_notes
  * unconditionally (~5755-5801, ~5854-5874): customerRecap, customerInteraction,
- * protocolActionsCompleted, recommendations, techTips and technician_notes.
- * report-data.js reads them the same way for a typed report:
+ * protocolActionsCompleted, recommendations, formRecommendations, techTips and
+ * technician_notes. report-data.js reads them the same way for a typed report:
  * buildProtocolPayload (~1791-1848, actions/recommendations/techTips) and the
  * visit-summary resolution (~5411-5416, customerRecap falling back to the
- * screened technicianReportCustomerCopy parse of technician_notes). Sourced
- * from genericCompletionFacts so a shared wiring change is never hand-copied
- * onto a typed line.
+ * screened technicianReportCustomerCopy parse of technician_notes);
+ * report-data.js's provenance-guaranteed formRecommendations read (~1824-1832)
+ * is the copy the customer report's "What we recommend" section actually uses
+ * (`recommendations` can carry raw `[Next]` technician-note lines, which never
+ * egress — codex P2, round 5). The re-entry timing pair
+ * (reentry_exterior_minutes / reentry_interior_minutes) is frozen onto
+ * `service_records.advisory` the same unconditional way (~6396-6589) — a typed
+ * closeout runs the SAME re-entry block as a basic one. Sourced from
+ * genericCompletionFacts so a shared wiring change is never hand-copied onto a
+ * typed line.
  * @returns {VisitFact[]}
  */
 const TYPED_SHARED_FACT_KEYS = Object.freeze([
@@ -548,9 +599,12 @@ const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'customer_interaction',
   'protocol_actions_completed',
   'recommendations',
+  'form_recommendations',
   'tech_tips',
   'technician_notes',
   'visit_outcome',
+  'reentry_exterior_minutes',
+  'reentry_interior_minutes',
 ]);
 
 function typedSharedCompletionFacts() {
@@ -735,6 +789,14 @@ function typedFactFields(typedForm) {
  */
 function typedFormFacts(typedForm, overrides = {}) {
   const required = requiredTypedKeys(typedForm);
+  // The full companion-context required set (base REQUIRED_FINDINGS_FIELDS
+  // plus this form's COMPANION_REQUIRED_FINDINGS_FIELDS extras, e.g.
+  // tree_shrub's treatments_completed — activity-indicators.js
+  // requiredFindingsFieldsFor(typedForm, { companion: true })). A `both`
+  // field's companion-context requiredness can differ from its primary one;
+  // a `companionOnly` field has NO primary context at all, so this set alone
+  // decides its (single) whenMissing.
+  const requiredCompanion = new Set(requiredFindingsFieldsFor(typedForm, { companion: true }));
   const extraReaders = overrides.readers || {};
   const extraNotes = overrides.notes || {};
   const builder = Object.values(TYPED_REPORT_BUILDERS).find((b) => b.typedForm === typedForm) || null;
@@ -744,37 +806,9 @@ function typedFormFacts(typedForm, overrides = {}) {
     }
   }
   return typedFactFields(typedForm).map((field) => {
-    const readers = [];
-    if (!field.internal) readers.push(TYPED_FINDINGS_LIST);
-    if (REPORT_DATA_TYPED_AREA_FIELD_KEYS.includes(field.key)) {
-      readers.push({ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' });
-    }
-    if (builder && builder.keys.includes(field.key)) {
-      readers.push({ file: builder.file, section: builder.sections[field.key] || builder.defaultSection });
-    }
-    readers.push(...(extraReaders[field.key] || []));
-    const notes = [];
-    if (field.internal) notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
-    if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
-    if (field.requiredUnless) {
-      notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
-    }
-    if (extraNotes[field.key]) notes.push(extraNotes[field.key]);
-    // companionOnly fields are NEVER recorded on a primary submission
-    // (activity-indicators.js validateTypedFindings rejects one as unknown)
-    // — complete-scheduled-service.js freezes them ONLY into
-    // service_data.companionReportSnapshots[] (~L6271-6306, buildTypedReportSnapshot
-    // called per companion, companion.values sourced from the client's
-    // companionFindings array), never into the primary typedReportSnapshot.
-    // A storage-driven consumer that looked in typedReportSnapshot for one of
-    // these would look in a path where the fact can never exist.
-    const isCompanionOnly = field.companionOnly;
-    const storage = isCompanionOnly
-      ? `service_data.companionReportSnapshots[].values.${field.key}`
-      : `service_data.typedReportSnapshot.values.${field.key}`;
-    const writers = isCompanionOnly
-      ? [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'companionReportSnapshots'), via(SCHEDULE_PAGE, 'companionFindings')]
-      : [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')];
+    const readers = typedFieldReaders(field, builder, extraReaders);
+    const notes = typedFieldNotes(field, extraNotes);
+    const placement = typedFieldPlacement(field, required, requiredCompanion);
     return {
       key: field.key,
       label: field.label,
@@ -785,15 +819,107 @@ function typedFormFacts(typedForm, overrides = {}) {
       // primary submission as unknown); every other field is legal on
       // either, since a companion submission accepts the whole form
       // (fields.filter((f) => companion || !f.companionOnly)).
-      applicability: isCompanionOnly ? 'companion' : 'both',
+      applicability: field.companionOnly ? 'companion' : 'both',
       capture: ['voice', 'tap'],
-      storage,
-      writers,
       readers,
-      whenMissing: required.has(field.key) ? 'required' : 'hidden',
+      ...placement,
       ...(notes.length ? { notes: notes.join(' ') } : {}),
     };
   });
+}
+
+/** Every reader edge for one typed field: the generic findings list, the
+ * areas-treated reader, its TYPED_REPORT_BUILDERS entry (if any) and any
+ * per-key override. Split out of typedFormFacts() to keep that function's
+ * complexity down. */
+function typedFieldReaders(field, builder, extraReaders) {
+  const readers = [];
+  if (!field.internal) readers.push(TYPED_FINDINGS_LIST);
+  if (REPORT_DATA_TYPED_AREA_FIELD_KEYS.includes(field.key)) {
+    readers.push({ file: REPORT_DATA, section: 'Areas treated (TYPED_AREA_FIELD_KEYS)' });
+  }
+  if (builder && builder.keys.includes(field.key)) {
+    readers.push({ file: builder.file, section: builder.sections[field.key] || builder.defaultSection });
+  }
+  readers.push(...(extraReaders[field.key] || []));
+  return readers;
+}
+
+/** Every note for one typed field (internal / companionOnly / requiredUnless
+ * / per-key override). Split out of typedFormFacts() to keep that function's
+ * complexity down. */
+function typedFieldNotes(field, extraNotes) {
+  const notes = [];
+  if (field.internal) notes.push('Internal field (never shown on the report); registered because REQUIRED_FINDINGS_FIELDS requires it.');
+  if (field.companionOnly) notes.push('companionOnly: this value is only ever recorded when the form runs as a COMPANION section (service_data.companionReportSnapshots[]) beside a different primary type; a primary submission of this form carrying it is rejected as an unknown field.');
+  if (field.requiredUnless) {
+    notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
+  }
+  if (extraNotes[field.key]) notes.push(extraNotes[field.key]);
+  return notes;
+}
+
+/**
+ * storage / companionStorage / writers / whenMissing / companionWhenMissing
+ * for one typed field. Split out of typedFormFacts() to keep that function's
+ * complexity down.
+ *
+ * companionOnly fields are NEVER recorded on a primary submission
+ * (activity-indicators.js validateTypedFindings rejects one as unknown) —
+ * complete-scheduled-service.js freezes them ONLY into
+ * service_data.companionReportSnapshots[] (~L6271-6306, buildTypedReportSnapshot
+ * called per companion, companion.values sourced from the client's
+ * companionFindings array), never into the primary typedReportSnapshot. A
+ * storage-driven consumer that looked in typedReportSnapshot for one of these
+ * would look in a path where the fact can never exist.
+ *
+ * A `both` field is the opposite case: complete-scheduled-service.js writes
+ * it into typedReportSnapshot.values when the form runs primary AND into
+ * companionReportSnapshots[].values when the SAME form runs as a companion
+ * (residual pre-retirement combined visits, 20260831000070, still freeze it
+ * this way too) — codex P2 round 5: advertising only the primary path here
+ * means a storage-driven consumer misses the field whenever the visit is a
+ * companion. Both paths and both writer pairs are recorded; `companionStorage`
+ * is the second path (same key, per storageKey()'s last-segment rule), not a
+ * second independent fact.
+ *
+ * Requiredness can differ by context the same way: activity-indicators.js
+ * COMPANION_REQUIRED_FINDINGS_FIELDS adds fields the companion validator
+ * requires beyond the base REQUIRED_FINDINGS_FIELDS (codex P2 round 5 — e.g.
+ * tree_shrub's treatments_completed, hidden on a primary submission but
+ * rejected as missing on a companion one). A companionOnly field has only the
+ * companion context, so `requiredCompanion` alone decides its (single)
+ * whenMissing; a `both` field gets a separate `companionWhenMissing` ONLY
+ * when it actually differs from the primary value, so the common case (same
+ * requiredness either way) stays a single field.
+ */
+function typedFieldPlacement(field, required, requiredCompanion) {
+  const isCompanionOnly = field.companionOnly;
+  const companionPath = `service_data.companionReportSnapshots[].values.${field.key}`;
+  const storage = isCompanionOnly ? companionPath : `service_data.typedReportSnapshot.values.${field.key}`;
+  const writers = isCompanionOnly
+    ? [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'companionReportSnapshots'), via(SCHEDULE_PAGE, 'companionFindings')]
+    : [
+      PROJECT_TYPES_FILE,
+      via(COMPLETE_SERVICE, 'typedReportSnapshot'),
+      via(SCHEDULE_PAGE, 'typedFindings'),
+      via(COMPLETE_SERVICE, 'companionReportSnapshots'),
+      via(SCHEDULE_PAGE, 'companionFindings'),
+    ];
+  const primaryRequired = !isCompanionOnly && required.has(field.key);
+  const companionRequired = requiredCompanion.has(field.key);
+  const whenMissing = (isCompanionOnly ? companionRequired : primaryRequired) ? 'required' : 'hidden';
+  const companionWhenMissingValue = companionRequired ? 'required' : 'hidden';
+  const companionWhenMissing = (!isCompanionOnly && companionWhenMissingValue !== whenMissing)
+    ? companionWhenMissingValue
+    : undefined;
+  return {
+    storage,
+    ...(isCompanionOnly ? {} : { companionStorage: companionPath }),
+    writers,
+    whenMissing,
+    ...(companionWhenMissing !== undefined ? { companionWhenMissing } : {}),
+  };
 }
 
 /**
@@ -820,6 +946,48 @@ function typedPhotoSummaryFact(opts = {}) {
     whenMissing: 'hidden',
     notes: opts.notes || 'The AI suggests a summary from the visit\'s uploaded photos; the tech reviews/edits it, and completion freezes the final text onto the typed snapshot (never a findingsFields entry — the field is generated from project-types.js, this is not).',
   };
+}
+
+/**
+ * The activity-gauge score for a typed form that has an ACTIVITY_INDICATORS
+ * entry (codex P2 round 5) — manually-scored types (rodent trapping,
+ * exclusion, inspection, wildlife: `derive: null`) have NO findingsFields
+ * source for it at all, and even a derived score (cockroach, flea, termite
+ * bait station, termite treatment, rodent bait station) is tech-touchable and
+ * frozen as its OWN value, never re-derivable from the findings field alone.
+ * Returns `[]` for a typedForm with no gauge (tree_shrub, palm_injection,
+ * rodent_sanitation, mosquito_event, one_time_lawn_treatment) so every typed
+ * line can call this the same way instead of hand-listing which ones qualify.
+ *
+ * Not a findingsFields entry (no `typedForm` on the returned fact, same as
+ * `typedPhotoSummaryFact`) — `complete-scheduled-service.js` freezes it onto
+ * `service_data.typedReportSnapshot.activity.{score,source,derivedFrom}`
+ * (~L6176-6231) AND inserts it as its own `service_activity_scores` row in
+ * the SAME transaction (~L6740-6756), which is what the customer ActivityCard
+ * gauge and cross-visit trend chart actually read (`activity-scores-store.js`
+ * `loadActivityCustomerView`).
+ * @param {string} typedForm
+ * @returns {VisitFact[]}
+ */
+function typedActivityScoreFacts(typedForm) {
+  const indicator = ACTIVITY_INDICATOR_DEFS[typedForm];
+  if (!indicator) return [];
+  return [{
+    key: 'typed_activity_score',
+    label: `${indicator.label} (0-5 activity score for the gauge + trend chart)`,
+    capture: indicator.derive ? ['prefill', 'voice', 'tap'] : ['voice', 'tap'],
+    storage: 'service_activity_scores.score',
+    writers: [via(COMPLETE_SERVICE, 'service_activity_scores'), via(SCHEDULE_PAGE, 'activityScore')],
+    readers: [{
+      file: ACTIVITY_SCORES_STORE,
+      section: 'Customer ActivityCard gauge + cross-visit trend chart',
+      readerSymbol: 'loadActivityCustomerView',
+    }],
+    whenMissing: 'hidden',
+    notes: indicator.derive
+      ? `Prefills from the ${indicator.derive.field} findings field (deriveActivityScore); the tech can still touch/override it (activityScoreSource records which).`
+      : 'Manually tech-set (no ACTIVITY_INDICATORS.derive for this form) — no other registered findings field can reconstruct it.',
+  }];
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,6 +1227,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('tree_shrub'),
       typedPhotoSummaryFact(),
       {
         key: 'tree_shrub_assessment_observations',
@@ -1108,6 +1277,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('cockroach'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1140,6 +1310,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('termite_bait_station'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1171,6 +1342,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('rodent_trapping'),
       typedPhotoSummaryFact({
         readers: [{ file: RODENT_REPORT_NARRATIVE, section: 'Narrative photo summary line' }],
       }),
@@ -1192,6 +1364,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('rodent_exclusion'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1210,6 +1383,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('rodent_bait_station'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1224,6 +1398,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('wildlife_trapping'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('wildlife_trapping'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1246,6 +1421,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('flea'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1260,6 +1436,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('palm_injection'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('palm_injection'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1274,6 +1451,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('termite_treatment'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('termite_treatment'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1288,6 +1466,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('rodent_inspection'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('rodent_inspection'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1302,6 +1481,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('rodent_sanitation'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('rodent_sanitation'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1316,6 +1496,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('mosquito_event'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('mosquito_event'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
@@ -1330,6 +1511,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('one_time_lawn_treatment'),
       ...typedSharedCompletionFacts(),
+      ...typedActivityScoreFacts('one_time_lawn_treatment'),
       typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
