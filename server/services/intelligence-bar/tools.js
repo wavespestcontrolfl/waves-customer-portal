@@ -2783,9 +2783,6 @@ const BOOKING_PRICE_CHANGED_ERROR = 'This visit\'s price or catalog service chan
 // with a fee, free-by-design visit types, and every PRICED booking pass.
 // Returns the model-facing refusal, or null when the booking bills or is free.
 function ibBookingBillingRefusal(customer, serviceType, price) {
-  // A stamped $0 comes only from a member discount that makes the visit free
-  // (ibBookingPricing) — intentionally free, never a money gap.
-  if (price === 0) return null;
   const { recurringWithoutBillableAmount } = require('../../routes/admin-schedule');
   const priced = Number(price) > 0;
   // Below its recurring early return, the gate asks a question that does not
@@ -3052,7 +3049,7 @@ async function createAppointment(input, actionContext = {}) {
       ...(lockedBooking.price != null ? {
         estimated_price: lockedBooking.price,
         primary_line_price: lockedBooking.pricing.primaryBase,
-        create_invoice_on_complete: lockedBooking.price > 0,
+        create_invoice_on_complete: true,
       } : {}),
       ...discountStamps,
       created_at: new Date(),
