@@ -708,7 +708,8 @@ const BANNED_TOTAL_RE = new RegExp(`(?:${PRICED_TOTAL_LEAD}|${BARE_TOTAL_NUMBER}
 // shared normalizer), but a compound this can't parse is left as words, and
 // "cuarenta Y nueve" must still read as one number, not two clauses.
 const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas|pero|mientras)\b|(?<![a-záéíóúñü])o(?![a-záéíóúñü])|(?<!\b(?:hundred|thousand|diez|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento)\s)(?:\band\b|(?<![a-záéíóúñü])y(?![a-záéíóúñü]))/i;
-const BARE_COORDINATED_PRICE_RE = new RegExp(`${BARE_BILLED_NUMBER}\\b${COUNT_NOUN_AHEAD}`, 'gi');
+const COORDINATED_PRICE_NUMBER = `(?:${BARE_BILLED_NUMBER}|\\b${NUMBER_RUN_EN_STRICT}|\\b${NUMBER_RUN_ES})`;
+const BARE_COORDINATED_PRICE_RE = new RegExp(`${COORDINATED_PRICE_NUMBER}\\b${COUNT_NOUN_AHEAD}`, 'gi');
 const COORDINATED_YEAR_COUNT_RE = new RegExp(`${BARE_YEAR_TOTAL_NUMBER}${YEAR_TOTAL_TAIL}`, 'i');
 const unitRe = (unit) => new RegExp(`\\b${PER_UNIT_CONNECTOR}\\s+${unit}s?\\b`, 'i');
 // The harness marks the words a caller interrupted as `<heard> [interrupted]`
@@ -758,6 +759,7 @@ function amount_requires_unit(value, record, { spoken }) {
         if (!amounts.length && priorPrice) {
           amounts = [...clause.matchAll(BARE_COORDINATED_PRICE_RE)]
             .map((m) => parseBillingAmount(m[0]))
+            .filter((amount) => amount >= 10)
             .filter((amount) => !isBareAnnualCount(amount) || !COORDINATED_YEAR_COUNT_RE.test(clause));
         }
         if (!amounts.length) continue;
@@ -942,7 +944,7 @@ const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero|aunque)\b/i;
 const SPANISH_VISIT_PURPOSE_RE = /\bpara\s+[a-záéíóúñü]+(?:ar|er|ir)(?:le|les|nos|se)?\s+(?:(?!que\b)[a-záéíóúñü]+\s+){0,3}(?:(?:la|el|su)\s+)?(?:visita|cita|servicio|tratamiento)\b/gi;
 const SPANISH_QUALITATIVE_VISIT_SUBJECT = '(?:visita|cita|servicio|tratamiento|t[eé]cnico)';
 const SPANISH_FILED_STATUS_PARTICIPLE = '(?:registrad|presentad|enviad|archivad|radicad|procesad)[oa]s?';
-const SPANISH_QUALITATIVE_VISIT_PREDICATE = `(?:(?:es|ser[aá]|ser[ií]a|est[aá]|estar[aá]|estar[ií]a|queda|quedar[aá])(?!\\s+${SPANISH_FILED_STATUS_PARTICIPLE}\\b)|ocurre|ocurrir[aá]|tiene\\s+lugar|tendr[aá]\\s+lugar|llega|llegar[aá]|llegar[ií]a|viene|vendr[aá]|vendr[ií]a|comienza|comenzar[aá]|empieza|empezar[aá]|program[a-záéíóúñü]*|agend[a-záéíóúñü]*|reserv[a-záéíóúñü]*)`;
+const SPANISH_QUALITATIVE_VISIT_PREDICATE = `(?:(?:va(?:n|mos)?\\s+a\\s+(?:llegar|venir|ser|estar|quedar|ocurrir|tener\\s+lugar|comenzar|empezar|programar|agendar|reservar))(?!\\s+${SPANISH_FILED_STATUS_PARTICIPLE}\\b)|(?:es|ser[aá]|ser[ií]a|est[aá]|estar[aá]|estar[ií]a|queda|quedar[aá])(?!\\s+${SPANISH_FILED_STATUS_PARTICIPLE}\\b)|ocurre|ocurrir[aá]|tiene\\s+lugar|tendr[aá]\\s+lugar|llega|llegar[aá]|llegar[ií]a|viene|vendr[aá]|vendr[ií]a|comienza|comenzar[aá]|empieza|empezar[aá]|program[a-záéíóúñü]*|agend[a-záéíóúñü]*|reserv[a-záéíóúñü]*)`;
 const SPANISH_QUALITATIVE_VISIT_SUBJECT_RE = new RegExp(`\\b(?:${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])|${SPANISH_QUALITATIVE_VISIT_PREDICATE}(?![a-záéíóúñü])[^.!?;,]{0,45}\\b${SPANISH_QUALITATIVE_VISIT_SUBJECT}(?![a-záéíóúñü]))`, 'i');
 function spanishQualitativeTimeEvidence(text, subject) {
   return String(text || '').replace(new RegExp(SPANISH_QUALITATIVE_VISIT_TIME_RE.source, 'gi'), (match, offset, source) => {

@@ -6841,6 +6841,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. A primera hora será la visita. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. La oficina abre al amanecer, pero la visita será al final del día. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. La oficina le llamará para confirmar que la visita será a primera hora.',
+      'Ya presenté la solicitud de re-servicio. El técnico va a llegar tras el almuerzo. La oficina le llamará.',
     ]) {
       const qualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, qualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -6862,6 +6863,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Ya presenté la solicitud de re-servicio. Envié su solicitud al técnico tras el almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio está registrada desde antes del almuerzo. La oficina le llamará.',
       'Ya presenté la solicitud de re-servicio. Está registrada su solicitud de re-servicio desde antes del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio va a estar registrada después del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. Su solicitud de re-servicio va a quedar registrada después del almuerzo. La oficina le llamará.',
+      'Ya presenté la solicitud de re-servicio. El técnico no va a llegar tras el almuerzo. La oficina le llamará.',
     ]) {
       const allowedQualitative = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
       expect([text, allowedQualitative.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -7522,6 +7526,21 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(yNotSplitting.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: yNotSplitting })).toBe('fail');
+    const spelledCoordinated = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta 119 por cada aplicación y el premium noventa y nueve', turn: 2 },
+    ] }));
+    expect(spelledCoordinated.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail', detail: expect.stringContaining('99') });
+    expect(replay._internals.scenarioStatus({ checks: spelledCoordinated })).toBe('fail');
+    for (const text of [
+      'El programa mejorado cuesta 119 por cada aplicación y una llamada de la oficina confirmará los detalles.',
+      'El programa mejorado cuesta 119 por cada aplicación y dos llamadas de la oficina confirmarán los detalles.',
+      'El programa mejorado cuesta 119 por cada aplicación y una revisión confirmará los detalles.',
+    ]) {
+      const quantityAfterPrice = replay._internals.evaluateChecks(scenario, record({ order: [
+        pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text, turn: 2 },
+      ] }));
+      expect([text, quantityAfterPrice.find((c) => c.check === 'amount_requires_unit')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+    }
     // Codex round-6 P1: a spelled-out Spanish number immediately before a
     // PRICING-UNIT phrase ("por aplicación"), with no currency word at all,
     // never converted to digits — the shared normalizer only knew a number
