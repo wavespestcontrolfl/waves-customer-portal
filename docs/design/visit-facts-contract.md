@@ -84,6 +84,18 @@ submits the value under another name (the client's camelCase
 declares that `writerSymbol`. The test checks **every** declared writer, not
 just one of them.
 
+`complete-scheduled-service.js`'s `structuredNotes` object literal writes
+more keys than the 11 below — review-ask scheduling, backfill/invoice-mint
+provenance, delivery posture, WaveGuard equipment compliance, duration/drive
+costing, telemetry. Those are internal completion bookkeeping, never a
+customer-report input, so they are NOT registry facts: they are named with a
+reason in `UNREGISTERED_INTERNAL_KEYS` (`server/config/visit-facts-contract.js`).
+The test extracts every key the object literal actually writes (including
+ones merged in through a `...(cond ? { key } : {})` spread) and fails if a
+key is neither a registered fact's storage key nor in that allow-list — so a
+brand-new key can't quietly become a customer-facing report input, or quietly
+stay internal, without a decision either way.
+
 | fact | capture | storage | report section | when missing |
 |---|---|---|---|---|
 | `areas_treated` ("Treated") | voice, tap | `structured_notes.areasTreated` | Areas treated / coverage (report-data.js) | fallback to the request's `areasServiced` |
@@ -123,20 +135,36 @@ voice-fill questions but never fill in findings.
 | fact | capture | storage | report section | when missing |
 |---|---|---|---|---|
 | `product_application_method` | prefill, voice, tap | `service_products.application_method` | What we did; premium primary move | hidden |
-| `product_targets` | prefill, voice, tap | `service_products.targets` | What we did; bug files; lawn and T&S treatment cards | hidden |
+| `product_targets` | prefill, voice, tap | `service_products.targets` | What we did; bug files; lawn (lawn line only) / T&S (tree_shrub line only) treatment cards | hidden |
 | `product_application_area` | voice, tap | `service_products.application_area` | What we did; treated areas | hidden |
-| `product_area_value` | voice, tap | `service_products.area_value` | What we did; lawn treatment card area | hidden; required for perimeter spray |
-| `product_area_unit` | prefill, voice, tap | `service_products.area_unit` | What we did; lawn treatment card area | hidden |
+| `product_area_value` | voice, tap | `service_products.area_value` | What we did; lawn/T&S treatment card area (lawn / tree_shrub lines only) | hidden; required for perimeter spray |
+| `product_area_unit` | prefill, voice, tap | `service_products.area_unit` | What we did; lawn/T&S treatment card area (lawn / tree_shrub lines only) | hidden |
 | `product_total_amount` | prefill, voice, tap | `service_products.total_amount` | What we did | hidden |
 | `product_amount_unit` | prefill, voice, tap | `service_products.amount_unit` | What we did | hidden |
 | `product_application_rate` | prefill, voice, tap | `service_products.application_rate` (the client sends `rate`) | What we did (rate) | hidden |
 | `product_rate_unit` | prefill, voice, tap | `service_products.rate_unit` | What we did (rate) | hidden |
+| `product_name` | prefill (catalog) | `service_products.product_name` | Product identity card (name) | hidden |
+| `product_category` | prefill (catalog) | `service_products.product_category` | Product identity card (category) | hidden |
+| `product_active_ingredient` | prefill (catalog) | `service_products.active_ingredient` | Product identity card (active ingredient) | hidden |
+| `product_epa_reg_number` | prefill (catalog) | `service_products.epa_reg_number` | Product identity card (EPA registration) | hidden |
 
 Each measurement names its unit fact (`qualifiedBy`): a value without its
 unit is not interpretable, and the test fails if a measurement is registered
 without one. The dark pest "what to expect" section needs method, area and target on
 each product. All three are here. **Targets on the full form are prefilled
 from the product label. They describe the product mix, not pests found.**
+
+The four identity/regulatory facts are resolved server-side from the catalog
+row the tech picked (`completionCatalogRowsById`), never typed by the tech —
+there is no client writer edge. `report-data.js`'s public application card
+renders all four (`product.name` / `category` / `active_ingredient` /
+`epa_reg`).
+
+`productFacts(opts)` takes an `extraReaders` map so a lawn- or
+tree-&-shrub-specific reader edge (the treatment-card sections) is scoped to
+the ONE line whose builder actually runs — `productFacts()` itself is reused
+by every service line, and `lawn-report-v2.js` / `tree-shrub-report-v2.js`
+never run for, say, a termite or rodent completion.
 
 ### Photos (`photoFacts`)
 
@@ -179,14 +207,23 @@ requires. Internal optional fields are office-only data, not report facts.
   per-key readers (Today's Result stories, the rodent narrative, cross-sell
   V2) are registered by hand, and the test checks that the key appears in
   each reader file.
-- **Storage** is `service_data.typedReportSnapshot.values.<key>`. The
-  two-program combos retired on 2026-08-31 (`20260831000070`); their residual
-  visits keep the same keys under
-  `service_data.companionReportSnapshots[].values.<key>`, which
-  `report-data.js` and `termite-report-v2.js` still read for those frozen
-  reports.
-- **Writers** are `project-types.js` (declares the key), the form
-  (`typedFindings`) and the completion service (`typedReportSnapshot`).
+- **Storage** is `service_data.typedReportSnapshot.values.<key>` for a
+  `both`-applicability field, and `service_data.companionReportSnapshots[].values.<key>`
+  for a `companion`-only field — `complete-scheduled-service.js` freezes a
+  companion-only field ONLY into the companion snapshot array
+  (`buildTypedReportSnapshot` called once per companion section,
+  `companion.values` sourced from the client's `companionFindings` array),
+  never into the primary `typedReportSnapshot`; a primary submission
+  carrying one is rejected as unknown. The two-program combos retired on
+  2026-08-31 (`20260831000070`) also keep their (non-companion-only) keys
+  under `service_data.companionReportSnapshots[].values.<key>` for their
+  residual frozen visits, which `report-data.js` and `termite-report-v2.js`
+  still read.
+- **Writers** are `project-types.js` (declares the key), and — for a `both`
+  field — the form (`typedFindings`) and the completion service
+  (`typedReportSnapshot`); for a `companion`-only field, the form's
+  `companionFindings` array and the completion service's
+  `companionReportSnapshots`.
 
 The test re-derives all of this on its own. A typed line must carry exactly
 its form's fields, with requiredness matching `REQUIRED_FINDINGS_FIELDS`. A
@@ -201,14 +238,26 @@ The Complete Service form is the SAME form for a typed or an untyped
 completion — a typed submission layers `structuredFindings` on top of it, it
 never replaces it. `complete-scheduled-service.js` freezes
 `customerRecap`, `customerInteraction`, `protocolActionsCompleted`,
-`recommendations`, `techTips` and the `technician_notes` column into the
-record unconditionally, and `report-data.js` reads them the same way for a
-typed report (`buildProtocolPayload`; the visit-summary resolution that falls
-back from `customerRecap` to the screened `technicianReportCustomerCopy`
-parse of `technician_notes`). Every typed line below adds this subset of
-[the basic form facts](#basic-form-facts-genericcompletionfacts) — sourced
+`recommendations`, `techTips`, `visitOutcome` and the `technician_notes`
+column into the record unconditionally, and `report-data.js` reads them the
+same way for a typed report (`buildProtocolPayload`; the visit-summary
+resolution that falls back from `customerRecap` to the screened
+`technicianReportCustomerCopy` parse of `technician_notes`; the no-application
+copy branch keyed on `visitOutcome`). Every typed line below adds this subset
+of [the basic form facts](#basic-form-facts-genericcompletionfacts) — sourced
 from `genericCompletionFacts` itself, never hand-copied — beside its
 generated typed facts.
+
+### Typed photo summary (`typedPhotoSummaryFact`)
+
+Every typed line also adds ONE more shared fact outside `typedFormFacts` (it
+is not a `findingsFields` entry): `typed_photo_summary`, the
+technician-reviewed AI photo summary (`typedPhotoSummary` on the client,
+`photoSummaryText` server-side) frozen at
+`service_data.typedReportSnapshot.photoSummary` — a sibling of `.values`, not
+a field inside it. `report-data.js` renders it on every typed report; the
+rodent-trapping line adds `rodent-report-narrative.js`'s own read of the same
+field as an extra reader.
 
 ## Per-line facts
 
@@ -251,8 +300,17 @@ photos, plus:
 | fact | capture | storage | report section | when missing |
 |---|---|---|---|---|
 | `lawn_assessment_observations` | photo, derived | `lawn_assessments.observations` | Lawn diagnosis / insights card | fallback to the AI summary |
+| `lawn_assessment_ai_summary` | derived | `lawn_assessments.ai_summary` | Lawn diagnosis / insights card (fallback source) | fallback |
 | `turf_height_reading` | voice, tap | `turf_height_readings.manual_height_in` | Mowing height card | hidden |
 | `turf_height_gauge_photo` | photo | `turf_height_readings.gauge_photo_id` | Mowing height card (gauge photo) | hidden |
+
+`lawn-report-v2.js` reads `observations || aiSummary || customerSummary`;
+`lawn_assessments` has no `customer_summary` column, so `aiSummary`
+(`lawn_assessments.ai_summary`, written by `knowledge-bridge.js`) is the real
+second source and is registered as its own fact — `customerSummary` is dead
+code on this path. Product facts on this line get the lawn-specific
+treatment-card readers (`productFacts({ extraReaders: {...} })`); no other
+line does.
 
 The numeric reading and the gauge photo are separate facts: either can be
 present without the other (a photo-only row stores a null reading), and
@@ -279,67 +337,96 @@ also adds the [shared facts above](#shared-facts-every-typed-line-also-carries-t
 each line adds by hand are named here.
 
 - **Tree & shrub** (`tree_shrub`, form `tree_shrub`): `tree_shrub_program`,
-  `tree_shrub_6week`, `tree_shrub_quarterly`. Adds
-  `tree_shrub_assessment_observations` (`tree_shrub_assessments.observations`,
-  read by the tree & shrub findings summary), product facts and photos.
-  `completion_photos` is **required** here (`TREE_SHRUB_MIN_CLOSEOUT_PHOTOS`
-  uploads); the caption stays optional. Its palm / shrub / bed module detail
-  fields are `companionOnly` (`applicability: 'companion'` in the generated
-  table) — they only ever populate when tree_shrub runs as a COMPANION
-  section beside a different primary type.
+  `tree_shrub_6week`, `tree_shrub_quarterly`. Adds the typed photo summary,
+  `tree_shrub_assessment_observations` and `tree_shrub_assessment_ai_summary`
+  (`tree_shrub_assessments.observations` / `.ai_summary` — same
+  observations-then-AI-summary fallback as lawn; `tree_shrub_assessments` has
+  no `customer_summary` column either), product facts (with the tree-&-shrub
+  treatment-card readers) and photos. `completion_photos` is **required**
+  here (`TREE_SHRUB_MIN_CLOSEOUT_PHOTOS` uploads); the caption stays
+  optional. Its palm / shrub / bed module detail fields are `companionOnly`
+  (`applicability: 'companion'` in the generated table, storage
+  `service_data.companionReportSnapshots[].values.<key>`) — they only ever
+  populate when tree_shrub runs as a COMPANION section beside a different
+  primary type.
 - **Cockroach** (`cockroach`, form `cockroach`): `cockroach_control`,
-  `german_roach`, `german_roach_initial`. Adds product facts, photos and the
-  `cockroach_work_from_products` **gap**. The cross-sell V2 roach signal
-  reads `activity_level` only from a **companion** cockroach snapshot under
-  a non-cockroach primary, so it is not a reader on this line.
+  `german_roach`, `german_roach_initial`. Adds the typed photo summary,
+  product facts, photos and the `cockroach_work_from_products` **gap**. The
+  cross-sell V2 roach signal reads `activity_level` only from a **companion**
+  cockroach snapshot under a non-cockroach primary, so it is not a reader on
+  this line.
 - **Termite bait** (`termite_bait`, form `termite_bait_station`,
   `20260612000001`): `termite_bait`, `termite_active_annual`,
   `termite_active_bait_quarterly`, `termite_monitoring`,
-  `termite_cartridge_replacement`, `termite_installation_setup`. Adds product
-  facts and photos. The cross-sell V2 termite signal reads `termite_activity`
-  only; `cross-sell.js` reads `bait_consumption` for rodent bait stations,
-  never for termite.
+  `termite_cartridge_replacement`, `termite_installation_setup`. Adds the
+  typed photo summary, product facts and photos. The cross-sell V2 termite
+  signal reads `termite_activity` only; `cross-sell.js` reads
+  `bait_consumption` for rodent bait stations, never for termite.
 - **Rodent trapping** (`rodent_trapping`, form `rodent_trapping`):
   `rodent_trapping`, `rodent_trapping_exclusion`,
   `rodent_trapping_sanitation`, `rodent_trapping_exclusion_sanitation`,
   `rodent_trapping_followup`, `rodent_trap_check_additional`,
   `trap_only_retainer_monthly`, `trap_only_retainer_standard`,
   `trap_only_retainer_plus`. The combo keys record exclusion and sanitation
-  on this same form (its "(combo)" fields). Adds product facts and photos.
+  on this same form (its "(combo)" fields). Adds the typed photo summary
+  (also read by `rodent-report-narrative.js`), product facts and photos.
 - **Rodent exclusion** (`rodent_exclusion`, form `rodent_exclusion`):
   `rodent_exclusion`, `rodent_exclusion_only`, `rodent_bird_box`,
   `rodent_wire_mesh`. No species field; all four fields are required. Adds
-  product facts and photos.
+  the typed photo summary, product facts and photos.
 - **Rodent bait stations** (`rodent_bait_station`, form
   `rodent_bait_station`, `20260612000001`): `rodent_bait_quarterly`,
-  `rodent_bait_setup`. Adds product facts and photos.
-- **Wildlife** (`wildlife`, form `wildlife_trapping`): `wildlife_trapping`.
-  Adds product facts (the same always-visible Products Applied picker as
-  every other lane; `service_products` rows are never excluded for wildlife)
-  and photos.
-- **Flea** (`flea`, form `flea`): `flea_tick`. Adds product facts and
+  `rodent_bait_setup`. Adds the typed photo summary, product facts and
   photos.
+- **Wildlife** (`wildlife`, form `wildlife_trapping`): `wildlife_trapping`.
+  Adds the typed photo summary, product facts (the same always-visible
+  Products Applied picker as every other lane; `service_products` rows are
+  never excluded for wildlife) and photos.
+- **Flea** (`flea`, form `flea`): `flea_tick`. Adds the typed photo summary,
+  product facts and photos.
 - **Palm** (`palm`, form `palm_injection`): `palm_injection`,
-  `palm_injection_semiannual`. Adds product facts and photos. The basic-form
-  `palm_treatment` row is archived (see Retired catalog keys).
+  `palm_injection_semiannual`. Adds the typed photo summary, product facts
+  and photos. The basic-form `palm_treatment` row is archived (see Retired
+  catalog keys).
+- **Termite treatment** (`termite_treatment`, form `termite_treatment`):
+  `termite_liquid`, `termite_trenching`, `termite_spot_treatment`,
+  `termite_pretreatment`, `foam_drill`, `foam_recurring` (`20260713100000`,
+  `20260808070000`). Adds the typed photo summary, product facts and photos.
+- **Rodent inspection** (`rodent_inspection`, form `rodent_inspection`):
+  `rodent_inspection`, `rodent_general_one_time` (`20260612000012`,
+  `20260712200000`). Diagnostic/one-time — adds the typed photo summary,
+  product facts and photos.
+- **Rodent sanitation** (`rodent_sanitation`, form `rodent_sanitation`):
+  `rodent_sanitation_light`, `rodent_sanitation_standard`,
+  `rodent_sanitation_heavy` (`20260612000012`, `20260712200000`). Adds the
+  typed photo summary, product facts and photos.
+- **Mosquito event** (`mosquito_event`, form `mosquito_event`):
+  `mosquito_one_time` (`20260611000012`). One-time event spray — adds the
+  typed photo summary, product facts and photos.
+- **One-time lawn treatment** (`one_time_lawn_treatment`, form
+  `one_time_lawn_treatment`): `lawn_care_one_time` (`20260611000012`),
+  `lawn_pest_knockdown` (`20260809000000`), `lawn_re_service`
+  (`20260618000001`). Outside the recurring WaveGuard flow — adds the typed
+  photo summary, product facts and photos.
 
 ### Active services not on a line yet
 
-These complete today, but no line in the registry covers them yet. Their
-typed fields render through the generic typed findings list, and their field
-contract is in the specialty doc. A typed one becomes a line by adding it
-with its `typedForm`; its facts then generate:
+These complete today, but no line in the registry covers them yet:
 
-- typed `termite_treatment`: `termite_liquid`, `termite_trenching`,
-  `termite_spot_treatment`, `termite_pretreatment`, `foam_drill`,
-  `foam_recurring`
-- typed `rodent_inspection`: `rodent_inspection`, `rodent_general_one_time`
-- typed `rodent_sanitation`: `rodent_sanitation_light`,
-  `rodent_sanitation_standard`, `rodent_sanitation_heavy`
-- typed `mosquito_event`: `mosquito_one_time`
-- typed `one_time_lawn_treatment`: `lawn_care_one_time`,
-  `lawn_pest_knockdown`, `lawn_re_service`
-- basic form: `bora_care`
+- basic form: `bora_care` — a one-time termite-adjacent wood treatment
+  completed through the SAME basic form as `one_time_pest` / `lawn`'s
+  one-time add-ons (`completion-lane-registry.js`
+  `ONE_TIME_GENERIC_BY_DESIGN`), but it doesn't share either line's
+  vocabulary (not a pest-control target, not a lawn condition) — parked here
+  rather than forced into a line it doesn't fit, until it gets its own
+  basic-form facts or a typed target (its beetle/wood-decay-fungi targets
+  don't exist in `termite_treatment`'s option list today — see
+  `completion-lane-registry.js`).
+
+A typed one becomes a line by adding it with its `typedForm`; its facts then
+generate. A basic-form one becomes a line by giving it its own
+`genericCompletionFacts()` entry (or joining an existing line's `catalogKeys`
+if its vocabulary genuinely matches that line).
 
 ### Retired catalog keys
 
@@ -581,6 +668,78 @@ means the field is legal on a primary OR a companion submission.
 | `deficiency_signs` | Nutrient observations | chips | both | hidden | — |
 | `pest_disease_signs` | Pest & disease check | chips | both | hidden | — |
 | `work_completed` | Work completed today | chips | both | hidden | — |
+| `customer_recommendations` | Customer recommendations | chips | both | hidden | — |
+
+### `termite_treatment` — typed `termite_treatment` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `target_termite` | Target termite / WDO | select | both | required | — |
+| `termite_evidence` | Evidence observed | chips | both | hidden | — |
+| `areas_treated` | Areas treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `treatment_method` | Treatment method | select | both | required | — |
+| `products_used` | Products used | textarea | both | required | — |
+| `percent_solution` | % solution | text | both | hidden | — |
+| `epa_registration` | EPA reg. no. | text | both | required | — |
+| `linear_feet_or_stations` | Linear feet / stations | textarea | both | required | — |
+| `gallons_or_amount` | Gallons / amount applied | textarea | both | required | — |
+| `posted_notice` | Posted notice placed (exterior / perimeter applications) | select | both | required | — |
+| `followup_plan` | Follow-up / warranty plan | textarea | both | hidden | — |
+
+### `rodent_inspection` — typed `rodent_inspection` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `areas_inspected` | Areas inspected | chips | both | required | — |
+| `activity_found` | Activity found | select | both | required | — |
+| `evidence_observed` | Evidence type | chips | both | hidden | — |
+| `species` | Suspected rodent type | select | both | hidden | — |
+| `entry_points_found` | Entry points found | text | both | hidden | — |
+| `conducive_conditions` | Conducive conditions | chips | both | hidden | — |
+| `recommended_service` | Recommended service | select | both | required | — |
+| `urgency` | Urgency | select | both | required | — |
+
+### `rodent_sanitation` — typed `rodent_sanitation` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `sanitation_areas` | Areas serviced | chips | both | required | — |
+| `contamination_level` | Contamination level | select | both | required | — |
+| `sanitation_work_completed` | Work completed | chips | both | required | — |
+| `sanitation_limitations` | Limitations | chips | both | required | — |
+
+### `mosquito_event` — typed `mosquito_event` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `activity_level` | Mosquito activity level | select | both | required | — |
+| `activity_locations` | Where activity was noted | chips | both | hidden | — |
+| `treatment_completed` | Treatment completed | chips | both | hidden | — |
+| `treatment_zones` | Treatment zones | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
+| `standing_water` | Standing water found | select | both | required | — |
+| `breeding_sources` | Breeding sources noted | chips | both | hidden | — |
+| `source_reduction` | Source reduction completed | chips | both | hidden | — |
+| `sensitive_areas` | Sensitive areas present | chips | both | hidden | — |
+| `sensitive_areas_avoided` | Sensitive-area handling | select | both | hidden | — |
+| `weather_conditions` | Weather conditions | chips | both | hidden | — |
+| `customer_recommendations` | Customer recommendations | chips | both | hidden | — |
+| `customer_reported` | Customer reported | chips | both | hidden | — |
+| `customer_discussed` | Discussed with customer | chips | both | hidden | — |
+
+### `one_time_lawn_treatment` — typed `one_time_lawn_treatment` form
+
+| fact | label | type | applicability | when missing | also read by name in |
+|---|---|---|---|---|---|
+| `turf_type` | Turf type | select | both | hidden | — |
+| `lawn_condition` | Lawn condition | select | both | required | — |
+| `turf_color` | Turf color | select | both | hidden | — |
+| `weed_pressure` | Weed pressure | select | both | hidden | — |
+| `insect_pressure` | Insect pressure | select | both | hidden | — |
+| `disease_pressure` | Disease pressure | select | both | hidden | — |
+| `turf_issues` | Issues observed | chips | both | hidden | — |
+| `irrigation_mowing` | Irrigation & mowing notes | chips | both | hidden | — |
+| `work_completed` | Work completed today | chips | both | hidden | — |
+| `spot_treatment_areas` | Areas treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
 | `customer_recommendations` | Customer recommendations | chips | both | hidden | — |
 
 <!-- END GENERATED: typed form facts -->

@@ -25,9 +25,14 @@
  * gaps list match in both directions, that every product measurement has its
  * unit fact, that each typed line carries exactly its form's fields with
  * REQUIRED_FINDINGS_FIELDS requiredness, that each TYPED_REPORT_BUILDERS
- * file reads exactly its registered keys, that the doc's generated typed
- * tables are current, that no line lists a retired catalog key, and that no
- * voice-fill line carries an undeclared tap-only fact.
+ * file reads exactly its registered keys (dot, optional-chaining, bracket
+ * access and destructuring off `values`), that the doc's generated typed
+ * tables are current, that no line lists a retired catalog key, that no
+ * voice-fill line carries an undeclared tap-only fact, and that every key
+ * complete-scheduled-service.js's structuredNotes object literal writes
+ * (including one merged in through a `...(cond ? { key } : {})` spread) is
+ * either a registered fact's storage key or named with a reason in
+ * UNREGISTERED_INTERNAL_KEYS below.
  *
  * Sibling pattern: server/config/completion-lane-registry.js (routing
  * decisions — which catalog key completes through which form) +
@@ -179,6 +184,7 @@ const TREE_SHRUB_REPORT_V2 = 'server/services/service-report/tree-shrub-report-v
 const COCKROACH_REPORT_V2 = 'server/services/service-report/cockroach-report-v2.js';
 const TERMITE_REPORT_V2 = 'server/services/service-report/termite-report-v2.js';
 const RODENT_REPORT_NARRATIVE = 'server/services/service-report/rodent-report-narrative.js';
+const KNOWLEDGE_BRIDGE = 'server/services/knowledge-bridge.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -201,9 +207,18 @@ const TYPED_FINDINGS_LIST = Object.freeze({
  * premium-experience.js read them back for every line). These are also the
  * facts the dark pest "what to expect" section needs: method + area +
  * targets per product.
+ *
+ * `opts.extraReaders` scopes a lawn- or tree-&-shrub-specific reader edge to
+ * the ONE line that actually runs that builder — `productFacts()` is reused
+ * by every service line (recurring pest, termite, rodent, …) and
+ * lawn-report-v2.js / tree-shrub-report-v2.js never run for those lines, so a
+ * universal reader edge would advertise a dependency that doesn't exist.
+ * @param {{ extraReaders?: Record<string, VisitFactReader[]> }} [opts]
  * @returns {VisitFact[]}
  */
-function productFacts() {
+function productFacts(opts = {}) {
+  const extra = opts.extraReaders || {};
+  const withExtra = (key, base) => base.concat(extra[key] || []);
   return [
     {
       key: 'product_application_method',
@@ -224,12 +239,10 @@ function productFacts() {
       capture: ['prefill', 'voice', 'tap'],
       storage: 'service_products.targets',
       writers: [COMPLETE_SERVICE, SCHEDULE_PAGE, FAST_COMPLETE_SHEET],
-      readers: [
+      readers: withExtra('product_targets', [
         { file: REPORT_DATA, section: 'What we did / products applied' },
         { file: PREMIUM_EXPERIENCE, section: 'Bug files / pressure receipt' },
-        { file: LAWN_REPORT_V2, section: 'Treatment card (lawn)' },
-        { file: TREE_SHRUB_REPORT_V2, section: 'Treatment card (tree & shrub)' },
-      ],
+      ]),
       whenMissing: 'hidden',
       notes: 'On the full form targets are prefilled from the product label list — they describe the product mix, NOT pests found. Fast Complete writes the tech\'s picked pests into every row\'s targets.',
     },
@@ -253,10 +266,9 @@ function productFacts() {
       storage: 'service_products.area_value',
       qualifiedBy: 'product_area_unit',
       writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'areaValue'), via(FAST_COMPLETE_SHEET, 'areaValue')],
-      readers: [
+      readers: withExtra('product_area_value', [
         { file: REPORT_DATA, section: 'What we did / products applied' },
-        { file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' },
-      ],
+      ]),
       whenMissing: 'hidden',
       notes: 'Required (blocks submit) for perimeter_spray (linear ft) and for methods whose report application needs square feet — see the linear_ft / sqft checks in complete-scheduled-service.js. Fast Complete sends it only for perimeter_spray.',
     },
@@ -266,12 +278,11 @@ function productFacts() {
       capture: ['prefill', 'voice', 'tap'],
       storage: 'service_products.area_unit',
       writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'areaUnit'), via(FAST_COMPLETE_SHEET, 'areaUnit')],
-      readers: [
+      readers: withExtra('product_area_unit', [
         { file: REPORT_DATA, section: 'What we did / products applied' },
-        { file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' },
-      ],
+      ]),
       whenMissing: 'hidden',
-      notes: 'Validated with area_value on completion; lawn-report-v2.js shows an area only when both are present. Fast Complete sends \'linear_ft\' with its perimeter_spray area.',
+      notes: 'Validated with area_value on completion; lawn-report-v2.js and tree-shrub-report-v2.js show an area only when both are present. Fast Complete sends \'linear_ft\' with its perimeter_spray area.',
     },
     {
       key: 'product_total_amount',
@@ -312,6 +323,48 @@ function productFacts() {
       storage: 'service_products.rate_unit',
       writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'rateUnit'), via(FAST_COMPLETE_SHEET, 'rateUnit')],
       readers: [{ file: REPORT_DATA, section: 'What we did / products applied (rate)' }],
+      whenMissing: 'hidden',
+    },
+    // Identity + regulatory fields, resolved server-side from the catalog
+    // row the tech picked (completionCatalogRowsById) — the client submits
+    // only the product's id, never these values, so there is no client
+    // writer edge. report-data.js's public application card renders them
+    // (product.name/epa_reg/active_ingredient/category ~L3755-3761).
+    {
+      key: 'product_name',
+      label: 'Product name (identity)',
+      capture: ['prefill'],
+      storage: 'service_products.product_name',
+      writers: [COMPLETE_SERVICE],
+      readers: [{ file: REPORT_DATA, section: 'Product identity card (name)' }],
+      whenMissing: 'hidden',
+      notes: 'Resolved from the catalog row at completion (product.name); the client never types a product name.',
+    },
+    {
+      key: 'product_category',
+      label: 'Product category (herbicide / insecticide / …)',
+      capture: ['prefill'],
+      storage: 'service_products.product_category',
+      writers: [COMPLETE_SERVICE],
+      readers: [{ file: REPORT_DATA, section: 'Product identity card (category)' }],
+      whenMissing: 'hidden',
+    },
+    {
+      key: 'product_active_ingredient',
+      label: 'Product active ingredient',
+      capture: ['prefill'],
+      storage: 'service_products.active_ingredient',
+      writers: [COMPLETE_SERVICE],
+      readers: [{ file: REPORT_DATA, section: 'Product identity card (active ingredient)' }],
+      whenMissing: 'hidden',
+    },
+    {
+      key: 'product_epa_reg_number',
+      label: 'Product EPA registration number',
+      capture: ['prefill'],
+      storage: 'service_products.epa_reg_number',
+      writers: [COMPLETE_SERVICE],
+      readers: [{ file: REPORT_DATA, section: 'Product identity card (EPA registration)' }],
       whenMissing: 'hidden',
     },
   ];
@@ -497,6 +550,7 @@ const TYPED_SHARED_FACT_KEYS = Object.freeze([
   'recommendations',
   'tech_tips',
   'technician_notes',
+  'visit_outcome',
 ]);
 
 function typedSharedCompletionFacts() {
@@ -706,6 +760,21 @@ function typedFormFacts(typedForm, overrides = {}) {
       notes.push(`Required unless ${field.requiredUnless.field} = '${field.requiredUnless.value}' (project-types.js requiredUnless); not in REQUIRED_FINDINGS_FIELDS.`);
     }
     if (extraNotes[field.key]) notes.push(extraNotes[field.key]);
+    // companionOnly fields are NEVER recorded on a primary submission
+    // (activity-indicators.js validateTypedFindings rejects one as unknown)
+    // — complete-scheduled-service.js freezes them ONLY into
+    // service_data.companionReportSnapshots[] (~L6271-6306, buildTypedReportSnapshot
+    // called per companion, companion.values sourced from the client's
+    // companionFindings array), never into the primary typedReportSnapshot.
+    // A storage-driven consumer that looked in typedReportSnapshot for one of
+    // these would look in a path where the fact can never exist.
+    const isCompanionOnly = field.companionOnly;
+    const storage = isCompanionOnly
+      ? `service_data.companionReportSnapshots[].values.${field.key}`
+      : `service_data.typedReportSnapshot.values.${field.key}`;
+    const writers = isCompanionOnly
+      ? [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'companionReportSnapshots'), via(SCHEDULE_PAGE, 'companionFindings')]
+      : [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')];
     return {
       key: field.key,
       label: field.label,
@@ -716,16 +785,95 @@ function typedFormFacts(typedForm, overrides = {}) {
       // primary submission as unknown); every other field is legal on
       // either, since a companion submission accepts the whole form
       // (fields.filter((f) => companion || !f.companionOnly)).
-      applicability: field.companionOnly ? 'companion' : 'both',
+      applicability: isCompanionOnly ? 'companion' : 'both',
       capture: ['voice', 'tap'],
-      storage: `service_data.typedReportSnapshot.values.${field.key}`,
-      writers: [PROJECT_TYPES_FILE, via(COMPLETE_SERVICE, 'typedReportSnapshot'), via(SCHEDULE_PAGE, 'typedFindings')],
+      storage,
+      writers,
       readers,
       whenMissing: required.has(field.key) ? 'required' : 'hidden',
       ...(notes.length ? { notes: notes.join(' ') } : {}),
     };
   });
 }
+
+/**
+ * The technician-reviewed AI photo summary a typed completion can freeze
+ * onto its snapshot (`typedPhotoSummary` on the client, `photoSummaryText`
+ * server-side) — a top-level `typedReportSnapshot.photoSummary` string, NOT
+ * a findingsFields entry, so `typedFormFacts()` never generates it. Shared
+ * across every typed line the same way `typedSharedCompletionFacts()` is.
+ * @param {{ readers?: VisitFactReader[], notes?: string }} [opts] - extra
+ *   per-line readers (e.g. the rodent narrative) beyond report-data.js.
+ * @returns {VisitFact}
+ */
+function typedPhotoSummaryFact(opts = {}) {
+  return {
+    key: 'typed_photo_summary',
+    label: 'Photo summary (technician-reviewed AI photo analysis)',
+    capture: ['derived', 'tap'],
+    storage: 'service_data.typedReportSnapshot.photoSummary',
+    writers: [COMPLETE_SERVICE, via(SCHEDULE_PAGE, 'typedPhotoSummary')],
+    readers: [
+      { file: REPORT_DATA, section: 'Typed report photo summary card' },
+      ...(opts.readers || []),
+    ],
+    whenMissing: 'hidden',
+    notes: opts.notes || 'The AI suggests a summary from the visit\'s uploaded photos; the tech reviews/edits it, and completion freezes the final text onto the typed snapshot (never a findingsFields entry — the field is generated from project-types.js, this is not).',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// structured_notes keys complete-scheduled-service.js writes that are NOT
+// customer-report facts — internal completion bookkeeping (billing/backfill
+// provenance, review-ask scheduling, delivery posture, WaveGuard equipment
+// compliance, duration/costing, telemetry). server/tests/visit-facts-contract.test.js
+// extracts every key the `structuredNotes` object literal writes and requires
+// each one to be either a registered fact's storage key OR listed here with a
+// reason — so a NEW key that quietly becomes a customer-facing report input
+// can't land without either a registry entry or an explicit "this is
+// internal-only" decision.
+// ---------------------------------------------------------------------------
+
+const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
+  requestReview: 'Review-ask scheduling bookkeeping (whether/when to request a review) — not itself rendered on the report.',
+  oneTimeRecapOnly: 'Review-ask scheduling bookkeeping (one-time recap-only posture).',
+  reviewSuppression: 'Review-ask scheduling bookkeeping (suppression reason).',
+  reviewTiming: 'Review-ask scheduling bookkeeping (timing strategy).',
+  reviewDelayMinutes: 'Review-ask scheduling bookkeeping (delay before the review request sends).',
+  reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
+  customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
+  incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  timeOnSite: 'Labor/duration costing bookkeeping, not a customer report fact.',
+  visitDurationAllocation: 'Labor/duration costing bookkeeping (packet duration allocation), not a customer report fact.',
+  visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
+  timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
+  invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',
+  backfill: 'Backfill-completion audit marker (quiet/backdated closeout posture).',
+  backfillMintRequired: 'Backfill invoice-mint bookkeeping (required-mint posture frozen at commit).',
+  backfillMintAmountCents: 'Backfill invoice-mint bookkeeping (frozen amount).',
+  backfillMintTaxRate: 'Backfill invoice-mint bookkeeping (frozen tax rate).',
+  backfillMintPayerId: 'Backfill invoice-mint bookkeeping (frozen Bill-To identity).',
+  issuedInvoiceCloseout: 'Provenance of an invoice-issued auto-closeout (which invoice, sent or paid) — internal audit trail, not a report claim.',
+  completionPricing: 'Reviewed-price witness/amount bookkeeping (pricing audit trail).',
+  waveguardEquipmentSystemId: 'WaveGuard mosquito equipment/compliance bookkeeping (system of record), not a report fact.',
+  waveguardCalibrationId: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardBlackoutApproval: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardNLimitApproval: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardManagerApproval: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardCalibrationAdvisory: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardInventoryAdvisory: 'WaveGuard equipment/compliance bookkeeping.',
+  waveguardTankCleanout: 'WaveGuard equipment/compliance bookkeeping.',
+  treeShrubCloseout: 'Tree & shrub required-photos gate audit summary; the photos/captions themselves are the registered facts (completion_photos / completion_photo_caption).',
+  treeShrubCloseoutWarnings: 'Tree & shrub required-photos gate audit warnings, paired with treeShrubCloseout.',
+  inventoryDeductions: 'Inventory ledger bookkeeping, not a customer report fact.',
+  protocolActionScopesCompleted: 'Internal scoping metadata paired with the registered protocol_actions_completed fact; not separately rendered.',
+  completionTelemetry: 'Opaque client-side completion-form timing, persisted for budget analysis only.',
+  typedReportDelivery: 'Delivery-posture bookkeeping (auto_send vs disabled), frozen so a later profile graduation can\'t retroactively expose a report that was never sent — not itself a report claim.',
+  companionReportDelivery: 'Delivery-posture bookkeeping for companion sections, same rule as typedReportDelivery.',
+  typedFollowupVerdict: 'Follow-up-required bookkeeping frozen at completion (billing/scheduling), not a report fact.',
+  closeoutRequirements: 'Frozen closeout-requirements snapshot (internal audit so a later catalog edit can\'t retroactively change a closed visit\'s status), not a report fact.',
+  internalOnlyCompletion: 'Internal consultation-mode flag (billing rider / assessment-experience posture), not a report fact.',
+});
 
 // ---------------------------------------------------------------------------
 // Excluded service lines (owner ruling — never a customer Service Report
@@ -826,7 +974,13 @@ const VISIT_FACTS_CONTRACT = {
     voiceFill: true,
     facts: [
       ...genericCompletionFacts(),
-      ...productFacts(),
+      ...productFacts({
+        extraReaders: {
+          product_targets: [{ file: LAWN_REPORT_V2, section: 'Treatment card (lawn)' }],
+          product_area_value: [{ file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' }],
+          product_area_unit: [{ file: LAWN_REPORT_V2, section: 'Treatment card area line (value + unit)' }],
+        },
+      }),
       ...photoFacts(),
       {
         key: 'lawn_assessment_observations',
@@ -837,6 +991,16 @@ const VISIT_FACTS_CONTRACT = {
         readers: [{ file: LAWN_REPORT_V2, section: 'Diagnosis / insights card' }],
         whenMissing: 'fallback',
         notes: 'lawn-report-v2.js falls back through observations || aiSummary || customerSummary.',
+      },
+      {
+        key: 'lawn_assessment_ai_summary',
+        label: 'Lawn assessment AI summary (fallback source)',
+        capture: ['derived'],
+        storage: 'lawn_assessments.ai_summary',
+        writers: [KNOWLEDGE_BRIDGE],
+        readers: [{ file: LAWN_REPORT_V2, section: 'Diagnosis / insights card (fallback when observations is empty)', readerSymbol: 'aiSummary' }],
+        whenMissing: 'fallback',
+        notes: 'lawn-report-v2.js reads observations || aiSummary || customerSummary; lawn_assessments has no customer_summary column, so aiSummary is the real second source. knowledge-bridge.js is the writer that keeps this one-liner in sync with applied products after the assessment is created.',
       },
       {
         key: 'turf_height_reading',
@@ -895,6 +1059,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       {
         key: 'tree_shrub_assessment_observations',
         label: 'Tree & shrub assessment observations (photo scoring narrative)',
@@ -905,7 +1070,23 @@ const VISIT_FACTS_CONTRACT = {
         whenMissing: 'fallback',
         notes: 'tree-shrub-report-v2.js falls back through observations || aiSummary.',
       },
-      ...productFacts(),
+      {
+        key: 'tree_shrub_assessment_ai_summary',
+        label: 'Tree & shrub assessment AI summary (fallback source)',
+        capture: ['derived'],
+        storage: 'tree_shrub_assessments.ai_summary',
+        writers: [TREE_SHRUB_ASSESSMENT],
+        readers: [{ file: TREE_SHRUB_REPORT_V2, section: 'Findings summary + hero photo caption (fallback when observations is empty)', readerSymbol: 'aiSummary' }],
+        whenMissing: 'fallback',
+        notes: 'tree-shrub-report-v2.js reads observations || aiSummary || customerSummary; tree_shrub_assessments has no customer_summary column, so aiSummary is the real second source.',
+      },
+      ...productFacts({
+        extraReaders: {
+          product_targets: [{ file: TREE_SHRUB_REPORT_V2, section: 'Treatment card (tree & shrub)' }],
+          product_area_value: [{ file: TREE_SHRUB_REPORT_V2, section: 'Treatment card area line (value + unit)' }],
+          product_area_unit: [{ file: TREE_SHRUB_REPORT_V2, section: 'Treatment card area line (value + unit)' }],
+        },
+      }),
       ...photoFacts({
         whenMissing: 'required',
         notes: 'Tree & shrub closeout requires TREE_SHRUB_MIN_CLOSEOUT_PHOTOS uploaded photos (treeShrubPhotoGateRequired); the upload tally lands in structured_notes.completionPhotos.',
@@ -927,6 +1108,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
       {
@@ -958,6 +1140,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -988,6 +1171,9 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact({
+        readers: [{ file: RODENT_REPORT_NARRATIVE, section: 'Narrative photo summary line' }],
+      }),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1006,6 +1192,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1023,6 +1210,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1036,6 +1224,7 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('wildlife_trapping'),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1057,6 +1246,7 @@ const VISIT_FACTS_CONTRACT = {
         },
       }),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1070,6 +1260,77 @@ const VISIT_FACTS_CONTRACT = {
     facts: [
       ...typedFormFacts('palm_injection'),
       ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  termite_treatment: {
+    label: 'Termite treatment (typed termite_treatment form: spot, liquid, trenching, cartridge, setup)',
+    typedForm: 'termite_treatment',
+    catalogKeys: ['termite_liquid', 'termite_trenching', 'termite_spot_treatment', 'termite_pretreatment', 'foam_drill', 'foam_recurring'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('termite_treatment'),
+      ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  rodent_inspection: {
+    label: 'Rodent inspection (typed rodent_inspection form: diagnostic, one-time)',
+    typedForm: 'rodent_inspection',
+    catalogKeys: ['rodent_inspection', 'rodent_general_one_time'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('rodent_inspection'),
+      ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  rodent_sanitation: {
+    label: 'Rodent sanitation (typed rodent_sanitation form)',
+    typedForm: 'rodent_sanitation',
+    catalogKeys: ['rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('rodent_sanitation'),
+      ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  mosquito_event: {
+    label: 'Mosquito event spray (typed mosquito_event form, one-time)',
+    typedForm: 'mosquito_event',
+    catalogKeys: ['mosquito_one_time'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('mosquito_event'),
+      ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
+      ...productFacts(),
+      ...photoFacts(),
+    ],
+  },
+
+  one_time_lawn_treatment: {
+    label: 'One-time lawn treatment (typed one_time_lawn_treatment form, outside the recurring WaveGuard flow)',
+    typedForm: 'one_time_lawn_treatment',
+    catalogKeys: ['lawn_care_one_time', 'lawn_pest_knockdown', 'lawn_re_service'],
+    voiceFill: true,
+    facts: [
+      ...typedFormFacts('one_time_lawn_treatment'),
+      ...typedSharedCompletionFacts(),
+      typedPhotoSummaryFact(),
       ...productFacts(),
       ...photoFacts(),
     ],
@@ -1097,6 +1358,7 @@ module.exports = {
   VISIT_FACTS_CONTRACT,
   EXCLUDED_SERVICE_LINES,
   RETIRED_CATALOG_KEYS,
+  UNREGISTERED_INTERNAL_KEYS,
   TYPED_REPORT_BUILDERS,
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
   typedFactFields,

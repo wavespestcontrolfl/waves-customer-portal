@@ -9,7 +9,14 @@
  * saying so. Plain file reads and string searches — no DB. Besides the
  * registry it loads only the DB-free modules the typed facts are generated
  * from (project-types.js, activity-indicators.js), to re-derive them
- * independently.
+ * independently. It also re-derives, from complete-scheduled-service.js
+ * itself, the full set of structured_notes keys that file writes (a
+ * char-level scan, not a naive regex, since this codebase merges many of
+ * those keys in via `...(cond ? { key } : {})` spreads) and requires every
+ * one to be either a registered fact or an explicitly reasoned internal-only
+ * key (UNREGISTERED_INTERNAL_KEYS) — so a new key can't quietly become a
+ * customer-facing report input, or quietly stay internal, without a
+ * registry decision either way.
  */
 const fs = require('fs');
 const path = require('path');
@@ -17,6 +24,7 @@ const {
   VISIT_FACTS_CONTRACT,
   EXCLUDED_SERVICE_LINES,
   RETIRED_CATALOG_KEYS,
+  UNREGISTERED_INTERNAL_KEYS,
   TYPED_REPORT_BUILDERS,
   REPORT_DATA_TYPED_AREA_FIELD_KEYS,
 } = require('../config/visit-facts-contract');
@@ -61,6 +69,87 @@ function readDoc() {
 function knownGapsSection(doc) {
   const match = doc.match(/^## Known gaps\s*$([\s\S]*?)(?=^## |(?![\s\S]))/m);
   return match ? match[1] : null;
+}
+
+/**
+ * Every key a typed report builder reads off its `values` object: dot access
+ * (`values.foo`, `values?.foo`), bracket access with a string literal
+ * (`values['foo']`, `values?.["foo"]`), and destructuring
+ * (`const { foo, bar: baz } = values`). Catches the forms a plain
+ * `values\.key` regex misses (Codex P2, round 4) so a builder that starts
+ * reading a field through one of these forms can't silently escape the
+ * reader-drift guard below.
+ */
+function extractValuesKeys(src) {
+  const keys = new Set();
+  for (const m of src.matchAll(/\bvalues\??\.([A-Za-z_][A-Za-z0-9_]*)\b/g)) keys.add(m[1]);
+  for (const m of src.matchAll(/\bvalues\??\.?\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]/g)) keys.add(m[1]);
+  for (const m of src.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*values\b/g)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(':')[0].trim().replace(/^\.\.\./, '');
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) keys.add(name);
+    }
+  }
+  return keys;
+}
+
+/**
+ * Every top-level key the `structuredNotes` object literal in
+ * complete-scheduled-service.js writes — including keys merged in through a
+ * `...(cond ? { key: … } : {})` spread, which this codebase uses throughout
+ * that object for conditionally-frozen fields. Char-level scan (not a single
+ * regex): a stack of "is this brace's contents a structured_notes top-level
+ * merge, or a nested VALUE object" contexts, decided by the character
+ * immediately preceding each `{` (`?` after a spread's ternary = top-level
+ * merge; `:` after a key = a nested value, not itself a set of top-level
+ * keys). Verified against the live file (2026-09-28): finds all 49 keys,
+ * including the 14 spread-merged ones a naive per-line scan misses.
+ */
+function structuredNotesWrittenKeys(src) {
+  const marker = 'const structuredNotes = {';
+  const start = src.indexOf(marker);
+  if (start < 0) throw new Error('structuredNotesWrittenKeys: marker not found — complete-scheduled-service.js changed shape');
+  const braceStart = start + marker.length - 1;
+  const contextStack = [];
+  const charTop = new Array(src.length).fill(null);
+  let end = -1;
+  for (let i = braceStart; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') {
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(src[j])) j--;
+      const prevChar = src[j];
+      const isTop = contextStack.length === 0 ? true : (prevChar === '?' && contextStack[contextStack.length - 1] === true);
+      contextStack.push(isTop);
+    } else if (ch === '}') {
+      contextStack.pop();
+      if (contextStack.length === 0) { end = i; charTop[i] = true; break; }
+    }
+    charTop[i] = contextStack.length ? contextStack[contextStack.length - 1] : true;
+  }
+  if (end < 0) throw new Error('structuredNotesWrittenKeys: no matching close brace found');
+  const objectSrc = src.slice(braceStart, end + 1);
+  const objectCharTop = charTop.slice(braceStart, end + 1);
+  const keys = new Set();
+  // Plain top-level keys (including the later lines of a multi-line spread
+  // body, e.g. the 2nd+ key inside `...(cond ? {\n key: v,\n key2: v2\n} : {})`).
+  let offset = 0;
+  for (const line of objectSrc.split('\n')) {
+    const lineStartTop = objectCharTop[offset] === true;
+    const trimmed = line.trim();
+    if (lineStartTop && trimmed && !trimmed.startsWith('...') && !trimmed.startsWith('//') && !trimmed.startsWith('*') && !trimmed.startsWith('/*')) {
+      const m = trimmed.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\s*[:,]/) || trimmed.match(/^([A-Za-z_$][A-Za-z0-9_$]*)$/);
+      if (m) keys.add(m[1]);
+    }
+    offset += line.length + 1;
+  }
+  // The FIRST key of every spread merge, single-line or not (`...(cond ? {`
+  // may open on the same line as its key, or on a line of its own) — every
+  // `? {` in this object is a spread-merge branch (verified 1:1 against the
+  // `...(` count on 2026-09-28), so this alone is safe without also
+  // requiring a preceding `...(` in the match.
+  for (const m of objectSrc.matchAll(/\?\s*\{\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[,:}]/g)) keys.add(m[1]);
+  return keys;
 }
 
 describe('visit facts contract registry', () => {
@@ -252,6 +341,38 @@ describe('visit facts contract registry', () => {
     expect(problems).toEqual([]);
   });
 
+  // Every structured_notes key complete-scheduled-service.js actually writes
+  // must be accounted for: either it is a registered fact's storage key (a
+  // customer-report input this registry tracks), or it is named in
+  // UNREGISTERED_INTERNAL_KEYS with a reason (internal bookkeeping this
+  // registry deliberately does not track). Without this, a brand-new key
+  // that quietly becomes a customer-facing report input could land with
+  // neither a registry entry nor a documented "this is internal" decision.
+  test('every structured_notes key is a registered fact or an allow-listed internal key', () => {
+    const src = readRepoFile('server/services/complete-scheduled-service.js') || '';
+    const written = structuredNotesWrittenKeys(src);
+    expect(written.size).toBeGreaterThan(30); // sanity: the extractor is finding real keys
+    const registeredKeys = new Set(
+      allFacts
+        .map((entry) => entry.fact.storage)
+        .filter((storage) => storage && storage.startsWith('structured_notes.'))
+        .map(storageKey),
+    );
+    const problems = [];
+    for (const key of written) {
+      if (registeredKeys.has(key)) continue;
+      if (Object.prototype.hasOwnProperty.call(UNREGISTERED_INTERNAL_KEYS, key)) continue;
+      problems.push(`structured_notes.${key}: written by complete-scheduled-service.js but neither a registered fact nor in UNREGISTERED_INTERNAL_KEYS`);
+    }
+    // Reverse direction: an allow-list entry for a key the object no longer
+    // writes is stale and should be removed (it would otherwise mask a
+    // rename silently widening what "internal" covers).
+    for (const key of Object.keys(UNREGISTERED_INTERNAL_KEYS)) {
+      if (!written.has(key)) problems.push(`UNREGISTERED_INTERNAL_KEYS.${key}: no longer written by complete-scheduled-service.js`);
+    }
+    expect(problems).toEqual([]);
+  });
+
   // ---------------------------------------------------------------------
   // Typed lines are generated from project-types.js; these re-derive the
   // expectation independently so the generator cannot be bypassed.
@@ -280,7 +401,14 @@ describe('visit facts contract registry', () => {
       const typed = def.facts.filter((f) => f.typedForm === def.typedForm);
       expect({ line, keys: typed.map((f) => f.key).sort() }).toEqual({ line, keys: expected });
       for (const fact of def.facts) {
-        if (fact.typedForm === undefined && fact.storage && fact.storage.startsWith('service_data.typedReportSnapshot.')) {
+        // The generated per-field storage is always `....typedReportSnapshot.values.<key>`
+        // (primary) or `....companionReportSnapshots[].values.<key>` (companion) —
+        // scoped to `.values.` so a hand-written fact at a SIBLING path on the
+        // same snapshot (e.g. typedPhotoSummaryFact's `.photoSummary`, not a
+        // findingsFields entry) is not mistaken for a bypassed generator.
+        if (fact.typedForm === undefined && fact.storage
+          && (fact.storage.startsWith('service_data.typedReportSnapshot.values.')
+            || fact.storage.startsWith('service_data.companionReportSnapshots[].values.'))) {
           problems.push(`${line}.${fact.key}: hand-written typed fact (generate it from ${def.typedForm})`);
         }
       }
@@ -300,7 +428,7 @@ describe('visit facts contract registry', () => {
     const problems = [];
     for (const [name, builder] of Object.entries(TYPED_REPORT_BUILDERS)) {
       const src = readRepoFile(builder.file) || '';
-      const reads = [...new Set([...src.matchAll(/\bvalues\??\.([a-z][a-z0-9_]*)\b/g)].map((m) => m[1]))].sort();
+      const reads = [...extractValuesKeys(src)].sort();
       expect({ builder: name, reads }).toEqual({ builder: name, reads: [...builder.keys].sort() });
       const fieldKeys = new Set((PROJECT_TYPES[builder.typedForm]?.findingsFields || []).map((f) => f.key));
       for (const key of reads) {
