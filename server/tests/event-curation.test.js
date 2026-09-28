@@ -13,8 +13,11 @@ const {
   buildCurationCandidateQuery,
   buildRescoreCandidateQuery,
   rescoreCuratedEvent,
+  hasContentChangedSinceCuration,
+  CURATION_FRESHNESS_EXCLUSIONS,
 } = require('../services/event-curation');
 const { FACTOR_MAXES, REJECTION_CODES, featureScoreFloor } = require('../services/event-scoring');
+const { isEligibleForFreshDigest } = require('../services/event-freshness');
 
 const EVENTS = [
   {
@@ -246,6 +249,131 @@ describe('event-curation buildRescoreCandidateQuery', () => {
     expect(sql).toMatch(/"score_breakdown" is not null/i);
     expect(sql).toMatch(/"merged_into" is null/i);
     expect(sql).toMatch(/"start_at" >= \?/);
+  });
+
+  // Codex P1 (2026-09-27): the rescore query used to skip every hard gate
+  // fresh curation itself requires (freshness_status, event_url, event_type,
+  // the routine-recurrence exclusion) — an operator flipping freshness_status
+  // to needs_review/expired on a pending, already-curated row would not stop
+  // its stale stored score from later riding to approval. Before this fix,
+  // none of these assertions held for buildRescoreCandidateQuery.
+  test('shares the SAME hard gates as buildCurationCandidateQuery (freshness, event_url, event_type, routine exclusion)', () => {
+    const { sql, bindings } = buildRescoreCandidateQuery(500).toSQL();
+    expect(sql).toMatch(/"event_url" is not null/);
+    expect(sql).toMatch(/not "e"\."event_type" = \?/);
+    expect(bindings).toEqual(expect.arrayContaining(['unknown', ...CURATION_FRESHNESS_EXCLUSIONS]));
+    expect(sql).toMatch(/"freshness_status" not in/i);
+    expect(sql).toMatch(/not exists/i);
+    expect(sql).toContain('routine_sibling');
+  });
+});
+
+describe('event-curation hasContentChangedSinceCuration (Codex P1)', () => {
+  test('false when updated_at and curated_at are the same instant (the normal post-curation state)', () => {
+    const stamp = '2026-09-27T06:15:00.000Z';
+    expect(hasContentChangedSinceCuration({ updated_at: stamp, curated_at: stamp })).toBe(false);
+  });
+
+  test('true when updated_at moved past curated_at — a later ingestion re-pull, normalizer reclassification, or admin edit', () => {
+    expect(hasContentChangedSinceCuration({
+      curated_at: '2026-09-27T06:15:00.000Z',
+      updated_at: '2026-09-27T08:00:00.000Z', // e.g. the 4am ingestion re-pull rewrote the description
+    })).toBe(true);
+  });
+
+  test('false (fail-safe, not fail-open toward drift) when either timestamp is missing', () => {
+    expect(hasContentChangedSinceCuration({ updated_at: null, curated_at: '2026-09-27T06:15:00.000Z' })).toBe(false);
+    expect(hasContentChangedSinceCuration({ updated_at: '2026-09-27T06:15:00.000Z', curated_at: null })).toBe(false);
+  });
+});
+
+describe('event-curation rescore approval must re-check current eligibility, not just score math (Codex P1)', () => {
+  // Mirrors the exact Codex scenario: a row was assessed and scored above the
+  // feature floor with zero rejection codes (rescoreCuratedEvent would say
+  // approve:true from the math alone), but an operator later marked it
+  // needs_review — isEligibleForFreshDigest is the SAME hard gate fresh
+  // curation itself runs, so approval must be refused regardless of the
+  // stored score.
+  const APPROVABLE_BREAKDOWN = JSON.stringify({
+    factors: {
+      specialness: 23, reader_pull: 17, audience_fit: 12, planning_value: 13,
+      local_relevance: 8, source_confidence: 10, accessibility: 3,
+    },
+    penalty_flags: [],
+    derived_penalty_flags: [],
+    final: 86,
+    tier: 'hero',
+    family_status: 'confirmed',
+  });
+
+  const baseRow = (overrides = {}) => ({
+    id: 'row-1',
+    admin_status: 'pending',
+    title: 'Riverfest Touring Show',
+    event_url: 'https://events.example/riverfest',
+    event_type: 'one_time',
+    recurrence_type: 'none',
+    freshness_status: 'fresh_one_time',
+    times_featured: 0,
+    last_featured_at: null,
+    merged_into: null,
+    start_at: new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString(),
+    score_breakdown: APPROVABLE_BREAKDOWN,
+    rejection_codes: '[]',
+    audience_tags: '[]',
+    novelty_type: 'touring',
+    editorial_evidence: '[]',
+    curation_note: 'Scored 86/100',
+    ...overrides,
+  });
+
+  test('the deterministic rescore math alone would approve — this is the fixture, not the fix', () => {
+    const decision = rescoreCuratedEvent(baseRow());
+    expect(decision.approve).toBe(true);
+    expect(decision.score).toBe(86);
+  });
+
+  test('needs_review/expired/stale_recurring never reach the rescore pipeline at all — buildRescoreCandidateQuery excludes them at the SQL layer', () => {
+    // The SAME freshness_status exclusion list fresh curation's own query
+    // uses (asserted directly against buildRescoreCandidateQuery above) means
+    // an operator's needs_review/expired flip removes the row from `rows`
+    // before runScoreRescore ever computes a decision for it — the strongest
+    // form of the fix, since a row that was never fetched can never be
+    // rescored from its stale assessment.
+    expect(CURATION_FRESHNESS_EXCLUSIONS).toEqual(['expired', 'stale_recurring', 'needs_review']);
+  });
+
+  test('a row whose recurrence metadata was edited to routine (no debut evidence, no proven first-of-year) fails isEligibleForFreshDigest even though its stored score clears the floor', () => {
+    // This is the layered-defense case the SQL admission fix (Codex P1,
+    // excludeRoutineRecurringFromQuery) and this eligibility recheck (Codex
+    // P1, this file) work together on: SQL admits a routine row broadly
+    // whenever it CAN'T disprove first-of-year (no earlier sibling exists in
+    // the DB for this row), but the JS gate below only actually approves a
+    // routine row with real debut evidence or the pool-verified
+    // __recurringFirstOfYear marker — neither of which this row carries.
+    const turnedRoutine = baseRow({
+      event_type: 'recurring_series',
+      recurrence_type: 'weekly',
+      freshness_status: 'stale_recurring',
+    });
+    const decision = rescoreCuratedEvent(turnedRoutine);
+    expect(decision.approve).toBe(true); // score math alone still says yes
+    expect(isEligibleForFreshDigest(turnedRoutine, new Date())).toBe(false);
+  });
+
+  test('a row later merged into another event fails isEligibleForFreshDigest even though its stored score clears the floor', () => {
+    const mergedAway = baseRow({ merged_into: 'other-event-id' });
+    const decision = rescoreCuratedEvent(mergedAway);
+    expect(decision.approve).toBe(true);
+    expect(isEligibleForFreshDigest(mergedAway, new Date())).toBe(false);
+  });
+
+  test('an unchanged, still-eligible row is unaffected — the fix never blocks a legitimate rescore approval', () => {
+    const row = baseRow();
+    const decision = rescoreCuratedEvent(row);
+    expect(decision.approve).toBe(true);
+    expect(isEligibleForFreshDigest(row, new Date())).toBe(true);
+    expect(hasContentChangedSinceCuration({ ...row, curated_at: '2026-09-27T06:15:00.000Z', updated_at: '2026-09-27T06:15:00.000Z' })).toBe(false);
   });
 });
 

@@ -289,23 +289,83 @@ function dedupeDigestEvents(events) {
   });
 }
 
+// SQL-side approximation of the JS identity match (normalizeDigestTitle +
+// isSameSeriesSibling) used by buildRoutineFirstOfYearAdmission below.
+// Deliberately looser than the JS normalizer (no stopword strip) — a false
+// MATCH here would wrongly re-exclude a genuine first-of-year row (unsafe),
+// while a false NON-match only means the row falls through to the JS gate's
+// full check (always safe), so this only needs to avoid over-matching.
+const sqlNormalizedTitle = (colRef) => `regexp_replace(lower(${colRef}), '[^a-z0-9]+', ' ', 'g')`;
+const sqlEtYear = (colRef) => `date_part('year', (${colRef} AT TIME ZONE 'America/New_York'))`;
+
+/**
+ * Raw NOT EXISTS clause: true when no OTHER row in events_raw shares this
+ * row's identity (normalized title + venue, or title + city when venue is
+ * blank on either side — mirrors newsletter-event-selection.js's
+ * isSameSeriesSibling) with a start_at strictly earlier in the SAME ET
+ * calendar year. Correlated against `alias` (the caller's own query alias),
+ * so it can only be used once that alias is actually in scope.
+ */
+function buildRoutineFirstOfYearAdmission(alias) {
+  const outer = (name) => `${alias}.${name}`;
+  const sib = (name) => `routine_sibling.${name}`;
+  return `NOT EXISTS (
+    SELECT 1 FROM events_raw AS routine_sibling
+    WHERE ${sib('id')} != ${outer('id')}
+      AND ${sib('start_at')} < ${outer('start_at')}
+      AND ${sqlEtYear(sib('start_at'))} = ${sqlEtYear(outer('start_at'))}
+      AND ${sqlNormalizedTitle(sib('title'))} = ${sqlNormalizedTitle(outer('title'))}
+      AND (
+        (${sib('venue_name')} IS NOT NULL AND ${outer('venue_name')} IS NOT NULL
+          AND ${sqlNormalizedTitle(sib('venue_name'))} = ${sqlNormalizedTitle(outer('venue_name'))})
+        OR (
+          (${sib('venue_name')} IS NULL OR ${outer('venue_name')} IS NULL)
+          AND ${sib('city')} IS NOT NULL AND ${outer('city')} IS NOT NULL
+          AND lower(${sib('city')}) = lower(${outer('city')})
+        )
+      )
+  )`;
+}
+
 /**
  * Add the metadata-level recurrence exclusions to a Knex query. Callers still
  * run isEligibleForFreshDigest after fetching so the text backstop and all
  * other hard gates apply too.
+ *
+ * Owner ruling 2026-09-27 (Codex P1): a recurring identity is
+ * newsletter-eligible for its first occurrence of the ET calendar year (see
+ * this module's header and newsletter-event-selection.js's
+ * isFirstOccurrenceOfYear / loadYearIdentityPool). This gate used to drop
+ * EVERY routine row outright unless it also carried the normalizer's
+ * fresh_series_launch classification, so a normal weekly/monthly series with
+ * genuine prior-year continuity could never reach the JS first-of-year check
+ * at all — every consumer of this shared gate (buildCurationCandidateQuery,
+ * the rescore pass, buildDigestPlan, the admin planner, draft loading) was
+ * affected identically. A third carve-out admits a routine row when SQL can't
+ * find an earlier-this-(ET)-year sibling of the same identity; the JS gate
+ * re-verifies with the real pool afterward (merged-row handling, prior-year
+ * continuity, debut evidence, star overrides), so this only needs to avoid
+ * FALSE matches (which would wrongly re-exclude a genuine first-of-year row)
+ * — a missed match here just costs the JS gate doing the full check instead
+ * of the row being pre-filtered, which is always safe.
  */
 function excludeRoutineRecurringFromQuery(query, alias = 'e') {
   const col = (name) => alias ? `${alias}.${name}` : name;
-  // Grouped so the carve-out ORs against BOTH metadata exclusions without
-  // leaking past any other conditions the caller has chained. A row survives
-  // either by having non-routine metadata, or by carrying the normalizer's
-  // fresh_series_launch classification (the debut carve-out — the JS gate
-  // still re-verifies debut evidence + never-featured after fetch).
+  // Grouped so the carve-out ORs against all three conditions without
+  // leaking past any other conditions the caller has chained.
   return query.where(function routineRecurringExclusion() {
     this.where(function nonRoutineMetadata() {
       this.whereNotIn(col('event_type'), ROUTINE_EVENT_TYPES)
         .whereNotIn(col('recurrence_type'), ROUTINE_RECURRENCE_TYPES);
     }).orWhere(col('freshness_status'), 'fresh_series_launch');
+
+    // Only meaningful once the row is aliased into the query (every real
+    // caller passes the default 'e') — an unaliased query has no stable
+    // identifier to correlate the subquery against, so it falls back to the
+    // pre-existing two-branch gate rather than guess at one.
+    if (alias) {
+      this.orWhereRaw(buildRoutineFirstOfYearAdmission(alias));
+    }
   });
 }
 
@@ -399,7 +459,18 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // operator explicitly re-stars. The star is consumed on ship
   // (markEventsFeatured demotes featured → approved), so it can't re-admit
   // the same event issue after issue. Every other hard gate still applies.
-  if (!isEditoriallyNewEvent(event, reference) && event.admin_status !== 'featured') return false;
+  //
+  // __recurrenceOccurrenceCount is the same pool-verified marker pattern as
+  // __recurringFirstOfYear above: this pure, pool-less function has no way to
+  // count a recurrence_type='unknown' identity's occurrences on its own, so
+  // a pool-having caller (filterRepeatedDateIdentities / assessFlagship-
+  // EventSelection) stamps it before calling in. Without it, isRecurring-
+  // IdentityEvent's own default (occurrenceCount=null) treats an
+  // actually-repeating 'unknown' identity as one-time — which permanently
+  // blocks it here once featured, instead of granting the calendar-year
+  // refresh a genuinely recurring identity gets (Codex P2, 2026-09-27).
+  const occurrenceCount = event.__recurrenceOccurrenceCount ?? null;
+  if (!isEditoriallyNewEvent(event, reference, { occurrenceCount }) && event.admin_status !== 'featured') return false;
 
   // Hard reject on terminal freshness states regardless of event_type. A
   // continuity-proven (non-debut) routine row still carries the stored
@@ -682,6 +753,7 @@ module.exports = {
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
   excludeRoutineRecurringFromQuery,
+  buildRoutineFirstOfYearAdmission,
   classifyFreshness,
   isEligibleForFreshDigest,
   scoreFreshEvent,
