@@ -74,6 +74,7 @@ const CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES = new Set([
   'approve_seo_action',
   'request_instant_payout',
   'request_standard_payout',
+  'cancel_pending_payout',
 ]);
 
 module.exports = {

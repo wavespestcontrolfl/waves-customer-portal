@@ -55,6 +55,7 @@ function acceptBookingGateToken(estimate) {
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const { copyAllowedInScope, guaranteeScope, serviceGuaranteeScope, withoutClaimsOutsideScope } = require('../../shared/estimate-copy-claims.cjs');
+const { classifyTermiteScope } = require('../../shared/estimate-termite-scope.cjs');
 const {
   collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
@@ -6217,6 +6218,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
 <title>Your Waves Estimate</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
+${require('../services/link-preview-metadata').fixedCardHeadTags('estimate')}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap" rel="stylesheet">
@@ -20271,19 +20273,13 @@ function guaranteeProposalRows(estData) {
 }
 
 function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
-  const { detectServiceCategory } = require('../utils/service-normalizer');
   const namedTermite = (row = {}) => {
     const name = [row.key, row.service, row.name, row.label, row.displayName]
-      .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
-    // detectServiceCategory returns one primary category, with lawn and
-    // mosquito taking precedence. Scan explicit termite identities too so a
-    // combined label cannot hide its termite scope. Foam stays narrow: these
-    // are the established drill/recurring forms, never rodent foam sealing.
-    const explicitTermite = /\btermites?\b|\bwdo\b|wood destroying|\bpre\s*slab\b|\btermiticide\b|\btermidor\b|\bbora\s*care\b|\btrelona\b/;
-    const termiteFoam = /foam\s*drill|drill\s*(?:and\s*)?foam|recurring\s*(?:termite\s*)?foam|foam\s*recurring/;
-    return detectServiceCategory(name) === 'termite'
-      || explicitTermite.test(name)
-      || termiteFoam.test(name);
+      .filter(Boolean).join(' ');
+    // This is deliberately independent of the primary category chosen for
+    // display: a lawn/mosquito row that also names termite scope still makes
+    // the whole estimate terms-neutral.
+    return classifyTermiteScope(name) !== null;
   };
   let classified = 0;
   for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {

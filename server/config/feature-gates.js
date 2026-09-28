@@ -2757,6 +2757,13 @@ const gates = {
   // disagree with request-time enforcement ('1'/'on' variants included).
   bankImport: gateEnvValue('GATE_BANK_IMPORT'),
 
+  // Plaid bank sync (2026-09-28): live Capital One checking/card feed into
+  // the Bank Import staging table (read-only Transactions product — no money
+  // movement). Nested under GATE_BANK_IMPORT; also needs PLAID_CLIENT_ID /
+  // PLAID_SECRET / PLAID_ENV and a token key (PLAID_TOKEN_KEY, falls back to
+  // DATA_HYGIENE_VAULT_KEY). Read at call time; kill switch = unset.
+  plaidSync: gateEnvValue('GATE_PLAID_SYNC'),
+
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -3216,6 +3223,18 @@ const gates = {
   // GATE_PEST_INSIDER_PROOF at call time. Kill = unset — today's behavior:
   // draft + notification only, no proof attempt.
   pestInsiderProof: process.env.GATE_PEST_INSIDER_PROOF === 'true',
+
+  // Retire the legacy account-level late-payment checker (dunning
+  // unification, PR 3a): with the Day 90 ladder owning every overdue
+  // invoice through its final notice, the Mon–Fri 10:10 checker is
+  // redundant with, and can double-nag alongside, the per-invoice ladder.
+  // Ships DARK: off unless exactly 'true', and only honoured while
+  // GATE_DUNNING_LADDER_90 is also live (off, the ladder ends at Day 30 and
+  // the checker is the only 60/90-day sender). This entry is for
+  // logGateStatus only: services/late-payment-checker.js reads it at call
+  // time in checkAndNotify(), and services/invoice-followups.js in
+  // latePaymentCheckerRetiredLive() (reopened-invoice revival).
+  latePaymentCheckerOff: process.env.GATE_LATE_PAYMENT_CHECKER_OFF === 'true',
 
   // Pre-visit balance reminder window widens from 3 to 5 days before the
   // visit (dunning unification, owner ruling 2026-09-27, decision 6) — ahead

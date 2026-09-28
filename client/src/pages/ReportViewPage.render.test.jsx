@@ -1305,3 +1305,33 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     }
   });
 });
+
+// Ask Waves (codex P2 on #5167): a staff browser sends its portal JWT on the
+// /ask request, as on the /data read, so the server can leave staff QA
+// questions out of customer engagement; a customer's browser sends none.
+describe('ReportViewPage — Ask Waves request carries the staff JWT only for staff', () => {
+  async function askAndReadHeaders() {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    fireEvent.change(input, { target: { value: 'What was applied today?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    let askCall;
+    await waitFor(() => {
+      askCall = globalThis.fetch.mock.calls.find(([url]) => String(url).endsWith('/ask'));
+      expect(askCall).toBeTruthy();
+    });
+    return askCall[1].headers;
+  }
+
+  it('a staff browser sends Authorization: Bearer <portal JWT>', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-jwt');
+    const headers = await askAndReadHeaders();
+    expect(headers.Authorization).toBe('Bearer staff-jwt');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('a customer browser sends no Authorization header', async () => {
+    const headers = await askAndReadHeaders();
+    expect(headers).not.toHaveProperty('Authorization');
+  });
+});
