@@ -46,12 +46,17 @@ suite('email division against real Postgres', () => {
     });
     return id;
   }
-  async function makeVisit(customerId, overrides = {}) {
+  // `targets` (optional) records one applied product carrying those
+  // structured targets — area intel's only treatment evidence.
+  async function makeVisit(customerId, { targets, ...overrides } = {}) {
     const id = randomUUID();
     await trx('service_records').insert({
       id, customer_id: customerId, service_date: '2026-09-10', service_type: 'Pest Control',
       technician_notes: 'WHAT WE DID: treated the perimeter.', status: 'completed', ...overrides,
     });
+    if (targets) {
+      await trx('service_products').insert({ id: randomUUID(), service_record_id: id, product_name: 'Bifen I/T', active_ingredient: 'bifenthrin', targets });
+    }
     return id;
   }
   async function makeVisits(customerId, count, overrides = {}) {
@@ -111,7 +116,7 @@ suite('email division against real Postgres', () => {
     ]);
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const talstar = products.find((p) => p.productName === 'Talstar P');
-    expect(talstar).toMatchObject({ family: 'contact_residual', verified: true, phrase: 'a contact product that works on the surfaces it is sprayed on' });
+    expect(talstar).toMatchObject({ family: 'contact_residual', verified: true, source: 'Talstar P label', phrase: 'a contact product that works on the surfaces it is sprayed on' });
     expect(talstar.dryRule?.hours).toBe(24);
     expect(talstar.factSlugs.length).toBeGreaterThan(0);
     for (const name of ['Delta Dust', 'Demand CS']) {
@@ -119,34 +124,54 @@ suite('email division against real Postgres', () => {
       // Same family (still shown, still ranked as contact_residual) but the
       // Talstar-P-specific "spray has dried" rain instruction, its fact
       // slugs, AND the "sprayed on" phrase (inaccurate for a dust) never
-      // ride along on a dust or a different active ingredient — a neutral,
-      // method-free phrase is used instead.
+      // ride along on a dust or a different active ingredient — the
+      // neutral class name is used instead.
       expect(p).toMatchObject({
         family: 'contact_residual', verified: false, dryRule: null, notes: [], factSlugs: [],
-        phrase: 'a contact product applied at this visit',
+        phrase: 'an insecticide',
       });
     }
   });
 
-  test('readVisitProducts: scopes the Taurus SC note/fact slug to fipronil products only, never Alpine WSG', async () => {
+  test('readVisitProducts: scopes the Taurus SC label claims to Taurus SC itself, never Alpine WSG or another fipronil product', async () => {
     const customerId = await makeCustomer();
     const visitId = await makeVisit(customerId);
     await trx('service_products').insert([
       { id: randomUUID(), service_record_id: visitId, product_name: 'Taurus SC', active_ingredient: 'fipronil', applied_at: new Date('2026-09-10T10:00:00Z') },
       { id: randomUUID(), service_record_id: visitId, product_name: 'Alpine WSG', active_ingredient: 'dinotefuran', applied_at: new Date('2026-09-10T10:15:00Z') },
+      // pricing.csv row 137 — granular fipronil for fire ants, a different label.
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Topchoice Granular Insecticide', active_ingredient: 'Fipronil 0.0143%', targets: ['Fire ants'], applied_at: new Date('2026-09-10T10:20:00Z') },
     ]);
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const taurus = products.find((p) => p.productName === 'Taurus SC');
     expect(taurus).toMatchObject({ family: 'non_repellent', verified: true });
     expect(taurus.notes.length).toBeGreaterThan(0);
     expect(taurus.factSlugs).toContain('fact-taurus-sc-non-repellent');
-    const alpine = products.find((p) => p.productName === 'Alpine WSG');
-    // Same family, still shown — but the Taurus-SC-sourced note/fact slug
-    // never rides along on a different active ingredient. The generic,
-    // unsourced "stay off treated areas until dry" instruction is NOT a
-    // product-specific citation, so it still applies to Alpine WSG too.
-    expect(alpine).toMatchObject({ family: 'non_repellent', verified: false, notes: [], factSlugs: [] });
-    expect(alpine.dryRule).toEqual({ hours: null, text: 'Stay off treated areas until dry.' });
+    // Same family, still shown — but the Taurus-SC-sourced phrase, note and
+    // fact slug never ride along on a different product, even one sharing
+    // its active ingredient. No unsourced dry instruction is invented either.
+    for (const name of ['Alpine WSG', 'Topchoice Granular Insecticide']) {
+      expect(products.find((p) => p.productName === name)).toMatchObject({
+        family: 'non_repellent', verified: false, notes: [], factSlugs: [], dryRule: null, phrase: 'an insecticide',
+      });
+    }
+    expect(products.find((p) => p.productName.startsWith('Topchoice')).targets).toEqual(['Fire ants']);
+  });
+
+  test('readVisitProducts: a catalogued wetting agent (joined by product_id) is internal and never primary', async () => {
+    const customerId = await makeCustomer();
+    const visitId = await makeVisit(customerId);
+    const catalogId = randomUUID();
+    await trx('products_catalog').insert({ id: catalogId, name: 'Synthetic Soil Aid', category: 'soil_surfactant', product_type: 'wetting_agent', active_ingredient: 'Alkoxylated polyols + glucoethers' });
+    await trx('service_products').insert([
+      // Neither name nor AI text says "surfactant" — only the catalog row does.
+      { id: randomUUID(), service_record_id: visitId, product_id: catalogId, product_name: 'Synthetic Soil Aid', active_ingredient: 'Alkoxylated polyols + glucoethers', applied_at: new Date('2026-09-10T10:00:00Z') },
+      { id: randomUUID(), service_record_id: visitId, product_name: 'LESCO Chelated Iron Plus', active_ingredient: 'Nitrogen + iron + manganese', applied_at: new Date('2026-09-10T10:05:00Z') },
+    ]);
+    const { products, primary, secondary } = await readVisitProducts(visitId, { conn: trx });
+    expect(products.find((p) => p.productName === 'Synthetic Soil Aid')).toMatchObject({ family: 'adjuvant', customerVisible: false, phrase: null });
+    expect(primary).toMatchObject({ productName: 'LESCO Chelated Iron Plus', phrase: 'a nutrition product with nitrogen, iron and manganese' });
+    expect(secondary).toBeNull();
   });
 
   test('readVisitProducts: a recorded active ingredient decides source scope — Gentrol Complete (pyriproxyfen) never gets the hydroprene claim', async () => {
@@ -158,7 +183,9 @@ suite('email division against real Postgres', () => {
       { id: randomUUID(), service_record_id: visitId, product_name: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator', active_ingredient: 'Nylar (pyriproxyfen) + Permethrin + Tetramethrin', applied_at: new Date('2026-09-10T10:00:00Z') },
       { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol IGR', active_ingredient: 'hydroprene', applied_at: new Date('2026-09-10T10:05:00Z') },
       // No active ingredient recorded — the name is the only evidence left.
-      { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol Point Source', active_ingredient: null, applied_at: new Date('2026-09-10T10:10:00Z') },
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol IGR Concentrate', active_ingredient: null, applied_at: new Date('2026-09-10T10:10:00Z') },
+      // Same chemistry, different label — the Gentrol IGR claim never transfers.
+      { id: randomUUID(), service_record_id: visitId, product_name: 'Gentrol Point Source', active_ingredient: 'hydroprene', applied_at: new Date('2026-09-10T10:15:00Z') },
     ]);
     const { products } = await readVisitProducts(visitId, { conn: trx });
     const complete = products.find((p) => p.productName.startsWith('ZOECON 10578'));
@@ -166,8 +193,10 @@ suite('email division against real Postgres', () => {
     const hydroprene = products.find((p) => p.productName === 'Gentrol IGR');
     expect(hydroprene).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
     expect(hydroprene.notes.map((n) => n.text)).toEqual(['The Gentrol IGR (hydroprene) label states 120 days of control.']);
-    const nameOnly = products.find((p) => p.productName === 'Gentrol Point Source');
+    const nameOnly = products.find((p) => p.productName === 'Gentrol IGR Concentrate');
     expect(nameOnly).toMatchObject({ family: 'igr', verified: true, factSlugs: ['fact-gentrol-igr'] });
+    const pointSource = products.find((p) => p.productName === 'Gentrol Point Source');
+    expect(pointSource).toMatchObject({ family: 'igr', verified: false, notes: [], factSlugs: [], phrase: 'an insect growth regulator' });
   });
 
   test('readVisitSummary: structured fields, advisory/conditions keys, and pests named', async () => {
@@ -199,6 +228,20 @@ suite('email division against real Postgres', () => {
     const nextDate = summary.nextVisitDate instanceof Date
       ? summary.nextVisitDate.toISOString().slice(0, 10) : String(summary.nextVisitDate).slice(0, 10);
     expect(nextDate).toBe(liveNextDate); // never the earlier, abandoned 'rescheduled' row
+  });
+
+  test('readVisitSummary: areasTreated unions every persisted area field (areas_serviced, areasServiced, areasTreated, typed snapshot)', async () => {
+    const customerId = await makeCustomer();
+    const legacyOnly = await makeVisit(customerId, { areas_serviced: JSON.stringify(['Perimeter', 'Lanai']) });
+    const altOnly = await makeVisit(customerId, { structured_notes: { areasServiced: ['Front yard'] } });
+    const everything = await makeVisit(customerId, {
+      areas_serviced: JSON.stringify(['Perimeter']),
+      structured_notes: { areasServiced: ['perimeter', 'Garage'], areasTreated: ['Kitchen'] },
+      service_data: { typedReportSnapshot: { values: { areas_treated: 'Kitchen, Attic', spot_treatment_areas: 'Bathroom' } } },
+    });
+    expect((await readVisitSummary(legacyOnly, { conn: trx })).areasTreated).toEqual(['Perimeter', 'Lanai']);
+    expect((await readVisitSummary(altOnly, { conn: trx })).areasTreated).toEqual(['Front yard']);
+    expect((await readVisitSummary(everything, { conn: trx })).areasTreated).toEqual(['Perimeter', 'Garage', 'Kitchen', 'Attic', 'Bathroom']);
   });
 
   test('readVisitSummary: excludes a past appointment between the service date and today from "next visit"', async () => {
@@ -248,19 +291,19 @@ suite('email division against real Postgres', () => {
   });
 
   // Four cities, one recompute: Ellenton (4 visits, below the 5-visit floor
-  // -> no rows), Parrish (54 visits, 35 (~65%) name big-headed ants -> the
-  // worked-example sentence), Nocatee (10 visits, 100% flea mentions but
-  // below minVisits -> null), Bradenton (25 visits, only 1 (4%) names a
+  // -> no rows), Parrish (54 visits, 35 (~65%) target big-headed ants -> the
+  // worked-example sentence), Nocatee (10 visits, 100% flea targets but
+  // below minVisits -> null), Bradenton (25 visits, only 1 (4%) targets a
   // pest, below the 10% floor -> null).
   test('computeAreaIntel + getAreaIntelSentence: 5-customer floor, minVisits, 10% floor, exact wording', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
     const sentenceMonth = new Date('2026-09-20T12:00:00Z');
-    await makeCityVisits('Ellenton', 4, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fire ants.' });
-    await makeCityVisits('Parrish', 35, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for big-headed ants.' });
+    await makeCityVisits('Ellenton', 4, { service_date: '2026-09-05', targets: ['Fire ants'] });
+    await makeCityVisits('Parrish', 35, { service_date: '2026-09-05', targets: ['Big-headed ants'] });
     await makeCityVisits('Parrish', 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
-    await makeCityVisits('Nocatee', 10, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeCityVisits('Nocatee', 10, { service_date: '2026-09-05', targets: ['Fleas'] });
     await makeCityVisits('Bradenton', 24, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
-    await makeCityVisits('Bradenton', 1, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for a single wasp nest.' });
+    await makeCityVisits('Bradenton', 1, { service_date: '2026-09-06', targets: ['Paper wasps'] });
     // Stale row from a prior recompute; must not survive a fresh one.
     await trx('email_area_intel_monthly').insert({ month: '2026-09-01', city: 'venice', visits: 40, pest_key: 'fleas', visits_with_pest: 30 });
     const result = await computeAreaIntel({ month, conn: trx });
@@ -278,20 +321,20 @@ suite('email division against real Postgres', () => {
 
   test('computeAreaIntel: excludes non-performed and report-suppressed service records from both counts', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
-    await makeCityVisits('Oneco', 5, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.', status: 'completed' });
+    await makeCityVisits('Oneco', 5, { service_date: '2026-09-05', targets: ['Fleas'], status: 'completed' });
     // An office-handoff closeout for a visit that did NOT happen — must not
     // inflate the denominator or seed a pest count of its own.
-    await makeCityVisits('Oneco', 3, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: treated for ticks.', status: 'incomplete' });
+    await makeCityVisits('Oneco', 3, { service_date: '2026-09-06', targets: ['Ticks'], status: 'incomplete' });
     // status='completed' alone is not enough — a completed row can still
     // carry a non-performed visitOutcome (tech showed up, nothing treated).
     await makeCityVisits('Oneco', 3, {
-      service_date: '2026-09-07', technician_notes: 'WHAT WE DID: treated for wasps.',
+      service_date: '2026-09-07', targets: ['Paper wasps'],
       structured_notes: { visitOutcome: 'customer_declined' },
     });
     // Report-suppressed (not shown to the customer) — excluded the same way
     // Pest Pressure's own first-visit history excludes it.
     await makeCityVisits('Oneco', 3, {
-      service_date: '2026-09-08', technician_notes: 'WHAT WE DID: treated for spiders.',
+      service_date: '2026-09-08', targets: ['Wolf spiders'],
       structured_notes: { typedReportDelivery: 'manual_review' },
     });
     await computeAreaIntel({ month, conn: trx });
@@ -308,17 +351,29 @@ suite('email division against real Postgres', () => {
     const customerId = await makeCustomer({ city: 'Wimauma' });
     // Several service lines/callbacks for the SAME household — a real
     // scenario, but distinct CUSTOMERS is the privacy floor, not raw visits.
-    await makeVisits(customerId, 6, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeVisits(customerId, 6, { service_date: '2026-09-05', targets: ['Fleas'] });
     await computeAreaIntel({ month, conn: trx });
     expect(await trx('email_area_intel_monthly').where({ city: 'wimauma' })).toHaveLength(0);
   });
 
-  test('computeAreaIntel: a completed visit with blank technician_notes still counts toward the visit denominator', async () => {
+  test('computeAreaIntel: counts recorded application targets only — a note that observes or negates a pest is never a treatment', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
-    await makeCityVisits('Terra', 3, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
-    // A completed visit with no notes at all still happened — it must add
-    // to `visits` (the denominator behind the percentage sentence), just
-    // not to any pest's numerator.
+    await makeCityVisits('Ruskin', 2, { service_date: '2026-09-05', targets: ['Fire ants'] });
+    await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: sprayed the perimeter and saw a few fire ants outside.' });
+    await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'Inspected the yard, no fire ants found.' });
+    // A nutrition goal is a recorded target but not a pest.
+    await makeCityVisits('Ruskin', 1, { service_date: '2026-09-05', technician_notes: 'Fleas mentioned by customer.', targets: ['Green-up'] });
+    await computeAreaIntel({ month, conn: trx });
+    const rows = await trx('email_area_intel_monthly').where({ city: 'ruskin' });
+    expect(rows).toMatchObject([{ visits: 5, pest_key: 'fire ants', visits_with_pest: 2 }]);
+  });
+
+  test('computeAreaIntel: a completed visit with no recorded targets still counts toward the visit denominator', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    await makeCityVisits('Terra', 3, { service_date: '2026-09-05', targets: ['Fleas'] });
+    // A completed visit with no notes and no targets still happened — it
+    // must add to `visits` (the denominator behind the percentage
+    // sentence), just not to any pest's numerator.
     await makeCityVisits('Terra', 2, { service_date: '2026-09-06', technician_notes: null });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'terra' });
@@ -333,7 +388,7 @@ suite('email division against real Postgres', () => {
     // mirror address, decides the city.
     for (let i = 0; i < 5; i++) {
       const customerId = await makeCustomer({ city: 'Bradenton' });
-      await makeVisitAtCity(customerId, 'Venice', { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+      await makeVisitAtCity(customerId, 'Venice', { service_date: '2026-09-05', targets: ['Fleas'] });
     }
     await computeAreaIntel({ month, conn: trx });
     expect(await trx('email_area_intel_monthly').where({ city: 'bradenton' })).toHaveLength(0);
@@ -345,7 +400,7 @@ suite('email division against real Postgres', () => {
     const month = new Date('2026-09-15T12:00:00Z');
     const sentenceMonth = new Date('2026-09-20T12:00:00Z');
     // 2/21 = 9.52% — rounds to "10%" but must still fail the floor.
-    await makeCityVisits('Palmetto', 2, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    await makeCityVisits('Palmetto', 2, { service_date: '2026-09-05', targets: ['Fleas'] });
     await makeCityVisits('Palmetto', 19, { service_date: '2026-09-06', technician_notes: 'WHAT WE DID: general perimeter treatment, no activity found.' });
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'palmetto' });

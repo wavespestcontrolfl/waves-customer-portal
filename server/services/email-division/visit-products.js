@@ -1,39 +1,132 @@
 // Email division — per-visit product reader. Read-only; no caller sends
-// anything. Classification: active_ingredient first, then product_name.
-// Verified families cite a real source; unverified ones get a plain
-// generic phrase and empty notes — never an invented timeline.
+// anything.
+//
+// Content rule (binding): a customer-facing statement about a product
+// quotes that product's own label or manufacturer, or is our own recorded
+// data, or is not said. Three structural consequences:
+// 1. A family's `phrase` is a neutral class name derived from the recorded
+//    chemistry ("an insecticide", "a fungicide") — never a target pest, a
+//    mode of action, a nutrient, or a timeline. The family says what the
+//    chemistry IS, not what a particular product does.
+// 2. Anything richer (a descriptive phrase, a note, a dry/rain instruction,
+//    a fact slug, `verified`) lives on a LABEL entry with its `source`, and
+//    attaches only to the labeled product itself: the product name must
+//    name that product, and a recorded active ingredient must agree with
+//    the label's. Sharing an active ingredient is never enough — Topchoice
+//    (granular fipronil) is not Taurus SC, Distance IGR (pyriproxyfen) is not
+//    Gentrol IGR, LESCO Crosscheck Plus is not Talstar P.
+// 3. Nutrition wording names only nutrients the recorded active ingredient
+//    itself lists (see nutrientsListed) — never a family default.
+// Recorded `targets` (the technician's picks at completion) ride along as
+// data so a writer can name what this application was for, instead of any
+// family assumption.
 const db = require('../../models/db');
 const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
+const LABELS = {
+  taurus_sc: {
+    name: ['taurus sc'], ai: ['fipronil'], source: 'Control Solutions, Taurus SC product page',
+    phrase: 'a non-repellent that ants cannot detect, so they walk through it and carry it back to the colony',
+    dryRule: null,
+    notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }],
+    factSlugs: ['fact-taurus-sc-non-repellent'],
+  },
+  talstar_p: {
+    // The catalog's 7.9% bifenthrin liquids (Talak is what the office calls
+    // Talstar P; Bifen I/T is the same concentrate). Never LESCO Crosscheck
+    // Plus or any other bifenthrin product by chemistry alone.
+    name: ['talstar p', 'bifen i/t', 'talak'], ai: ['bifenthrin'], source: 'Talstar P label',
+    phrase: 'a contact product that works on the surfaces it is sprayed on',
+    dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', source: 'Talstar P label' },
+    notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'],
+  },
+  gentrol_igr: {
+    // "Gentrol IGR" exactly — Gentrol Complete EC3 (pyriproxyfen +
+    // permethrin + tetramethrin) and Gentrol Point Source are other labels.
+    name: ['gentrol igr'], ai: ['hydroprene'], source: 'Gentrol IGR label',
+    phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce',
+    dryRule: null,
+    notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }],
+    factSlugs: ['fact-gentrol-igr'],
+  },
+};
+
+// `factSlugs` on a family are guardrail markers for the writer (e.g. "no
+// verified timeline"), not claims; a labeled product carries its label's.
 const FAMILIES = {
-  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'a non-repellent that ants and roaches cannot detect, so they walk through it and carry it back to the colony', dryRule: { hours: null, text: 'Stay off treated areas until dry.' }, notes: [{ text: 'It works through the colony rather than killing on contact, so you may still see ants for a while after the visit.', source: 'Control Solutions, Taurus SC product page' }], factSlugs: ['fact-taurus-sc-non-repellent'], customerVisible: true, verified: true, sourceScope: { ai: ['fipronil'], name: ['taurus sc'] } },
-  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'a contact product that works on the surfaces it is sprayed on', outOfScopePhrase: 'a contact product applied at this visit', dryRule: { hours: 24, text: 'The label asks for application when rain is not predicted for the next 24 hours; people and pets stay off treated surfaces until the spray has dried.', sourced: true }, notes: [], factSlugs: ['fact-bifenthrin-residual', 'fact-talstar-p-label'], customerVisible: true, verified: true, sourceScope: { ai: ['bifenthrin'], name: ['talstar p', 'bifen i/t', 'talak'] } },
-  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce', dryRule: null, notes: [{ text: 'The Gentrol IGR (hydroprene) label states 120 days of control.', source: 'Gentrol IGR label' }], factSlugs: ['fact-gentrol-igr'], customerVisible: true, verified: true, sourceScope: { ai: ['hydroprene'], name: ['gentrol'] } },
-  fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', dryRule: null, notes: [], factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, verified: false },
-  herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', dryRule: null, notes: [], factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, verified: false },
-  nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'potassium and micronutrients', dryRule: null, notes: [], factSlugs: ['fact-nutrition-unverified-timeline'], customerVisible: true, verified: false },
-  adjuvant: { ai: ['surfactant', 'nonionic'], name: ['90/10', 'nonionic', 'surfactant'], phrase: 'a spreader/surfactant that helps other products stick and spread evenly', dryRule: null, notes: [], factSlugs: ['fact-adjuvant-internal-only'], customerVisible: false, verified: false },
-  other: { ai: [], name: [], phrase: null, dryRule: null, notes: [], factSlugs: [], customerVisible: true, verified: false },
+  non_repellent: { ai: ['fipronil', 'dinotefuran'], name: ['taurus sc', 'alpine wsg'], phrase: 'an insecticide', factSlugs: [], customerVisible: true, labels: ['taurus_sc'] },
+  contact_residual: { ai: ['bifenthrin', 'lambda-cyhalothrin', 'lambda cyhalothrin', 'deltamethrin', 'cyfluthrin'], name: ['talstar p', 'bifen i/t', 'talak', 'demand cs', 'delta dust'], phrase: 'an insecticide', factSlugs: [], customerVisible: true, labels: ['talstar_p'] },
+  igr: { ai: ['hydroprene', 'pyriproxyfen', 'methoprene'], name: ['gentrol'], phrase: 'an insect growth regulator', factSlugs: [], customerVisible: true, labels: ['gentrol_igr'] },
+  fungicide: { ai: ['azoxystrobin', 'thiophanate-methyl', 'thiophanate methyl', 'propiconazole'], name: ['artavia', 't-storm', 't storm'], phrase: 'a fungicide', factSlugs: ['fact-fungicide-unverified-timeline'], customerVisible: true, labels: [] },
+  herbicide: { ai: ['thiencarbazone', 'iodosulfuron', 'dicamba', 'halosulfuron', 'sulfentrazone'], name: ['celsius', 'sedgehammer'], phrase: 'a weed control', factSlugs: ['fact-herbicide-unverified-timeline'], customerVisible: true, labels: [] },
+  // `phrase` is the fallback when the recorded AI lists no recognisable
+  // nutrient; otherwise nutritionPhrase() names exactly what it lists.
+  nutrition: { ai: ['potassium', 'iron', 'manganese', 'micronutrient', '0-0-'], name: ['k-flow', 'chelated'], phrase: 'a nutrition product', factSlugs: ['fact-nutrition-unverified-timeline'], customerVisible: true, labels: [] },
+  // Non-pesticide additives (surfactants, wetting agents, spreaders,
+  // markers/dyes) — internal only, never ranked, never described.
+  adjuvant: { ai: ['surfactant', 'nonionic', 'non-ionic', 'wetting agent', 'humectant', 'spreader', 'sticker', 'defoam', 'drift control', 'spray pattern indicator', 'marker dye'], name: ['90/10', 'nonionic', 'non-ionic', 'surfactant', 'wetting agent', 'spreader', 'sticker', 'defoam', 'marker', 'pattern indicator', 'blue dye'], phrase: null, factSlugs: ['fact-adjuvant-internal-only'], customerVisible: false, labels: [] },
+  other: { ai: [], name: [], phrase: null, factSlugs: [], customerVisible: true, labels: [] },
 };
 const FAMILY_ORDER = Object.keys(FAMILIES).filter((f) => f !== 'other');
 // Customer-primacy ranking (adjuvant is never customer-visible, so never eligible).
 const PRIMARY_FAMILY_RANK = ['non_repellent', 'contact_residual', 'igr', 'fungicide', 'herbicide', 'nutrition', 'other'];
 
+// A catalogued/recorded category or product type that marks a non-pesticide
+// additive (products_catalog.category 'adjuvant' / 'soil_surfactant',
+// product_type 'wetting_agent', pricing.csv "Soil Surfactant"). Checked
+// before chemistry, so a wetting agent whose AI text is a trade chemistry
+// ("Alkoxylated polyols + glucoethers") still stays internal.
+const ADJUVANT_CATEGORY_RE = /adjuvant|surfactant|wetting|spreader|sticker|penetrant|defoam|anti-?foam|drift|marker|dye|colorant|pattern indicator/i;
+
+// Nutrients named only when the recorded active ingredient lists them.
+// [nutrient, word (any case), two-letter element symbol (exact case,
+// standalone), single-letter symbol (only attached to a percentage, "4%S",
+// or nonzero in an N-P-K analysis — so "(S)-Hydroprene" is never sulfur)].
+const NUTRIENTS = [
+  ['nitrogen', /\bnitrogen\b/i, null, 'N'], ['phosphorus', /\bphosph/i, null, 'P'],
+  ['potassium', /\bpotassium\b|\bpotash\b/i, null, 'K'], ['iron', /\biron\b/i, 'Fe', null],
+  ['manganese', /\bmanganese\b/i, 'Mn', null], ['magnesium', /\bmagnesium\b/i, 'Mg', null],
+  ['zinc', /\bzinc\b/i, 'Zn', null], ['copper', /\bcopper\b/i, 'Cu', null],
+  ['sulfur', /\bsulfur\b|\bsulphur\b/i, null, 'S'], ['micronutrients', /\bmicronutrients?\b/i, null, null],
+];
+const NPK_RE = /(?<![\d.])(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)(?![\d.])/;
+
+function nutrientsListed(activeIngredient) {
+  const ai = String(activeIngredient || '');
+  const npk = ai.match(NPK_RE);
+  const inAnalysis = { N: npk && Number(npk[1]) > 0, P: npk && Number(npk[2]) > 0, K: npk && Number(npk[3]) > 0 };
+  return NUTRIENTS.filter(([, word, symbol, letter]) => word.test(ai)
+    || (symbol && new RegExp(`(?<![A-Za-z])${symbol}(?![A-Za-z])`).test(ai))
+    || (letter && (inAnalysis[letter] || new RegExp(`\\d%\\s*${letter}(?![A-Za-z])`).test(ai))))
+    .map(([nutrient]) => nutrient);
+}
+
+function joinList(items) {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+function nutritionPhrase(activeIngredient) {
+  const nutrients = nutrientsListed(activeIngredient);
+  return nutrients.length ? `a nutrition product with ${joinList(nutrients)}` : FAMILIES.nutrition.phrase;
+}
+
 function allCustomerFacingStrings() {
   const out = [];
-  for (const def of Object.values(FAMILIES)) {
-    if (def.phrase) out.push(def.phrase);
-    if (def.outOfScopePhrase) out.push(def.outOfScopePhrase);
-    if (def.dryRule?.text) out.push(def.dryRule.text);
-    for (const note of def.notes) out.push(note.text);
+  for (const def of Object.values(FAMILIES)) if (def.phrase && def.customerVisible) out.push(def.phrase);
+  for (const label of Object.values(LABELS)) {
+    out.push(label.phrase);
+    if (label.dryRule?.text) out.push(label.dryRule.text);
+    for (const note of label.notes) out.push(note.text);
   }
   return out;
 }
 
-function classifyProduct({ productName, activeIngredient } = {}) {
+function classifyProduct({ productName, activeIngredient, productCategory, catalogCategory, catalogProductType } = {}) {
+  if ([productCategory, catalogCategory, catalogProductType].some((c) => c && ADJUVANT_CATEGORY_RE.test(String(c)))) return 'adjuvant';
   const ai = String(activeIngredient || '').toLowerCase();
   const name = String(productName || '').toLowerCase();
   for (const family of FAMILY_ORDER) if (FAMILIES[family].ai.some((s) => ai.includes(s))) return family;
@@ -41,53 +134,51 @@ function classifyProduct({ productName, activeIngredient } = {}) {
   return 'other';
 }
 
+// The label a product's own identity supports, or null. The name must name
+// the labeled product; a recorded active ingredient must also agree (a
+// brand name never pulls a different chemistry into a label claim — e.g.
+// a "Taurus SC" row recorded as imidacloprid). A blank AI leaves the name
+// as the only evidence.
+function labelFor(family, productName, activeIngredient) {
+  const name = String(productName || '').toLowerCase();
+  const ai = String(activeIngredient || '').trim().toLowerCase();
+  for (const key of FAMILIES[family].labels) {
+    const label = LABELS[key];
+    if (!label.name.some((s) => name.includes(s))) continue;
+    if (ai && !label.ai.some((s) => ai.includes(s))) continue;
+    return label;
+  }
+  return null;
+}
+
 /** Every product applied at one visit, with `primary`/`secondary`
  * (highest-ranked customer-visible products; adjuvants never selected). */
 async function readVisitProducts(serviceRecordId, { conn = db } = {}) {
-  const rows = await conn('service_products').where({ service_record_id: serviceRecordId }).orderBy('applied_at', 'asc');
+  const rows = await conn('service_products as sp')
+    .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
+    .where('sp.service_record_id', serviceRecordId)
+    .orderBy('sp.applied_at', 'asc')
+    .select('sp.*', 'pc.category as catalog_category', 'pc.product_type as catalog_product_type');
   const products = rows.map((row) => {
-    const family = classifyProduct({ productName: row.product_name, activeIngredient: row.active_ingredient });
+    const family = classifyProduct({
+      productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
+      catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
+    });
     const def = FAMILIES[family];
-    // sourceScope narrows notes/factSlugs/verified (and a SOURCED dryRule —
-    // one citing a specific label, `dryRule.sourced`) to the matching
-    // product — e.g. non_repellent's Taurus-SC note is fipronil-only (not
-    // Alpine WSG/dinotefuran), igr's 120-day claim is hydroprene-only, and
-    // contact_residual's sourced "spray has dried" rain instruction is the
-    // Talstar P/bifenthrin liquid label, not Delta Dust (a dust, not a
-    // spray) or Demand CS (lambda-cyhalothrin). A generic, unsourced
-    // dryRule (non_repellent's "stay off treated areas until dry" — no
-    // product-specific citation) applies to the whole family regardless.
-    // The customer phrase itself is scoped the same way: contact_residual's
-    // "works on the surfaces it is sprayed on" describes a liquid spray, so
-    // an out-of-scope member (a dust, or a different active ingredient)
-    // falls back to `outOfScopePhrase`, a neutral, method-free description
-    // — never `def.phrase` when the family declares one.
-    const inScope = !def.sourceScope || matchesAny(def.sourceScope, row.product_name, row.active_ingredient);
-    const dryRuleInScope = inScope || !def.dryRule?.sourced;
-    const phrase = inScope || !def.outOfScopePhrase ? def.phrase : def.outOfScopePhrase;
+    const label = labelFor(family, row.product_name, row.active_ingredient);
+    const phrase = label?.phrase || (family === 'nutrition' ? nutritionPhrase(row.active_ingredient) : def.phrase);
     return {
       productName: row.product_name, activeIngredient: row.active_ingredient || null, family,
-      phrase, dryRule: dryRuleInScope ? def.dryRule : null, notes: inScope ? def.notes : [],
-      factSlugs: inScope ? def.factSlugs : [], customerVisible: def.customerVisible, verified: inScope && def.verified,
+      phrase: def.customerVisible ? phrase : null, dryRule: label?.dryRule || null, notes: label?.notes || [],
+      factSlugs: label ? label.factSlugs : def.factSlugs, customerVisible: def.customerVisible,
+      verified: Boolean(label), source: label?.source || null,
+      targets: asArray(row.targets).map((t) => String(t || '').trim()).filter(Boolean),
       applicationMethod: row.application_method || null, applicationArea: row.application_area || null,
       appliedAt: row.applied_at || row.created_at || null,
     };
   });
   const { primary, secondary } = rankVisibleProducts(products);
   return { products, primary, secondary };
-}
-
-// A recorded active ingredient decides source scope on its own; the
-// product name is only a fallback when no active ingredient was recorded.
-// A brand name alone never pulls a different chemistry into a label claim
-// — e.g. "ZOECON 10578 Gentrol Complete EC3" (server/data/pricing.csv) is
-// pyriproxyfen + permethrin + tetramethrin, so the hydroprene-only Gentrol
-// IGR 120-day note must not ride along just because the name says Gentrol.
-function matchesAny(scope, productName, activeIngredient) {
-  const ai = String(activeIngredient || '').trim().toLowerCase();
-  if (ai) return scope.ai.some((s) => ai.includes(s));
-  const name = String(productName || '').toLowerCase();
-  return scope.name.some((s) => name.includes(s));
 }
 
 /** Pure ranking step (split out for a DB-free unit test). */
@@ -143,16 +234,66 @@ function parsePestsNamed(technicianNotes) {
   return found.filter((key) => !GENERIC_PARENTS[key]?.some((specific) => foundSet.has(specific)));
 }
 
-// pg already parses jsonb into objects/arrays; these guard null/wrong-shape.
-const asObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
-const asArray = (v) => (Array.isArray(v) ? v : []);
+// Canonical pest keys from one visit's recorded application targets
+// (service_products.targets — the technician's structured picks for what
+// each product was applied against). This, not free-text notes, is the
+// treatment evidence area intel counts: a note that merely observes or
+// negates a pest ("saw a few fire ants", "no fire ants found") is never a
+// treatment. A target outside PEST_KEYWORDS (a nutrition goal such as
+// "Green-up", an unlisted species) is not counted.
+function pestsTargeted(targets) {
+  const found = new Set();
+  for (const target of asArray(targets)) {
+    const text = String(target || '').toLowerCase();
+    if (!text.trim()) continue;
+    for (const [canonical, pattern] of PEST_KEYWORDS) if (pattern.test(text)) found.add(canonical);
+  }
+  return [...found].filter((key) => !GENERIC_PARENTS[key]?.some((specific) => found.has(specific)));
+}
+
+// pg already parses jsonb into objects/arrays; these guard null/wrong-shape
+// (and a legacy JSON-string column value).
+function parseJson(v) {
+  if (typeof v !== 'string') return v;
+  try { return JSON.parse(v); } catch { return null; }
+}
+const asObject = (v) => { const p = parseJson(v); return p && typeof p === 'object' && !Array.isArray(p) ? p : {}; };
+const asArray = (v) => { const p = parseJson(v); return Array.isArray(p) ? p : []; };
+
+// Every persisted representation of where a visit was performed, unioned
+// the same way the canonical service-report scope reader does
+// (service-report/report-data.js scopeTextValues + snapshotAreaValues):
+// service_records.areas_serviced, structured_notes.areasServiced,
+// structured_notes.areasTreated, and the typed-report snapshot area fields.
+// Case-insensitive de-duplication keeps the first spelling seen.
+const TYPED_AREA_FIELD_KEYS = ['areas_treated', 'spot_treatment_areas', 'treatment_zones'];
+function visitAreas(service) {
+  const structured = asObject(service.structured_notes);
+  const serviceData = asObject(service.service_data);
+  const snapshots = [serviceData.typedReportSnapshot, ...asArray(serviceData.companionReportSnapshots)]
+    .filter((snap) => snap && typeof snap === 'object' && snap.values && typeof snap.values === 'object');
+  const values = [
+    ...asArray(service.areas_serviced), ...asArray(structured.areasServiced), ...asArray(structured.areasTreated),
+    ...snapshots.flatMap((snap) => TYPED_AREA_FIELD_KEYS.flatMap((key) => String(snap.values[key] ?? '').split(','))),
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const area = value.trim();
+    const key = area.toLowerCase();
+    if (!area || seen.has(key)) continue;
+    seen.add(key);
+    out.push(area);
+  }
+  return out;
+}
 
 /** One visit's plain-language summary for a lifecycle email. */
 async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
   const service = await conn('service_records').where({ id: serviceRecordId }).first();
   if (!service) return null;
 
-  const structured = asObject(service.structured_notes);
   const advisory = asObject(service.advisory);
   const conditions = asObject(service.conditions);
 
@@ -180,7 +321,7 @@ async function readVisitSummary(serviceRecordId, { conn = db } = {}) {
 
   return {
     customerId: service.customer_id, serviceType: service.service_type || null, serviceLine: service.service_line || null,
-    visitDate: service.service_date || null, areasTreated: asArray(structured.areasTreated),
+    visitDate: service.service_date || null, areasTreated: visitAreas(service),
     pestsNamed: parsePestsNamed(service.technician_notes),
     activityRating: service.client_pest_rating != null ? Number(service.client_pest_rating) : null,
     advisory: {
@@ -231,6 +372,6 @@ async function getActivityRatingAverages({ conn = db } = {}) {
 
 module.exports = {
   PRODUCT_FAMILIES: FAMILIES, FAMILY_ORDER, PRIMARY_FAMILY_RANK, PEST_KEYWORDS,
-  classifyProduct, rankVisibleProducts, parsePestsNamed, expandElidedSpeciesLists, allCustomerFacingStrings,
+  classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed, expandElidedSpeciesLists, allCustomerFacingStrings,
   readVisitProducts, readVisitSummary, getActivityRatingAverages,
 };

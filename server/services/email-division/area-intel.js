@@ -10,11 +10,12 @@
 
 const db = require('../../models/db');
 const { etMonthStart, etMonthEnd } = require('../../utils/datetime-et');
-const { parsePestsNamed } = require('./visit-products');
+const { pestsTargeted } = require('./visit-products');
 const { applyCustomerVisibleServiceRecordFilter } = require('../pest-pressure/history-filter');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('../pest-pressure/first-visit');
 
 const MIN_CITY_CUSTOMERS = 5;
+const TARGET_READ_CHUNK = 1000;
 
 /** Recomputes and upserts every city's row for one ET calendar month.
  * Replaces the WHOLE month's aggregate atomically (a city with no
@@ -35,12 +36,16 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   // getActivityRatingAverages below does, straight from Pest Pressure's own
   // first-visit history (server/services/pest-pressure/first-visit.js +
   // history-filter.js), never re-derived. Every performed, visible visit
-  // counts toward the denominator whether or not it has technician_notes —
-  // a visit with blank notes still happened and must not silently shrink
+  // counts toward the denominator whether or not it recorded any target —
+  // a visit with no targets still happened and must not silently shrink
   // `visits` (and so understate the true visit volume behind the
-  // percentage in getAreaIntelSentence); parsePestsNamed itself returns []
-  // for blank notes, so no separate notes filter is needed for the
-  // pest-mention numerator either.
+  // percentage in getAreaIntelSentence).
+  //
+  // The pest numerator counts STRUCTURED treatment evidence only — the
+  // targets recorded on the visit's applied products (service_products.
+  // targets, via pestsTargeted) — never technician_notes free text, where
+  // a pest can be merely observed or negated ("saw a few fire ants", "no
+  // fire ants found") and would turn into a false "technicians treated X".
   const query = conn('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
@@ -53,7 +58,19 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     NON_PERFORMED_VISIT_OUTCOMES,
   );
   const rows = await query
-    .select('sr.customer_id', 'sr.technician_notes', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
+    .select('sr.id', 'sr.customer_id', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));
+
+  const targetsByVisit = new Map();
+  const visitIds = rows.map((row) => row.id);
+  for (let i = 0; i < visitIds.length; i += TARGET_READ_CHUNK) {
+    const productRows = await conn('service_products')
+      .whereIn('service_record_id', visitIds.slice(i, i + TARGET_READ_CHUNK))
+      .select('service_record_id', 'targets');
+    for (const product of productRows) {
+      if (!targetsByVisit.has(product.service_record_id)) targetsByVisit.set(product.service_record_id, []);
+      targetsByVisit.get(product.service_record_id).push(...(Array.isArray(product.targets) ? product.targets : []));
+    }
+  }
 
   const byCity = new Map();
   for (const row of rows) {
@@ -63,7 +80,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     const entry = byCity.get(city);
     entry.visits += 1;
     entry.customers.add(row.customer_id);
-    for (const pest of new Set(parsePestsNamed(row.technician_notes))) {
+    for (const pest of pestsTargeted(targetsByVisit.get(row.id) || [])) {
       entry.pestCounts.set(pest, (entry.pestCounts.get(pest) || 0) + 1);
     }
   }

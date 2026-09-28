@@ -1,12 +1,18 @@
 // Email division per-visit product reader — pure-function tests only (no
 // DB). DB-backed reads are covered in email-division-postgres.test.js.
 const {
-  PRODUCT_FAMILIES, classifyProduct, rankVisibleProducts, parsePestsNamed, allCustomerFacingStrings, readVisitProducts,
+  PRODUCT_FAMILIES, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, pestsTargeted, nutrientsListed,
+  allCustomerFacingStrings, readVisitProducts,
 } = require('../services/email-division/visit-products');
 
-// Minimal knex-shaped stub: conn('service_products').where(...).orderBy(...) -> rows.
+// Minimal knex-shaped stub:
+// conn('service_products as sp').leftJoin(...).where(...).orderBy(...).select(...) -> rows.
 function stubConn(rows) {
-  return () => ({ where: () => ({ orderBy: async () => rows }) });
+  return () => ({ leftJoin: () => ({ where: () => ({ orderBy: () => ({ select: async () => rows }) }) }) });
+}
+async function readOne(row) {
+  const { products } = await readVisitProducts('sr-1', { conn: stubConn([row]) });
+  return products[0];
 }
 
 describe('readVisitProducts source scope: a recorded active ingredient wins over the product name', () => {
@@ -19,19 +25,64 @@ describe('readVisitProducts source scope: a recorded active ingredient wins over
 
   test.each([
     ['Gentrol IGR', 'hydroprene', true],
-    ['Gentrol IGR', '', true], // no active ingredient recorded -> name fallback
+    ['Gentrol IGR', '', true], // no active ingredient recorded -> the name is the only evidence
     ['Gentrol IGR', '   ', true], // whitespace-only counts as absent
     ['Gentrol IGR', null, true],
-    ['Taurus SC', 'imidacloprid', false], // non_repellent by name, but the recorded AI is not fipronil
-    ['Talstar P', 'lambda-cyhalothrin', false], // contact_residual, but not bifenthrin
-    ['House Brand Bifenthrin', 'bifenthrin', true], // AI decides even with an unscoped name
+    ['Taurus SC', 'imidacloprid', false], // the name matches, but the recorded AI is not fipronil
+    ['Talstar P', 'lambda-cyhalothrin', false], // the name matches, but not bifenthrin
+    // Sharing the labeled product's active ingredient is never enough — the
+    // claim is the LABEL's, and these are different labels (pricing.csv).
+    ['Topchoice Granular Insecticide', 'Fipronil 0.0143%', false],
+    ['LESCO Crosscheck Plus', '7.9% Bifenthrin', false],
+    ['House Brand Bifenthrin', 'bifenthrin', false],
+    ['Distance IGR', 'Pyriproxyfen', false],
+    ['Gentrol Point Source', 'hydroprene', false],
   ])('%s / %j -> verified:%s', async (productName, activeIngredient, verified) => {
-    const { products } = await readVisitProducts('sr-1', { conn: stubConn([{ product_name: productName, active_ingredient: activeIngredient }]) });
-    expect(products[0].verified).toBe(verified);
+    const product = await readOne({ product_name: productName, active_ingredient: activeIngredient });
+    expect(product.verified).toBe(verified);
     if (!verified) {
-      expect(products[0].notes).toEqual([]);
-      expect(products[0].factSlugs).toEqual([]);
+      expect(product).toMatchObject({ notes: [], factSlugs: [], dryRule: null, source: null });
     }
+  });
+});
+
+describe('readVisitProducts wording comes from the product\'s own data, never a family default', () => {
+  test.each([
+    // Topchoice is granular fipronil for fire ants — not Taurus SC's
+    // colony-transfer description.
+    ['Topchoice Granular Insecticide', 'Fipronil 0.0143%', 'an insecticide'],
+    ['Alpine WSG', 'dinotefuran', 'an insecticide'],
+    ['Delta Dust', 'deltamethrin', 'an insecticide'],
+    // Distance IGR is a Tree & Shrub whitefly/scale product — never "immature roaches".
+    ['Distance IGR', 'Pyriproxyfen', 'an insect growth regulator'],
+    ['Taurus SC', 'fipronil', 'a non-repellent that ants cannot detect, so they walk through it and carry it back to the colony'],
+    ['Gentrol IGR', '(S)-Hydroprene 9.0%', 'a growth regulator: immature roaches exposed to it become adults that cannot reproduce'],
+  ])('%s (%s) -> %j', async (productName, activeIngredient, phrase) => {
+    expect((await readOne({ product_name: productName, active_ingredient: activeIngredient })).phrase).toBe(phrase);
+  });
+
+  test('recorded targets ride along as data (the technician\'s picks, not a family assumption)', async () => {
+    const product = await readOne({ product_name: 'Distance IGR', active_ingredient: 'Pyriproxyfen', targets: ['Ficus whitefly', ' ', 'Scale insects'] });
+    expect(product.targets).toEqual(['Ficus whitefly', 'Scale insects']);
+  });
+
+  test.each([
+    // pricing.csv rows 43-45 / 176: iron + manganese, no potassium.
+    ['LESCO Chelated Iron Plus 12-0-0 6% Fe 2% Mn All Purpose Liquid Fertilizer', 'Nitrogen + iron + manganese', 'a nutrition product with nitrogen, iron and manganese'],
+    ['ArborJet Mn-Jet Fe Micros', 'Manganese + Iron', 'a nutrition product with iron and manganese'],
+    ['LESCO Chelated Iron Plus 12-0-0 2%Mn 6%Fe 4%S', '12-0-0 2%Mn 6%Fe 4%S', 'a nutrition product with nitrogen, iron, manganese and sulfur'],
+    ['LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer', 'Potassium 0-0-25 + sulfur', 'a nutrition product with potassium and sulfur'],
+    ['LESCO Chelated AM + Micros', 'Chelated micronutrients', 'a nutrition product with micronutrients'],
+    ['LESCO K-Flow 0-0-25', null, 'a nutrition product'], // no AI recorded -> no nutrient named, even from the name
+  ])('%s (%s) -> %j', async (productName, activeIngredient, phrase) => {
+    const product = await readOne({ product_name: productName, active_ingredient: activeIngredient });
+    expect(product).toMatchObject({ family: 'nutrition', phrase });
+  });
+
+  test('nutrientsListed never reads a stray capital letter as an element', () => {
+    expect(nutrientsListed('(S)-Hydroprene 9.0%')).toEqual([]);
+    expect(nutrientsListed('Mn + Fe + Mg + S')).toEqual(['iron', 'manganese', 'magnesium']);
+    expect(nutrientsListed('0-0-25')).toEqual(['potassium']);
   });
 });
 
@@ -54,8 +105,31 @@ describe('classifyProduct', () => {
     ['LESCO chelated manganese', 'manganese', 'nutrition'],
     ['LESCO chelated micronutrients', 'micronutrient', 'nutrition'],
     ['LESCO 90/10 nonionic surfactant', 'nonionic surfactant', 'adjuvant'],
+    // pricing.csv row 116 — neither the AI nor a chemistry list names it,
+    // but it is a wetting agent (catalog: Soil Surfactant / wetting_agent).
+    ['Dispatch Sprayable Wetting Agent', 'Alkoxylated polyols + glucoethers', 'adjuvant'],
+    ['LESCO Moisture Manager', 'Humectants + non-ionic surfactant', 'adjuvant'],
   ])('%s (%s) classifies as %s', (productName, activeIngredient, expected) => {
     expect(classifyProduct({ productName, activeIngredient })).toBe(expected);
+  });
+
+  test('a catalogued/recorded adjuvant category or product type keeps any product internal', () => {
+    for (const fields of [
+      { productCategory: 'Soil Surfactant' }, { catalogCategory: 'soil_surfactant' }, { catalogCategory: 'adjuvant' },
+      { catalogProductType: 'wetting_agent' },
+    ]) {
+      expect(classifyProduct({ productName: 'Brand X', activeIngredient: 'Alkoxylated polyols', ...fields })).toBe('adjuvant');
+    }
+    expect(classifyProduct({ productName: 'Taurus SC', activeIngredient: 'fipronil', catalogCategory: 'termiticide' })).toBe('non_repellent');
+  });
+
+  test('a catalogued wetting agent is never ranked primary and carries no customer phrase', async () => {
+    const { products, primary } = await readVisitProducts('sr-1', { conn: stubConn([
+      { product_name: 'Dispatch Sprayable Wetting Agent', active_ingredient: 'Alkoxylated polyols + glucoethers', catalog_category: 'soil_surfactant' },
+      { product_name: 'Catalog Soil Aid', active_ingredient: 'Alkoxylated polyols', product_category: 'Soil Surfactant' },
+    ]) });
+    expect(products.map((p) => [p.family, p.customerVisible, p.phrase])).toEqual([['adjuvant', false, null], ['adjuvant', false, null]]);
+    expect(primary).toBeNull();
   });
 
   test('case-insensitive, falls back to product_name, active_ingredient wins, unrecognized -> "other"', () => {
@@ -63,7 +137,7 @@ describe('classifyProduct', () => {
     expect(classifyProduct({ productName: 'Talstar P', activeIngredient: '' })).toBe('contact_residual');
     expect(classifyProduct({ productName: 'House Brand Spray', activeIngredient: 'fipronil' })).toBe('non_repellent');
     expect(classifyProduct({ productName: 'Mystery Blend 42', activeIngredient: 'unobtanium' })).toBe('other');
-    expect(PRODUCT_FAMILIES.other.notes).toEqual([]);
+    expect(PRODUCT_FAMILIES.other.labels).toEqual([]);
   });
 });
 
@@ -126,11 +200,27 @@ describe('PRODUCT_FAMILIES customer-facing text carries no fabricated timeline',
     expect(PRODUCT_FAMILIES.adjuvant.customerVisible).toBe(false);
   });
 
+  test('every family phrase is target-neutral: no pest name, and no pest word outside a sourced label phrase', () => {
+    for (const [family, def] of Object.entries(PRODUCT_FAMILIES)) {
+      if (!def.phrase) continue;
+      for (const [, pattern] of PEST_KEYWORDS) expect(`${family}: ${def.phrase}`).not.toMatch(pattern);
+      expect(def.phrase).not.toMatch(/\b(ants?|roach(es)?|cockroach(es)?|colony|potassium|iron|manganese|nitrogen)\b/i);
+    }
+  });
+
+  test.each(['fungicide', 'herbicide', 'nutrition', 'adjuvant', 'other'])('%s has no label, so its products are never verified', async (family) => {
+    expect(PRODUCT_FAMILIES[family].labels).toEqual([]);
+  });
+});
+
+describe('pestsTargeted (area-intel treatment evidence)', () => {
   test.each([
-    ['herbicide', false], ['fungicide', false], ['nutrition', false], ['adjuvant', false],
-    ['non_repellent', true], ['contact_residual', true], ['igr', true],
-  ])('%s is verified:%s', (family, verified) => {
-    expect(PRODUCT_FAMILIES[family].verified).toBe(verified);
-    if (!verified) expect(PRODUCT_FAMILIES[family].notes).toEqual([]);
+    [['Ghost ants', 'Big-headed ants', 'Fire ants'], ['ghost ants', 'big-headed ants', 'fire ants']],
+    [['Wolf spiders', 'Widow spiders'], ['widow spiders']], // specific subtype suppresses generic parent
+    [['Green-up', 'Iron chlorosis', 'Ficus whitefly'], []], // non-pest / unlisted targets never count
+    [[], []], [null, []],
+  ])('%j -> %j', (targets, expected) => {
+    expect(pestsTargeted(targets)).toEqual(expect.arrayContaining(expected));
+    expect(pestsTargeted(targets)).toHaveLength(expected.length);
   });
 });
