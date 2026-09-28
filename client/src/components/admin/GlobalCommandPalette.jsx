@@ -15,6 +15,7 @@ import { useIntelligenceBarPageData, useIntelligenceBarActions } from '../../hoo
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useRef,
   useCallback,
   useImperativeHandle,
@@ -61,6 +62,66 @@ const D = {
   text: "#334155",
   muted: "#64748B",
   white: "#fff",
+};
+
+// Auto-grow composer textareas ------------------------------------------
+// Owner-reported bug: the composer was a single-line <input>, so dictated
+// text longer than the box couldn't be seen or edited past the cut-off.
+// This hook recomputes height from content on every `value` change (typed
+// input, dictation appends via appendTranscript, and clears) — one shared
+// place instead of per-keystroke DOM hacks scattered across each composer.
+// `getMaxHeight` may be a number or a function (mobile factors in the live
+// viewport height); growth caps there and the box scrolls internally.
+function sizeComposer(el, maxHeight) {
+  el.style.height = "auto";
+  // scrollHeight excludes the border; a border-box height must add it
+  // back or the box ends up shorter than its content.
+  const borders = el.offsetHeight - el.clientHeight;
+  const full = el.scrollHeight + borders;
+  const next = maxHeight ? Math.min(full, maxHeight) : full;
+  el.style.height = `${next}px`;
+  el.style.overflowY = maxHeight && full > maxHeight ? "auto" : "hidden";
+}
+
+function useAutoGrowTextarea(ref, value, getMaxHeight, enabled = true) {
+  // Runs after every render but measures only when the element, the value,
+  // the cap or the width changed — so a textarea that MOUNTS already holding
+  // text (a draft kept across close/reopen, the follow-up box appearing) is
+  // sized too, not just one whose value changes while mounted.
+  const lastRef = useRef({ el: null, value: null, maxHeight: null, width: null });
+  const cap = () => (typeof getMaxHeight === "function" ? getMaxHeight() : getMaxHeight);
+  useLayoutEffect(() => {
+    if (!enabled) return;
+    const el = ref.current;
+    if (!el) return;
+    const maxHeight = cap();
+    const width = el.clientWidth;
+    const last = lastRef.current;
+    if (last.el === el && last.value === value && last.maxHeight === maxHeight && last.width === width) return;
+    lastRef.current = { el, value, maxHeight, width };
+    sizeComposer(el, maxHeight);
+  });
+  // A viewport resize or rotation re-wraps the text without any render (the
+  // mobile breakpoint may not change), so re-measure on window resize too.
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const onResize = () => {
+      const el = ref.current;
+      if (!el) return;
+      const maxHeight = cap();
+      lastRef.current = { el, value: el.value, maxHeight, width: el.clientWidth };
+      sizeComposer(el, maxHeight);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [ref, getMaxHeight, enabled]); // cap() reads getMaxHeight, a per-call-site constant
+}
+
+// Roughly 6 lines before a composer stops growing and scrolls internally.
+const COMPOSER_MAX_HEIGHT = {
+  desktop: 132, // ~6 lines @ 15px in the main composer
+  followUp: 112, // ~6 lines @ 13px in the follow-up composer
+  mobile: () => Math.min(148, window.innerHeight * 0.4), // ~6 lines @ 16px, capped to ~40% viewport
 };
 
 function adminFetch(path, options = {}) {
@@ -355,12 +416,18 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const followUpRef = useRef(null);
   const openerRef = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
+  // Desktop-only composers. MobileSheet owns inputRef's growth (its own
+  // mobile-viewport cap) when isMobile — `enabled: false` here keeps this
+  // effect from also touching the same shared inputRef node on that render.
+  useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.desktop, !isMobile);
+  useAutoGrowTextarea(followUpRef, prompt, COMPOSER_MAX_HEIGHT.followUp, !isMobile);
   // The shared modal stack consumes Escape before an underlying customer
   // drawer can see it; closing the bar must leave that record open.
   const paletteRef = useModalFocus(open, () => setOpen(false));
@@ -746,10 +813,15 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   }, []);
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // isComposing / keyCode 229 is the Enter that confirms an IME
+    // (Japanese/Chinese/Korean, etc.) candidate — it must never submit.
+    const composing = e.nativeEvent?.isComposing || e.keyCode === 229;
+    if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault();
       submit();
     }
+    // Shift+Enter falls through unhandled — the textarea's own default
+    // behavior inserts a newline.
     if (e.key === "Escape") {
       setOpen(false);
     }
@@ -903,8 +975,9 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
           {" "}
           <div style={{ flex: 1, position: "relative" }}>
             {" "}
-            <input
+            <textarea
               ref={inputRef}
+              rows={1}
               aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -923,6 +996,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
                 boxSizing: "border-box",
+                resize: "none",
               }}
               onFocusCapture={(e) =>
                 (e.target.style.borderColor = accentColor + "66")
@@ -933,8 +1007,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               style={{
                 position: "absolute",
                 right: 8,
-                top: "50%",
-                transform: "translateY(-50%)",
+                bottom: 8,
                 display: "flex",
                 gap: 6,
                 alignItems: "center",
@@ -1133,10 +1206,13 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
               borderTop: `1px solid ${D.border}33`,
               display: "flex",
               gap: 8,
+              alignItems: "flex-end",
             }}
           >
             {" "}
-            <input
+            <textarea
+              ref={followUpRef}
+              rows={1}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1151,6 +1227,8 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
                 fontSize: 13,
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
+                boxSizing: "border-box",
+                resize: "none",
               }}
             />{" "}
             <button
@@ -1280,6 +1358,7 @@ function MobileSheet({
   removeAttachment,
 }) {
   const fileInputRef = useRef(null);
+  useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
   return (
     <>
       {/* Backdrop */}
@@ -1402,8 +1481,9 @@ function MobileSheet({
           {" "}
           <div style={{ position: "relative" }}>
             {" "}
-            <input
+            <textarea
               ref={inputRef}
+              rows={1}
               aria-label="Ask Waves AI"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -1421,6 +1501,7 @@ function MobileSheet({
                 fontSize: 16,
                 fontFamily: "Roboto, Arial, sans-serif",
                 outline: "none",
+                resize: "none",
               }}
             />{" "}
             {!loading && (
@@ -1428,8 +1509,7 @@ function MobileSheet({
                 style={{
                   position: "absolute",
                   right: 10,
-                  top: "50%",
-                  transform: "translateY(-50%)",
+                  bottom: 10,
                   display: "flex",
                   alignItems: "center",
                   gap: 4,
