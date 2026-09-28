@@ -704,6 +704,46 @@ describe('gate on: a customer with 2 due rows gets ONE combined message', () => 
     );
   });
 
+  // Claude fallback-audit P1 (push, codex over usage limit): the guard
+  // above only protected ONE direction (a final-notice sibling riding an
+  // earlier anchor's copy). The symmetric case — a NON-final sibling
+  // riding a FINAL-NOTICE anchor's copy — was unguarded: the sibling would
+  // get the "may be sent to collections" wording for an invoice nowhere
+  // near that stage.
+  test('a sibling NOT at the final-notice step is pulled out and fired individually when the ANCHOR itself is at the final step — never rides the final-notice copy', async () => {
+    process.env.GATE_DUNNING_COMBINED_MESSAGE = 'true';
+    const rowA = seqRow({ // anchor (oldest), AT its final-notice step
+      id: 'seq-A', invoice_id: 'inv-A', next_touch_at: tenAmET('2026-08-05'),
+      invoice_sent_at: tenAmET('2026-06-01'), step_index: 3,
+    });
+    const rowB = seqRow({ // newer, early-cadence sibling
+      id: 'seq-B', invoice_id: 'inv-B', next_touch_at: tenAmET('2026-08-05'),
+      invoice_sent_at: tenAmET('2026-07-20'), step_index: 0,
+    });
+    const { seqTable } = setupCombinedDb({
+      batchRows: [rowA, rowB],
+      invoices: [invoiceRow({ id: 'inv-A' }), invoiceRow({ id: 'inv-B' })],
+    });
+    const result = await runPending();
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+    // No combined send at all — after B is pulled out, only the anchor
+    // remains, and resolveCombinedGroup's own sole-survivor fallback fires
+    // it alone too.
+    expect(smsTemplatesRouter.getTemplate).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^invoice_followup_combined/), expect.anything(), expect.anything(),
+    );
+    // Each invoice got its OWN real-step template — B's early-cadence
+    // copy, never the anchor's final-notice one.
+    expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
+      'invoice_followup_30day', expect.anything(), expect.anything(),
+    );
+    expect(smsTemplatesRouter.getTemplate).toHaveBeenCalledWith(
+      'invoice_followup_3day', expect.anything(), expect.anything(),
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2); // two individual touches, no combined one
+    expect(seqTable.rows.get('seq-B').step_index).toBe(1); // B advanced from its OWN early step
+  });
+
   // Fable review P2: the fallback loops (pay-link mismatch, ownership
   // recheck, final-notice split) fired each row with a bare await — one
   // invoice's fireTouch throwing aborted every invoice queued after it in

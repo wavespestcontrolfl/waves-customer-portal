@@ -1891,29 +1891,54 @@ async function resolveCombinedGroup(rows, customerId) {
 }
 
 /**
- * A sibling invoice already at ITS OWN final-notice step must never be
- * folded into a combined touch whose rendered content is an EARLIER
- * step's copy: advanceCombinedSequences would still retire that
- * sequence's step past the final one, and the customer would never
- * actually receive THAT invoice's final notice (Fable review P2). Safe
- * rule: only ever combine a final-notice invoice into a touch whose own
- * rendered step IS that same final step (the anchor itself is at its
- * final notice, so the combined copy genuinely represents it) —
- * otherwise the sibling is pulled out and fired through its own
- * individual touch RIGHT NOW, which renders its real final-notice
- * template, rather than left to re-exclude itself (and risk the same
- * staleness the mdPending path above guards against) on a later run.
+ * The FINAL NOTICE step is a special case, in EITHER direction, of the
+ * combined message's normal "the anchor's step renders the copy for
+ * every included invoice" design (siblings at an earlier, non-final step
+ * than the anchor otherwise combine under the anchor's own later copy on
+ * purpose — see fireCombinedTouchClaimed's own docstring, "the combined
+ * message intentionally spans them"):
+ *
+ *   - A sibling already at ITS OWN final-notice step must never be folded
+ *     into a combined touch whose rendered content is an EARLIER step's
+ *     copy (Fable review P2): advanceCombinedSequences would still retire
+ *     that sequence's step past the final one, and the customer would
+ *     never actually receive THAT invoice's final notice.
+ *   - Symmetrically, a sibling NOT at the final step must never be folded
+ *     into a combined touch whose rendered content IS the final-notice
+ *     copy (Claude fallback-audit P1 — the original guard only covered
+ *     the first direction): the customer would get an inappropriate "may
+ *     be sent to collections" message for an invoice nowhere near that
+ *     stage, while advanceCombinedSequences only advances its step_index
+ *     by one, leaving no record that anything unusual was ever sent.
+ *
+ * Safe rule: a sibling may combine under a final-notice anchor ONLY when
+ * the sibling is ALSO at the final step; a sibling may combine under a
+ * non-final anchor at ANY non-final step (the normal spanning behavior).
+ * Otherwise the sibling is pulled out and fired through its own
+ * individual touch RIGHT NOW, which renders ITS real step's template,
+ * rather than left to re-exclude itself (and risk the same staleness the
+ * mdPending path above guards against) on a later run.
  */
 async function excludeFinalNoticeSiblings(included, rows, anchorRow) {
   const lastStepIndex = followupSteps().length - 1;
-  if (anchorRow.step_index === lastStepIndex) return included; // the combined touch itself IS the final notice
+  const anchorIsFinal = anchorRow.step_index === lastStepIndex;
   const keep = [];
-  const finalNoticeSiblings = [];
+  const pulledOut = [];
   for (const inv of included) {
-    if (inv.step_index === lastStepIndex) finalNoticeSiblings.push(inv);
+    const invIsFinal = inv.step_index === lastStepIndex;
+    // The combined message renders ONE step's copy (the anchor's) for the
+    // whole group. A sibling at the FINAL step must never ride an EARLIER
+    // anchor's copy (it would never actually receive its real final-notice
+    // wording) — and, symmetrically (Claude fallback-audit P1: the
+    // original guard only covered this first direction), a sibling NOT at
+    // the final step must never ride a FINAL-NOTICE anchor's copy either —
+    // it would get an inappropriate "may be sent to collections" message
+    // for an invoice nowhere near that stage. Only a sibling at the SAME
+    // step as the anchor may combine under a final-notice anchor's copy.
+    if (anchorIsFinal ? !invIsFinal : invIsFinal) pulledOut.push(inv);
     else keep.push(inv);
   }
-  for (const inv of finalNoticeSiblings) {
+  for (const inv of pulledOut) {
     const originalRow = rows.find((r) => r.invoice_id === inv.invoice_id);
     if (!originalRow) continue;
     // Sequential, not Promise.all: each fireTouch owns its own DB writes.
