@@ -4,7 +4,7 @@
 // the consistency layer must never fabricate a "Follow-up already planned"
 // card from routine sign-off prose.
 
-const { answerServiceReportQuestion, answerAppliedToday } = require('../services/service-report/report-assistant');
+const { answerServiceReportQuestion, answerAppliedToday, routeServiceReportQuestion } = require('../services/service-report/report-assistant');
 const { reconcileLawnReport } = require('../services/service-report/report-consistency');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
@@ -296,6 +296,26 @@ describe('watering questions answer with the weekly plan when the report carries
       expect(answer).toMatch(/^Confirm the product watering directions/);
       if (source !== 'fallback') expect(answer).toContain(mowing);
     }
+  });
+
+  // Round 7 (codex P2 #5033 on report-assistant.js:391): the same mandatory
+  // aftercare above is a PAST visit's note once its own weekPlan carries
+  // visitInPlanWeek: false — the generic next-step route must still classify
+  // as 'next_steps' (routeServiceReportQuestion), but never promote that
+  // historical confirmation into today's answer.
+  test('generic next-step question drops a past-visit review confirmation once its weekPlan is out of scope', () => {
+    const data = {
+      dynamicContext: {},
+      findings: [{ title: 'Mushrooms observed' }],
+      reportV2: {
+        aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' },
+        water: { weekPlan: { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now.', visitInPlanWeek: false } },
+      },
+    };
+    const routed = routeServiceReportQuestion({ question: 'What should I do next?', data });
+    expect(routed.topic).toBe('next_steps');
+    expect(routed.answer).not.toMatch(/Confirm the product watering directions/);
+    expect(routed.answer).toMatch(/^No special repair or prep was flagged/);
   });
 });
 

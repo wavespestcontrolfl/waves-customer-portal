@@ -388,7 +388,10 @@ function targetsFromApplications(applications = []) {
 }
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
-  const wateringTask = aftercareCustomerTask(normalizeLawnAftercare(data.reportV2?.aftercare));
+  // Scoped to the visit's own plan week — a reopened report's generic
+  // "what's next" answer must never promote a historical confirmation/
+  // credit as though it were this visit's task (codex P2 #5033 r7).
+  const wateringTask = aftercareCustomerTask(normalizeLawnAftercare(data.reportV2?.aftercare), data.reportV2?.water?.weekPlan);
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
@@ -557,7 +560,7 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // Same guards as the rendered card: a credited watering-in only for a
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
-  const recordedWaterIn = hasCreditableWaterIn(aftercare);
+  const recordedWaterIn = hasCreditableWaterIn(aftercare, weekPlan);
   const shown = renderedWeekPlan(aftercare, weekPlan);
   const reduced = shown && shown !== weekPlan ? shown : null;
   // Keep the full plan beside uncredited aftercare. A HOLD plan also stays
@@ -586,6 +589,11 @@ function questionRoutingRules({
   return [
     // Preserve unverified or restricted aftercare before any watering plan.
     {
+      // Deliberately unscoped: a direct watering question still states the
+      // recorded note beside the plan even for a historical (visitInPlanWeek
+      // === false) aftercare — report-assistant-honesty.test.js pins this;
+      // wateringPlanCondition below (which IS scoped) already keeps such a
+      // visit from gating the CURRENT plan on an unresolved historical note.
       test: () => wateringIntent
         && Boolean(aftercare?.watering)
         && Boolean(wateringRestrictionAction(aftercare)),

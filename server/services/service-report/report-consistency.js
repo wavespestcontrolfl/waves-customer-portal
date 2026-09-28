@@ -690,7 +690,10 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       scheduled: true,
       headline: 'Follow-up already planned',
       reason: firstSentence(focus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
-      customerAction: aftercareCustomerTask(normalizeLawnAftercare(reportV2?.aftercare))
+      // Scoped to the visit's own plan week — a reopened report's follow-up
+      // card must never promote a historical confirmation/credit as though
+      // it were this visit's task (codex P2 #5033 r7).
+      customerAction: aftercareCustomerTask(normalizeLawnAftercare(reportV2?.aftercare), reportV2?.water?.weekPlan)
         || 'No action is needed from you before then unless the area changes quickly.',
     };
   }

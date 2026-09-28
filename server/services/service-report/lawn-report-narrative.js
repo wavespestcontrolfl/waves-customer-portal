@@ -52,7 +52,7 @@ function waterFacts(water, aftercare) {
 // Only the FACTS that should drive copy — not the deterministic prose itself, so the
 // model writes fresh rather than paraphrasing our fallback sentences.
 function groundingFacts(v2, ctx) {
-  const { verdict, customerTask } = resolveLawnAftercare(v2.aftercare);
+  const { verdict, customerTask } = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan);
   return {
     overallScore: v2.snapshot?.overallScore ?? null,
     overallStatus: v2.snapshot?.status ?? null,
@@ -229,7 +229,7 @@ function mergeNarrative(v2, out) {
   // A product-driven aftercare verdict owns the customer's task and the
   // watering story: the hero, insight cards, water explanation and product
   // note must state the same one, so the model may not rewrite them.
-  const verdictOwnsWatering = resolveLawnAftercare(v2.aftercare).verdict !== 'none';
+  const verdictOwnsWatering = resolveLawnAftercare(v2.aftercare, v2.water?.weekPlan).verdict !== 'none';
   const rewriteAction = (modelValue, fallback) => (
     fallback && !verdictOwnsWatering ? safeText(modelValue, fallback) : fallback
   );
@@ -284,7 +284,7 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   // before cache/model access unless structured evidence establishes drought.
   // A non-neutral product note also stays deterministic until its provenance is
   // affirmative and unopposed. Any narrative field could contradict it.
-  const { verdict } = resolveLawnAftercare(guardedV2?.aftercare);
+  const { verdict } = resolveLawnAftercare(guardedV2?.aftercare, guardedV2?.water?.weekPlan);
   const overlayAllowed = verdict === 'credit' || (verdict === 'none' && guardedV2?.aftercare?.neutral === true);
   if (!guardedV2 || guardedV2.water?.droughtSignal !== true || !overlayAllowed) return guardedV2;
   const facts = groundingFacts(guardedV2, ctx);

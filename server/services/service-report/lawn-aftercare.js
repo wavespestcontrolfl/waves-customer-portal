@@ -11,7 +11,21 @@ const LEGACY_NOTE_CONFIRMATION = 'Confirm the product watering directions with y
 // below — never the raw flags. The client card mirrors the same table
 // (LawnReportV2.jsx aftercareVerdict).
 //
+// Visit scope is part of the verdict, not a side check some callers remember
+// and others forget: a reopened/history-carried report can attach an
+// aftercare object that was never THIS visit's own (an old credited water-in
+// or an old review/hold confirmation) — week membership is the only signal
+// that distinguishes them. Pass the report's water.weekPlan as the second
+// argument wherever it is available; an explicit visitInPlanWeek === false
+// resolves to verdict 'none' (customerTask null, restricts false, credited
+// false) before any of the flags below are even read. A plan with no
+// membership marker (legacy payloads) or no plan at all keeps the current-
+// week reading — omit the argument or pass null/undefined. The note itself
+// (aftercare.watering) is still shown in the Aftercare section either way;
+// only the PROMOTED customer task/restriction/credit is scoped.
+//
 // Fail closed, first match wins:
+//   visit outside the plan week (visitInPlanWeek === false) → none
 //   neutral fallback, no direction claimed          → none
 //   no recorded instruction, a direction claimed    → review
 //   instruction, evidence source not allowlisted    → review
@@ -50,7 +64,10 @@ function aftercareVerdict(aftercare) {
   return 'none';
 }
 
-function resolveLawnAftercare(aftercare) {
+const NONE_STATE = { verdict: 'none', customerTask: null, restricts: false, credited: false };
+
+function resolveLawnAftercare(aftercare, weekPlan) {
+  if (weekPlan && weekPlan.visitInPlanWeek === false) return NONE_STATE;
   const verdict = aftercareVerdict(aftercare);
   const customerTask = {
     review: LEGACY_NOTE_CONFIRMATION,
@@ -71,48 +88,39 @@ const VERDICT_PLAN_CONDITION = {
   hold: 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.',
 };
 
-function hasCreditableWaterIn(aftercare) {
-  return resolveLawnAftercare(aftercare).credited;
+// aftercare/weekPlan resolve the SAME visit-scoped verdict everywhere: pass
+// the report's water.weekPlan as the second argument wherever it is
+// available (see the resolveLawnAftercare header comment above).
+function hasCreditableWaterIn(aftercare, weekPlan) {
+  return resolveLawnAftercare(aftercare, weekPlan).credited;
 }
 
 // The task that outranks every other watering instruction (review / hold).
-function wateringRestrictionAction(aftercare) {
-  const state = resolveLawnAftercare(aftercare);
+function wateringRestrictionAction(aftercare, weekPlan) {
+  const state = resolveLawnAftercare(aftercare, weekPlan);
   return state.restricts ? state.customerTask : null;
 }
 
 // Any customer task the aftercare creates, including a credited water-in.
-function aftercareCustomerTask(aftercare) {
-  return resolveLawnAftercare(aftercare).customerTask;
-}
-
-// aftercareCustomerTask, scoped to the visit that actually earned it. A
-// reopened/history-carried report can attach an aftercare object that was
-// never this visit's own — an old credited water-in or an old review/hold
-// confirmation — and week membership is the only signal that distinguishes
-// them (the note itself is still shown in the Aftercare section either way).
-// Same guard as the client's aftercareAppliesToPlanWeek (LawnReportV2.jsx)
-// and wateringPlanCondition below: only an explicit visitInPlanWeek === false
-// withholds it; a plan with no membership marker (legacy payloads) or no
-// plan at all keeps the current-week reading.
-function currentVisitAftercareTask(aftercare, weekPlan) {
-  if (weekPlan && weekPlan.visitInPlanWeek === false) return null;
-  return aftercareCustomerTask(aftercare);
+function aftercareCustomerTask(aftercare, weekPlan) {
+  return resolveLawnAftercare(aftercare, weekPlan).customerTask;
 }
 
 // A visit outside the plan's week cannot qualify that week's plan with its
 // own restriction; the note itself stays on the report. A plan without week
-// membership (older payloads) keeps the current-week reading.
+// membership (older payloads) keeps the current-week reading. Routed through
+// the same scoped verdict as every other helper — a visit outside the plan
+// week resolves 'none', which carries no plan condition either.
 function wateringPlanCondition(aftercare, weekPlan) {
-  if (!weekPlan?.title || weekPlan.visitInPlanWeek === false) return null;
-  return VERDICT_PLAN_CONDITION[aftercareVerdict(aftercare)] || null;
+  if (!weekPlan?.title) return null;
+  return VERDICT_PLAN_CONDITION[resolveLawnAftercare(aftercare, weekPlan).verdict] || null;
 }
 
 // The weekly plan the report actually shows: reduced by a credited water-in
 // only for a visit inside the plan week on a plan that prescribes a run.
 function renderedWeekPlan(aftercare, weekPlan) {
   if (!weekPlan?.title) return null;
-  const reduced = hasCreditableWaterIn(aftercare) && weekPlan.visitInPlanWeek === true
+  const reduced = hasCreditableWaterIn(aftercare, weekPlan) && weekPlan.visitInPlanWeek === true
     && weekPlan.prescribesRun === true && weekPlan.afterTreatment?.title;
   return reduced ? weekPlan.afterTreatment : weekPlan;
 }
@@ -160,7 +168,6 @@ module.exports = {
   hasCreditableWaterIn,
   wateringRestrictionAction,
   aftercareCustomerTask,
-  currentVisitAftercareTask,
   wateringPlanCondition,
   renderedWeekPlan,
   normalizeLawnAftercare,

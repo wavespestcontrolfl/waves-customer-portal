@@ -274,6 +274,30 @@ describe('aftercare verdict fixture table (PR #5033 findings)', () => {
       expect(String(report.snapshot.customerAction || '')).not.toContain(creditedAftercare().watering);
       expect(String(report.smsSummary || '')).not.toContain(creditedAftercare().watering);
     }],
+    // Round 7 (PR #5033 findings on ca8bbecf87): the hero-action fix above
+    // (round 10) only guarded the direct-task promotion. Three more surfaces
+    // still read the unscoped verdict: the water card's own action, the
+    // follow-up card, and the assistant's generic "what's next" answer.
+    ['P2 a past-visit review confirmation is stripped from the water card action', () => render('deficit', { ...RUN_PLAN, visitInPlanWeek: false }), (report) => {
+      const waterCard = report.insights.find((c) => c.category === 'water');
+      expect(waterCard).toBeDefined();
+      expect(waterCard.customerAction).not.toMatch(CONFIRM);
+      expect(report.water.explanation).not.toMatch(CONFIRM);
+    }],
+    ['P2 a past-visit review confirmation is stripped from the follow-up card', () => {
+      const report = render('deficit', { ...RUN_PLAN, visitInPlanWeek: false });
+      return reconcileLawnReport({
+        data: { lawnAssessment: { ...CASES.deficit, recommendations: { nextVisitFocus: 'Recheck the recorded lawn areas next visit.' } } },
+        reportV2: report,
+      }).followUp;
+    }, (followUp) => {
+      expect(followUp).toBeTruthy();
+      expect(followUp.customerAction).not.toMatch(CONFIRM);
+      expect(followUp.customerAction).toMatch(/No action is needed/);
+    }],
+    ['P2 a past-visit review confirmation is stripped from assistant next steps', () => ask('What should I do next?', { weekPlan: { ...RUN_PLAN, visitInPlanWeek: false } }), (answer) => {
+      expect(answer).not.toMatch(CONFIRM);
+    }],
   ])('%s', async (_finding, run, check) => check(await run()));
 });
 

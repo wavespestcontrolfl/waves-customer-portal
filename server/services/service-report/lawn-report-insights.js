@@ -35,8 +35,12 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
   const aftercare = normalizeLawnAftercare(rawAftercare) || {};
-  const waterInRequired = hasCreditableWaterIn(aftercare);
-  const aftercareWaterAction = wateringRestrictionAction(aftercare);
+  // Scoped to the visit's own plan week — a reopened report's water card
+  // must never promote a historical confirmation/restriction as though it
+  // were this visit's task (codex P2 #5033 r7).
+  const weekPlan = water && water.weekPlan;
+  const waterInRequired = hasCreditableWaterIn(aftercare, weekPlan);
+  const aftercareWaterAction = wateringRestrictionAction(aftercare, weekPlan);
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
