@@ -7,7 +7,10 @@
 // 1. TEMPORAL FORMS: what counts as a date, weekday, relative date, arrival
 //    window, or exact clock time. Scans run on word-number-normalized text,
 //    so "eight AM", "nine in the morning", "half past eight", and
-//    "September third" are judged exactly like their digit forms.
+//    "September third" are judged exactly like their digit forms. Arrival
+//    windows are read in dash and prose form ("between 8 and 10", "from 8
+//    to 10 AM") and compared by value. A relative duration ("in 7 days",
+//    "within two weeks") is a date only inside a visit claim.
 //
 // 2. VISIT CLAIMS: which ratified care sentences talk about our visit. A
 //    ratified sentence copied verbatim is exempt from the temporal scans only
@@ -42,7 +45,14 @@ const EXACT_TIME_TEXT = [
   String.raw`\b(?:(?:half|quarter)\s+(?:past|after|to|till?)|[1-5]?\d\s+(?:past|after))\s+${HOUR_12}${BARE_HOUR_END}`,
   String.raw`\b(?:at|around|before|after|until|till|til)\s+${HOUR_12}(?:[:.][0-5]\d)?${BARE_HOUR_END}`,
 ].join('|');
-const WINDOW_TEXT_RE = new RegExp(String.raw`(?<![\d:])\d{1,2}(?::\d{2})?\s*(?:${MERIDIEM_TEXT})?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
+// An arrival range, dash or prose: "8–10 AM", "8 AM to 10 AM", "between 8
+// and 10", "from 8 to 10 in the morning". arrivalRanges() decides which
+// matches are times rather than counts ("between 2 and 3 traps").
+const RANGE_POINT = String.raw`${HOUR_12}(?:[:.][0-5]\d)?`;
+const RANGE_TEXT_RE = new RegExp(
+  String.raw`(?<![\d:.])(?:\b(between|from)\s+)?(${RANGE_POINT})(\s*${MERIDIEM_TEXT}(?![a-z\d]))?(\s*[–—-]\s*|\s+(?:and|to|till?|until|through|thru)\s+)(${RANGE_POINT})(${CLOCK_SUFFIX})?`,
+  'gi',
+);
 const CLOCK_TIME_RE = new RegExp(EXACT_TIME_TEXT, 'gi');
 const YEAR_TEXT = String.raw`(?:\s*,?\s*(?:(?:in|of)\s+)?\(?(\d{4}|[’']?\d{2})(?![\d:]|\s*(?:${MERIDIEM_TEXT}|[–—-]))\)?)?`;
 // Month-first ("Monday, Aug. 3rd") and day-first ("the 3rd of September").
@@ -53,6 +63,19 @@ const DATE_TEXT_RE = new RegExp(
 );
 const RELATIVE_APPOINTMENT_DATE_RE = new RegExp(
   `\\b(?:tomorrow|tonight|next\\s+(?:day|week|month)|(?:(?:next|this)\\s+(?:coming\\s+)?|coming\\s+|following\\s+)(?:${WEEKDAY_NAMES})|(?:${WEEKDAY_NAMES})\\s+after\\s+next)\\b`,
+  'gi',
+);
+// A span of time from today: "in 7 days", "within 2 weeks", "in a couple
+// of days", "after 2 or 3 days", "7 days from now", "within the next week".
+// Only a visit claim turns it into an appointment date ("We will be back in
+// 7 days"); in care copy it is an expectation ("results show within 2 weeks").
+// A visit claim's span is grounded only by a span the ratified care copy
+// states itself ("A follow-up visit in 10–14 days is recommended"), never by
+// a numeral another fact happens to ground (7 traps).
+const DURATION_COUNT = String.raw`(?:\d+(?:\s*(?:[–—-]|to|or)\s*\d+)?|an?|(?:a\s+)?(?:couple|few)(?:\s+(?:of|more))?|several|another)`;
+const DURATION_UNIT = String.raw`(?:hours?|days?|weeks?|months?)`;
+const RELATIVE_DURATION_RE = new RegExp(
+  String.raw`\b(?:(?:in|within|after)\s+(?:(?:about|around|roughly|approximately|another|the\s+next|the\s+coming)\s+)?(?:${DURATION_COUNT}\s+)?(?:more\s+)?${DURATION_UNIT}|${DURATION_COUNT}\s+${DURATION_UNIT}\s+(?:from\s+(?:now|today)|later))\b`,
   'gi',
 );
 
@@ -108,9 +131,87 @@ function isVisitClaim(sentence) {
 
 // --- Scans -------------------------------------------------------------------
 
+// One sentence splitter for everything that judges copy sentence by
+// sentence: the visit-claim scope of a duration, the ratified-care list, and
+// the stale-claim filter below.
+function splitSentences(block) {
+  return String(block || '').split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+}
+
 function normalizeWindowText(value) {
   return String(value || '').replace(/\s*([ap])\.?\s?m\.?(?![a-z])/gi, ' $1M')
     .replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
+}
+
+function dayPeriod(text) {
+  const value = String(text || '').toLowerCase();
+  if (/morning/.test(value)) return 'AM';
+  if (/afternoon|evening|night/.test(value)) return 'PM';
+  const meridiem = /([ap])\.?\s?m/.exec(value);
+  return meridiem ? `${meridiem[1].toUpperCase()}M` : null;
+}
+
+function durationSpans(text) {
+  return [...String(text).matchAll(new RegExp(RELATIVE_DURATION_RE.source, 'gi'))].map((match) => {
+    const raw = match[0].toLowerCase().replace(/\s+/g, ' ');
+    return {
+      raw,
+      unit: /(hour|day|week|month)s?\b/.exec(raw)[1],
+      numbers: raw.match(/\d+/g) || [],
+      words: raw.replace(/^(?:in|within|after) /, ''),
+    };
+  });
+}
+
+// Same unit, and either numerals the ratified span carries ("in 14 days"
+// inside "in 10–14 days") or, with no numeral, the same words ("in a couple
+// of days").
+function ratifiedSpan(span, ratifiedSpans) {
+  return ratifiedSpans.some((ratified) => ratified.unit === span.unit && (span.numbers.length
+    ? span.numbers.every((number) => ratified.numbers.includes(number))
+    : ratified.words === span.words));
+}
+
+function rangePoint(text) {
+  const [hour, minute = '0'] = text.split(/[:.]/);
+  return { hour: Number(hour), minute: Number(minute) };
+}
+
+// The arrival ranges in the text, as values. A range is a time range when
+// either end carries a meridiem or part of the day ("8 to 10 AM", "eight to
+// ten in the morning"), or when "between"/"from" opens it and the clause ends
+// or a timing word follows ("arriving between 7 and 8.", "from 8 to 10 on
+// Monday"). "between 2 and 3 traps" and "2 to 3 weeks" are not.
+function arrivalRanges(text) {
+  const ranges = [];
+  for (const match of String(text).matchAll(new RegExp(RANGE_TEXT_RE.source, 'gi'))) {
+    const [raw, opener = '', start, startMeridiem, separator, end, suffix] = match;
+    if (separator.trim().toLowerCase() === 'and' && opener.toLowerCase() !== 'between') continue;
+    if (!startMeridiem && !suffix) {
+      const rest = String(text).slice(match.index + raw.length);
+      if (!opener || !new RegExp(`^${BARE_HOUR_END}`, 'i').test(rest)) continue;
+    }
+    const endPeriod = dayPeriod(suffix);
+    ranges.push({
+      raw,
+      index: match.index,
+      start: rangePoint(start),
+      end: rangePoint(end),
+      startPeriod: dayPeriod(startMeridiem) || endPeriod,
+      endPeriod,
+    });
+  }
+  return ranges;
+}
+
+// Same hours and minutes as the authoritative window; a stated half of the
+// day must match it too ("between 8 and 10" names the 8–10 AM window).
+function sameRange(range, expected) {
+  return Boolean(expected)
+    && range.start.hour === expected.start.hour && range.start.minute === expected.start.minute
+    && range.end.hour === expected.end.hour && range.end.minute === expected.end.minute
+    && (!range.startPeriod || range.startPeriod === expected.startPeriod)
+    && (!range.endPeriod || range.endPeriod === expected.endPeriod);
 }
 
 // Every arrival window must be the authoritative window, and no exact clock
@@ -118,17 +219,31 @@ function normalizeWindowText(value) {
 // including either endpoint of the window.
 function clockWindowProblems(text, facts) {
   const problems = [];
-  const expectedWindow = normalizeWindowText(facts?.nextVisit?.window);
-  for (const match of String(text).matchAll(new RegExp(WINDOW_TEXT_RE.source, 'gi'))) {
-    if (normalizeWindowText(match[0]) !== expectedWindow) {
-      problems.push(`ungrounded_window:${normalizeWindowText(match[0])}`);
-    }
+  const [expected = null] = arrivalRanges(facts?.nextVisit?.window || '');
+  let withoutRanges = String(text);
+  for (const range of arrivalRanges(text).reverse()) {
+    if (!sameRange(range, expected)) problems.unshift(`ungrounded_window:${normalizeWindowText(range.raw)}`);
+    withoutRanges = `${withoutRanges.slice(0, range.index)} ${withoutRanges.slice(range.index + range.raw.length)}`;
   }
-  const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
   for (const match of withoutRanges.matchAll(new RegExp(CLOCK_TIME_RE.source, 'gi'))) {
     problems.push(`ungrounded_time:${normalizeWindowText(match[0])}`);
   }
   return problems;
+}
+
+// A relative date is never the authoritative visit; a span is one only inside
+// a visit claim, and only when the ratified care does not state it.
+function relativeDateProblems(text, groundedCare) {
+  const relativeDates = [...text.matchAll(new RegExp(RELATIVE_APPOINTMENT_DATE_RE.source, 'gi'))]
+    .map((match) => match[0]);
+  const ratifiedSpans = groundedCare.flatMap((sentence) => durationSpans(normalizeTemporalText(sentence)));
+  for (const sentence of splitSentences(text)) {
+    if (!isVisitClaim(sentence)) continue;
+    relativeDates.push(...durationSpans(sentence)
+      .filter((span) => !ratifiedSpan(span, ratifiedSpans))
+      .map((span) => span.raw));
+  }
+  return relativeDates.map((relative) => `ungrounded_relative_date:${relative.toLowerCase().replace(/\s+/g, ' ')}`);
 }
 
 // Every window, month-day, weekday, relative date, and exact clock time must
@@ -168,10 +283,25 @@ function nextVisitProblems(text, facts, options = {}) {
       problems.push(`ungrounded_weekday:${match[1]}`);
     }
   }
-  for (const match of validationText.matchAll(new RegExp(RELATIVE_APPOINTMENT_DATE_RE.source, 'gi'))) {
-    problems.push(`ungrounded_relative_date:${match[0].toLowerCase().replace(/\s+/g, ' ')}`);
-  }
+  problems.push(...relativeDateProblems(validationText, options.groundedCareExemptions || []));
   return problems;
 }
 
-module.exports = { nextVisitProblems, isVisitClaim };
+// Ratified copy (Today's Result, next step, recap) that promises a visit at
+// a time the authoritative next visit contradicts is stale. It is removed
+// sentence by sentence before the copy reaches any consumer (the prompt, the
+// deterministic fallback, the mandatory-care append, the care exemptions), so
+// no path can publish it beside the dated visit. A sentence grounds its own
+// recommended span, as it would in the model's copy. With no authoritative
+// visit there is nothing to contradict and the copy is kept as written.
+function withoutStaleVisitClaims(block, nextVisit) {
+  if (!nextVisit) return block;
+  return splitSentences(block)
+    .filter((sentence) => !isVisitClaim(sentence)
+      || !nextVisitProblems(sentence, { nextVisit }, { groundedCareExemptions: [sentence] }).length)
+    .join(' ');
+}
+
+module.exports = {
+  nextVisitProblems, isVisitClaim, splitSentences, withoutStaleVisitClaims,
+};

@@ -23,7 +23,7 @@ const {
   _cache,
 } = _test;
 
-const { nextVisitProblems, isVisitClaim } = require('../services/service-report/next-visit-claims');
+const { nextVisitProblems, isVisitClaim, withoutStaleVisitClaims } = require('../services/service-report/next-visit-claims');
 
 const RECAP = 'Today we completed your Rodent Trapping Service. We treated the accessible service areas. - Waves';
 
@@ -537,6 +537,32 @@ describe('next-visit claims fixture table', () => {
     ['Your next visit is Monday after next.', ['ungrounded_relative_date:monday after next']],
     ['Your next visit is tomorrow.', ['ungrounded_relative_date:tomorrow']],
     ['We will be back Tuesday.', ['ungrounded_weekday:Tuesday']],
+    // relative durations used as the visit date (codex P1 on #5055, L56):
+    // only a visit claim makes a span of time an appointment date
+    ['Your next visit is in 7 days.', ['ungrounded_relative_date:in 7 days']],
+    ['We will be back in seven days.', ['ungrounded_relative_date:in 7 days']],
+    ['Our technician returns within two weeks.', ['ungrounded_relative_date:within 2 weeks']],
+    ['We will be back in a couple of days.', ['ungrounded_relative_date:in a couple of days']],
+    ['Your follow-up is 10 days from now.', ['ungrounded_relative_date:10 days from now']],
+    ['A follow-up visit in 10–14 days is recommended.', ['ungrounded_relative_date:in 10–14 days']],
+    ['Results should appear within two weeks.', []],
+    ['Results should appear within two weeks. We will be back in 7 days.', ['ungrounded_relative_date:in 7 days']],
+    // prose arrival ranges are windows, compared by value (codex P1 on
+    // #5055, L46); counts written as ranges are not
+    ['Your next visit is Monday, August 3, arriving between 7 and 8.', ['ungrounded_window:BETWEEN 7 AND 8']],
+    ['Your next visit is Monday, August 3, arriving from 7 to 8.', ['ungrounded_window:FROM 7 TO 8']],
+    ['We will arrive between 7 and 8 on Monday, August 3.', ['ungrounded_window:BETWEEN 7 AND 8']],
+    ['Your next visit is Monday, August 3, arriving 9 to 11 AM.', ['ungrounded_window:9 TO 11 AM']],
+    ['Your next visit is Monday, August 3, arriving eight to ten in the evening.', ['ungrounded_window:8 TO 10 IN THE EVENING']],
+    ['Your next visit is Monday, August 3, arriving 8–10 PM.', ['ungrounded_window:8–10 PM']],
+    ['Your next visit is Monday, August 3, arriving between eight and ten.', []],
+    ['Your next visit is Monday, August 3, arriving between 8 and 10 AM.', []],
+    ['Your next visit is Monday, August 3, arriving 8 to 10 in the morning.', []],
+    ['Your next visit is Monday, August 3, arriving 8 AM to 10 AM.', []],
+    ['Your next visit is Monday, August 3, arriving from 8:00 until 10:00 a.m.', []],
+    ['We arrive Monday, August 3 between 8 and 10 AM, specifically at 9 AM.', ['ungrounded_time:9 AM']],
+    ['Captures were recorded at between 2 and 3 traps.', []],
+    ['Activity dropped from 3 to 2 stations.', []],
   ])('%s', (text, expected) => {
     expect(problemsFor(text)).toEqual(expected);
   });
@@ -583,11 +609,84 @@ describe('next-visit claims fixture table', () => {
     }
   });
 
+  test('a visit-claim span is grounded only by a span the ratified care states', () => {
+    const care = 'A follow-up visit in 10–14 days is recommended.';
+    expect(problemsFor('A follow-up visit in fourteen days keeps you ahead of new activity.', [care])).toEqual([]);
+    expect(problemsFor('Your next visit is in 7 days.', [care])).toEqual(['ungrounded_relative_date:in 7 days']);
+    expect(problemsFor('We will be back in 14 weeks.', [care])).toEqual(['ungrounded_relative_date:in 14 weeks']);
+  });
+
+  test('ratified copy loses only the visit claims the dated visit contradicts', () => {
+    const block = 'We checked 7 traps today. We will return tomorrow. '
+      + 'A follow-up visit in 10–14 days is recommended. We will arrive between 7 and 8. '
+      + 'Contact us tomorrow if activity returns.';
+    expect(withoutStaleVisitClaims(block, facts.nextVisit)).toBe('We checked 7 traps today. '
+      + 'A follow-up visit in 10–14 days is recommended. Contact us tomorrow if activity returns.');
+    expect(withoutStaleVisitClaims(block, null)).toBe(block);
+  });
+
   test('an exempt care sentence exempts only its verbatim copy', () => {
     const care = 'Contact us at 8 AM if activity returns.';
     expect(problemsFor(`${care} We will arrive at 8 AM.`, [care])).toEqual(['ungrounded_time:8 AM']);
     expect(problemsFor('Contact us at 9 AM if activity returns.', [care])).toEqual(['ungrounded_time:9 AM']);
   });
+});
+
+test('grounded numerals cannot launder a relative visit date or a prose window', () => {
+  // 7 traps grounds the numerals 7 and 8–10 AM grounds 8, so only the
+  // temporal rules can catch these (codex P1 on #5055, L46 + L56).
+  const facts = groundingFacts(input());
+  expect(ungroundedClaims('Your next visit is in 7 days.', facts)).toContain('ungrounded_relative_date:in 7 days');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving between 7 and 8.', facts))
+    .toContain('ungrounded_window:BETWEEN 7 AND 8');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving from 7 to 8.', facts))
+    .toContain('ungrounded_window:FROM 7 TO 8');
+});
+
+test('stale appointment copy in the ratified result never reaches the published summary', async () => {
+  // Frozen Today's Result copy that contradicts the dated next visit (codex
+  // P1 on #5055, L1350). Before the fix the stale sentence was published
+  // either way: the fallback copied the body verbatim, and the care append
+  // re-added it after the model's copy had passed the guard.
+  const stale = 'We will return tomorrow.';
+  const staleStep = 'We will be back Tuesday.';
+  const care = 'Contact us tomorrow if activity returns.';
+  const args = input();
+  args.typedReport = {
+    ...args.typedReport,
+    todaysResult: {
+      ...args.typedReport.todaysResult,
+      body: `We checked 7 traps today. ${stale} ${care}`,
+      nextStep: staleStep,
+    },
+  };
+  const facts = groundingFacts(args);
+  expect(facts.todaysResult.body).toBe(`We checked 7 traps today. ${care}`);
+  expect(facts.todaysResult.nextStep).toBeNull();
+  const clean = 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. '
+    + 'We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. '
+    + 'Your next visit is Monday, August 3, arriving 8–10 AM.';
+  // the model omits the stale sentence: the care append adds only live care
+  const omitted = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: clean } }),
+  });
+  expect(omitted).toContain(clean);
+  expect(omitted).toContain(care);
+  expect(omitted).not.toContain(stale);
+  expect(omitted).not.toContain(staleStep);
+  // the model repeats it: rejected, and the fallback no longer copies it
+  _cache.clear();
+  const repeated = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: `${clean} ${stale}` } }),
+  });
+  expect(repeated).toContain('Your next visit is scheduled for Monday, August 3, arriving 8–10 AM.');
+  expect(repeated).toContain(care);
+  expect(repeated).not.toContain(stale);
+  expect(repeated).not.toContain(staleStep);
+  // with no dated visit there is nothing to contradict: the copy stays
+  const undated = groundingFacts({ ...args, nextAppointment: null });
+  expect(undated.todaysResult.body).toBe(`We checked 7 traps today. ${stale} ${care}`);
+  expect(undated.todaysResult.nextStep).toBe(staleStep);
 });
 
 test('banned copy, bad length, and withheld-name echoes fall back deterministically', async () => {

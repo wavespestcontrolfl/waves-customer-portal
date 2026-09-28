@@ -41,7 +41,7 @@ const {
   normalizeWordNumbers,
 } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
-const { nextVisitProblems } = require('./next-visit-claims');
+const { nextVisitProblems, splitSentences, withoutStaleVisitClaims } = require('./next-visit-claims');
 const {
   EXTRA_FORBIDDEN,
   formatNextVisitDate,
@@ -227,8 +227,15 @@ function groundingFacts({
       window: formatArrivalWindow(nextAppointment.windowStart),
     }
     : null;
+  const groundedVisit = nextVisit && nextVisit.date ? nextVisit : null;
+  // Ratified copy enters the facts without appointment sentences the
+  // authoritative next visit contradicts ("We will return tomorrow" beside a
+  // dated visit). Every consumer reads these facts — the prompt, the
+  // deterministic fallback, and the mandatory-care append after validation —
+  // so no path can publish the stale sentence (codex P1 on #5055).
+  const ratified = (value) => cleanText(withoutStaleVisitClaims(cleanText(value), groundedVisit));
   return {
-    recap: cleanText(recap),
+    recap: ratified(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
     reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
     // The trap-SETUP visit — the traps went out today and nothing has been
@@ -254,9 +261,9 @@ function groundingFacts({
       : null),
     todaysResult: typedReport?.todaysResult
       ? {
-        headline: cleanText(typedReport.todaysResult.headline) || null,
-        body: cleanText(typedReport.todaysResult.body) || null,
-        nextStep: cleanText(typedReport.todaysResult.nextStep) || null,
+        headline: ratified(typedReport.todaysResult.headline) || null,
+        body: ratified(typedReport.todaysResult.body) || null,
+        nextStep: ratified(typedReport.todaysResult.nextStep) || null,
       }
       : null,
     findings: findingFacts(typedReport),
@@ -267,7 +274,7 @@ function groundingFacts({
     // The tech-reviewed consolidated photo analysis, when present — richer
     // grounding than the per-photo captions alone.
     photoSummary: cleanText(typedReport?.photoSummary).slice(0, 400) || null,
-    nextVisit: nextVisit && nextVisit.date ? nextVisit : null,
+    nextVisit: groundedVisit,
   };
 }
 
@@ -1411,11 +1418,10 @@ const CARE_SENTENCE_RE = /\b(please|keep|avoid|do not|don't|wash|vacuum|stay off
 
 function mandatoryCareCopy(todaysResult) {
   const sentences = [];
-  const split = (block) => String(block || '').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
-  split(todaysResult?.body).forEach((sentence) => {
+  splitSentences(todaysResult?.body).forEach((sentence) => {
     if (CARE_SENTENCE_RE.test(sentence)) sentences.push(sentence);
   });
-  sentences.push(...split(todaysResult?.nextStep));
+  sentences.push(...splitSentences(todaysResult?.nextStep));
   return [...new Set(sentences)];
 }
 
