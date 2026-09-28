@@ -587,3 +587,58 @@ describe('billVisit — canonical payer, visit status, card hold (GH Codex r2)',
     expect(InvoiceService.createFromService).not.toHaveBeenCalled();
   });
 });
+
+describe('previewBillVisit / expectedTotal (exact total on the IB card)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+    customerOnAutopay.mockResolvedValue(false);
+  });
+
+  function installNested(dispositionQB) {
+    // Outer preview transaction → billVisit's own (nested) transaction.
+    db.transaction = jest.fn(async (cb) => {
+      const trx = (arg) => {
+        if (arg === 'invoices') return makeQB({ first: null });
+        if (arg === 'visit_billing_dispositions') return dispositionQB;
+        return db(arg);
+      };
+      trx.raw = jest.fn((sql) => (typeof sql === 'string' ? sql : Promise.resolve()));
+      trx.schema = db.schema;
+      trx.transaction = (inner) => inner(trx);
+      return cb(trx);
+    });
+  }
+
+  test('previewBillVisit runs the real mint and always rolls it back, reporting the exact total', async () => {
+    const { previewBillVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: { ...BILLABLE_VISIT, ss_status: 'completed' } }) : makeQB({ first: null })));
+    const dispositionQB = makeQB({ first: null });
+    installNested(dispositionQB);
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-p', total: '138.03', subtotal: '129.00', discount_amount: '0', tax_amount: '9.03' });
+    let rolledBack = false;
+    const outer = db.transaction;
+    db.transaction = jest.fn(async (cb) => {
+      try { return await outer(cb); } catch (err) { rolledBack = true; throw err; }
+    });
+    const preview = await previewBillVisit('ss-1', { expectedPrice: 129 });
+    expect(preview).toEqual({ ok: true, total: 138.03, subtotal: 129, discountAmount: 0, taxAmount: 9.03, dueDate: '2026-04-14' });
+    expect(rolledBack).toBe(true); // the outer transaction threw its rollback sentinel
+    expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ database: expect.anything() }));
+  });
+
+  test('billVisit refuses (and rolls back) when the minted total differs from the approved total', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? makeQB({ first: BILLABLE_VISIT }) : makeQB({ first: null })));
+    const dispositionQB = makeQB({ first: null });
+    installTransaction((arg) => {
+      if (arg === 'invoices') return makeQB({ first: null });
+      if (arg === 'visit_billing_dispositions') return dispositionQB;
+      throw new Error('fall through');
+    });
+    InvoiceService.createFromService.mockResolvedValue({ id: 'inv-x', total: '140.00' });
+    const result = await billVisit('ss-1', { expectedPrice: 129, expectedTotal: 138.03 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/\$138\.03 → \$140\.00/) }));
+    expect(dispositionQB.insert).not.toHaveBeenCalled();
+  });
+});

@@ -11,14 +11,20 @@ jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn().
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
 jest.mock('../services/billing-recovery-bill', () => ({
   assessVisitBillable: jest.fn(), billVisit: jest.fn(),
+  previewBillVisit: jest.fn(async () => ({ ok: true, total: 138.03, subtotal: 129, discountAmount: 0, taxAmount: 9.03, dueDate: '2026-09-14' })),
   pendingDepositForVisit: jest.fn().mockResolvedValue(0), liveCardHoldForVisit: jest.fn().mockResolvedValue(null),
 }));
+// The Send action's own recipient resolver and send.
+jest.mock('../services/invoice-email', () => ({ invoiceRecipientFor: jest.fn(() => ({ recipient: { email: 'Pat@Example.com' } })) }));
+jest.mock('../services/invoice', () => ({ sendViaSMSAndEmail: jest.fn() }));
 
 const db = require('../models/db');
 const { getCloseoutStatus } = require('../services/closeout-status');
 const { ensureReportToken } = require('../services/service-report/pdf-queue');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const BillingRecoveryBill = require('../services/billing-recovery-bill');
+const InvoiceService = require('../services/invoice');
+const { invoiceRecipientFor } = require('../services/invoice-email');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
 const gates = require('../services/intelligence-bar/write-gates');
 const { executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -337,23 +343,41 @@ test('a recipient swapped behind the same mask changes the plan: fingerprint and
 describe('bill_visit — the Billing Recovery "Bill" action as a repair step', () => {
   const UNBILLED = { invoice: { state: 'pending', reason: 'expected_invoice_not_minted', expectation: 'invoice', amount: 129 } };
 
-  test('plans a draft invoice at the Bill amount; the card says draft, not sent, before tax', async () => {
+  test('plans the invoice at its exact total (the rolled-back real mint) and the Send action to the resolved contacts', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
     db.mockImplementation(fakeDb({ service_records: [RECORD] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {}, dueDate: '2026-09-14' });
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     // Pinned to closeout-status's canonical completion record (GH Codex P2).
     expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.objectContaining({ serviceRecordId: 'rec-1', requireCompletedVisit: true }));
-    expect(preview.steps[0]).toEqual(expect.objectContaining({ due_date: '2026-09-14', service_record_id: 'rec-1' }));
-    expect(preview.steps).toEqual([expect.objectContaining({ step: 'bill_visit', scheduled_service_id: SVC, amount: 129, kind: 'billing' })]);
-    expect(preview.notifies_customer).toBe(false);
+    expect(BillingRecoveryBill.previewBillVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({
+      serviceRecordId: 'rec-1', requireCompletedVisit: true, refuseDepositCredit: true, refuseLiveCardHold: true,
+    }));
+    expect(preview.steps).toEqual([
+      expect.objectContaining({ step: 'bill_visit', scheduled_service_id: SVC, service_record_id: 'rec-1', amount: 129, total: 138.03, tax: 9.03, due_date: '2026-09-14', kind: 'billing' }),
+      expect.objectContaining({ step: 'send_invoice', fact: 'invoiceDelivery', depends_on: 'bill_visit', recipients: ['p***@example.com'], text_to: '***0100', kind: 'comms' }),
+    ]);
+    expect(invoiceRecipientFor).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), expect.anything(), null);
+    expect(JSON.stringify(preview)).not.toMatch(/pat@example\.com|9415550100/i);
+    expect(preview.notifies_customer).toBe(true);
     expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
     const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
-    expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'billing', label: expect.stringMatching(/DRAFT invoice.*not sent, not charged.*visit price \$129\.00/) })]));
-    expect(contract.notifies_customer).toBe(false);
-    expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/visit price \$129\.00, due 2026-09-14 .*total is set at creation/);
-    // The 'billed' disposition cannot be removed from the portal (GH Codex P2).
+    const labels = contract.effects.map((e) => e.label).join('\n');
+    expect(labels).toMatch(/Create the invoice .*nothing is charged: \$138\.03 total \(\$129\.00 services, \$9\.03 tax\), due 2026-09-14/);
+    expect(labels).toMatch(/Send the invoice to the customer .*: email to p\*\*\*@example\.com and text the pay link to \*\*\*0100 — this also starts the usual unpaid-invoice reminders/);
+    expect(contract.notifies_customer).toBe(true);
     expect(contract.irreversible).toBe(true);
+  });
+
+  test('no invoice contact on file: the invoice is still planned, the send is listed manual', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], customers: [{ ...CUSTOMER, phone: null }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    invoiceRecipientFor.mockReturnValueOnce({ recipient: null });
+    const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(preview.steps.map((st) => st.step)).toEqual(['bill_visit']);
+    expect(preview.manual).toEqual(expect.arrayContaining([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/no invoice email or phone on file/) })]));
   });
 
   test('a visit with an open card hold stays manual (completion owns the hold rail)', async () => {
@@ -393,26 +417,60 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     expect(BillingRecoveryBill.assessVisitBillable).not.toHaveBeenCalled();
   });
 
-  test('confirmed: bills through billVisit with the confirming operator as actor; an amount change refuses', async () => {
+  test('confirmed: bills at the approved total, then sends that invoice as a first delivery; a total change refuses', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
-    db.mockImplementation(fakeDb({ service_records: [RECORD] }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
     BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
     const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03', status: 'draft' } });
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', invoice_number: 'WPC-2026-0042', total: '138.03', status: 'draft' } });
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValue({ ok: true, email: { ok: true }, sms: { ok: true } });
     const run = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
       confirmed: true, technicianId: 'tech-admin', executionPins: { _verified_repair_steps: approved },
     });
     expect(run.success).toBe(true);
-    expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
-    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true, serviceRecordId: 'rec-1', requireCompletedVisit: true, refuseLiveCardHold: true }));
+    expect(run.receipt).toEqual([
+      expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9', invoice_number: 'WPC-2026-0042' }),
+      expect.objectContaining({ step: 'send_invoice', status: 'completed', detail: 'invoice sent (emailed, texted)', invoice_id: 'inv-9' }),
+    ]);
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({
+      actorId: 'tech-admin', expectedPrice: 129, expectedTotal: 138.03, refuseDepositCredit: true,
+      serviceRecordId: 'rec-1', requireCompletedVisit: true, refuseLiveCardHold: true,
+    }));
+    expect(InvoiceService.sendViaSMSAndEmail).toHaveBeenCalledWith('inv-9', { firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: 'tech-admin' });
 
-    // Repriced after the card: the executor's plan no longer matches.
+    // A failed mint leaves the send not attempted.
+    InvoiceService.sendViaSMSAndEmail.mockClear();
+    BillingRecoveryBill.billVisit.mockResolvedValueOnce({ ok: false, status: 409, error: 'The invoice total changed since it was approved ($138.03 → $140.00).' });
+    const failed = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
+      confirmed: true, technicianId: 'tech-admin', executionPins: { _verified_repair_steps: approved },
+    });
+    expect(failed.receipt.map((r) => [r.step, r.status])).toEqual([['bill_visit', 'failed'], ['send_invoice', 'not_attempted']]);
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+
+    // A different previewed total after the card: the executor's plan no longer matches.
     BillingRecoveryBill.billVisit.mockClear();
-    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 149, rowPrice: 149, visit: {} });
+    BillingRecoveryBill.previewBillVisit.mockResolvedValueOnce({ ok: true, total: 140, subtotal: 129, discountAmount: 0, taxAmount: 11, dueDate: '2026-09-14' });
     const drift = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, {
       confirmed: true, technicianId: 'tech-admin', executionPins: { _verified_repair_steps: approved },
     });
     expect(drift.preview_changed).toBe(true);
     expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
+  });
+
+  test('send: an invoice already delivered by another path is a completed no-op; a refused send is a failed step (partial run)', async () => {
+    getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
+    db.mockImplementation(fakeDb({ service_records: [RECORD], visit_billing_dispositions: [{ invoice_id: 'inv-9' }] }));
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    const { steps: approved } = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    BillingRecoveryBill.billVisit.mockResolvedValue({ ok: true, price: 129, invoice: { id: 'inv-9', total: '138.03' } });
+    InvoiceService.sendViaSMSAndEmail.mockRejectedValueOnce(Object.assign(new Error('already delivered'), { code: 'already_delivered' }));
+    const noop = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(noop.success).toBe(true);
+    expect(noop.receipt[1]).toEqual(expect.objectContaining({ step: 'send_invoice', status: 'completed', detail: 'the invoice was already delivered — nothing re-sent' }));
+
+    InvoiceService.sendViaSMSAndEmail.mockResolvedValueOnce({ ok: false, error: 'No invoice recipient email', sms: { ok: false }, email: { ok: false } });
+    const partial = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC }, { confirmed: true, executionPins: { _verified_repair_steps: approved } });
+    expect(partial.partial).toBe(true);
+    expect(partial.receipt[1]).toEqual(expect.objectContaining({ status: 'failed', detail: 'No invoice recipient email' }));
   });
 });

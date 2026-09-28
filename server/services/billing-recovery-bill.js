@@ -239,14 +239,17 @@ async function pendingDepositForVisit(scheduledServiceId, database = db) {
 // requireCompletedVisit / refuseLiveCardHold: the IB repair's approval
 // covers neither a contradicted visit nor an open card hold — both are
 // re-checked under the lock.
+// expectedTotal: the exact invoice total an approval showed (from
+// previewBillVisit) — the minted invoice must carry the same total or the
+// whole mint rolls back.
 async function billVisit(scheduledServiceId, {
-  actorId = null, expectedPrice = null, refuseDepositCredit = false, serviceRecordId = null,
+  actorId = null, expectedPrice = null, expectedTotal = null, refuseDepositCredit = false, serviceRecordId = null,
   requireCompletedVisit = false, refuseLiveCardHold = false, database = db,
 } = {}) {
   try {
     // Serialize concurrent bills on the same visit, assess inside the lock,
     // then create the invoice + disposition. Prevents duplicate draft invoices.
-    const { invoice, price } = await database.transaction(async (trx) => {
+    const { invoice, price, dueDate } = await database.transaction(async (trx) => {
       await acquireScheduledInvoiceMintLock(trx, scheduledServiceId);
       const assessed = await assessVisitBillable(scheduledServiceId, { serviceRecordId, requireCompletedVisit, database: trx });
       if (!assessed.ok) {
@@ -314,6 +317,12 @@ async function billVisit(scheduledServiceId, {
         refuseDepositCredit,
       });
 
+      if (expectedTotal !== null && cents(created.total) !== cents(expectedTotal)) {
+        const e = new Error(`The invoice total changed since it was approved ($${Number(expectedTotal).toFixed(2)} → $${Number(created.total).toFixed(2)}).`);
+        e.status = 409;
+        throw e;
+      }
+
       await trx('visit_billing_dispositions').insert({
         scheduled_service_id: scheduledServiceId,
         service_record_id: visit.service_record_id,
@@ -322,9 +331,9 @@ async function billVisit(scheduledServiceId, {
         actor_user_id: actorId,
       });
 
-      return { invoice: created, price };
+      return { invoice: created, price, dueDate: dueDateFromVisit(visit) || null };
     });
-    return { ok: true, invoice, price };
+    return { ok: true, invoice, price, dueDate };
   } catch (err) {
     if (err && err.refusal) return err.refusal;
     if (err && err.status === 409) return refuse(409, err.message);
@@ -333,4 +342,38 @@ async function billVisit(scheduledServiceId, {
   }
 }
 
-module.exports = { assessVisitBillable, billVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit };
+const PREVIEW_ROLLBACK = Symbol('bill-visit-preview');
+
+// The exact invoice the Bill action would create, without keeping it: the
+// REAL billVisit (same locks, replayed line items, discounts, tax, retention
+// reservation) runs inside an outer transaction that is always rolled back.
+// Every write on this path is on the transaction (invoice, disposition, the
+// discount audit savepoint, the retention-slot reservation — built to revert
+// with a rolled-back mint), and invoice numbers are read from the table, not
+// a sequence, so nothing survives. Same options as billVisit.
+async function previewBillVisit(scheduledServiceId, options = {}) {
+  let result = null;
+  try {
+    await db.transaction(async (trx) => {
+      result = await billVisit(scheduledServiceId, { ...options, database: trx });
+      throw PREVIEW_ROLLBACK;
+    });
+  } catch (err) {
+    if (err !== PREVIEW_ROLLBACK) throw err;
+  }
+  if (!result?.ok) return result || refuse(500, 'Invoice preview failed');
+  const inv = result.invoice;
+  const money = (v) => Number(Number(v || 0).toFixed(2));
+  return {
+    ok: true,
+    total: money(inv.total),
+    subtotal: money(inv.subtotal),
+    discountAmount: money(inv.discount_amount),
+    taxAmount: money(inv.tax_amount),
+    // The service-date due date the mint was given (dueDateFromVisit) — not
+    // re-read off the row, where a DATE column may come back as a JS Date.
+    dueDate: result.dueDate,
+  };
+}
+
+module.exports = { assessVisitBillable, billVisit, previewBillVisit, pendingDepositForVisit, liveCardHoldForVisit, dueDateFromVisit };

@@ -21,9 +21,12 @@
  *   queue_report_email  enqueueServiceReportV1EmailDelivery — the delivery
  *                       worker emails the customer (one row per record)
  *   bill_visit          billing-recovery-bill billVisit — the Billing
- *                       Recovery "Bill" action: a DRAFT invoice + 'billed'
- *                       disposition under the scheduled mint lock (never
- *                       sent, never charged)
+ *                       Recovery "Bill" action (invoice + 'billed'
+ *                       disposition under the scheduled mint lock); the card
+ *                       shows the exact total from previewBillVisit (the
+ *                       same mint, rolled back) and the run must match it
+ *   send_invoice        InvoiceService.sendViaSMSAndEmail — the Invoices
+ *                       page "Send" action, first delivery only; never charges
  * Everything else stays manual. Paid receipts too: the receipt worker routes
  * per invoice (payer AP inbox, billing-email authority, channel settings), so
  * a card here could not name the real recipients without a second copy of
@@ -45,6 +48,9 @@ const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const BillingRecoveryBill = require('../billing-recovery-bill');
+// Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when an
+// invoice send is planned, never at IB boot.
+const invoiceEmail = () => require('../invoice-email');
 const {
   getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
@@ -53,7 +59,7 @@ const CLOSEOUT_REPAIR_TOOLS = [
   {
     name: 'repair_closeout',
     description: `Finish the closeout gaps the server can safely repair for ONE completed visit (scheduled_services id). The first call returns a PLAN and changes nothing: the repair steps it would run and the open items it will NOT touch (with where to fix them). The operator approves the exact plan on the confirmation card; the confirmed run executes only those steps and returns an itemized receipt (completed / failed / not attempted).
-Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and bill a completed self-pay visit that was never invoiced (a DRAFT invoice through the Billing Recovery "Bill" checks — never sent or charged).
+Repairable today: publish a missing service report link, queue a service-report email that was never queued (the customer gets an email), and bill a completed self-pay visit that was never invoiced (the Billing Recovery "Bill" checks; the card shows the exact invoice total) and send that invoice to the customer by email/text exactly as the Invoices "Send" button does — nothing is charged.
 Never repaired here: application log, photos, technician license (field evidence — never generated), payer-billed / autopay / prepaid billing, invoice and receipt sends, follow-up booking, completion texts, and exhausted/failed deliveries.
 Use for: "fix the closeout for this visit", "finish what's missing on the job we just completed". Call get_closeout_status first when the operator only wants to know what is missing.`,
     input_schema: {
@@ -83,7 +89,8 @@ const MANUAL_REMEDY = {
 const STEP_EFFECTS = {
   publish_report: { kind: 'operational', label: 'Publish the service report link (internal — no message is sent by this step)' },
   queue_report_email: { kind: 'comms', label: 'Queue the service-report email — the delivery worker emails the customer the report on file' },
-  bill_visit: { kind: 'billing', label: 'Create a DRAFT invoice (the Billing Recovery "Bill" action) — not sent, not charged' },
+  bill_visit: { kind: 'billing', label: 'Create the invoice (the Billing Recovery "Bill" action) — nothing is charged' },
+  send_invoice: { kind: 'comms', label: 'Send the invoice to the customer (the Invoices "Send" action)' },
 };
 
 // Invoice reason meaning "a customer self-pay invoice was expected and never
@@ -140,6 +147,11 @@ async function reportEmailBlocker(status, recordRow, knex) {
   if (existing) return 'a report email row already exists';
   if (!(await reportEmailFlagEnabled(status.visit?.technicianId))) return 'report email delivery is switched off';
   return null;
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `***${digits.slice(-4)}` : null;
 }
 
 function maskEmail(address) {
@@ -234,15 +246,51 @@ async function planInvoiceStep(status, knex) {
   if (deposit > 0) {
     return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply — bill it from Billing Recovery` } };
   }
+  // The exact invoice: the real Bill action run in a rolled-back transaction.
+  const preview = await BillingRecoveryBill.previewBillVisit(status.serviceId, {
+    serviceRecordId, requireCompletedVisit: true, refuseDepositCredit: true, refuseLiveCardHold: true,
+  });
+  if (!preview.ok) return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: String(preview.error).replace(/\.$/, '') } };
+  const bill = {
+    step: 'bill_visit',
+    fact: 'invoice',
+    reason: invoiceFact.reason,
+    scheduled_service_id: status.serviceId,
+    service_record_id: serviceRecordId,
+    amount: Number(assessed.price.toFixed(2)),
+    total: preview.total,
+    subtotal: preview.subtotal,
+    discount: preview.discountAmount,
+    tax: preview.taxAmount,
+    due_date: preview.dueDate || assessed.dueDate || null,
+  };
+  const send = await planInvoiceSend(status, knex);
+  return send.step ? { steps: [bill, send.step] } : { steps: [bill], skip: send.skip };
+}
+
+// Who the Send action reaches — its own resolver (invoiceRecipientFor over
+// the customer's billing contact) for the email, and the phone on file for
+// the pay-link text (the messaging pipeline's consent rules apply at send).
+async function planInvoiceSend(status, knex) {
+  const why = (text) => ({ skip: { fact: 'invoiceDelivery', reason: 'no_invoice_yet', why: text } });
+  const { customer, prefs } = await loadContact(status.visit?.customerId || null, knex);
+  if (!customer) return why('the customer record could not be read — send the invoice from the Invoices page');
+  if (prefs === PREFS_UNAVAILABLE) return why("the customer's billing settings could not be read — send the invoice from the Invoices page");
+  const { recipient } = invoiceEmail().invoiceRecipientFor(customer, prefs, null);
+  const email = recipient?.email ? String(recipient.email).trim().toLowerCase() : null;
+  const phone = customer.phone || null;
+  if (!email && !phone) return why('no invoice email or phone on file — the invoice is created; send it from the Invoices page');
   return {
     step: {
-      step: 'bill_visit',
-      fact: 'invoice',
-      reason: invoiceFact.reason,
+      step: 'send_invoice',
+      fact: 'invoiceDelivery',
+      reason: 'no_invoice_yet',
       scheduled_service_id: status.serviceId,
-      service_record_id: serviceRecordId,
-      amount: Number(assessed.price.toFixed(2)),
-      due_date: assessed.dueDate || null,
+      depends_on: 'bill_visit',
+      recipients: email ? [maskEmail(email)] : [],
+      text_to: maskPhone(phone),
+      // Binds the FULL email + phone (masks can collide).
+      recipients_key: crypto.createHash('sha256').update(JSON.stringify([email, phone])).digest('hex').slice(0, 16),
     },
   };
 }
@@ -282,7 +330,7 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   };
   const report = await planReportSteps({ ...status, facts }, getContact, knex);
   const invoice = await planInvoiceStep({ ...status, facts }, knex);
-  const steps = [...report.steps, ...(invoice.step ? [invoice.step] : [])];
+  const steps = [...report.steps, ...(invoice.steps || [])];
   const skipped = [...report.skipped, ...(invoice.skip ? [invoice.skip] : [])];
   // Who the card is about — resolved by the server, never the model.
   const who = steps.length ? (await getContact()).customer : null;
@@ -317,6 +365,7 @@ const STEP_RUNNERS = {
     const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, {
       actorId: step.actor_id || null,
       expectedPrice: step.amount,
+      expectedTotal: step.total,
       refuseDepositCredit: true,
       serviceRecordId: step.service_record_id || null,
       requireCompletedVisit: true,
@@ -324,9 +373,48 @@ const STEP_RUNNERS = {
       database: knex,
     });
     if (!billed.ok) return { status: 'failed', detail: billed.error };
-    return { status: 'completed', detail: 'draft invoice created (not sent)', invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };
+    return { status: 'completed', detail: 'invoice created', invoice_id: billed.invoice.id, invoice_number: billed.invoice.invoice_number || null, total: billed.invoice.total ?? null };
+  },
+  async send_invoice(step, knex) {
+    // The invoice bill_visit just created for this visit (its 'billed'
+    // disposition row), sent exactly as the Invoices page Send button sends
+    // a first delivery.
+    const disposition = await knex('visit_billing_dispositions')
+      .where({ scheduled_service_id: step.scheduled_service_id, disposition: 'billed' })
+      .first('invoice_id');
+    if (!disposition?.invoice_id) return { status: 'failed', detail: 'the created invoice could not be found' };
+    try {
+      const result = await require('../invoice').sendViaSMSAndEmail(disposition.invoice_id, {
+        firstDeliveryOnly: true, operatorInitiated: true, actorTechnicianId: step.actor_id || null,
+      });
+      return { ...invoiceSendOutcome(result), invoice_id: disposition.invoice_id };
+    } catch (err) {
+      return { ...invoiceSendRefusal(err), invoice_id: disposition.invoice_id };
+    }
   },
 };
+
+// The Send route's own reading of a send result.
+function invoiceSendOutcome(result) {
+  if (!result?.ok) {
+    return { status: 'failed', detail: result?.error || result?.sms?.error || result?.email?.error || 'invoice not sent' };
+  }
+  const legs = [result.email?.ok && 'emailed', result.sms?.ok && 'texted', result.sms?.scheduled && 'text queued for 8 AM'].filter(Boolean);
+  return { status: 'completed', detail: `invoice sent (${legs.join(', ') || 'delivered'})` };
+}
+
+// Same no-op-success codes the Send route treats as delivered for a first
+// delivery; anything else is a failed step.
+const ALREADY_SENT = {
+  already_delivered: 'the invoice was already delivered — nothing re-sent',
+  queued_pay_link: 'the pay-link text was already queued — nothing re-sent',
+  delivery_in_progress: 'another send of this invoice is already in progress',
+};
+
+function invoiceSendRefusal(err) {
+  if (ALREADY_SENT[err?.code]) return { status: 'completed', detail: ALREADY_SENT[err.code] };
+  return { status: 'failed', detail: err?.message || 'invoice send failed' };
+}
 
 async function runStep(step, { knex = db } = {}) {
   const runner = STEP_RUNNERS[step.step];
@@ -358,8 +446,24 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 function stepsKey(steps) {
   return JSON.stringify((steps || []).map((s) => [
     s.step, s.service_record_id || null, s.scheduled_service_id || null, s.depends_on || null, s.recipients_key || null,
-    s.amount ?? null, s.due_date || null,
+    s.amount ?? null, s.total ?? null, s.due_date || null,
   ]));
+}
+
+const money = (n) => `$${Number(n).toFixed(2)}`;
+
+// The card line for one step — server wording, never model text.
+function stepEffect(s) {
+  const label = STEP_EFFECTS[s.step].label;
+  if (s.step === 'bill_visit') {
+    const parts = [`${money(s.subtotal)} services`, s.discount ? `−${money(s.discount)} discounts` : null, `${money(s.tax)} tax`].filter(Boolean);
+    return `${label}: ${money(s.total)} total (${parts.join(', ')})${s.due_date ? `, due ${s.due_date}` : ''}`;
+  }
+  if (s.step === 'send_invoice') {
+    const legs = [s.recipients.length && `email to ${s.recipients.join(', ')}`, s.text_to && `text the pay link to ${s.text_to}`].filter(Boolean);
+    return `${label}: ${legs.join(' and ')} — this also starts the usual unpaid-invoice reminders`;
+  }
+  return s.recipients ? `${label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : label;
 }
 
 function previewFromPlan(serviceId, status, plan) {
@@ -373,9 +477,7 @@ function previewFromPlan(serviceId, status, plan) {
     steps: plan.steps.map((s) => ({
       ...s,
       kind: STEP_EFFECTS[s.step].kind,
-      effect: s.step === 'bill_visit'
-        ? `${STEP_EFFECTS[s.step].label}: visit price $${s.amount.toFixed(2)}${s.due_date ? `, due ${s.due_date}` : ''} — the draft replays the visit's line items and discounts and adds tax, so its total is set at creation; review it before sending`
-        : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
+      effect: stepEffect(s),
     })),
     manual: plan.manual,
     notifies_customer: plan.steps.some((s) => STEP_EFFECTS[s.step].kind === 'comms'),
