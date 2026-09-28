@@ -101,6 +101,13 @@ test('a quoted slot that is STILL open sends normally', async () => {
   expect(sendCustomerMessage).toHaveBeenCalled();
 });
 
+test('the snapshot\'s serviceType is forwarded to the recheck when present (Codex r3 audit P1)', async () => {
+  drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
+  const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, serviceType: 'Lawn Fertilization' } };
+  await expect(attempt({ openTimesSnapshot: snap })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'Lawn Fertilization' }));
+});
+
 test('a quoted slot that is GONE blocks the send, fails the claim, reopens parked suggestions', async () => {
   drafter.openTimesStillOffered.mockResolvedValue({ ok: false, reason: 'open_times_no_longer_offered', goneWindows: ['9:00 AM - 11:00 AM'] });
   await expect(attempt({ openTimesSnapshot: OPEN_TIMES_SNAPSHOT })).resolves.toMatchObject({

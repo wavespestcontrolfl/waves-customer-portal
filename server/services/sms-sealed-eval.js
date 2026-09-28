@@ -143,13 +143,29 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
     .where('active', true)
     .count('* as count');
-  const remaining = target - Number(activeCount);
+  // Compatibility-aware replenishment (pre-push audit P1 on Codex r3): once
+  // GATE_SMS_REAL_ANSWERS is live the exam grades under a v12 prompt, and
+  // examOneItem excludes every item frozen without the v12 facts. A pool
+  // already full of pre-v12 items would otherwise never top up — the target
+  // then counts only COMPATIBLE items, only compatible drafts are sealed,
+  // and the oldest pre-v12 items beyond the target are retired
+  // (active=false; rows and every historical result stay put). v11: unchanged.
+  const v12 = isV12PromptVersion(require('./sms-shadow-drafter').currentPromptVersion());
+  let compatibleCount = Number(activeCount);
+  if (v12) {
+    const [{ count }] = await dbi('sms_sealed_eval_items')
+      .where('active', true)
+      .whereRaw("COALESCE(facts_block, '') LIKE ?", [`%${V12_FACTS_MARKER}%`])
+      .count('* as count');
+    compatibleCount = Number(count);
+  }
+  const remaining = target - compatibleCount;
   if (remaining <= 0) {
     return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
   }
 
   const cutoff = new Date(Date.now() - SEALED_EVAL_MIN_AGE_DAYS * 86400 * 1000);
-  const candidates = await dbi({ md: 'message_drafts' })
+  let candidateQuery = dbi({ md: 'message_drafts' })
     .join({ j: 'shadow_draft_judgments' }, 'j.draft_id', 'md.id')
     .leftJoin({ si: 'sms_sealed_eval_items' }, 'si.source_draft_id', 'md.id')
     .leftJoin({ inbound_sms: 'sms_log' }, 'md.sms_log_id', 'inbound_sms.id')
@@ -162,7 +178,10 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     // ...and must NOT be a backfill row: backfill facts are TODAY's context
     // pasted onto a months-old inbound — sealing one would freeze the drift.
     .whereRaw("md.prompt_version NOT LIKE '%backfill'")
-    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''")
+    .whereRaw("TRIM(COALESCE(md.inbound_message, '')) <> ''");
+  // v12: only drafts frozen WITH the v12 facts are representative
+  if (v12) candidateQuery = candidateQuery.whereRaw("md.facts_block LIKE ?", [`%${V12_FACTS_MARKER}%`]);
+  const candidates = await candidateQuery
     .where('md.created_at', '<', cutoff)
     .select(
       'md.id as source_draft_id', 'md.customer_id', 'md.intent',
@@ -209,8 +228,25 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
     schema_version: SCHEMA_VERSION,
   }));
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
+  // Keep the active pool at the target: retire the OLDEST pre-v12 items that
+  // the new compatible ones displaced (never delete — results reference them).
+  let retired = 0;
+  if (v12) {
+    const overflow = Number(activeCount) + rows.length - target;
+    if (overflow > 0) {
+      retired = await dbi('sms_sealed_eval_items')
+        .whereIn('id', dbi('sms_sealed_eval_items')
+          .select('id')
+          .where('active', true)
+          .whereRaw("COALESCE(facts_block, '') NOT LIKE ?", [`%${V12_FACTS_MARKER}%`])
+          .orderBy('sealed_at', 'asc')
+          .limit(overflow))
+        .update({ active: false });
+      if (retired) logger.info(`[sealed-eval] seal: retired ${retired} pre-v12 item(s) displaced by v12-compatible ones`);
+    }
+  }
 
-  const summary = { sealed: rows.length, activeCount: Number(activeCount) + rows.length, ms: Date.now() - startedAt };
+  const summary = { sealed: rows.length, retired, activeCount: Number(activeCount) + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
   return summary;
 }

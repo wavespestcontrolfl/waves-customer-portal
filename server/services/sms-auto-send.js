@@ -800,6 +800,8 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           city: claim.openTimesSnapshot.lookup?.city || null,
           customerId: claim.openTimesSnapshot.lookup?.customerId || null,
           estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
+          // Same service identity the draft was priced with (Codex r3 / audit P1)
+          ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
           quotedWindows: stillQuoted,
         });
         if (!recheck.ok) {
