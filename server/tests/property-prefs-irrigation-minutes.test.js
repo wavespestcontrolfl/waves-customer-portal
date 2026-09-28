@@ -9,13 +9,13 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn().mockResolvedValue(undefined) }));
-jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 
 const fs = require('fs');
 const path = require('path');
 const propertyRouter = require('../routes/property');
 
-const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+const { hasLawnServiceEvidence, hasIrrigationEmailOptIn } = require('../services/irrigation-weekly-email');
 
 const {
   propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, IRRIGATION_INPUT_FIELDS,
@@ -139,6 +139,13 @@ describe('property preferences — Weekly Inches eligibility', () => {
     expect(hasLawnServiceEvidence).toHaveBeenCalledWith('c2');
     hasLawnServiceEvidence.mockResolvedValueOnce(false);
     await expect(customerQualifiesForLawnInches({ id: 'c3' })).resolves.toBe(false);
+  });
+
+  test('an irrigation-email opt-in qualifies a customer without lawn service', async () => {
+    hasLawnServiceEvidence.mockResolvedValueOnce(false);
+    hasIrrigationEmailOptIn.mockResolvedValueOnce(true);
+    await expect(customerQualifiesForLawnInches({ id: 'c5', waveguard_tier: 'Bronze' })).resolves.toBe(true);
+    expect(hasIrrigationEmailOptIn).toHaveBeenCalledWith('c5');
   });
 
   test('a failed evidence lookup THROWS — the PUT must fail the save, never silently drop inches', async () => {
