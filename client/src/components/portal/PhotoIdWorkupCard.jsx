@@ -12,6 +12,7 @@ import {
   OUTCOME_CHIP_LABEL,
   WEED_WORDING_PHRASE,
   evidenceChipPhrase,
+  subjectPlantChipText,
 } from './photoIdCopy';
 
 // =========================================================================
@@ -41,6 +42,21 @@ function SectionHeading({ children }) {
     <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 8 }}>
       {children}
     </div>
+  );
+}
+
+// The plant the workup is about — the account's grass on file, or the plant
+// the photo named — with its catalog warning (Codex #5250 r4: a sago palm
+// workup must not drop the pet-poisoning line).
+function SubjectPlant({ plant, subjectType }) {
+  if (!plant?.common_name) return null;
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <Chip>{subjectPlantChipText(plant, subjectType)}</Chip>
+      </div>
+      <SafetyLine text={plant.safety_line} />
+    </>
   );
 }
 
@@ -269,7 +285,10 @@ function NextStepHintBlock({ nextStepHint, referral, onOpenRequestCta, onDone })
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
       {nextStepHint?.text && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextStepHint.text}</div>}
-      {referral && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{referral}</div>}
+      {/* `referral` is `{ kind, text }`; its text usually repeats the hint's own (Codex #5250 r4 P1). */}
+      {referral?.text && referral.text !== nextStepHint?.text && (
+        <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{referral.text}</div>
+      )}
       {requestable ? (
         <button type="button" data-glass-accent="" data-glass-size="primary" onClick={onOpenRequestCta} style={{
           minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body, alignSelf: 'flex-start',
@@ -301,6 +320,7 @@ export default function PhotoIdWorkupCard({ v2, photos, unavailablePhotoIds, onP
           {answer.headline && <div style={{ fontSize: 20, fontWeight: 700, color: SHELL.text, lineHeight: 1.25 }}>{answer.headline}</div>}
           {answer.subhead && <div style={{ fontSize: 16, fontStyle: 'italic', color: SHELL.muted, marginTop: 2 }}>{answer.subhead}</div>}
         </div>
+        <SubjectPlant plant={subject.plant} subjectType={v2.subject_type} />
         <WeedChips weeds={subject.weeds} />
         {tierLabel && (
           <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>

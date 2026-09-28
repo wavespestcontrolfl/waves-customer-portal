@@ -1447,6 +1447,28 @@ describe('lawn/tree_shrub/palm workup card (renders only when data.v2.kind === "
     expect(within(sheet).getByText(poison)).toBeInTheDocument();
   });
 
+  it('a referral renders its text once instead of crashing the card, and the named plant shows with its warning (Codex #5250 r4)', async () => {
+    const referralText = 'This needs a licensed arborist or palm specialist; a technician can point you to one.';
+    const petWarning = 'All parts of sago palm are toxic to dogs, cats and horses; call your vet right away if a pet chews any part.';
+    const referred = {
+      ...workupNamed,
+      subject_type: 'tree_shrub',
+      subject: { plant: { slug: 'sago-palm', common_name: 'Sago Palm', source: 'photo', wording: 'pretty_sure', safety_line: petWarning }, weeds: [] },
+      next_step_hint: { kind: 'specialist', text: referralText },
+      referral: { kind: 'arborist', text: referralText },
+    };
+    const dialog = await openLawnResultWith(referred);
+    expect(screen.getAllByText(referralText)).toHaveLength(1);
+    expect(screen.getByText("Plant: Sago Palm — we're pretty sure")).toBeInTheDocument();
+    expect(screen.getByText(petWarning)).toBeInTheDocument();
+    expect(dialog.textContent).toContain('Potassium Deficiency');
+  });
+
+  it('an account grass on file shows as the grass on file', async () => {
+    await openLawnResultWith(workupSymptom);
+    expect(screen.getByText('Grass on file: St. Augustinegrass')).toBeInTheDocument();
+  });
+
   it('tapping a possibility opens a sheet with its what_it_means', async () => {
     await openLawnResultWith(workupNamed);
     fireEvent.click(screen.getByText('Lethal Bronzing'));

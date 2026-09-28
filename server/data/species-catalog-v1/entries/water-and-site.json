@@ -85,7 +85,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "785d95345cafa6ff4cd74d502f90a3f687f7da62ed6a3da023a507d0be417115"
+      "approval_hash": "b3eb428b63d49908ec727f9203f0605b748788b4c306111af95189afd48763b9"
     },
     "condition": {
       "hosts": [
@@ -137,7 +137,7 @@
           "slug": "mower-scalping",
           "difference": "Drought stress shows blue-gray, folded blades across dry zones; mower scalping is a uniform tan, stubbly cut appearing right after a mow.",
           "next_observation": "Check whether the discoloration followed a recent mow or a dry, sunny spell.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         },
         {
           "slug": "chinch-bug",
@@ -530,7 +530,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "c44dcdd287e8003839a65513201a767d3577f168a7159bcc72e2fb4822017b8c"
+      "approval_hash": "9cbff5d06650030e0d5344e36a207e5f1f6c70dd115512d8d181bfb4b9cb2752"
     },
     "condition": {
       "hosts": [
@@ -559,7 +559,7 @@
           "slug": "mower-scalping",
           "difference": "Compaction wear follows a repeated traffic path regardless of mowing; mower scalping is a uniform tan cut appearing right after a single low mow.",
           "next_observation": "Check whether the thin area is a walking path or matches a recent mow.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         }
       ],
       "site_factors": [

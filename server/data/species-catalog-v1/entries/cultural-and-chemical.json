@@ -94,7 +94,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "e9dc41e4556b3f8e46a56c55a4e4c869a30a8736b66a71bef199167d0a200c6f"
+      "approval_hash": "8de14407c99b762eb523416f5cf5dbbec9cdecbf99bc275d336e9bc4b92208c6"
     },
     "condition": {
       "hosts": [
@@ -117,7 +117,7 @@
           "slug": "drought-irrigation-stress",
           "difference": "Mower scalping is a uniform tan, stubbly cut appearing right after a mow; drought stress shows blue-gray, folded blades across dry zones.",
           "next_observation": "Check whether the discoloration followed a recent mow or a dry, sunny spell.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         },
         {
           "slug": "dull-blade-shredding",
@@ -129,13 +129,13 @@
           "slug": "chinch-bug",
           "difference": "Mower scalping is a uniform tan cut right after mowing; chinch bug damage expands in hot, sunny spots without a recent low mow.",
           "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs climbing up in a few minutes, or a technician checks.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         },
         {
           "slug": "compaction-traffic-wear",
           "difference": "Mower scalping is a uniform tan cut appearing right after a mow, anywhere in the yard; compaction wear follows a repeated foot-traffic path.",
           "next_observation": "Check whether the thin area is a walking path or matches a recent mow.",
-          "photo_can_confirm": true
+          "photo_can_confirm": false
         }
       ],
       "site_factors": [

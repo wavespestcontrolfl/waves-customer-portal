@@ -794,7 +794,7 @@
     "review": {
       "status": "owner_approved",
       "notes": "",
-      "approval_hash": "a137a129aeee479de2c6f42f13f3d687e7a0b05fba595818f758c7f82ea02b67"
+      "approval_hash": "af987bfcf9e57c05ce8903a9736067f3e380c3d43899d22d7976d5d1de7517a9"
     },
     "condition": {
       "hosts": [
@@ -818,7 +818,7 @@
         {
           "slug": "nitrogen-deficiency-turf",
           "difference": "Nitrogen deficiency shows a uniform pale yellow-green across older blades with no powdery pustules; rust shows orange pustules that rub off on a finger.",
-          "next_observation": "Rub a blade between your fingers checking for orange residue.",
+          "next_observation": "A close-up of your fingertip after rubbing a blade: orange powder that rubs off points to rust.",
           "photo_can_confirm": true
         },
         {
