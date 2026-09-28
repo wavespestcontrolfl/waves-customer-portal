@@ -2238,11 +2238,6 @@ router.get('/:token', async (req, res, next) => {
       // the cache-lookup value; assigned inside the try so an unreadable
       // lookup fails closed through the retry path.
       let laRenderSignature = null;
-      // The canonical (never delivery-pinned) lawnHistory `canonical` above
-      // resolves, hoisted the same way so the post-render photo-set re-check
-      // below can reuse it instead of re-deriving its own (Sonnet
-      // fallback-audit P1, 2026-09-28).
-      let canonicalLawnHistory = null;
       // The page's own image-load failure count (null = unknown provider).
       let renderImageFailures = null;
       // The payload the render was produced from — its flags decide whether
@@ -2258,7 +2253,6 @@ router.get('/:token', async (req, res, next) => {
         const canonical = await resolveCanonicalLawnRender(service, db, { propertyHistoryEnabled });
         const canonicalPin = canonical.pin;
         laRenderSignature = canonical.signature;
-        canonicalLawnHistory = canonical.lawnHistory;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
@@ -2355,7 +2349,7 @@ router.get('/:token', async (req, res, next) => {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
           logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
-        } else if (await reportPhotoSetPdfSignature(service.id, db, { propertyHistoryEnabled, lawnHistory: canonicalLawnHistory }) !== photoSetSignature) {
+        } else if (await reportPhotoSetPdfSignature(service.id, db, { propertyHistoryEnabled }) !== photoSetSignature) {
           // Recovered closeout photos landed mid-render: this output describes
           // the OLD photo set and must not become the cached document.
           logger.warn(`[reports-public] photo set changed during PDF render for ${service.id} — not caching this render`);
