@@ -7404,6 +7404,30 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 5:10 AM ET — Email division area-intel recompute (current month;
+  // also previous month on the 1st). Dark behind GATE_EMAIL_AREA_INTEL
+  // (emailAreaIntelLive) — unset returns immediately. No caller sends
+  // anything. See server/services/email-division/area-intel.js.
+  cron.schedule('10 5 * * *', async () => {
+    const { emailAreaIntelLive } = require('../config/feature-gates');
+    if (!emailAreaIntelLive()) return;
+    try {
+      const { computeAreaIntel } = require('./email-division/area-intel');
+      const { etParts, addETDays } = require('../utils/datetime-et');
+      await runExclusive('email-area-intel-recompute', async () => {
+        const now = new Date();
+        const result = await computeAreaIntel({ month: now });
+        logger.info(`[email-area-intel] recomputed ${result.month}: ${result.citiesProcessed} cities`);
+        if (etParts(now).day === 1) {
+          const prevResult = await computeAreaIntel({ month: addETDays(now, -1) });
+          logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Email area-intel recompute tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
