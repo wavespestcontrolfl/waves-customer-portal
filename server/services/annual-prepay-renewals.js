@@ -3974,6 +3974,28 @@ async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn
     const Charge = require('./termite-annual-renewal-charge')._private;
     const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
     if (!(await Charge.successorPaymentBacksRenewal(t, successor))) return null;
+    // Codex #4971 r16 P1 (finding 5, DELETION (b)): a deleted account is a
+    // late-payment CONFLICT, never a silent renewal — the SAME refund-or-
+    // honor staff alert a parent that changed any other way gets
+    // (paid_after_parent_ended), not a fact resolveParentEligibility itself
+    // tracks (it never reads customers.deleted_at at all). An ACH successor
+    // can settle days after its submission — long enough for the account to
+    // be deleted in between — and this stamp used to run with no deletion
+    // check whatsoever, silently recording the parent 'renewed' under a
+    // deleted account with no alert. Gated the SAME way every other
+    // deletion-sensitive write now is (acquireTermiteGateAtEntry above takes
+    // the SAME advisory key withCustomerDeletionGate holds for every one of
+    // the customer's renewable termite parent terms), so this either waits
+    // behind an in-flight deletion or is seen by it once it commits.
+    const deleted = await Charge.customerDeletedRefusal(t, successor);
+    if (deleted) {
+      await Charge.ringRenewalBell(
+        successor,
+        'paid_after_parent_ended',
+        "the customer's account was deleted before the renewal payment settled",
+      );
+      return null;
+    }
     const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
     if (!(await Charge.resolveParentEligibility(t, parent)).eligible) return null;
     return recordDecision({ termId: parentTermId, action: 'renew', conn: t });

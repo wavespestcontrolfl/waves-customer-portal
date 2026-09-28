@@ -145,6 +145,10 @@ async function createScratchDb() {
     invoice_id uuid NOT NULL,
     status text NOT NULL DEFAULT 'claimed',
     error_message text,
+    -- Codex #4971 r16 P1 (finding 2, migration 20260927180000): the raw
+    -- Stripe decline_code, so leg 7d's crash recovery can tell
+    -- authentication_required (ambiguous) from a genuine terminal decline.
+    decline_code text,
     submitted_at timestamptz,
     stripe_payment_intent_id text,
     resolved_at timestamptz,
@@ -580,6 +584,35 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       }));
       expect((await kindOf(declined.successor.id)).renewal_charge_failure_handled_at).toBeInstanceOf(Date);
       expect((await kindOf(unknown.successor.id)).renewal_charge_failure_handled_at).toBeInstanceOf(Date);
+    });
+
+    // Codex #4971 r16 P1 (finding 2): a crash before decideAndCharge's own
+    // in-memory classifyChargeError ever ran leaves ONLY the persisted
+    // attempt row for leg 7d to read. A submitted 'failed' attempt whose
+    // decline_code is authentication_required must recover as AMBIGUOUS
+    // (the off-session PaymentIntent may still be completed and succeed
+    // later) — never a durable decline, which used to send a second pay
+    // link and a false "your payment didn't go through" notice beside a
+    // charge that might still go through. An attempt with no decline_code
+    // at all (a genuine, already-final Stripe decline, or an attempt row
+    // predating this column) stays a genuine decline, unaffected.
+    test('leg 7d recovers a crashed authentication_required attempt as ambiguous, never a genuine decline', async () => {
+      const authRequired = await pendingOutcome({
+        attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'Your card was declined.', decline_code: 'authentication_required' },
+      });
+      const genuineDecline = await pendingOutcome({
+        attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'Your card was declined.', decline_code: 'card_declined' },
+      });
+
+      const counts = sweepCounts();
+      await Charge._private.resolvePendingChargeOutcomes({ conn: db, limit: 50, counts });
+
+      expect(await kindOf(authRequired.successor.id)).toMatchObject({
+        renewal_charge_failure_kind: 'ambiguous', renewal_charge_failure_handled_at: null,
+      });
+      expect(await kindOf(genuineDecline.successor.id)).toMatchObject({
+        renewal_charge_failure_kind: 'declined', renewal_charge_failure_handled_at: null,
+      });
     });
 
     test('the grace lapse never counts a submitted attempt whose follow-through is still owed as "presented" (SQL and JS twins agree)', async () => {
@@ -1260,6 +1293,33 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
         eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: false,
       });
+    });
+
+    // Codex #4971 r16 P1 (finding 6): the shared revocation-dating
+    // expression (parentChangedAtSql / paidAfterParentChanged) had no
+    // timestamp arm for this exact shape — the child invoice carries no
+    // Stripe ids of its own, so the PI/charge-id arm can never match a
+    // statement-keyed refund row. Without the new statement arm, this ACH
+    // successor's payment read as landing strictly BEFORE any change at
+    // all (LEAST simply ignored the missing NULL) and lost its
+    // refund-or-honor alert (bellLatePaidRenewal never fires for it).
+    test('a renewal paid after a FINAL full statement refund is dated late by it', async () => {
+      const { parent, successor } = await statementParentRenewal();
+      const refundedAt = new Date(Date.now() - 10 * 60000);
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', statement_id: statementId, updated_at: refundedAt });
+      await db('invoices').where({ id: successor.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
+      await expect(Charge._private.paidAfterParentChanged(
+        db, await db('annual_prepay_terms').where({ id: successor.id }).first(), parent,
+      )).resolves.toBe(true);
+    });
+
+    test('a renewal paid BEFORE a statement refund is not dated late by a LATER refund', async () => {
+      const { parent, successor } = await statementParentRenewal();
+      await db('invoices').where({ id: successor.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date(Date.now() - 3600000) });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', statement_id: statementId, updated_at: new Date() });
+      await expect(Charge._private.paidAfterParentChanged(
+        db, await db('annual_prepay_terms').where({ id: successor.id }).first(), parent,
+      )).resolves.toBe(false);
     });
   });
 

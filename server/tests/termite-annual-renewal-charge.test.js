@@ -127,7 +127,7 @@ describe('termite annual renewal charge', () => {
       expect(dbSpy).not.toHaveBeenCalled();
     });
 
-    test('no live (payment_pending) successor for this customer — fn runs directly, no gate taken', async () => {
+    test('no renewable termite parent term for this customer — fn runs directly, no gate taken', async () => {
       mockCommon();
       const withParentDecisionLock = jest.fn((termId, fn) => fn());
       jest.doMock('../services/annual-prepay-renewals', () => ({
@@ -136,7 +136,11 @@ describe('termite annual renewal charge', () => {
       }));
       jest.doMock('../models/db', () => jest.fn((table) => {
         if (table === 'annual_prepay_terms') {
-          return { where: jest.fn(() => ({ whereNotNull: jest.fn(() => ({ select: jest.fn(async () => []) })) })) };
+          return {
+            where: jest.fn(() => ({
+              whereNotNull: jest.fn(() => ({ whereIn: jest.fn(() => ({ select: jest.fn(async () => []) })) })),
+            })),
+          };
         }
         throw new Error(`unexpected table ${table}`);
       }));
@@ -147,12 +151,18 @@ describe('termite annual renewal charge', () => {
       expect(withParentDecisionLock).not.toHaveBeenCalled();
     });
 
-    test('a live successor takes its OWN renewal gate (parent + successor keys) before fn runs — and never commits until the gate releases', async () => {
+    // Codex #4971 r16 P1 — finding 4: keys on the customer's renewable
+    // termite PARENT term(s) directly (withParentDecisionLock, no
+    // alsoTermIds) rather than on an existing payment_pending successor —
+    // the SAME key mintRenewalSuccessor now also takes before it ever reads
+    // the customer's liveness, so a concurrently-minting successor (no
+    // successor row exists yet — the old query found nothing to lock) is
+    // now fenced too.
+    test('a live renewable parent term takes withParentDecisionLock (its own key) before fn runs — and never commits until the gate releases', async () => {
       mockCommon();
       const order = [];
-      const withParentDecisionLock = jest.fn(async (termId, innerFn, opts) => {
+      const withParentDecisionLock = jest.fn(async (termId, innerFn) => {
         expect(termId).toBe('parent-1');
-        expect(opts).toEqual({ alsoTermIds: ['succ-1'] });
         order.push('gate-acquired');
         const result = await innerFn();
         order.push('gate-released');
@@ -166,7 +176,7 @@ describe('termite annual renewal charge', () => {
         if (table === 'annual_prepay_terms') {
           return {
             where: jest.fn(() => ({
-              whereNotNull: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'succ-1', renewed_from_term_id: 'parent-1' }]) })),
+              whereNotNull: jest.fn(() => ({ whereIn: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'parent-1' }]) })) })),
             })),
           };
         }
@@ -179,6 +189,39 @@ describe('termite annual renewal charge', () => {
       // The deletion write runs ONLY inside the gate's callback — never
       // before it is acquired, never after it releases.
       expect(order).toEqual(['gate-acquired', 'deletion-commits', 'gate-released']);
+    });
+
+    // Codex #4971 r16 P1 — finding 4 regression: a customer with more than
+    // one in-flight renewable parent term takes every one of their gates,
+    // in id order, nested (never in parallel) — the SAME defensive
+    // cross-deadlock ordering the old successor-keyed version already had.
+    test('more than one renewable parent term takes every gate, in sorted id order', async () => {
+      mockCommon();
+      const acquireOrder = [];
+      const withParentDecisionLock = jest.fn(async (termId, innerFn) => {
+        acquireOrder.push(termId);
+        return innerFn();
+      });
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        withParentDecisionLock,
+      }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'annual_prepay_terms') {
+          return {
+            where: jest.fn(() => ({
+              whereNotNull: jest.fn(() => ({
+                whereIn: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'parent-b' }, { id: 'parent-a' }]) })),
+              })),
+            })),
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      await expect(withCustomerDeletionGate('cust-1', async () => 'deleted')).resolves.toBe('deleted');
+      expect(withParentDecisionLock).toHaveBeenCalledTimes(2);
+      expect(acquireOrder).toEqual(['parent-a', 'parent-b']);
     });
   });
 
@@ -227,6 +270,24 @@ describe('termite annual renewal charge', () => {
       const { _private } = require('../services/termite-annual-renewal-charge');
       expect(_private.chargeFailedNoticeMustRetry(null)).toBe(true);
       expect(_private.chargeFailedNoticeMustRetry(undefined)).toBe(true);
+    });
+
+    // Codex #4971 r16 P2 — finding 8: renewalPayerRouting's own lookup
+    // failure (withPayLinkClearance's { code: 'payer_unverifiable' }, whose
+    // own doc says "fail closed, retry later") used to fall through the old
+    // default-false and settle forever, dropping the customer notice for
+    // good the first time the payer lookup merely errored. Now retryable,
+    // like any other reason not on the terminal allowlist.
+    test('payer_unverifiable (the payer lookup failed) must retry — never silently counted as settled', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: false, reason: 'payer_unverifiable' })).toBe(true);
+    });
+
+    test('an unrecognized/future reason not on the terminal allowlist must retry by default', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: false, reason: 'some_new_outcome_shape' })).toBe(true);
     });
   });
 
@@ -705,6 +766,62 @@ describe('termite annual renewal charge', () => {
       // Codex #4971 r5 P1: the renewal invoice is linked to its term, strictly.
       expect(invoiceLink).toHaveBeenCalledWith({ annual_prepay_term_id: 'succ-term-1' });
       expect(parentUpdate).not.toHaveBeenCalled();
+    });
+
+    // Codex #4971 r16 P1 — finding 4: the WHOLE mint now runs inside
+    // withParentDecisionLock, keyed on the PARENT term — the SAME key
+    // withCustomerDeletionGate takes for every one of the customer's
+    // renewable termite parent terms, so an account deletion racing in
+    // during a mint either waits behind the whole mint or wins the gate
+    // first and is seen by the mint's own re-check.
+    test('Codex #4971 r16 P1 (finding 4): the mint runs inside withParentDecisionLock, keyed on the parent id', async () => {
+      mockCommon();
+      const parent = baseParent();
+      const { trx } = makeMintTrx({ parent });
+      const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
+      const { createTermForAnnualPrepay } = mockMintDeps();
+      const withParentDecisionLock = jest.fn(async (termId, fn) => {
+        expect(termId).toBe('parent-1');
+        return fn();
+      });
+      // Re-mock on top of mockMintDeps()'s own registration, reusing its
+      // SAME createTermForAnnualPrepay spy so this test can still assert on
+      // it, but with a spy-able withParentDecisionLock.
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        withParentDecisionLock,
+        createTermForAnnualPrepay,
+        recordDecision: jest.fn(),
+        TERMITE_RENEWAL_GRACE_DAYS: 30,
+        termiteRenewalGraceDeadlineFor: jest.fn(() => '2099-01-01'),
+      }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const result = await _private.mintRenewalSuccessor('parent-1', conn);
+
+      expect(result.minted).toBe(true);
+      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
+      // The transaction (the actual DB work) never even starts before the
+      // gate is acquired.
+      expect(conn.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    test('Codex #4971 r16 P1 (finding 4): a gate that cannot be taken (a concurrent account deletion holding it) mints nothing at all', async () => {
+      mockCommon();
+      mockMintDeps();
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        withParentDecisionLock: jest.fn(async () => {
+          throw Object.assign(new Error('could not acquire the parent-decision lock'), { code: 'PARENT_DECISION_LOCK_TIMEOUT' });
+        }),
+        createTermForAnnualPrepay: jest.fn(),
+        recordDecision: jest.fn(),
+        TERMITE_RENEWAL_GRACE_DAYS: 30,
+        termiteRenewalGraceDeadlineFor: jest.fn(() => '2099-01-01'),
+      }));
+      const conn = { transaction: jest.fn() };
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      await expect(_private.mintRenewalSuccessor('parent-1', conn)).rejects.toThrow('could not acquire the parent-decision lock');
+      expect(conn.transaction).not.toHaveBeenCalled();
     });
 
     test('Codex round-1 P1: a year-2 successor (whose OWN consent was itself carried forward) carries it into its year-3 mint too — the chain, not just one hop', async () => {
@@ -1216,6 +1333,46 @@ describe('termite annual renewal charge', () => {
       expect(claimUpdate).not.toHaveBeenCalled();
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    // Codex #4971 r16 P1 — finding 3: a payer assigned to this invoice since
+    // the mint makes the quote throw the SAME typed PAYER_BILLED_GUARD
+    // chargeInvoiceWithSavedCard itself throws (stripe.js) — this must route
+    // into the payer_billed follow-through (deliverInvoiceAndStampSkip),
+    // never the generic 'charge_quote_unavailable' deferral (which the
+    // payer can never resolve either, so it retried forever before this
+    // fix).
+    test('a payer-billed quote (PAYER_BILLED_GUARD) routes to the payer follow-through — no Stripe call, no forever-retry', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({
+        resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })),
+      }));
+      const chargeInvoiceWithSavedCard = jest.fn();
+      const payerGuardErr = Object.assign(new Error('Invoice is billed to a third-party payer'), { code: 'PAYER_BILLED_GUARD' });
+      const quoteInvoiceSavedCardCharge = jest.fn(async () => { throw payerGuardErr; });
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
+      jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: 'payer-9' })) }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = baseSuccessor();
+      const { conn, claimUpdate, skipStampUpdate, deferredUpdate } = makeClaimConn({ successor, successorInvoice: { status: 'draft' } });
+      const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+      expect(outcome).toEqual({ status: 'payer_billed' });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(claimUpdate).not.toHaveBeenCalled();
+      // Never the old, undifferentiated forever-retry deferral.
+      expect(deferredUpdate).not.toHaveBeenCalled();
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/third-party payer/i), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:payer_billed',
+      }));
+      expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'payer_assigned:payer_billed' }));
     });
 
     // Codex #4971 r12 P1 — ONE ceiling: cash total (surcharge included) +
@@ -2317,6 +2474,15 @@ describe('termite annual renewal charge', () => {
     // resolves to when the whereNull() race was LOST (startedAtReturning
     // is `[]`) — the concurrent tick's own persisted stamp.
     raceLostLapseStartedAt = null,
+    // Codex #4971 r16 P1 (finding 7): a FRESH lapse (no renewal_lapse_
+    // started_at on the in-memory term yet) now re-reads the successor's
+    // status on the OUTER conn, under the gate, BEFORE ever stamping —
+    // defaults model the happy path (still genuinely payment_pending, no
+    // lapse started elsewhere) so every EXISTING test is unaffected. Pass
+    // preStatus: 'cancelled' (or similar) to model an operator's void
+    // racing in ahead of this stamp.
+    preStatus = 'payment_pending',
+    preAlreadyStartedAt = null,
   } = {}) {
     const startedAtReturningFn = jest.fn().mockResolvedValue(startedAtReturning);
     const startedUpdate = jest.fn(() => ({ returning: startedAtReturningFn }));
@@ -2343,16 +2509,22 @@ describe('termite annual renewal charge', () => {
             return { update: startedUpdate };
           }),
           update: jest.fn((payload) => (payload && 'renewal_sweep_deferred_at' in payload ? deferredUpdate(payload) : completedUpdate(payload))),
-          // Two DISTINCT `.where(...).first(...)` call sites share this
-          // outer `conn`, told apart by the column they ask for: the
+          // THREE DISTINCT `.where(...).first(...)` call sites share this
+          // outer `conn`, told apart by the columns they ask for: (1) the
+          // NEW pre-stamp status/lapse-started recheck (finding 7) asks for
+          // BOTH 'status' and 'renewal_lapse_started_at' together; (2) the
           // whereNull()-race-lost re-read asks for 'renewal_lapse_started_at'
-          // on the successor; processGraceLapseSequence's own parent-
-          // guard-miss re-read asks for 'renewal_decision' on the parent.
-          first: jest.fn((col) => Promise.resolve(
-            col === 'renewal_lapse_started_at'
-              ? (raceLostLapseStartedAt == null ? null : { renewal_lapse_started_at: raceLostLapseStartedAt })
-              : parentAfterGuardMiss,
-          )),
+          // alone; (3) processGraceLapseSequence's own parent-guard-miss
+          // re-read asks for 'renewal_decision' on the parent.
+          first: jest.fn((...cols) => {
+            if (cols.length === 2 && cols.includes('status') && cols.includes('renewal_lapse_started_at')) {
+              return Promise.resolve({ status: preStatus, renewal_lapse_started_at: preAlreadyStartedAt });
+            }
+            if (cols[0] === 'renewal_lapse_started_at') {
+              return Promise.resolve(raceLostLapseStartedAt == null ? null : { renewal_lapse_started_at: raceLostLapseStartedAt });
+            }
+            return Promise.resolve(parentAfterGuardMiss);
+          }),
         })),
       };
     });

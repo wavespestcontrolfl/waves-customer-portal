@@ -426,6 +426,15 @@ async function resolveNoFundsSavedCardChargeAttempt({
   attemptId,
   invoiceId,
   failureMessage,
+  // Codex #4971 r16 P1 (finding 2): the raw Stripe decline_code/error code,
+  // persisted alongside the failure so a crash-recovery reader (termite-
+  // annual-renewal-charge.js pendingChargeOutcomeVerdict) can tell an
+  // AMBIGUOUS live outcome (authentication_required — the off-session PI
+  // can still be completed and succeed later) from a genuine terminal
+  // decline, without the in-memory classified error a live catch handler
+  // has. Optional; every other caller of this function omits it and the
+  // column stays null, unaffected.
+  declineCode = null,
   database = db,
 }) {
   if (!attemptId || !invoiceId) return false;
@@ -466,6 +475,7 @@ async function resolveNoFundsSavedCardChargeAttempt({
       .update({
         status: 'failed',
         error_message: String(failureMessage || 'Pre-charge setup failed').slice(0, 1000),
+        decline_code: declineCode,
         resolved_at: new Date(),
         updated_at: new Date(),
       });
@@ -1951,7 +1961,17 @@ const StripeService = {
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice);
     if (invoice.payer_id) {
-      throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
+      // Codex #4971 r16 P1 (finding 3): typed the SAME as
+      // chargeInvoiceWithSavedCard's own payer-billed refusal below
+      // (assertLockedInvoiceNotPayerBilled) — this quote used to throw a
+      // plain untyped Error, so a payer assigned since the mint reduced
+      // termite-annual-renewal-charge.js's renewalChargeCeiling to an
+      // undifferentiated 'charge_quote_unavailable' deferral, retried
+      // forever (the payer never resolves the quote either way). The typed
+      // code lets that caller route it into the SAME payer_billed
+      // follow-through the charge path already has for a payer discovered
+      // any other way.
+      throw payerBilledGuardError('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
     }
 
     const card = await db('payment_methods').where({ id: paymentMethodId }).first();
@@ -2819,10 +2839,19 @@ const StripeService = {
           // retry remains possible.
           logger.error(`[stripe] could not record saved-card failure for invoice ${invoiceId}: ${recordErr.message}`);
         }
+        // Codex #4971 r16 P1 (finding 2): the SAME decline_code the
+        // wavesCardDecline marker below reads — persisted on the durable
+        // attempt row so a crash BEFORE this in-memory classification ever
+        // runs (the process dies right after Stripe's confirm response, or
+        // right after this row resolves) leaves a recovery reader
+        // (termite-annual-renewal-charge.js pendingChargeOutcomeVerdict)
+        // something to classify by other than the raw error_message text.
+        const declineCode = err.decline_code || err.raw?.decline_code || err.code || null;
         await resolveNoFundsSavedCardChargeAttempt({
           attemptId: chargeAttempt.id,
           invoiceId,
           failureMessage: err.message || 'Card charge failed',
+          declineCode,
         }).catch((attemptErr) => {
           logger.error(`[stripe] charge-attempt release failed after deterministic decline ${chargeAttempt.id}; claim remains blocking: ${attemptErr.message}`);
         });
@@ -2840,7 +2869,7 @@ const StripeService = {
             attemptedAmount: Number.isFinite(total) ? total : null,
             cardBrand: card.card_brand || null,
             cardLast4: card.last_four || null,
-            declineCode: err.decline_code || err.code || null,
+            declineCode,
           };
         }
         // SCA step-up (Codex r28): a declined off-session confirm (e.g.

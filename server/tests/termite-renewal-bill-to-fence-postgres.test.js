@@ -379,4 +379,43 @@ postgres('termite renewal invoices — the Bill-To fence through pay-link handof
       gate.mockRestore();
     }
   });
+
+  // Codex #4971 r16 P1 — finding 1: the queued/scheduled send
+  // (processScheduledSends -> withRenewalSendGate -> sendViaSMSAndEmail)
+  // never asserted the gate's own session liveness before its provider
+  // handoffs — only the IMMEDIATE sends (decideAndCharge's Stripe call, the
+  // pay-link / charge-failed-notice text) did. The assertion now lives
+  // inside sendViaSMSAndEmail itself — the one function every renewal send
+  // hands off through — so the queued path is covered without threading a
+  // flag through every caller.
+  test('a normal queued renewal send asserts the gate is alive before EACH provider handoff (SMS, then email)', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const assertSpy = jest.spyOn(Renewals, 'assertParentDecisionLockAlive');
+    try {
+      const { invoiceId } = await queuedRenewal();
+      await Invoice.processScheduledSends();
+      expect(assertSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await readInvoice(invoiceId)).toMatchObject({ status: 'sent' });
+    } finally {
+      assertSpy.mockRestore();
+    }
+  });
+
+  test('the gate lost mid-send (assertParentDecisionLockAlive throws) stops BOTH provider handoffs — nothing is ever texted or emailed', async () => {
+    const Renewals = require('../services/annual-prepay-renewals');
+    const lostErr = Object.assign(new Error('the parent-decision lock session was lost before this action reached its provider'), {
+      code: 'PARENT_DECISION_LOCK_LOST', deliveryNeverAttempted: true,
+    });
+    const assertSpy = jest.spyOn(Renewals, 'assertParentDecisionLockAlive').mockImplementation(() => { throw lostErr; });
+    try {
+      const { invoiceId } = await queuedRenewal();
+      await Invoice.processScheduledSends();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(require('../services/invoice-email').sendInvoiceEmail).not.toHaveBeenCalled();
+      expect((await readInvoice(invoiceId)).status).not.toBe('sent');
+    } finally {
+      assertSpy.mockRestore();
+    }
+  });
 });

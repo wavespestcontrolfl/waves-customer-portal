@@ -6696,8 +6696,13 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
   const LIVE_PARENT = { id: 'parent-term', status: 'active', renewal_decision: null, prepay_invoice_id: null };
   const PAID_SUCCESSOR = { id: 'succ-term', status: 'active', prepay_invoice_id: 'inv-succ', dispute_suspended_at: null };
   const stampPrelude = (successor = PAID_SUCCESSOR) => [query({ rows: [] }), query({ first: successor }), query({ first: LIVE_PARENT })];
-  const paidEvidence = (invoice = { status: 'paid', stripe_payment_intent_id: 'pi_succ' }, ledgerRefund = undefined) => ({
-    invoices: [query({ first: invoice })], payments: [query({ first: ledgerRefund })],
+  // Codex #4971 r16 P1 (finding 5): recordParentRenewedIfEligible now reads
+  // customers.deleted_at right after the successor's payment backs the
+  // renewal (before ever reading the parent) — every happy-path fixture
+  // below reaches it, so this default models a LIVE customer; the
+  // dedicated deletion describe block overrides it.
+  const paidEvidence = (invoice = { status: 'paid', stripe_payment_intent_id: 'pi_succ' }, ledgerRefund = undefined, customer = { deleted_at: null }) => ({
+    invoices: [query({ first: invoice })], payments: [query({ first: ledgerRefund })], customers: [query({ first: customer })],
   });
   beforeEach(() => {
     jest.clearAllMocks();
@@ -6735,6 +6740,32 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 
     const [, bindings] = gateQ.whereRaw.mock.calls[0];
     expect(bindings[0]).toBe('{parent-term,succ-term}');
+  });
+
+  // Codex #4971 r16 P1 — finding 5 (DELETION (b)): an ACH successor can
+  // settle days after submission — long enough for the account to be
+  // deleted in between. This stamp used to run with no deletion check at
+  // all, silently recording the parent 'renewed' under a deleted account
+  // with no alert. It must instead ring the SAME refund-or-honor alert a
+  // parent that changed any other way gets, and never touch the parent row.
+  test('a deleted customer never gets a silent renew stamp — the refund-or-honor alert fires instead', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const parentQ = query({ first: LIVE_PARENT });
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude(), parentQ, recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(undefined, undefined, { deleted_at: new Date('2026-09-20T00:00:00Z') }),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/account was deleted/i), expect.objectContaining({
+      dedupeKey: 'termite-renewal-charge:succ-term:paid_after_parent_ended',
+    }));
+    // Never reads or writes the parent — this is not a renewal decision.
+    expect(parentQ.first).not.toHaveBeenCalled();
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
   });
 
   const TERMS = 'annual_prepay_terms';
@@ -6865,6 +6896,9 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
   const evidence = (n) => ({
     invoices: Array.from({ length: n }, () => query({ first: { status: 'paid', stripe_payment_intent_id: 'pi_x' } })),
     payments: Array.from({ length: n }, () => query({ first: undefined })),
+    // Codex #4971 r16 P1 (finding 5): one customers.deleted_at read per row
+    // (see paidEvidence's own comment above) — a live customer by default.
+    customers: Array.from({ length: n }, () => query({ first: { deleted_at: null } })),
   });
   beforeEach(() => {
     jest.clearAllMocks();

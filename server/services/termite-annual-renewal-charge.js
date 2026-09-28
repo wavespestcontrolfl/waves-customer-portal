@@ -909,6 +909,27 @@ async function mintRenewalSuccessor(parentTermId, conn = db, today = etDateStrin
   // anchorTermToInstallation for the same import).
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
 
+  // Codex #4971 r16 P1 (finding 4): the SAME parent-decision gate every
+  // other renewal action holds (withRenewalGate) — taken here, BEFORE this
+  // mint ever reads the customer's liveness (parentEligibleToMintSuccessor
+  // -> parentStillDueForRenewal -> whereDueForRenewal's own unlocked
+  // customerLive check), so it serializes against withCustomerDeletionGate,
+  // which takes this exact key for every one of the customer's renewable
+  // termite parent terms. Without this, a mint reading "customer live" and
+  // a concurrent account deletion had no lock in common at all — the mint
+  // could read live, then the deletion could commit deleted_at, and the
+  // mint would still finish and go on to charge or pay-link a deleted
+  // account's successor. Now either the deletion wins the gate first (this
+  // mint's own re-check then sees deleted_at set and refuses), or this mint
+  // wins it first and the deletion waits behind the whole mint.
+  return AnnualPrepayRenewals.withParentDecisionLock(parentTermId, () => mintRenewalSuccessorUnderGate(
+    parentTermId, conn, today, InvoiceService, AnnualPrepayRenewals, lockAndAssertNoAnnualPrepayOverlap,
+  ));
+}
+
+async function mintRenewalSuccessorUnderGate(
+  parentTermId, conn, today, InvoiceService, AnnualPrepayRenewals, lockAndAssertNoAnnualPrepayOverlap,
+) {
   return conn.transaction(async (trx) => {
     // P2-2: lock order now matches anchorTermToInstallation and every
     // Customer-360 term writer (admin-customers.js) — an UNLOCKED peek of
@@ -1292,34 +1313,55 @@ function assertRenewalLockAlive() {
   if (typeof mod.assertParentDecisionLockAlive === 'function') mod.assertParentDecisionLockAlive();
 }
 
-// Codex #4971 r15 P1: EVERY code path that soft-deletes or archives a
-// customer (routes/auth.js self-service DELETE /account, admin-customers.js
-// archive) must wait on this SAME gate before its deleted_at write may
-// commit. Without it, deleted_at can commit AFTER a pay-link send's own
-// in-gate eligibility read (payLinkVerdict, at the top of
-// withPayLinkClearance) but BEFORE that same send's provider handoff — both
-// of which run inside withRenewalGate, but nothing stops an unrelated writer
-// from ignoring an advisory lock it never takes. Held here, the deletion
-// literally cannot commit until any in-flight renewal action (send, charge,
-// withdrawal) for this customer's terms has released the gate — and once
-// held for deletion, no such action can start until the deletion itself
-// releases it. Takes every live (payment_pending) successor's own gate, in
-// id order (never more than one open per customer in practice — sorted
-// defensively so a customer with more than one can't cross-deadlock two
-// concurrent deletion attempts). No live successor → fn() runs directly,
-// no lock taken.
+// Codex #4971 r15 P1, widened r16 P1 (finding 4): EVERY code path that
+// soft-deletes or archives a customer (routes/auth.js self-service DELETE
+// /account, admin-customers.js archive) must wait on this SAME gate before
+// its deleted_at write may commit. Without it, deleted_at can commit AFTER
+// a pay-link send's own in-gate eligibility read (payLinkVerdict, at the
+// top of withPayLinkClearance) but BEFORE that same send's provider handoff
+// — both of which run inside withRenewalGate, but nothing stops an
+// unrelated writer from ignoring an advisory lock it never takes. Held
+// here, the deletion literally cannot commit until any in-flight renewal
+// action (send, charge, withdrawal, MINT) for this customer's terms has
+// released the gate — and once held for deletion, no such action can start
+// until the deletion itself releases it.
+//
+// r16 P1: this used to key on the customer's EXISTING payment_pending
+// successors only — a customer with no successor minted yet (its parent
+// term still 'active', not yet due, or due but not yet ticked) took NO
+// lock at all, so a mint racing in in that exact gap (mintRenewalSuccessor)
+// was never fenced against the deletion. Keys on every one of the
+// customer's termite PARENT-shaped terms instead — any annual_prepay_terms
+// row still in a RENEWABLE status (a not-yet-renewed original, OR the
+// parent of an existing live successor: it stays 'active'/'renewal_pending'
+// until its OWN renewal decision is recorded, which never happens before
+// the successor itself settles or lapses) — the SAME withParentDecisionLock
+// key mintRenewalSuccessor now also takes before it ever reads the
+// customer's liveness (see its own comment). Locking the parent id alone
+// mutually excludes against any renewal action on its successor too: every
+// such action's own withRenewalGate/acquireTermiteGateAtEntry call takes
+// this SAME parent key alongside the successor's, and Postgres advisory
+// locks contend on any one shared key regardless of what else is held with
+// it. In id order (sorted defensively so a customer with more than one
+// in-flight parent can't cross-deadlock two concurrent deletion attempts).
+// No renewable parent → fn() runs directly, no lock taken.
 async function withCustomerDeletionGate(customerId, fn) {
   if (!customerId) return fn();
-  const successors = await db('annual_prepay_terms')
-    .where({ customer_id: customerId, status: PAYMENT_PENDING_STATUS })
-    .whereNotNull('renewed_from_term_id')
-    .select('id', 'renewed_from_term_id');
-  if (!successors?.length) return fn();
+  const parents = await db('annual_prepay_terms')
+    .where({ customer_id: customerId })
+    .whereNotNull('annual_plan_version')
+    .whereIn('status', RENEWABLE_STATUSES)
+    .select('id');
+  if (!parents?.length) return fn();
   // Sorted in JS, not the query (a plain array sort — no ORDER BY needed
   // for a handful of rows, and it keeps this callable against a query
-  // builder stub that supports where/whereNotNull/select but not orderBy).
-  const sorted = [...successors].sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  const chain = sorted.reduceRight((inner, successor) => () => withRenewalGate(successor, inner), fn);
+  // builder stub that supports where/whereNotNull/whereIn/select but not
+  // orderBy).
+  const sorted = [...parents].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const chain = sorted.reduceRight(
+    (inner, parent) => () => require('./annual-prepay-renewals').withParentDecisionLock(parent.id, inner),
+    fn,
+  );
   return chain();
 }
 
@@ -1535,7 +1577,20 @@ function parentChangedAtSql(p = 'p', pi = 'pi') {
     (SELECT MIN(${ts('rp', 'updated_at')}) FROM payments rp
       WHERE ${revokedPaymentSql('rp')}
         AND ((rp.stripe_payment_intent_id IS NOT NULL AND rp.stripe_payment_intent_id = ${pi}.stripe_payment_intent_id)
-          OR (rp.stripe_charge_id IS NOT NULL AND rp.stripe_charge_id = ${pi}.stripe_charge_id)))
+          OR (rp.stripe_charge_id IS NOT NULL AND rp.stripe_charge_id = ${pi}.stripe_charge_id))),
+    -- Codex #4971 r16 P1 (finding 6): a NET-terms statement child (draft,
+    -- paid_at cleared, NO invoice-level Stripe ids — see
+    -- statementRevocationForInvoice's own doc, r15's fix #3) is revoked on
+    -- the STATEMENT's own payments row instead, keyed by payer_statement_id,
+    -- never on a row the PI/charge-id arm above can ever match. Without this
+    -- arm, a statement refund or a closed-lost dispute never dated the
+    -- parent's change at all — LEAST simply ignored the missing NULL — so an
+    -- ACH successor settling after it read as paid strictly BEFORE any
+    -- change and lost its refund-or-honor alert (bellLatePaidRenewal).
+    (SELECT MIN(${ts('sp', 'updated_at')}) FROM payments sp
+      WHERE ${pi}.payer_statement_id IS NOT NULL
+        AND sp.statement_id = ${pi}.payer_statement_id
+        AND ${revokedPaymentSql('sp')})
   )`;
 }
 
@@ -1791,6 +1846,16 @@ async function renewalChargeCeiling(successor, method, feeCents) {
     const StripeService = require('./stripe');
     quote = await StripeService.quoteInvoiceSavedCardCharge(successor.prepay_invoice_id, method.paymentMethodRowId);
   } catch (err) {
+    // Codex #4971 r16 P1 (finding 3): a payer assigned to this invoice since
+    // the mint (or since the last tick) is a ROUTING fact, not a quote
+    // failure — the quote now throws the SAME typed PAYER_BILLED_GUARD
+    // chargeInvoiceWithSavedCard itself throws (stripe.js) instead of a
+    // plain Error, so it never gets reduced to an undifferentiated
+    // 'charge_quote_unavailable' deferral (which the payer can never
+    // resolve either, so it retried forever). decideAndCharge routes this
+    // into the SAME payer_billed follow-through as its other pre-Stripe
+    // skips (deliverInvoiceAndStampSkip).
+    if (err?.code === 'PAYER_BILLED_GUARD') return { payerBilled: true };
     logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — the charge is deferred: ${err.message}`);
     return { unavailable: err.message };
   }
@@ -1823,6 +1888,10 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   // customer gets the pay link (showing the exact surcharge) instead of a
   // silent over-collection. Checked BEFORE the attempt fence is stamped.
   const ceiling = await renewalChargeCeiling(successor, method, prepayAmountCents);
+  if (ceiling.payerBilled) {
+    await deliverInvoiceAndStampSkip(successor, 'payer_assigned', 'A third-party payer is now assigned to this renewal invoice.', conn);
+    return { status: 'payer_billed' };
+  }
   if (ceiling.unavailable) {
     await stampSweepDeferred(successor, conn);
     return { status: 'deferred', reason: 'charge_quote_unavailable' };
@@ -2089,21 +2158,33 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
   return done;
 }
 
+// Codex #4971 r16 P2 (finding 8): an ALLOWLIST of TERMINAL reasons — retrying
+// changes nothing for exactly these (no phone on file, no pay url, a missing
+// template, a third-party payer now owns the bill, or withPayLinkClearance's
+// 'handled' — the renewal no longer owes a notice at all).
+const CHARGE_FAILED_NOTICE_TERMINAL_REASONS = new Set(['no_phone', 'no_pay_url', 'missing_template', 'payer_billed', 'handled']);
+
 // Whether the notice attempt just run means nothing more should be
 // retried: true once ACCEPTED (sendCustomerMessage's own "definitely sent"
-// shape) and durably stamped, or once withheld/failed for a reason retrying
-// changes nothing (no phone on file, no pay url, a missing template,
-// payer_billed, or withPayLinkClearance's 'handled' — the renewal no longer
-// owes a notice at all). False — must retry later — for a genuine defer
+// shape) and durably stamped, or once withheld/failed for one of the
+// TERMINAL reasons above. False — must retry later — for a genuine defer
 // (quiet hours, or withPayLinkClearance's 'deferred' on a dispute-suspended
-// pay link), an explicit `retryable` flag, or no outcome at all (the
-// attempt threw before producing one — never silently counted as settled).
+// pay link), an explicit `retryable` flag, no outcome at all (the attempt
+// threw before producing one), OR (Codex #4971 r16 P2) any reason NOT on
+// the terminal allowlist — this used to default to "settled" for anything
+// unrecognized, which silently dropped the notice for good the first time
+// renewalPayerRouting's own lookup failed (withPayLinkClearance's
+// 'payer_unverifiable' — its own doc says "fail closed, retry later") or
+// any other outcome shape this file hasn't seen yet. Never silently
+// counted as settled.
 function chargeFailedNoticeMustRetry(outcome) {
   if (!outcome) return true;
+  const deliveryOutcome = outcome.deliveryOutcome || (outcome.sent === true ? 'accepted' : undefined);
+  if (deliveryOutcome === 'accepted') return false;
+  if (outcome.retryable === true) return true;
   if (outcome.deferred === true) return true;
   if (outcome.reason === 'deferred') return true;
-  if (outcome.retryable === true) return true;
-  return false;
+  return !CHARGE_FAILED_NOTICE_TERMINAL_REASONS.has(outcome.reason);
 }
 
 async function recordChargeFailedNoticeOutcome(successor, outcome, conn) {
@@ -2979,50 +3060,81 @@ async function resolveLapseVoidEligibility(term, conn = db) {
 // Returns 'lapsed' (genuinely voided + retired coverage), 'retired'
 // (settled before the void ran — no void, no retrieval), or 'deferred' (a
 // pending Stripe reconciliation — retry next tick).
+// Codex round-7 P1 (2nd audit round): the eligibility re-check inside
+// processGraceLapseSequence used to commit on its OWN, short-lived
+// transaction, releasing its row lock BEFORE the void and retrieval task
+// ran — a renew/switch_plan decision landing in that gap was ignored (the
+// void and retrieval task still fired against a plan an operator had just
+// decided otherwise). A dedicated-connection SESSION lock, held across the
+// WHOLE sequence (the lapse-start stamp below through the final
+// recordDecision('cancel')) — the SAME mechanism and SAME key
+// decideAndCharge's charge submission uses — closes it: a decision (xact
+// lock) racing in from elsewhere on this SAME parent genuinely waits behind
+// this whole sequence, or this sequence's own eligibility re-check already
+// sees it and defers with NO void. The nested recordDecision('cancel') call
+// below (SAME parent, SAME async tree) never re-takes the lock — see
+// heldParentDecisionLockStore's doc in annual-prepay-renewals.js. A term
+// with no parent (should not occur for a real grace-lapse candidate, but
+// defensive) skips the lock entirely — nothing to serialize against.
 async function processGraceLapseForTerm(term, conn = db) {
+  if (!term.renewed_from_term_id) return stampLapseStartAndRunSequence(term, conn);
+  return withRenewalGate(term, () => stampLapseStartAndRunSequence(term, conn));
+}
+
+// Codex #4971 r16 P1 (finding 7): renewal_lapse_started_at is the ONLY thing
+// that ever sets this column (see processGraceLapseSequence's own doc
+// above) — its mere presence with completed_at still null is what the
+// recovery pass (reconcileMissedLapseEffects) trusts as "this successor's
+// cancellation IS this lapse's own void", never re-derived from status
+// alone. Stamping it used to run BEFORE the renewal gate — a plain UPDATE
+// with no status check at all — so an operator void racing in around the
+// same moment (voidInvoice -> cancelTermWithRestorations, which DOES take
+// this SAME gate as its transaction's first lock) could commit its own
+// unrelated cancellation just before or after this write landed, and the
+// stamp then sat on an already-(externally-)cancelled row with no lapse of
+// its own behind it. The next pass (lapseVoidAlreadyRanFor) read that shape
+// as "the lapse's own void already ran" and finished the sequence —
+// deciding 'cancel' on the PARENT on the lapse's authority for a
+// cancellation an operator caused for an unrelated reason. Now the stamp
+// itself runs INSIDE the gate, and only once the successor re-reads
+// payment_pending under it — an operator void either wins the gate first
+// (successor no longer payment_pending here — deferred, nothing stamped —
+// the ordinary candidate scan simply stops selecting this row once its
+// status change is visible) or waits behind this whole sequence, exactly
+// like every other renewal action.
+async function stampLapseStartAndRunSequence(term, conn) {
   let lapseStartedAt = term.renewal_lapse_started_at;
   if (!lapseStartedAt) {
-    // Codex #4971 post-push audit round-6 P1: a fresh lapse only stamped
-    // renewal_lapse_started_at in the DB — the in-memory `term` object
-    // passed down to raiseGraceLapseRetrievalTask still read null, so its
-    // eventAt was null and the raise ranked as the OLDEST event in the
-    // account's retrieval chronology, yielding to any earlier request-
-    // backed row even one staff already acted on. RETURNING the persisted
-    // value (or, when a concurrent tick's own whereNull() guard already
-    // won the race, re-reading it) means eventAt always reflects the REAL
-    // first-detected time, never a fabricated new one and never null.
-    const [stamped] = await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_started_at')
-      .update({ renewal_lapse_started_at: new Date() })
-      .returning('renewal_lapse_started_at');
-    if (stamped) {
-      lapseStartedAt = stamped.renewal_lapse_started_at;
+    const fresh = await conn('annual_prepay_terms').where({ id: term.id }).first('status', 'renewal_lapse_started_at');
+    if (fresh?.renewal_lapse_started_at) {
+      lapseStartedAt = fresh.renewal_lapse_started_at;
+    } else if (fresh?.status !== PAYMENT_PENDING_STATUS) {
+      logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred — no longer payment_pending under the gate (an external write resolved it first)`);
+      await stampSweepDeferred(term, conn);
+      return 'deferred';
     } else {
-      const fresh = await conn('annual_prepay_terms').where({ id: term.id }).first('renewal_lapse_started_at');
-      lapseStartedAt = fresh?.renewal_lapse_started_at || null;
+      // Codex #4971 post-push audit round-6 P1: a fresh lapse only stamped
+      // renewal_lapse_started_at in the DB — the in-memory `term` object
+      // passed down to raiseGraceLapseRetrievalTask still read null, so its
+      // eventAt was null and the raise ranked as the OLDEST event in the
+      // account's retrieval chronology, yielding to any earlier request-
+      // backed row even one staff already acted on. RETURNING the persisted
+      // value (or, when a concurrent tick's own whereNull() guard already
+      // won the race, re-reading it) means eventAt always reflects the REAL
+      // first-detected time, never a fabricated new one and never null.
+      const [stamped] = await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_started_at')
+        .update({ renewal_lapse_started_at: new Date() })
+        .returning('renewal_lapse_started_at');
+      if (stamped) {
+        lapseStartedAt = stamped.renewal_lapse_started_at;
+      } else {
+        const refetched = await conn('annual_prepay_terms').where({ id: term.id }).first('renewal_lapse_started_at');
+        lapseStartedAt = refetched?.renewal_lapse_started_at || null;
+      }
     }
     term = { ...term, renewal_lapse_started_at: lapseStartedAt };
   }
-
-  // Codex round-7 P1 (2nd audit round): the eligibility re-check above
-  // used to commit on its OWN, short-lived transaction, releasing its row
-  // lock BEFORE the void and retrieval task ran — a renew/switch_plan
-  // decision landing in that gap was ignored (the void and retrieval task
-  // still fired against a plan an operator had just decided otherwise). A
-  // dedicated-connection SESSION lock, held across the WHOLE sequence
-  // (eligibility re-check through the final recordDecision('cancel')) —
-  // the SAME mechanism and SAME key decideAndCharge's charge submission
-  // uses — closes it: a decision (xact lock) racing in from elsewhere on
-  // this SAME parent genuinely waits behind this whole sequence, or this
-  // sequence's own eligibility re-check already sees it and defers with NO
-  // void. The nested recordDecision('cancel') call below (SAME parent, SAME
-  // async tree) never re-takes the lock — see heldParentDecisionLockStore's
-  // doc in annual-prepay-renewals.js. A term with no parent (should not
-  // occur for a real grace-lapse candidate, but defensive) skips the lock
-  // entirely — nothing to serialize against.
-  if (!term.renewed_from_term_id) {
-    return processGraceLapseSequence(term, conn);
-  }
-  return withRenewalGate(term, () => processGraceLapseSequence(term, conn));
+  return processGraceLapseSequence(term, conn);
 }
 
 // Extracted from processGraceLapseSequence (Codex #4971 post-push audit
@@ -3814,8 +3926,27 @@ async function pendingChargeOutcomeVerdict(successor, conn) {
   if (classifyRenewalInvoice(invoice).processing) return { kind: 'in_motion' };
   const attempt = await whereAttemptSubmitted(
     conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
-  ).orderBy('a.created_at', 'desc').first('a.status', 'a.error_message');
+  ).orderBy('a.created_at', 'desc').first('a.status', 'a.error_message', 'a.decline_code');
   if (attempt?.status === 'failed') {
+    // Codex #4971 r16 P1 (finding 2): a crash before decideAndCharge's own
+    // in-memory classifyChargeError ever ran leaves ONLY this persisted
+    // 'failed' status behind — treating every one of those as a genuine
+    // decline is wrong for authentication_required (classifyChargeError
+    // itself reads that exact decline_code as 'ambiguous': the off-session
+    // PaymentIntent can still be completed and succeed later), which used
+    // to send a second pay link and a false decline notice beside a charge
+    // that might still go through. decline_code is the SAME field stripe.js
+    // persists on the attempt (resolveNoFundsSavedCardChargeAttempt);
+    // absent on an attempt row from before this column existed, which
+    // stays a genuine decline (the conservative default for a KNOWN decline
+    // shape — never for an unclassified one, see the ambiguous fallback
+    // below).
+    if (attempt.decline_code === 'authentication_required') {
+      return {
+        kind: 'ambiguous',
+        reason: `the charge failed at Stripe pending additional authentication (authentication_required) — its live PaymentIntent may still be completed and succeed: ${attempt.error_message || 'no reason recorded'}`,
+      };
+    }
     return { kind: 'declined', reason: `the charge failed at Stripe: ${attempt.error_message || 'no reason recorded'}` };
   }
   return {
@@ -3945,5 +4076,7 @@ module.exports = {
     addDaysYmd,
     graceDays,
     graceDeadlineFor,
+    customerDeletedRefusal,
+    ringRenewalBell,
   },
 };

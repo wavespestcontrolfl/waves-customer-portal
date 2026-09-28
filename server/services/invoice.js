@@ -3498,6 +3498,27 @@ async function withRenewalSendGate(invoice, send) {
   }
 }
 
+// Codex #4971 r16 P1 (finding 1): the gate's own SESSION can die at any
+// point while the queued send it wraps (withRenewalSendGate above) is
+// running — a dropped raw connection releases every advisory lock the
+// session held at Postgres's end immediately, but nothing here would
+// otherwise notice. termite-annual-renewal-charge.js's own immediate sends
+// (decideAndCharge's Stripe submission, the pay-link / charge-failed-notice
+// text) already assert this right before each provider call
+// (assertRenewalLockAlive there); this file's OWN provider handoffs never
+// did, so a queued/scheduled renewal send (processScheduledSends ->
+// withRenewalSendGate -> sendViaSMSAndEmail) could still reach Twilio/
+// SendGrid after the lock backing its own eligibility read was gone.
+// Called from INSIDE sendViaSMSAndEmail itself — the ONE function every
+// renewal send (immediate or queued) hands off to a provider through — so
+// every caller is covered without threading a flag through each one. A
+// no-op outside any held gate (an ordinary, non-renewal invoice send never
+// pays this any attention at all).
+function assertRenewalGateAlive() {
+  const mod = require("./annual-prepay-renewals");
+  if (typeof mod.assertParentDecisionLockAlive === "function") mod.assertParentDecisionLockAlive();
+}
+
 // Codex #4971 r11 P1: the renewal's own clearance (a parent cancelled or
 // refunded, an account deleted, a dispute, the grace window closed) is
 // re-judged HERE, at the claim every renewal send goes through — the
@@ -6386,6 +6407,10 @@ const InvoiceService = {
         // the provider sees the text. A throw here is pre-provider: the
         // SMS leg reports a definite non-delivery and the rows restore.
         await fenceAdoptedRowsBeforeHandoff(consumedQueuedSendRows, claim.invoice.send_claim_token);
+        // Codex #4971 r16 P1 (finding 1): immediately before THIS provider
+        // handoff — the gate's session can die at any point while this
+        // whole send is running, not just at entry.
+        assertRenewalGateAlive();
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
           claimToken: claim.invoice.send_claim_token,
@@ -6621,6 +6646,11 @@ const InvoiceService = {
       email.code = sms.code;
     } else {
       try {
+        // Codex #4971 r16 P1 (finding 1): the SAME assertion as the SMS leg
+        // above, immediately before THIS separate provider handoff — a lock
+        // loss between the two legs (the SMS leg's own network round trip)
+        // must still be caught before the email leg reaches SendGrid.
+        assertRenewalGateAlive();
         const r = await sendInvoiceEmail(invoiceId, {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
