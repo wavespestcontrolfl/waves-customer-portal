@@ -657,7 +657,10 @@ never attempts this — `moveVisitAsUnit` forwards its caller's options,
 `evaluateArrivalPlacement` refuses any row still sharing a `visit_id` with
 another live stop, which would fail the whole unit move on its first
 member — so this lane checks `!service.visit_id` before attempting it, a
-deliberate skip rather than an oversight.
+deliberate skip rather than an oversight. The picker mirrors that skip: any
+row carrying a `visit_id` (a singleton group included) is offered append-only
+slots only, so it is never shown a position its commit won't certify (Codex
+round 2 P1).
 
 **Series re-anchor never offers or commits an insertion** (Codex round 1
 P1, corrects the original design's assumption): a big-pull-forward re-anchor

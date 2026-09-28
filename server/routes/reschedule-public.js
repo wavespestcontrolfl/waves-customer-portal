@@ -488,8 +488,11 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     // has no capacityPlacement to refuse against, it silently commits
     // append-only). pickerMayReanchor is the same predicate shouldReanchor
     // itself evaluates for a single-day range (the commit re-check below),
-    // so the two can never disagree.
-    capacityPlacement: bookInsertionOffersLive() && !pickerMayReanchor(svc, rangeFrom, rangeTo),
+    // so the two can never disagree. A row that still carries a visit_id
+    // (even a singleton group) is excluded too: rescheduleOnce skips
+    // certification for any visit_id row, so it would commit append-only
+    // (Codex round 2 P1 on PR #5267).
+    capacityPlacement: bookInsertionOffersLive() && !svc.visit_id && !pickerMayReanchor(svc, rangeFrom, rangeTo),
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —

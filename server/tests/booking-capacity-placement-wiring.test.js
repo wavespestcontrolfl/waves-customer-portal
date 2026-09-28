@@ -127,6 +127,11 @@ describe('reschedule-public.js — single-visit commit persists the certified or
     expect(call).toContain('capacityPlacement: bookInsertionOffersLive()');
   });
 
+  test('buildAvailabilityForService never offers insertion for a row carrying a visit_id — rescheduleOnce skips certification for those (Codex r2 P1 on PR #5267)', () => {
+    const call = callAfter(src, 'async function buildAvailabilityForService');
+    expect(call).toContain('capacityPlacement: bookInsertionOffersLive() && !svc.visit_id');
+  });
+
   test('the single-visit commit (SmartRebooker.reschedule) opts in with capacityPlacement: true — its own commit (rescheduleOnce) persists the certified order under this flag', () => {
     const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
     expect(singleIdx).toBeGreaterThan(-1);
