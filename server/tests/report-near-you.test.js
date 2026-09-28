@@ -1,10 +1,12 @@
 // "Near you" line on the LIVE lawn report (owner ask 2026-09-28, "lawn only",
 // GATE_REPORT_NEAR_YOU): buildReportV1Data adds nearYou { city, pest } — the
-// lawn pest most often found among OTHER lawn customers in this report's city
-// over the last 30 ET days, only at NEAR_YOU_MIN_CUSTOMERS (3) distinct
-// customers. The SQL filters (city, window, performed/visible, own customer
-// excluded) are proven against real Postgres in report-near-you-postgres.test.js;
-// this suite pins the conditions and the counting.
+// lawn pest most often recorded among OTHER lawn customers in this report's
+// city over the last 30 ET days, only at NEAR_YOU_MIN_CUSTOMERS (3) distinct
+// customers, read from each visit's completion-form snapshot
+// (structured_notes.formObservations) only. The SQL filters (city, window,
+// performed/visible, own customer excluded) are proven against real Postgres
+// in report-near-you-postgres.test.js; this suite pins the conditions and the
+// counting.
 const lawnCatalog = require('../../shared/lawn-condition-findings.json');
 const { stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
 
@@ -17,12 +19,14 @@ function requireWithGateOn() {
 const statementFor = (label) => lawnCatalog.groups
   .flatMap(({ findings }) => findings)
   .find((finding) => finding.label === label).statement;
-const title = (label, location = 'Front yard') => `${statementFor(label)} Location: ${location}.`;
+// An allowlisted lawn pest observation, exactly as the closeout form stores it.
+const observation = (label, location = 'Front yard') => `${statementFor(label)} Location: ${location}.`;
 const CHINCH = 'Chinch bugs — observed';
 const ARMY = 'Armyworms';
 
 // The same builder fake as report-plan-summary.test.js, plus knex.raw: the
-// near-you read answers with `nearYouRows`, every other raw query with none.
+// near-you read (one row per visit: customer_id + form_observations) answers
+// with `nearYouRows`, every other raw query with none.
 function makeKnex(fixtures, nearYouRows, rawCalls) {
   const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
@@ -53,7 +57,7 @@ function makeKnex(fixtures, nearYouRows, rawCalls) {
   };
   knex.schema = { hasTable: async () => true };
   knex.raw = (sql, bindings) => {
-    const isNearYou = /FROM service_findings f/.test(String(sql));
+    const isNearYou = /AS form_observations/.test(String(sql));
     if (isNearYou) rawCalls.push({ sql, bindings });
     return Promise.resolve({ rows: isNearYou ? nearYouRows : [] });
   };
@@ -107,10 +111,9 @@ test('gate off: no nearYou and no near-you read', async () => {
 
 test('names the top pest at the 3-customer floor, with the trimmed report city, and excludes the viewer', async () => {
   const { data, rawCalls } = await buildWith([
-    { title: title(CHINCH), customer_id: 'c1' },
-    { title: title(CHINCH, 'Back yard'), customer_id: 'c2' },
-    { title: title(CHINCH), customer_id: 'c3' },
-    { title: title(ARMY), customer_id: 'c1' },
+    { customer_id: 'c1', form_observations: [observation(CHINCH), observation(ARMY)] },
+    { customer_id: 'c2', form_observations: [observation(CHINCH, 'Back yard')] },
+    { customer_id: 'c3', form_observations: [observation(CHINCH)] },
   ]);
   expect(data.nearYou).toEqual({ city: 'Parrish', pest: 'chinch bugs' });
   const [call] = rawCalls;
@@ -119,35 +122,46 @@ test('names the top pest at the 3-customer floor, with the trimmed report city, 
   expect(call.bindings[3]).toBe('Parrish');
   expect(call.sql).toMatch(/sr\.customer_id <> \?/);
   expect(call.sql).toMatch(/sr\.service_line = 'lawn'/);
+  // The closeout form snapshot is the only pest source (codex P0 on #5177).
+  expect(call.sql).not.toMatch(/service_findings/);
 });
 
 test('below the floor, or one customer counted many times, names nothing', async () => {
   const twoCustomers = await buildWith([
-    { title: title(CHINCH), customer_id: 'c1' },
-    { title: title(CHINCH), customer_id: 'c2' },
+    { customer_id: 'c1', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c2', form_observations: [observation(CHINCH)] },
   ]);
   expect(twoCustomers.data).not.toHaveProperty('nearYou');
   const oneCustomerMany = await buildWith([
-    { title: title(CHINCH), customer_id: 'c1' },
-    { title: title(CHINCH, 'Back yard'), customer_id: 'c1' },
-    { title: title(CHINCH, 'Left side yard'), customer_id: 'c2' },
+    { customer_id: 'c1', form_observations: [observation(CHINCH), observation(CHINCH, 'Back yard')] },
+    { customer_id: 'c1', form_observations: [observation(CHINCH)] },
+    { customer_id: 'c2', form_observations: [observation(CHINCH, 'Left side yard')] },
   ]);
   expect(oneCustomerMany.data).not.toHaveProperty('nearYou');
 });
 
 test('a tie goes to the label that sorts first', async () => {
-  const { data } = await buildWith(['c1', 'c2', 'c3'].flatMap((customer) => [
-    { title: title(CHINCH), customer_id: customer },
-    { title: title(ARMY), customer_id: customer },
-  ]));
+  const { data } = await buildWith(['c1', 'c2', 'c3'].map((customer) => (
+    { customer_id: customer, form_observations: [observation(CHINCH), observation(ARMY)] }
+  )));
   expect(data.nearYou).toEqual({ city: 'Parrish', pest: 'armyworms' });
 });
 
-test('absence findings and unrelated findings never name a pest', async () => {
-  const { data } = await buildWith(['c1', 'c2', 'c3'].flatMap((customer) => [
-    { title: title('No live pests detected'), customer_id: customer },
-    { title: 'Mulch piled against the foundation.', customer_id: customer },
-  ]));
+test('absence and unrelated observations never name a pest', async () => {
+  const { data } = await buildWith(['c1', 'c2', 'c3'].map((customer) => (
+    { customer_id: customer, form_observations: [observation('No live pests detected'), 'Mulch piled against the foundation.'] }
+  )));
+  expect(data).not.toHaveProperty('nearYou');
+});
+
+test('only an exact allowlisted observation counts, never text that merely starts like one (codex P0 on #5177)', async () => {
+  const { data } = await buildWith(['c1', 'c2', 'c3'].map((customer) => ({
+    customer_id: customer,
+    form_observations: [
+      `${observation(CHINCH)} Also saw some in the neighbor's yard.`,
+      `${statementFor(CHINCH)} Location: Somewhere else.`,
+    ],
+  })));
   expect(data).not.toHaveProperty('nearYou');
 });
 
@@ -157,7 +171,7 @@ test.each([
   ['a live build without the opt-in (the Q&A endpoint)', { opts: { mode: 'live' } }],
   ['a report with no city', { service: { ...LAWN_SERVICE, city: '  ' } }],
 ])('%s gets no nearYou and makes no near-you read', async (_label, overrides) => {
-  const rows = ['c1', 'c2', 'c3'].map((customer) => ({ title: title(CHINCH), customer_id: customer }));
+  const rows = ['c1', 'c2', 'c3'].map((customer) => ({ customer_id: customer, form_observations: [observation(CHINCH)] }));
   const { data, rawCalls } = await buildWith(rows, overrides);
   expect(data).not.toHaveProperty('nearYou');
   expect(rawCalls).toHaveLength(0);

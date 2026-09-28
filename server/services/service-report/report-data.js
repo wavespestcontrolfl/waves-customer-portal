@@ -61,7 +61,7 @@ const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 const {
   STRUCTURED_OBSERVATION_FINDING_DETAIL,
   LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
-  lawnDefiniteLivePestLabelForTitle,
+  lawnDefiniteLivePestLabelForObservation,
 } = require('../../../shared/service-completion-observations');
 // The plan's callbacks, as a customer knows them ("re-service"). Not
 // re-service.js's RE_SERVICE_SERVICE_KEYS: that billing set also holds
@@ -1873,30 +1873,24 @@ function structuredCustomerConcern(structured = {}) {
   ).trim();
 }
 
-// LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
-// place: cached PDFs / static renders are content-key-insensitive snapshots,
-// and a reschedule after render would leave a stale appointment fossilized in
-// the downloadable document. Covers the top-level nextAppointment AND the V2
-// snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
-// (pdf-queue.js) builds its payload outside the route helper, so the strip
-// must be shared, not route-inlined (codex P2 2026-07-18).
-// The lawn pest most often found among OTHER lawn customers in this
+// The lawn pest most often recorded among OTHER lawn customers in this
 // report's own service city over the last 30 ET days, named only once
 // NEAR_YOU_MIN_CUSTOMERS distinct customers had it (the "Near you" line,
-// GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records
-// only (the Pest Pressure prior-visit rule); the pest comes from the
-// structured lawn findings (shared/service-completion-observations.js).
-// Returns { city, pest } — a fixed customer noun, never a count, name, or
-// address — or null.
+// GATE_REPORT_NEAR_YOU, lawn only). Performed, customer-visible records only
+// (the Pest Pressure prior-visit rule). The pest comes only from each visit's
+// completion-form snapshot (structured_notes.formObservations: server-
+// allowlisted values, the provenance buildProtocolPayload trusts), matched
+// exactly to a definite-live-pest observation. Never from service_findings
+// titles, which can be free text (codex P0 on #5177). Returns { city, pest }
+// (a fixed customer noun, never a count, name, or address) or null.
 async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } = {}) {
   const nearYouCity = String(city || '').trim();
   if (!customerId || !nearYouCity) return null;
   const todayEt = etDateString(now);
   const sinceEt = etDateString(addETDays(now, -29));
   const { rows } = await knex.raw(`
-    SELECT f.title, sr.customer_id
-    FROM service_findings f
-    JOIN service_records sr ON sr.id = f.service_record_id
+    SELECT sr.customer_id, sr.structured_notes->'formObservations' AS form_observations
+    FROM service_records sr
     LEFT JOIN scheduled_services ss ON ss.id = sr.scheduled_service_id
     JOIN customers c ON c.id = sr.customer_id
     WHERE sr.status = 'completed'
@@ -1909,10 +1903,13 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   `, [customerId, sinceEt, todayEt, nearYouCity, ...NON_PERFORMED_VISIT_OUTCOMES]);
   const customersByLabel = new Map();
   for (const row of rows || []) {
-    const label = lawnDefiniteLivePestLabelForTitle(row.title);
-    if (!label || !row.customer_id) continue;
-    if (!customersByLabel.has(label)) customersByLabel.set(label, new Set());
-    customersByLabel.get(label).add(String(row.customer_id));
+    if (!row.customer_id) continue;
+    for (const observation of parseJsonArray(row.form_observations)) {
+      const label = lawnDefiniteLivePestLabelForObservation(observation);
+      if (!label) continue;
+      if (!customersByLabel.has(label)) customersByLabel.set(label, new Set());
+      customersByLabel.get(label).add(String(row.customer_id));
+    }
   }
   const [top] = [...customersByLabel.entries()]
     .map(([label, customers]) => ({ label, customers: customers.size }))
@@ -1922,6 +1919,13 @@ async function loadNearYouLawnPest(knex, { customerId, city, now = new Date() } 
   return pest ? { city: nearYouCity, pest } : null;
 }
 
+// LIVE-VIEW-ONLY schedule fields, stripped from every non-live render in one
+// place: cached PDFs / static renders are content-key-insensitive snapshots,
+// and a reschedule after render would leave a stale appointment fossilized in
+// the downloadable document. Covers the top-level nextAppointment AND the V2
+// snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
+// (pdf-queue.js) builds its payload outside the route helper, so the strip
+// must be shared, not route-inlined (codex P2 2026-07-18).
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;

@@ -103,14 +103,17 @@ Report near-you line (owner ask 2026-09-28, "lawn only"):
 LIVE service-report payload (`/api/reports/:token/data` only — the one caller
 that opts in with `nearYou: true`; the `/ask` Q&A build and every other build
 neither read nor carry it) may carry `nearYou: { city, pest }` on a LAWN report
-only: the lawn pest most often found among OTHER lawn customers in this
+only: the lawn pest most often recorded among OTHER lawn customers in this
 report's own service city over the last 30 ET days. The city is the visit's
 stamped service address city, else the customer's (the same
 `COALESCE(ss.service_address_city, customers.city)` the report query uses),
 compared trimmed and case-blind. Records count only when completed, performed
 (not inspection-only, customer-declined or incomplete) and customer-visible;
-the pest comes from the structured lawn findings' definite-live-pest labels,
-mapped to a fixed customer noun (`LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS`).
+the pest comes only from each visit's closeout form snapshot
+(`structured_notes.formObservations`, server-allowlisted at completion), matched
+exactly to a definite-live-pest observation — never from `service_findings`
+titles, which can be free text — and is shown as a fixed customer noun
+(`LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS`).
 A pest is named only once at least 3 distinct customers
 (`NEAR_YOU_MIN_CUSTOMERS`) had it — the privacy floor, so one household's
 problem is never broadcast; ties go to the label that sorts first; below the

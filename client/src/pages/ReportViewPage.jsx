@@ -2660,7 +2660,11 @@ function PlanSummaryCard({ data, mode }) {
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">Your plan</div>
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
       <p className="map-context-copy">{yearLine}</p>
     </section>
   );
@@ -2677,7 +2681,8 @@ function NearYouCard({ data, mode }) {
   if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
   return (
     <section data-glass="card" className="sr-section near-you-section" id="near-you">
-      <div className="section-eyebrow">Near you</div>
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
       <p className="map-context-copy">
         Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
       </p>

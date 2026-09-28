@@ -50,6 +50,11 @@ const LAWN_VISIBLE_DISEASE_SYMPTOM_IDS = new Set([
 ]);
 const THROUGHOUT_INSPECTED_LAWN = 'Throughout inspected lawn';
 const LAWN_PEST_OBSERVATION_SCOPE = new Map();
+// The definite-live-pest label each allowlisted lawn pest observation names,
+// keyed by the exact observation string (filled in the same loop). The
+// report "Near you" line (GATE_REPORT_NEAR_YOU) names a pest only from these;
+// the "No live pests detected" absence rows are never added.
+const LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS = new Map();
 const LAWN_DISEASE_OBSERVATION_SCOPE = new Map();
 const lawnPestFindings = lawnCatalog.groups
   .flatMap(({ findings }) => findings)
@@ -62,23 +67,14 @@ for (const { label, statement } of lawnPestFindings) {
         location,
         state: label === 'No live pests detected' ? 'absent' : 'present',
       });
+      if (LAWN_DEFINITE_LIVE_PEST_LABELS.has(label)) {
+        LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS.set(observation, label);
+      }
     }
   }
 }
 const routineLiveLawnPests = catalog.lawn.find(([id]) => id === 'live-pests')?.[1];
 LAWN_PEST_OBSERVATION_SCOPE.set(routineLiveLawnPests, { location: null, state: 'present' });
-
-// Statement text (before " Location: … Extent: …") for each definite-live-
-// pest label, restricted to the seven definite-live pests — the "No live
-// pests detected" absence finding is deliberately excluded. Lets the report
-// "Near you" line (GATE_REPORT_NEAR_YOU) trace a stored
-// service_findings.title back to which pest it names, without hand-copying
-// the catalog statements a second time.
-const LAWN_DEFINITE_LIVE_PEST_STATEMENTS = new Map(
-  lawnPestFindings
-    .filter(({ label }) => LAWN_DEFINITE_LIVE_PEST_LABELS.has(label))
-    .map(({ label, statement }) => [statement, label]),
-);
 
 // Fixed lower-case plural customer noun for each definite-live-pest label
 // (owner ruling 2026-09-28, "Near you" line): strips the internal
@@ -95,18 +91,12 @@ const LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS = new Map([
   ['Turf scale or mealybugs', 'turf scale or mealybugs'],
 ]);
 
-// Resolves a stored service_findings.title back to its definite-live-pest
-// label, or null when the title is not one of these seven (including when
-// it is the "No live pests detected" absence finding, or an unrelated
-// finding entirely). Titles are always `${statement} Location: …` with an
-// optional ` Extent: …` suffix, and every definite-live-pest statement is
-// unique text, so a prefix match is exact.
-function lawnDefiniteLivePestLabelForTitle(title) {
-  const text = String(title || '');
-  for (const [statement, label] of LAWN_DEFINITE_LIVE_PEST_STATEMENTS) {
-    if (text.startsWith(statement)) return label;
-  }
-  return null;
+// The definite-live-pest label an allowlisted lawn pest observation names, or
+// null for anything else: the absence finding, the routine unnamed "live
+// pests" row, an unrelated observation, or text that only starts like a
+// catalog statement. Exact match only (codex P0 on #5177).
+function lawnDefiniteLivePestLabelForObservation(observation) {
+  return LAWN_DEFINITE_LIVE_PEST_OBSERVATION_LABELS.get(String(observation || '').trim()) || null;
 }
 
 const lawnDiseaseGroup = lawnCatalog.groups
@@ -202,9 +192,8 @@ function conflictingRoutineObservations(observations = [], { treeShrubLandscapeC
 module.exports = {
   ROUTINE_SERVICE_OBSERVATIONS,
   STRUCTURED_OBSERVATION_FINDING_DETAIL,
-  LAWN_DEFINITE_LIVE_PEST_LABELS,
   LAWN_DEFINITE_LIVE_PEST_CUSTOMER_TERMS,
-  lawnDefiniteLivePestLabelForTitle,
+  lawnDefiniteLivePestLabelForObservation,
   observationsForRoutineService,
   conflictingRoutineObservations,
 };

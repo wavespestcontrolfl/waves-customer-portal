@@ -1256,9 +1256,13 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
     payload.planSummary = { year: 2026, visitsThisYear: 4, reservicesThisYear: 1 };
     const { container } = renderReport(payload);
 
-    await screen.findByText('Your plan');
+    // A real <h2>: the glass theme hides every .section-eyebrow outside the
+    // hero, so the title must not ride one (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Your plan', level: 2 });
     const section = container.querySelector('#your-plan');
     expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
     expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
   });
@@ -1314,9 +1318,12 @@ describe('ReportViewPage — "Near you" line (nearYou)', () => {
     payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
     const { container } = renderReport(payload);
 
-    await screen.findByText('Near you');
+    // A real <h2>, never a glass-hidden .section-eyebrow (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Near you', level: 2 });
     const section = container.querySelector('#near-you');
     expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
     expect(within(section).getByText('Around Parrish this past month, chinch bugs were the lawn pest we found most often.')).toBeInTheDocument();
   });
 

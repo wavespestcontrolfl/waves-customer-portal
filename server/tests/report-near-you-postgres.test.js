@@ -5,7 +5,8 @@
 // this suite proves loadNearYouLawnPest's SQL filters against the real schema:
 // the city rule (the visit's stamped service city, else the customer's),
 // the 30-ET-day window, lawn-only, performed and customer-visible records,
-// and the viewer's own customer left out.
+// the viewer's own customer left out, and the closeout form snapshot
+// (structured_notes.formObservations) as the only pest source.
 const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
@@ -17,7 +18,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const statementFor = (label) => lawnCatalog.groups
   .flatMap(({ findings }) => findings)
   .find((finding) => finding.label === label).statement;
-const CHINCH_TITLE = `${statementFor('Chinch bugs — observed')} Location: Front yard.`;
+const CHINCH_OBSERVATION = `${statementFor('Chinch bugs — observed')} Location: Front yard.`;
 const daysAgo = (n) => etDateString(addETDays(new Date(), -n));
 
 postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
@@ -49,10 +50,12 @@ postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
     return id;
   }
 
-  // A completed lawn visit with one chinch-bug finding. `stampedCity` models
-  // a visit whose booking stamps a different service address city.
+  // A completed lawn visit whose closeout form recorded chinch bugs.
+  // `stampedCity` models a visit whose booking stamps a different service
+  // address city.
   async function lawnFinding(customerId, {
-    date = daysAgo(5), line = 'lawn', status = 'completed', stampedCity = null, notes = {}, title = CHINCH_TITLE,
+    date = daysAgo(5), line = 'lawn', status = 'completed', stampedCity = null, notes = {},
+    formObservations = [CHINCH_OBSERVATION],
   } = {}) {
     const [sched] = await trx('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Lawn Care Visit', status: 'completed',
@@ -60,9 +63,10 @@ postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
     }).returning('*');
     const [rec] = await trx('service_records').insert({
       customer_id: customerId, service_date: date, service_type: 'Lawn Care Visit', status,
-      scheduled_service_id: sched.id, service_line: line, structured_notes: JSON.stringify(notes),
+      scheduled_service_id: sched.id, service_line: line,
+      structured_notes: JSON.stringify({ ...notes, formObservations }),
     }).returning('*');
-    await trx('service_findings').insert({ service_record_id: rec.id, category: 'observation', severity: 'medium', title });
+    return rec;
   }
 
   test('three other customers in the city name the pest; the viewer, other cities and stamped-away visits do not count', async () => {
@@ -81,7 +85,7 @@ postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
       .toEqual({ city: 'PARRISH', pest: 'chinch bugs' });
   });
 
-  test('outside the 30-day window, non-lawn, not performed, not completed and internal-only records do not count', async () => {
+  test('outside the 30-day window, non-lawn, not performed, not completed, internal-only and free-typed findings do not count', async () => {
     const viewer = await customer();
     await lawnFinding(await customer()); // one that counts
     await lawnFinding(await customer()); // two that count
@@ -90,6 +94,12 @@ postgres('loadNearYouLawnPest against migrated PostgreSQL', () => {
     await lawnFinding(await customer(), { notes: { visitOutcome: 'customer_declined' } });
     await lawnFinding(await customer(), { status: 'incomplete' });
     await lawnFinding(await customer(), { notes: { typedReportDelivery: 'internal_only' } });
+    // The same words typed as a title-only finding, with no closeout form
+    // pick, prove nothing (codex P0 on #5177).
+    const typed = await lawnFinding(await customer(), { formObservations: [] });
+    await trx('service_findings').insert({
+      service_record_id: typed.id, category: 'observation', severity: 'medium', title: CHINCH_OBSERVATION,
+    });
     expect(await loadNearYouLawnPest(trx, { customerId: viewer, city: 'Parrish' })).toBeNull();
 
     await lawnFinding(await customer(), { date: daysAgo(29) }); // the window's first day counts
