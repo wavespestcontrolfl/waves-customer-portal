@@ -505,9 +505,26 @@ async function activate(itemId, overrides = {}) {
         }),
       });
       const out = await res.json();
-      expect(out).toMatchObject({ imported: 1, feedCovered: 2, feedCutoff: '2026-09-11', duplicates: 0 });
+      expect(out).toMatchObject({ imported: 1, feedCovered: 2, feedLiveFrom: '2026-09-11', feedHistory: null, duplicates: 0 });
       const csvRows = await mockPg('bank_transactions').where({ source: 'csv' }).orderBy('txn_date');
       expect(csvRows.map(r => r.description)).toEqual(['EARLY', 'CSV row']);
+
+      // the feed imports 09-12..09-15, then is disconnected: those days stay
+      // covered (the rows remain), later days are open to statements again
+      plaid.transactionsSync.mockResolvedValueOnce(page([
+        txn('t-12', 'acc-card', 7, '2026-09-12'), txn('t-15', 'acc-card', 8, '2026-09-15'),
+      ], [], [], 'cursor-1'));
+      await plaidSync.syncItem(itemId);
+      await plaidSync.disconnectItem(itemId);
+      const res2 = await fetch(`http://127.0.0.1:${server.address().port}/admin/tax/bank-import/upload`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountLabel: 'capone-card', accountType: 'card', filename: 'oct.csv',
+          csv: 'Date,Description,Amount\n2026-09-13,IN FEED SPAN,-6.00\n2026-09-15,IN FEED SPAN 2,-8.00\n2026-09-16,AFTER FEED,-9.00',
+        }),
+      });
+      expect(await res2.json()).toMatchObject({ imported: 1, feedCovered: 2, feedLiveFrom: null, feedHistory: { from: '2026-09-12', to: '2026-09-15' } });
+      expect((await mockPg('bank_transactions').where({ source: 'csv', description: 'AFTER FEED' })).length).toBe(1);
     } finally {
       server.close();
       delete process.env.GATE_BANK_IMPORT;

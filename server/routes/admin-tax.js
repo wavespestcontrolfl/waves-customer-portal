@@ -2077,7 +2077,7 @@ router.post('/bank-import/upload', async (req, res, next) => {
     // idempotent via the confirmation token.)
     const inserted = [];
     const feedCoveredHashes = new Set();
-    let feedCutoff = null;
+    let feedCoverage = null;
     await db.transaction(async (trx) => {
       // Advisory xact-lock serializes uploads per canonical label, making
       // the label→type invariant race-free: two concurrent FIRST uploads
@@ -2095,20 +2095,19 @@ router.post('/bank-import/upload', async (req, res, next) => {
         e.status = 400;
         throw e; // rolls back before any insert
       }
-      // A live Plaid feed on this label already covers its start date
-      // onward; CSV and feed rows can't be deduped against each other (they
-      // hash differently), so those days are skipped here and reported —
-      // never imported as silent duplicates. Read under the same label lock
-      // the feed setup takes.
-      feedCutoff = await require('../services/plaid-sync').feedCutoffForLabel(trx, label);
-      if (feedCutoff) {
-        const kept = [];
-        for (const r of toInsert) {
-          if (r.txn_date >= feedCutoff) feedCoveredHashes.add(r.row_hash); else kept.push(r);
-        }
-        toInsert.length = 0;
-        toInsert.push(...kept);
+      // A Plaid feed on this label covers some days (live: its start date
+      // onward; history: the span it already imported, even if since
+      // stopped). CSV and feed rows can't be deduped against each other
+      // (they hash differently), so those days are skipped here and
+      // reported — never imported as silent duplicates. Read under the same
+      // label lock the feed setup takes.
+      feedCoverage = await require('../services/plaid-sync').feedCoverageForLabel(trx, label);
+      const kept = [];
+      for (const r of toInsert) {
+        if (feedCoverage.isCovered(r.txn_date)) feedCoveredHashes.add(r.row_hash); else kept.push(r);
       }
+      toInsert.length = 0;
+      toInsert.push(...kept);
       for (let i = 0; i < toInsert.length; i += 500) {
         const batch = await trx('bank_transactions')
           .insert(toInsert.slice(i, i + 500))
@@ -2242,7 +2241,8 @@ router.post('/bank-import/upload', async (req, res, next) => {
       skippedTotal: skipped.length,
       // rows on/after a live bank feed's start date for this label
       feedCovered: feedCoveredHashes.size,
-      feedCutoff,
+      feedLiveFrom: feedCoverage ? feedCoverage.liveFrom : null,
+      feedHistory: feedCoverage ? feedCoverage.history : null,
       matching,
       matchingError,
     });

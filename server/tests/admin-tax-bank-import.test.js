@@ -40,6 +40,9 @@ function bankBuilder() {
     where: jest.fn((c) => { wheres.push(c); return b; }),
     whereIn: jest.fn((c, v) => { wheres.push([c, v]); return b; }),
     whereRaw: jest.fn((sql, binds) => { wheres.push([sql, binds]); return b; }),
+    // the upload's feed-history span read (min/max txn_date of feed rows)
+    min: jest.fn(() => b),
+    max: jest.fn(() => b),
     first: jest.fn((...cols) => {
       // appliedRefundTotal aggregates refund credits (raw select with the
       // refundAmount sum) — resolve the staged total
@@ -100,7 +103,7 @@ function expensesBuilder() {
 // binding-less raw stays a plain string (the jsonb key-subtraction asserts)
 const mockDb = jest.fn((table) => {
   if (table === 'bank_transactions') return bankBuilder();
-  // the upload's live-feed cutoff read (plaid-sync.feedCutoffForLabel):
+  // the upload's feed-coverage read (plaid-sync.feedCoverageForLabel):
   // no feed on any label in these tests
   if (table === 'plaid_accounts as pa') {
     const f = {};

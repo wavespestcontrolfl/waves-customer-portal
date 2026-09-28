@@ -211,17 +211,36 @@ function publicAccount(a) {
   };
 }
 
-// First day a live feed covers for this label (null = no live feed). The
-// CSV upload calls this under its per-label lock and skips rows on/after it.
-async function feedCutoffForLabel(conn, label) {
-  const row = await conn('plaid_accounts as pa')
+// Which days a bank feed covers for this label, for the CSV upload's
+// overlap guard (called under its per-label lock):
+//  - live: a connected, enabled feed covers its start date onward;
+//  - history: the span of feed rows actually imported — still covered
+//    after the feed is disabled, disconnected or its start date moved,
+//    because those rows stay in staging.
+// isCovered(date) is true when a CSV row that day would duplicate the feed.
+async function feedCoverageForLabel(conn, label) {
+  const canonical = String(label).trim();
+  const live = await conn('plaid_accounts as pa')
     .join('plaid_items as pi', 'pi.id', 'pa.plaid_item_id')
     .whereNot('pi.status', 'removed')
     .where('pa.enabled', true)
-    .whereRaw('upper(trim(pa.account_label)) = upper(?)', [String(label).trim()])
+    .whereRaw('upper(trim(pa.account_label)) = upper(?)', [canonical])
     .min('pa.sync_from as cutoff')
     .first();
-  return toDateOnly(row && row.cutoff);
+  const hist = await conn('bank_transactions')
+    .whereRaw('upper(trim(account_label)) = upper(?)', [canonical])
+    .where({ source: 'plaid' })
+    .min('txn_date as first')
+    .max('txn_date as last')
+    .first();
+  const liveFrom = toDateOnly(live && live.cutoff);
+  const histFrom = toDateOnly(hist && hist.first);
+  const histTo = toDateOnly(hist && hist.last);
+  return {
+    liveFrom,
+    history: histFrom ? { from: histFrom, to: histTo } : null,
+    isCovered: (d) => (!!liveFrom && d >= liveFrom) || (!!histFrom && d >= histFrom && d <= histTo),
+  };
 }
 
 async function getStatus() {
@@ -753,6 +772,6 @@ module.exports = {
   isLoginRequired,
   toDateOnly,
   supersedeUnmatchedRow,
-  feedCutoffForLabel,
+  feedCoverageForLabel,
   _private: { applyChanges, fetchAllChanges, decryptToken, defaultSyncFrom, existingLabels },
 };
