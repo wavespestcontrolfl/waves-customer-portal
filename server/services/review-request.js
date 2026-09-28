@@ -6130,19 +6130,25 @@ const ReviewService = {
     // GATE_REVIEW_DAY0_CONTEXT: classify only once this enrollment has won its
     // insert — the one-active unique index is the serialization point, so a
     // refused or racing duplicate trigger (completion + paid webhook) never
-    // sends evidence to a model — and outside the insert's transaction. The
-    // topic lands on its own column (the step runner rewrites `decision` on
-    // every deferral) while nothing has been sent; a Day-0 that goes out
-    // first just uses the fixed text. updated_at is the runner's claim stamp
-    // and is left alone. Never fails the start.
+    // sends evidence to a model. Detached: a best-effort topic never holds
+    // the completion request or the paid webhook for a model call. The topic
+    // lands on its own column (the step runner rewrites `decision` on every
+    // deferral) while nothing has been sent and the plan is still the one it
+    // was classified for (a first-send re-resolve may have swapped it); a
+    // Day-0 that goes out first just uses the fixed text. updated_at is the
+    // runner's claim stamp and is left alone.
     if (typeof resolveAskContext === "function") {
-      const askContext = await resolveAskContext();
-      if (askContext) {
-        await db("review_sequences")
-          .where({ id: sequence.id, status: "active", touches_sent: 0 })
-          .update({ ask_context: JSON.stringify(askContext) })
-          .catch((err) => logger.warn(`[review] Day-0 topic not stored (sequenceId=${sequence.id}): ${err.message}`));
-      }
+      const sequenceId = sequence.id;
+      const planJson = JSON.stringify(usePlan);
+      setImmediate(() => {
+        void Promise.resolve()
+          .then(resolveAskContext)
+          .then((askContext) => askContext && db("review_sequences")
+            .where({ id: sequenceId, status: "active", touches_sent: 0 })
+            .whereRaw("plan = ?::jsonb", [planJson])
+            .update({ ask_context: JSON.stringify(askContext) }))
+          .catch((err) => logger.warn(`[review] Day-0 topic not stored (sequenceId=${sequenceId}): ${err.message}`));
+      });
     }
 
     // Scheduled start: the cron fires step 0 at firstTouchAt; nothing to run

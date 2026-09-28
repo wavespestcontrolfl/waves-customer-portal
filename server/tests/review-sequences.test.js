@@ -2848,6 +2848,10 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-1', serviceRecordId: 'sr-rc-ctx-1', scheduledServiceId: 'ss-rc-ctx-1', completedAt: new Date() });
 
     expect(result.started).toBe(true);
+    // The enrollment returned before the detached classification ran: the
+    // completion request never waits on the model.
+    expect(mockResolveReviewTopic).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i += 1) await new Promise((r) => setImmediate(r));
     // The visit id travels so the resolver anchors on the visit's own
     // completed_at even where the service record does not exist yet.
     expect(mockResolveReviewTopic).toHaveBeenCalledWith(expect.objectContaining({
@@ -2890,6 +2894,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const result = await ReviewService.enrollPostService({ customerId: 'rc-ctx-2', serviceRecordId: 'sr-rc-ctx-2', completedAt: new Date() });
 
     expect(result.started).toBe(true);
+    for (let i = 0; i < 3; i += 1) await new Promise((r) => setImmediate(r));
+    expect(mockResolveReviewTopic).toHaveBeenCalled();
     expect(mock.__state.rows.review_sequences[0]).not.toHaveProperty('ask_context');
   });
 
