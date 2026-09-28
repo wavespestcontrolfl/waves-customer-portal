@@ -590,9 +590,18 @@ async function runPending() {
     );
 
   let sent = 0, skipped = 0;
-  for (const row of rows) {
+  for (const batchRow of rows) {
+    let row = batchRow;
     try {
-      if (await deferToLadderDay(row)) { skipped++; continue; }
+      // A legacy-cadence touch moved to its Day 90 ladder day is processed
+      // on that new day in this same run when the new day is today (pre-push
+      // audit P1): skipping it would let the next tick find it past its
+      // stale grace and pass it over.
+      const retimed = await deferToLadderDay(row);
+      if (retimed) {
+        if (!retimed.moved || retimed.due.getTime() > now.getTime()) { skipped++; continue; }
+        row = { ...row, next_touch_at: retimed.due };
+      }
       if (row.next_touch_at && isStaleTouch(row.next_touch_at, now)) {
         const skip = await skipStaleTouches(row, now);
         skipped++;
@@ -661,19 +670,21 @@ async function reviveLegacyFinishedSequences() {
 /**
  * Day 90 ladder: a touch stored on the legacy cadence (Day 7 or Day 14)
  * waits for its new day (Day 10 or Day 17). Guarded on the batch snapshot,
- * like the stale skip; true when this run should leave the row alone.
+ * like the stale skip. Returns null when no move is needed, otherwise
+ * { moved, due }: moved false means the sequence changed since the batch
+ * select and this run leaves it alone.
  */
 async function deferToLadderDay(row) {
-  if (!ladderThrough90Live() || !row.next_touch_at) return false;
+  if (!ladderThrough90Live() || !row.next_touch_at) return null;
   const due = computeNextTouchAt(sequenceAnchor(row), row.step_index);
-  if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return false;
+  if (!due || due.getTime() <= new Date(row.next_touch_at).getTime()) return null;
   const updated = await db('invoice_followup_sequences')
     .where({ id: row.id, status: 'active', step_index: row.step_index })
     .where('next_touch_at', row.next_touch_at)
     .update({ updated_at: db.fn.now(), next_touch_at: due });
   logger.info(`[invoice-followups] Day 90 ladder: invoice ${row.invoice_id} step ${row.step_index} `
     + `${updated ? `moved to ${due.toISOString()}` : 'unchanged (sequence moved since batch select)'}`);
-  return true;
+  return { moved: Number(updated) === 1, due };
 }
 
 // NY weekday of a touch's anchor (touches always sit at 10:00 NY, so the

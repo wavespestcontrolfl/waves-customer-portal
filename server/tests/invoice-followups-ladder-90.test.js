@@ -177,6 +177,30 @@ describe('runPending under the Day 90 ladder', () => {
     expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-08'));
   });
 
+  // Pre-push audit P1: a touch moved to a new day that is TODAY must go out
+  // in this run; the next tick would find it past its stale grace.
+  test('a legacy Day 7 touch whose Day 10 is today is moved and sent in the same run', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    jest.setSystemTime(new Date('2026-08-11T14:16:00Z')); // Tue 08-11 10:16 ET
+    // Sent Sat 08-01: legacy Day 7 = Sat 08-08 (first fire Tue 08-11), Day 10 = Tue 08-11.
+    const row = seqRow({ step_index: 1, invoice_sent_at: tenAmET('2026-08-01'), next_touch_at: tenAmET('2026-08-08') });
+    const { seqUpdates, transaction } = setupDb({ joinedReads: [[], [row]] });
+    const result = await runPending();
+    expect(seqUpdates[0].patch.next_touch_at).toEqual(tenAmET('2026-08-11'));
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  test('a sequence that changed since the batch select is left alone', async () => {
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    jest.setSystemTime(new Date('2026-08-11T14:16:00Z'));
+    const row = seqRow({ step_index: 1, invoice_sent_at: tenAmET('2026-08-01'), next_touch_at: tenAmET('2026-08-08') });
+    const { transaction } = setupDb({ joinedReads: [[], [row]], seqUpdateResult: 0 });
+    const result = await runPending();
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, skipped: 1 });
+  });
+
   test('a touch already on its new day fires normally', async () => {
     process.env.GATE_DUNNING_LADDER_90 = 'true';
     // Day 3 is the same in both cadences.
