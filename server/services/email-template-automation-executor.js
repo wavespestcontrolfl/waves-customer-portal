@@ -994,6 +994,26 @@ async function livePayloadForRun(run, storedPayload = {}) {
 
   if (entityType === 'estimate') {
     const row = await loadEntityRow('estimates', id);
+    // estimate.expired's defining fact ONLY (codex P1 round 3 on #5154—
+    // scoped to that ONE trigger key: every other estimate-entity
+    // automation, e.g. estimate.extension_notice/estimate.viewed_gone_quiet,
+    // legitimately runs with the estimate at 'sent'/'viewed'/anything, so a
+    // blanket "must still be expired" check on every estimate run would
+    // wrongly block them). Staff can revive an expired estimate back to
+    // sent/viewed through POST /:id/extend before a delayed or retried
+    // estimate.expired run comes due — extendEstimate changes the row's
+    // status and texts the customer a new deadline, but nothing here
+    // enforced that THAT run's own defining fact ("this estimate is still
+    // expired") still held at execution. Enforced exactly like the review
+    // branch below enforces ITS defining facts: __blocked skips the run
+    // instead of sending stale expiration copy right after the customer was
+    // told their estimate was extended.
+    if (run.trigger_event_key === 'estimate.expired') {
+      if (!row) return { __blocked: 'linked estimate no longer exists' };
+      if (row.status !== 'expired') {
+        return { __blocked: `linked estimate is no longer expired (status is ${row.status})` };
+      }
+    }
     if (!row) return {};
     const live = {};
     setLiveValue(live, 'estimate_id', row.id);
@@ -1512,11 +1532,16 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     const livePayload = await livePayloadForRun(claimedRun, storedPayload);
     // Hard invariant, not a catalog-configurable exit/condition (codex P1):
     // a review.linked_5star run whose review was reattributed, edited below
-    // five stars, dismissed, or removed since it was queued must never
-    // dispatch on stale evidence. livePayloadForRun's 'review' branch signals
-    // this with __blocked rather than a normal field refresh.
+    // five stars, dismissed, or removed since it was queued — or an
+    // estimate.expired run whose estimate was revived through /extend or no
+    // longer exists (codex P1 round 3) — must never dispatch on stale
+    // evidence. livePayloadForRun's 'review'/'estimate' branches signal this
+    // with __blocked rather than a normal field refresh.
     if (livePayload.__blocked) {
-      return markRunSkipped(claimedRun, livePayload.__blocked, { guard: 'review_invalid', attempt: attemptNumber });
+      return markRunSkipped(claimedRun, livePayload.__blocked, {
+        guard: `${String(claimedRun.entity_type || 'entity')}_invalid`,
+        attempt: attemptNumber,
+      });
     }
     const executionPayload = { ...storedPayload, ...livePayload };
     const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);

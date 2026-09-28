@@ -1,25 +1,17 @@
 /**
- * Real PostgreSQL proof for the lifecycle sweep's SQL (codex round 2 on
- * #5154).
+ * Real PostgreSQL proof for the lifecycle sweep's durable-marker design
+ * (codex round 3 on #5154 — supersedes round 2's timestamp-based anti-join
+ * sweep entirely; that sweep and this file's round-2 tests are gone).
  *
- * A mocked db cannot catch any of these:
- *  - entity_id::text vs uuid casts: email_template_automation_runs.entity_id
- *    is varchar while estimates.id/google_reviews.id are uuid. Without the
- *    cast Postgres rejects the anti-join outright ("operator does not exist:
- *    character varying = uuid"), and the sweep's own try/catch silently
- *    swallows that into "0 emitted" forever.
- *  - per-automation reconciliation: several active automations can share one
- *    trigger, so the anti-join must be correlated per (entity, trigger,
- *    automation), not just per entity — otherwise one automation's run looks
- *    like full coverage and a later automation's missing run is never
- *    retried.
- *  - click_auto exclusion: a review linked only by the probabilistic
- *    click-tracking matcher must never surface until a human confirms it via
- *    manualAttributeGoogleReview.
- *
- * This runs the real, exported sweepMissedLifecycleEvents against a real,
- * migrated database so the type mismatch and the anti-join shape can never
- * come back silently.
+ * A mocked db cannot prove any of these:
+ *  - the marker write really shares the SAME Postgres transaction as the
+ *    transition it records — a rollback must leave NEITHER the transition
+ *    NOR the marker, which only a real ROLLBACK can demonstrate;
+ *  - a pending marker committed to a real table is picked back up and
+ *    replayed by retryPendingIntents/sweepMissedLifecycleEvents;
+ *  - an unrecoverable marker is excluded from the very next 'pending' query
+ *    (real WHERE status = 'pending' semantics) so it can never pin the
+ *    sweep's batch, while a co-batched sibling still gets through.
  */
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
@@ -36,17 +28,15 @@ jest.mock('../services/email-template-automation-executor', () => ({
   processTrigger: jest.fn(async () => ({ automation_count: 1, results: [] })),
 }));
 
-(SKIP ? describe.skip : describe)('email-template-automation lifecycle sweep on PostgreSQL (codex round 2 on #5154)', () => {
+(SKIP ? describe.skip : describe)('email-template-automation lifecycle intent markers on PostgreSQL (codex round 3 on #5154)', () => {
   let db;
-  let logger;
   let AutomationExecutor;
-  let sweepMissedLifecycleEvents;
+  let emitters;
 
   beforeAll(() => {
     db = require('../models/db');
-    logger = require('../services/logger');
     AutomationExecutor = require('../services/email-template-automation-executor');
-    ({ sweepMissedLifecycleEvents } = require('../services/email-template-automation-emitters'));
+    emitters = require('../services/email-template-automation-emitters');
   });
 
   afterAll(async () => { await db.destroy(); });
@@ -70,151 +60,164 @@ jest.mock('../services/email-template-automation-executor', () => ({
     return id;
   }
 
-  async function makeTemplate() {
-    const key = `qa_sweep_${randomUUID().slice(0, 8)}`;
-    await db('email_templates').insert({ template_key: key, name: key, status: 'active' });
-    return key;
-  }
-
-  async function makeAutomation({ triggerEventKey, templateKey, status = 'active' }) {
-    const id = randomUUID();
-    await db('email_template_automations').insert({
-      id,
-      automation_key: `qa_${id.slice(0, 8)}`,
-      name: `QA sweep automation ${id.slice(0, 8)}`,
-      trigger_event_key: triggerEventKey,
-      template_key: templateKey,
-      status,
-    });
-    return id;
-  }
-
-  async function makeRun({ automationId, entityType, entityId, templateKey, triggerEventKey }) {
-    const id = randomUUID();
-    await db('email_template_automation_runs').insert({
-      id,
-      automation_id: automationId,
-      automation_key: `qa-run-${id.slice(0, 8)}`,
-      trigger_event_key: triggerEventKey,
-      entity_type: entityType,
-      entity_id: entityId,
-      template_key: templateKey,
-      recipient_email: 'sweep-qa@example.com',
-      idempotency_key: `qa:${id}`,
-      status: 'shadow',
-    });
-    return id;
-  }
-
-  async function cleanup({
-    customerIds = [], templateKeys = [], automationIds = [], estimateIds = [], reviewIds = [],
-  }) {
-    if (automationIds.length) await db('email_template_automation_runs').whereIn('automation_id', automationIds).del();
+  async function cleanup({ customerIds = [], reviewIds = [], estimateIds = [], markerIds = [] }) {
+    if (markerIds.length) await db('email_template_automation_intents').whereIn('id', markerIds).del();
     if (estimateIds.length) await db('estimates').whereIn('id', estimateIds).del();
     if (reviewIds.length) await db('google_reviews').whereIn('id', reviewIds).del();
-    if (automationIds.length) await db('email_template_automations').whereIn('id', automationIds).del();
-    if (templateKeys.length) await db('email_templates').whereIn('template_key', templateKeys).del();
     if (customerIds.length) await db('customers').whereIn('id', customerIds).del();
   }
 
-  test('estimate.expired sweep: the entity_id::text cast lets the uuid anti-join run without a Postgres type error', async () => {
-    const templateKey = await makeTemplate();
-    const automationId = await makeAutomation({ triggerEventKey: 'estimate.expired', templateKey });
-    const estimateId = randomUUID();
-    await db('estimates').insert({
-      id: estimateId,
-      status: 'expired',
-      customer_email: 'sweep-qa@example.com',
-      category: 'RESIDENTIAL',
-      service_interest: 'Pest Control',
+  test('a rollback of the transition leaves NEITHER the entity write NOR its intent marker (same transaction)', async () => {
+    const customerId = await makeCustomer();
+    const reviewId = randomUUID();
+    await db('google_reviews').insert({
+      id: reviewId, location_id: 'venice', star_rating: 5, customer_id: null,
     });
 
     try {
-      const result = await sweepMissedLifecycleEvents();
+      await expect(db.transaction(async (trx) => {
+        // Mirror google-business.js's _upsertGbpReview: the attribution
+        // write and the marker recording happen inside the SAME trx, in
+        // that order, before anything else runs.
+        await trx('google_reviews').where({ id: reviewId }).update({ customer_id: customerId });
+        const intent = await emitters.recordAutomationIntent(trx, {
+          triggerEventKey: 'review.linked_5star',
+          entityType: 'review',
+          entityId: reviewId,
+          occurredAt: new Date(),
+          payload: { review_id: reviewId, customer_id: customerId, star_rating: 5 },
+        });
+        expect(intent).toBeTruthy(); // the insert itself succeeded, mid-transaction
+        throw new Error('synthetic failure forcing a rollback');
+      })).rejects.toThrow('synthetic failure forcing a rollback');
 
-      expect(result.estimatesEmitted).toBe(1);
-      expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith(expect.objectContaining({
-        triggerEventKey: 'estimate.expired',
-        entityId: estimateId,
-      }));
-      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('sweep query failed'));
+      const reviewAfter = await db('google_reviews').where({ id: reviewId }).first();
+      expect(reviewAfter.customer_id).toBeNull(); // the attribution write rolled back
+
+      const markerAfter = await db('email_template_automation_intents').where({ entity_id: reviewId }).first();
+      expect(markerAfter).toBeUndefined(); // the marker rolled back WITH it — neither survived
     } finally {
-      await cleanup({ templateKeys: [templateKey], automationIds: [automationId], estimateIds: [estimateId] });
+      await cleanup({ customerIds: [customerId], reviewIds: [reviewId] });
     }
   });
 
-  test('per-automation reconciliation: two active automations share a trigger; one has a run, the sweep still surfaces the entity for the missing one, then stops once both are covered', async () => {
-    const templateKey = await makeTemplate();
+  test('a committed transition keeps BOTH the entity write and its intent marker', async () => {
     const customerId = await makeCustomer();
-    const automationA = await makeAutomation({ triggerEventKey: 'review.linked_5star', templateKey });
-    const automationB = await makeAutomation({ triggerEventKey: 'review.linked_5star', templateKey });
     const reviewId = randomUUID();
     await db('google_reviews').insert({
-      id: reviewId, location_id: 'venice', star_rating: 5, customer_id: customerId,
+      id: reviewId, location_id: 'venice', star_rating: 5, customer_id: null,
     });
-    await makeRun({
-      automationId: automationA, entityType: 'review', entityId: reviewId, templateKey, triggerEventKey: 'review.linked_5star',
-    });
+    let markerId;
 
     try {
-      const result = await sweepMissedLifecycleEvents();
-
-      // Automation A already has a run; automation B does not — one active
-      // automation missing coverage is enough to surface the entity once.
-      expect(result.reviewsEmitted).toBe(1);
-      expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith(expect.objectContaining({
-        triggerEventKey: 'review.linked_5star',
-        entityId: reviewId,
-      }));
-      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('sweep query failed'));
-
-      // Cover automation B too — nothing left missing, so a second sweep is silent.
-      await makeRun({
-        automationId: automationB, entityType: 'review', entityId: reviewId, templateKey, triggerEventKey: 'review.linked_5star',
+      await db.transaction(async (trx) => {
+        await trx('google_reviews').where({ id: reviewId }).update({ customer_id: customerId });
+        const intent = await emitters.recordAutomationIntent(trx, {
+          triggerEventKey: 'review.linked_5star',
+          entityType: 'review',
+          entityId: reviewId,
+          occurredAt: new Date(),
+          payload: { review_id: reviewId, customer_id: customerId, star_rating: 5 },
+        });
+        markerId = intent.id;
       });
-      jest.clearAllMocks();
-      AutomationExecutor.processTrigger.mockResolvedValue({ automation_count: 1, results: [] });
 
-      const second = await sweepMissedLifecycleEvents();
+      const reviewAfter = await db('google_reviews').where({ id: reviewId }).first();
+      expect(reviewAfter.customer_id).toBe(customerId);
 
-      expect(second.reviewsEmitted).toBe(0);
-      expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+      const markerAfter = await db('email_template_automation_intents').where({ id: markerId }).first();
+      expect(markerAfter).toBeTruthy();
+      expect(markerAfter.status).toBe('pending');
+      expect(markerAfter.entity_id).toBe(reviewId);
     } finally {
-      await cleanup({
-        templateKeys: [templateKey], automationIds: [automationA, automationB], reviewIds: [reviewId], customerIds: [customerId],
-      });
+      await cleanup({ customerIds: [customerId], reviewIds: [reviewId], markerIds: markerId ? [markerId] : [] });
     }
   });
 
-  test('click_auto exclusion: an unconfirmed click-tracking link never emits; the same review after manual confirmation does', async () => {
-    const templateKey = await makeTemplate();
-    const customerId = await makeCustomer();
-    const automationId = await makeAutomation({ triggerEventKey: 'review.linked_5star', templateKey });
-    const reviewId = randomUUID();
-    await db('google_reviews').insert({
-      id: reviewId, location_id: 'venice', star_rating: 5, customer_id: customerId, link_source: 'click_auto',
+  test('the sweep replays a real, committed pending marker and settles it processed', async () => {
+    const markerId = randomUUID();
+    const occurredAt = new Date(Date.now() - 10 * 60 * 1000); // well past the sweep's grace window
+    await db('email_template_automation_intents').insert({
+      id: markerId,
+      trigger_event_key: 'estimate.expired',
+      entity_type: 'estimate',
+      entity_id: 'est-pg-1',
+      occurred_at: occurredAt,
+      status: 'pending',
+      payload: JSON.stringify({ id: 'est-pg-1', customer_email: 'sweep-qa@example.com' }),
     });
 
     try {
-      const firstPass = await sweepMissedLifecycleEvents();
+      const result = await emitters.sweepMissedLifecycleEvents();
 
-      expect(firstPass.reviewsEmitted).toBe(0);
-      expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
-
-      // Manual confirmation clears link_source, mirroring manualAttributeGoogleReview.
-      await db('google_reviews').where({ id: reviewId }).update({ link_source: null, updated_at: new Date() });
-
-      const secondPass = await sweepMissedLifecycleEvents();
-
-      expect(secondPass.reviewsEmitted).toBe(1);
+      expect(result.intentsRetried).toBe(1);
       expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith(expect.objectContaining({
-        triggerEventKey: 'review.linked_5star',
-        entityId: reviewId,
+        triggerEventKey: 'estimate.expired', entityId: 'est-pg-1',
       }));
+      const after = await db('email_template_automation_intents').where({ id: markerId }).first();
+      expect(after.status).toBe('processed');
     } finally {
-      await cleanup({
-        templateKeys: [templateKey], automationIds: [automationId], reviewIds: [reviewId], customerIds: [customerId],
-      });
+      await cleanup({ markerIds: [markerId] });
+    }
+  });
+
+  test('an unrecoverable marker settles out of "pending" in the SAME pass and never resurfaces — never pins a co-batched sibling (codex P2)', async () => {
+    const unresolvableId = randomUUID();
+    const resolvableId = randomUUID();
+    const occurredAt = new Date(Date.now() - 10 * 60 * 1000);
+    await db('email_template_automation_intents').insert([
+      {
+        id: unresolvableId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-unresolvable',
+        occurred_at: occurredAt,
+        status: 'pending',
+        // No customer_email/customer_id at all — recipientFor's own
+        // "recipient email is required" throw is what settles this
+        // unrecoverable; the executor is mocked here so the rejection is
+        // simulated directly on it (proven for real against recipientFor's
+        // exact error in the mocked emitters unit suite).
+        payload: JSON.stringify({ id: 'est-pg-unresolvable' }),
+      },
+      {
+        id: resolvableId,
+        trigger_event_key: 'estimate.expired',
+        entity_type: 'estimate',
+        entity_id: 'est-pg-resolvable',
+        occurred_at: new Date(occurredAt.getTime() + 1000), // one second later — still oldest-first ahead of nothing else
+        status: 'pending',
+        payload: JSON.stringify({ id: 'est-pg-resolvable', customer_email: 'sweep-qa@example.com' }),
+      },
+    ]);
+    const unrecoverableErr = new Error('recipient email is required for automation execution');
+    unrecoverableErr.status = 400;
+    AutomationExecutor.processTrigger
+      .mockRejectedValueOnce(unrecoverableErr)
+      .mockResolvedValueOnce({ automation_count: 1, results: [] });
+
+    try {
+      const first = await emitters.sweepMissedLifecycleEvents();
+
+      // Both markers were IN the same 'pending' batch (LIMIT 100 easily
+      // covers 2 rows) — the unresolvable one failing never stopped the
+      // resolvable sibling from being attempted in the SAME pass.
+      expect(first.intentsRetried).toBe(1); // only the resolvable one counts as an actual emit
+      expect(AutomationExecutor.processTrigger).toHaveBeenCalledTimes(2);
+
+      const unresolvableAfter = await db('email_template_automation_intents').where({ id: unresolvableId }).first();
+      expect(unresolvableAfter.status).toBe('unrecoverable');
+      const resolvableAfter = await db('email_template_automation_intents').where({ id: resolvableId }).first();
+      expect(resolvableAfter.status).toBe('processed');
+
+      // A second sweep pass — the real WHERE status = 'pending' clause must
+      // never re-select the unrecoverable row.
+      AutomationExecutor.processTrigger.mockClear();
+      const second = await emitters.sweepMissedLifecycleEvents();
+      expect(second.intentsRetried).toBe(0);
+      expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+    } finally {
+      await cleanup({ markerIds: [unresolvableId, resolvableId] });
     }
   });
 });

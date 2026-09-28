@@ -30,13 +30,24 @@ function makeQuery(updateResult) {
   return { q, updates };
 }
 
+// email_template_automation_intents — codex round 3 on #5154: each Rule's
+// flip now records one marker per flipped row in the SAME transaction,
+// before this test's own db('estimates') queue runs out. A no-op stub keyed
+// by table name (not call order) keeps that write harmless here — the
+// marker write itself is proven for real in
+// email-template-automation-emitters-postgres.test.js.
+function makeIntentsStub() {
+  return { insert: () => ({ onConflict: () => ({ ignore: () => ({ returning: async () => [] }) }) }) };
+}
+
 test('both rules stamp disposition in the flip UPDATE and return it', async () => {
   const rule1 = makeQuery([
     { id: 'a', customer_name: 'A', disposition: 'expired_unviewed' },
     { id: 'b', customer_name: 'B', disposition: 'expired_viewed' },
   ]);
   const rule2 = makeQuery([{ id: 'c', customer_name: 'C', disposition: 'expired_unviewed' }]);
-  db.mockImplementationOnce(() => rule1.q).mockImplementationOnce(() => rule2.q);
+  const tables = { estimates: [rule1.q, rule2.q], email_template_automation_intents: makeIntentsStub() };
+  db.mockImplementation((table) => (table === 'estimates' ? tables.estimates.shift() : tables.email_template_automation_intents));
 
   const result = await runEstimateExpiration();
   expect(result).toEqual({ aged: 2, dateExpired: 1 });

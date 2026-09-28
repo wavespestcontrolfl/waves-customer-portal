@@ -20,10 +20,15 @@ jest.mock('../utils/cron-lock', () => ({
 }));
 jest.mock('../services/email-template-automation-emitters', () => ({
   emitReviewLinked5Star: jest.fn(async () => null),
+  // codex round 3 on #5154: manualAttributeGoogleReview now records a
+  // durable intent marker inside its own relink transaction BEFORE calling
+  // emitReviewLinked5Star — mocked here so that write is a harmless no-op
+  // for every test in this file that isn't specifically about it.
+  recordAutomationIntent: jest.fn(async () => ({ id: 'intent-mock' })),
 }));
 
 const ReviewIncentives = require('../services/review-incentives');
-const { emitReviewLinked5Star } = require('../services/email-template-automation-emitters');
+const { emitReviewLinked5Star, recordAutomationIntent } = require('../services/email-template-automation-emitters');
 
 function createDbMock(initialRows = {}) {
   const state = {
@@ -677,7 +682,13 @@ describe('review incentives', () => {
 
     expect(emitReviewLinked5Star).toHaveBeenCalledWith({
       reviewId: 'google-5star', customerId: 'customer-1', locationId: 'sarasota', starRating: 5,
-    });
+    }, 'intent-mock');
+    // codex round 3 on #5154: the durable intent marker is recorded inside
+    // the SAME relink transaction as the attribution write, before the
+    // direct emit call above — never against the bare `conn`.
+    expect(recordAutomationIntent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      triggerEventKey: 'review.linked_5star', entityType: 'review', entityId: 'google-5star',
+    }));
   });
 
   test('manual attribution of a previously-unmatched review BELOW five stars does not emit review.linked_5star', async () => {
@@ -700,7 +711,14 @@ describe('review incentives', () => {
     // contract, tested directly in email-template-automation-emitters.test.js)
     // — this proves the CALLER still routes the review's real star_rating
     // through rather than assuming 5.
-    expect(emitReviewLinked5Star).toHaveBeenCalledWith(expect.objectContaining({ starRating: 4 }));
+    expect(emitReviewLinked5Star).toHaveBeenCalledWith(expect.objectContaining({ starRating: 4 }), null);
+    // No marker for THIS non-5-star review either — one would never be
+    // settled (the emitter's own guard returns before touching a marker
+    // id) and would sit 'pending' forever. (This file has no mock-clearing
+    // beforeEach — other tests' calls persist across the suite — so the
+    // assertion is scoped to this review's entityId, matching the file's
+    // existing style.)
+    expect(recordAutomationIntent).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ entityId: 'google-4star' }));
   });
 
   test('re-confirming an ALREADY-linked review (customer unchanged, not click_auto) does not re-emit review.linked_5star', async () => {

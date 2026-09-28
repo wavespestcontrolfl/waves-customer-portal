@@ -149,6 +149,71 @@ describe('livePayloadForRun — review revalidation (review.linked_5star)', () =
   });
 });
 
+describe('livePayloadForRun — estimate revalidation (estimate.expired, codex P1 round 3 on #5154)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function run(overrides = {}) {
+    return {
+      entity_type: 'estimate', entity_id: 'est-1', trigger_event_key: 'estimate.expired', ...overrides,
+    };
+  }
+
+  test('still valid: estimate is still expired — no block', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'expired', expires_at: '2026-06-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBeUndefined();
+    expect(live.status).toBe('expired');
+  });
+
+  test('blocked: revived through /extend before a delayed run came due (status back to sent)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate is no longer expired (status is sent)');
+  });
+
+  test('blocked: revived through /extend before a delayed run came due (status back to viewed)', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'viewed', expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate is no longer expired (status is viewed)');
+  });
+
+  test('blocked: the estimate no longer exists', async () => {
+    mockTables({ estimates: undefined });
+
+    const live = await livePayloadForRun(run());
+
+    expect(live.__blocked).toBe('linked estimate no longer exists');
+  });
+
+  // Scoping guard (codex P1 round 3 fix-forward regression): a DIFFERENT
+  // estimate-entity automation (e.g. estimate.extension_notice) legitimately
+  // runs while the estimate is sent/viewed/anything else — this hard
+  // invalidation must apply ONLY to the estimate.expired trigger, never to
+  // every estimate-entity run.
+  test('a non-estimate.expired trigger on an estimate entity is never blocked by status', async () => {
+    mockTables({
+      estimates: { id: 'est-1', status: 'sent', viewed_at: null, expires_at: '2026-07-01' },
+    });
+
+    const live = await livePayloadForRun(run({ trigger_event_key: 'estimate.extension_notice' }));
+
+    expect(live.__blocked).toBeUndefined();
+    expect(live.status).toBe('sent');
+  });
+});
+
 describe('exitReasonFor — send-time appointment guards', () => {
   const PREP_EXITS = { stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] };
 

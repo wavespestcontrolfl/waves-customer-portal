@@ -1037,6 +1037,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // same transaction the row is parked / requeued exactly like a reviewer
   // edit; the action bell rings after commit.
   let autoReplyParkedPosted = false;
+  // review.linked_5star's durable intent marker id (codex round 3 on
+  // #5154), recorded inside the SAME transaction as the relink below when
+  // this touch is the attribution moment (mirrors the two sync sites in
+  // google-business.js) — set below, threaded to the emit call further down.
+  let manualAttributionIntentId = null;
   const linkedCount = await conn.transaction(async (trx) => {
     // Paid-payout serialization INSIDE the relink transaction (pre-push
     // P0 ×2): lock the payout row FOR UPDATE regardless of status so a
@@ -1174,6 +1179,23 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
         if (cleared) reversedCustomerId = prior.customer_id;
       }
     }
+    // Same attribution-moment condition as the emit call further down
+    // (prior?.customer_id changed, OR a click_auto link is being confirmed
+    // by the SAME customer) — recorded in THIS transaction so a rollback of
+    // the relink rolls the marker back too. Five-star only: a marker for
+    // any other rating would never be settled (the direct emitter's own
+    // star_rating!==5 guard returns before touching a marker id).
+    if ((prior?.customer_id !== customerId || prior?.link_source === 'click_auto') && Number(review.star_rating) === 5) {
+      const { recordAutomationIntent } = require('./email-template-automation-emitters');
+      const intent = await recordAutomationIntent(trx, {
+        triggerEventKey: 'review.linked_5star',
+        entityType: 'review',
+        entityId: review.id,
+        occurredAt: new Date(),
+        payload: { review_id: review.id, customer_id: customerId, location_id: review.location_id, star_rating: review.star_rating },
+      });
+      manualAttributionIntentId = intent?.id || null;
+    }
     return count;
   });
   if (autoReplyParkedPosted) {
@@ -1260,7 +1282,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       const { emitReviewLinked5Star } = require('./email-template-automation-emitters');
       await emitReviewLinked5Star({
         reviewId: review.id, customerId, locationId: review.location_id, starRating: review.star_rating,
-      });
+      }, manualAttributionIntentId);
     } catch (emitErr) {
       logger.warn(`[review-incentives] review.linked_5star emit failed for review ${review.id}: ${emitErr.message}`);
     }
