@@ -1162,9 +1162,7 @@ async function fireGroupedRows(toFire) {
         // send just finished ITS last ladder step, a common case here
         // since the anchor is always the OLDER, further-along invoice)
         // and never a flat constant (Claude pre-push review r2 P1).
-        const siblingAnchorAt = sibling.anchor_at || sibling.invoice_sent_at
-          || sibling.invoice_sms_sent_at || sibling.invoice_created_at || sibling.created_at;
-        const nextAt = computeNextTouchAt(siblingAnchorAt, siblingNextIndex);
+        const nextAt = computeNextTouchAt(sequenceAnchor(sibling), siblingNextIndex);
         const outOfSteps = nextAt === null;
         // Same ordering and revalidation as fireStep's claim: lock the
         // invoice row first, then advance only if the sequence is still the
@@ -2294,10 +2292,13 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       customer_id: customer.id,
       interaction_type: interactionType,
       subject: `Invoice follow-up — ${step.label} (${row.invoice_number || row.invoice_id})`,
-      body: `Step ${row.step_index + 1}/${followupSteps().length} fired. Amount: $${amount}.`,
+      body: combinedVariant
+        ? `Step ${row.step_index + 1}/${followupSteps().length} fired as a combined reminder: ${combinedVariant.invoiceCount} invoices, ${currency(Number(combinedVariant.totalDue))} total (this invoice $${amount}).`
+        : `Step ${row.step_index + 1}/${followupSteps().length} fired. Amount: $${amount}.`,
       metadata: JSON.stringify({
         invoice_id: row.invoice_id,
         step_id: step.id,
+        combined_invoice_ids: combinedVariant?.coveredInvoiceIds || undefined,
         step_index: row.step_index,
         sms_sent: actualSmsSent,
         app_sent: appSent,
