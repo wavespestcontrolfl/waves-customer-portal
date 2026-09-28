@@ -3734,18 +3734,32 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
     body: JSON.stringify({ to: '+15551234567', body: 'Pick a time: portal.wavespestcontrol.com/l/cons1', leadId: LEAD_ID, ...overrides }),
   });
 
-  test('a consultation send passes onDispatchStart/onDispatchAbort that write and clear the shared attempt row', async () => {
+  test('a consultation send passes onDispatchStart/onDispatchAbort/onDispatchRejected that write and clear the shared attempt row', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-attempt' });
     await withServer(async (baseUrl) => {
       const res = await send(baseUrl);
       expect(res.status).toBe(200);
     });
-    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
     expect(typeof onDispatchStart).toBe('function');
     expect(typeof onDispatchAbort).toBe('function');
+    expect(typeof onDispatchRejected).toBe('function');
     await onDispatchStart();
     expect(insertAttemptSpy).toHaveBeenCalledWith({ leadId: LEAD_ID, toPhone: '+15551234567', source: 'admin_communications_manual_sms' });
     await onDispatchAbort();
+    expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
+  });
+
+  // codex #5196 r4 P2: onDispatchRejected deletes the SAME id — it fires
+  // from inside twilio.js's own dispatch() instead of onDispatchAbort when
+  // messages.create() itself throws a definitive rejection.
+  test('onDispatchRejected deletes the attempt row twilio.js\'s own dispatch() wrote', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-attempt' });
+    await withServer(async (baseUrl) => { await send(baseUrl); });
+    const { onDispatchStart, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
+    await onDispatchStart();
+    expect(deleteAttemptSpy).not.toHaveBeenCalled();
+    await onDispatchRejected();
     expect(deleteAttemptSpy).toHaveBeenCalledWith('attempt-99');
   });
 
@@ -3789,9 +3803,10 @@ describe('the consultation-link attempt marker (codex #5196 P1)', () => {
     await withServer(async (baseUrl) => {
       await send(baseUrl, { body: 'Running a bit late today.' });
     });
-    const { onDispatchStart, onDispatchAbort } = sendCustomerMessage.mock.calls[0][0];
+    const { onDispatchStart, onDispatchAbort, onDispatchRejected } = sendCustomerMessage.mock.calls[0][0];
     expect(onDispatchStart).toBeUndefined();
     expect(onDispatchAbort).toBeUndefined();
+    expect(onDispatchRejected).toBeUndefined();
     expect(insertAttemptSpy).not.toHaveBeenCalled();
   });
 });
