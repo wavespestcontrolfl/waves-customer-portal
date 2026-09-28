@@ -159,6 +159,81 @@ describe('buildRainExpectation', () => {
     expect(joined).not.toMatch(/guarantee/i);
     expect(joined).not.toMatch(/eliminat/i);
   });
+
+  // codex P1 2026-09-29 (pre-push audit round 2): "moving through the
+  // treated band" is a TREATMENT claim and must never fire from rain alone.
+  // The ants line now requires the SAME confirmed exterior/perimeter
+  // application evidence the pyrethroid barrier sentence requires.
+  describe('ants-after-rain wording requires confirmed perimeter-treatment evidence', () => {
+    const HEAVY_WEEK = { rainInches: 2, rainConfidence: null };
+
+    it('no applications at all (inspection/sweep-only visit): treatment-neutral wording, never "treated band"', () => {
+      const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
+      expect(out.lines).toHaveLength(2);
+      expect(out.lines[1]).toMatch(/Heavy rain pushes ants indoors/);
+      expect(out.lines[1]).not.toMatch(/treated band/);
+      expect(out.lines[1]).toMatch(/text us/i);
+    });
+
+    it('an INTERIOR-only application (non_repellent, no exterior evidence): treatment-neutral wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'spot_treatment', methodInferred: false, applicationArea: 'Kitchen' }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('a product applied with UNKNOWN method/area (nothing recorded): treatment-neutral wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Demand CS' }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('an INFERRED method (the pest-line default guess) is treated as unknown, never confirms perimeter evidence', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: true }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('an ant bait / roach gel / IGR with confirmed exterior evidence STILL does not earn the band claim (not a perimeter band)', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Advion Ant Bait Gel', method: 'perimeter_spray', methodInferred: false }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).not.toMatch(/treated band/);
+    });
+
+    it('an EXPLICIT perimeter spray (non_repellent) earns the treated-band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).toMatch(/treated band/);
+    });
+
+    it('an applicationArea naming an exterior/perimeter chip (no explicit method) also earns the treated-band wording', () => {
+      const out = buildRainExpectation({
+        weekWeather: HEAVY_WEEK,
+        products: [{ name: 'Demand CS', applicationArea: 'Foundation perimeter' }],
+        serviceMonth: 7,
+      });
+      expect(out.lines[1]).toMatch(/treated band/);
+    });
+
+    it('never guarantees/eliminates in the neutral wording either', () => {
+      const out = buildRainExpectation({ weekWeather: HEAVY_WEEK, products: [], serviceMonth: 7 });
+      expect(out.lines[1]).not.toMatch(/guarantee|eliminat/i);
+    });
+  });
 });
 
 // Owner ruling 2026-09-28 (P1 audit, 2 rounds of misclassification from the

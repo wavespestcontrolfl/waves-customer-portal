@@ -109,7 +109,25 @@ while the live page may show the current reading); a second line may add an ants
 ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
 rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
 the higher 1" bar) or the same live-only forecast signal fires — never on
-the calendar month alone, and never when there is no rain data at all. A
+the calendar month alone, and never when there is no rain data at all. That
+second line's WORDING is itself gated (owner ruling 2026-09-28, revised
+codex P1 2026-09-29, P1 audit round 2): "trails ... usually mean the colony
+is moving through the treated band" is a TREATMENT claim and requires the
+SAME confirmed exterior/perimeter application evidence the `whatToExpect`
+pyrethroid barrier sentence below requires (an explicit, non-inferred
+`perimeter_spray`/`broadcast_spray` method, or an `applicationArea` naming
+an exterior/perimeter chip) on a product whose class is `non_repellent` or
+`pyrethroid` — an ant bait, roach gel, or IGR is never a perimeter band
+either, regardless of where it was placed. No applications at all
+(inspection/sweep-only visit), an interior-only application, or unknown
+method/area all fall back to a treatment-neutral sentence (rain pushes ants
+indoors; text us if activity persists) that states the same honest
+biological fact without claiming a treatment is responsible. The same
+predicate feeds the `EXPECTATIONS` grounding section below; that path is
+structurally incapable of proving perimeter evidence (its product list is
+deduped by catalog product, not by application) and so always gets the
+neutral wording, never a stronger claim than the deterministic card itself
+would make with the same missing evidence. A
 PDF/static render of a GEOCODED visit whose week is not both SETTLED
 (`windowClosed === true`) AND POPULATED (`rainInches != null`) is
 additionally marked **uncacheable** (codex P0 2026-09-28, refined codex P1

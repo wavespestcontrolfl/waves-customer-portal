@@ -149,7 +149,34 @@ function buildRainExpectation({
   const rainySeason = Number.isInteger(serviceMonth) && RAINY_SEASON_MONTHS.has(serviceMonth);
   const heavyWeek = rainInches != null && rainInches >= antsRainThresholdInches(rainConfidence, rainySeason);
   if (heavyWeek || forecastHeavyRain) {
-    lines.push('Heavy rain pushes ants indoors; trails over the next few days usually mean the colony is moving through the treated band.');
+    // codex P1 2026-09-29 (pre-push audit round 2): "moving through the
+    // treated band" is a TREATMENT claim — it must never fire from rain
+    // alone. A sweep-only or inspection-only visit (no applications at all)
+    // and an interior-only application both previously got this exact
+    // wording just because it rained. Require the SAME confirmed
+    // exterior/perimeter application evidence the pyrethroid barrier
+    // sentence requires (hasExteriorApplicationEvidence — explicit,
+    // non-inferred perimeter_spray/broadcast_spray method, or an
+    // applicationArea naming an exterior/perimeter chip) on a product whose
+    // class actually forms a residual band (non_repellent or pyrethroid);
+    // an ant BAIT, a roach gel, or an IGR is not a perimeter band either,
+    // regardless of where it was placed. No such evidence (no applications
+    // at all, interior-only, or unknown method/area) => treatment-neutral
+    // wording — still an honest, useful fact (rain pushes ants indoors
+    // regardless of what was applied), just no claim about a treated band.
+    // report-copy-context.js's grounding path funnels through this same
+    // function with the SAME toExpectationProduct-normalized products, and
+    // structurally has no per-application method/area (deduped by catalog
+    // product, not by application) — it always fails this check and gets
+    // the neutral wording too, so generated copy can never claim more than
+    // the customer-facing card does.
+    const perimeterTreatmentEvidence = (products || []).some((product) => {
+      const cls = classifyProductExpectation(product);
+      return (cls === 'non_repellent' || cls === 'pyrethroid') && hasExteriorApplicationEvidence(product);
+    });
+    lines.push(perimeterTreatmentEvidence
+      ? 'Heavy rain pushes ants indoors; trails over the next few days usually mean the colony is moving through the treated band.'
+      : 'Heavy rain pushes ants indoors for a few days — if activity is still noticeable after about a week, text us and we\'ll take another look.');
   }
 
   if (!lines.length) return null;

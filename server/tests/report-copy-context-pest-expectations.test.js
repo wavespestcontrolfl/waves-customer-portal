@@ -138,6 +138,14 @@ describe('buildReportCopyContext — EXPECTATIONS grounding (gate on)', () => {
     });
     expect(contextText).toMatch(/rained about 0\.6"/);
     expect(contextText).toMatch(/Heavy rain pushes ants indoors/);
+    // codex P1 2026-09-29: the "treated band" claim requires confirmed
+    // exterior/perimeter application evidence (method/area) that this
+    // grounding path structurally never has — productSafety is deduped by
+    // CATALOG PRODUCT, not by application, so it always falls back to the
+    // treatment-neutral ants wording, same as the customer-facing card
+    // would with no such evidence (never a stronger claim in the prompt
+    // than the deterministic block itself makes).
+    expect(contextText).not.toMatch(/treated band/);
   });
 
   it('omits the EXPECTATIONS section outside rainy season with no classifiable product and no rain data', async () => {
