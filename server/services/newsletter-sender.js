@@ -368,17 +368,29 @@ function applyRetryableDeliveryFilter(query, tableAlias = null) {
     .whereIn(col('status'), RETRYABLE_DELIVERY_STATUSES);
 }
 
-// Whether a campaign still has recipients a Resume would mail: at least one
-// delivery-ledger row in a retryable state with no success signal. THE
-// predicate behind "correctable" (codex round 14 on #5187): a fully
-// delivered campaign has a ledger too, and its archive must stay what its
-// recipients received, so a ledger row alone never makes a campaign
-// correctable.
+// The rows a Resume would actually mail: retryable ledger rows with no
+// success signal whose subscriber is still active, not globally suppressed
+// and not an archived customer — the resume precheck's own predicate, in
+// one place. `sendId` is a value, or a raw SQL correlation such as
+// `newsletter_sends.id` when the caller embeds this as an EXISTS subquery.
+function outstandingEligibleDeliveries(sendId, { database = db, correlate = false } = {}) {
+  const base = database('newsletter_send_deliveries')
+    .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
+    .where({ 'newsletter_subscribers.status': 'active' });
+  const scoped = correlate
+    ? base.whereRaw(`newsletter_send_deliveries.send_id = ${sendId}`)
+    : base.where({ 'newsletter_send_deliveries.send_id': sendId });
+  return excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(scoped, 'newsletter_send_deliveries')));
+}
+
+// Whether a campaign still has recipients a Resume would mail. THE predicate
+// behind "correctable" (codex round 14 on #5187): a fully delivered campaign
+// has a ledger too, and its archive must stay what its recipients received,
+// so a ledger row alone never makes a campaign correctable — and neither do
+// rows whose recipients Resume would exclude and terminalize anyway
+// (unsubscribed, globally suppressed, archived; codex round 17 P2).
 async function hasOutstandingDeliveries(sendId, database = db) {
-  const row = await applyRetryableDeliveryFilter(
-    database('newsletter_send_deliveries').where({ send_id: sendId }),
-    'newsletter_send_deliveries',
-  ).first('newsletter_send_deliveries.id');
+  const row = await outstandingEligibleDeliveries(sendId, { database }).first('newsletter_send_deliveries.id');
   return Boolean(row);
 }
 
@@ -1237,12 +1249,7 @@ async function prepareResumeCampaign(sendId) {
     // actually send — otherwise a campaign whose only outstanding rows are
     // suppressed/archived would falsely report work remaining (and repeatedly
     // claim a resume that then selects nobody).
-    const outstanding = await excludeArchivedCustomers(excludeGloballySuppressed(applyRetryableDeliveryFilter(
-      db('newsletter_send_deliveries')
-        .join('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id')
-        .where({ 'newsletter_send_deliveries.send_id': send.id, 'newsletter_subscribers.status': 'active' }),
-      'newsletter_send_deliveries',
-    )))
+    const outstanding = await outstandingEligibleDeliveries(send.id)
       .count('* as c')
       .first();
     if (Number(outstanding?.c || 0) === 0) {
@@ -1538,4 +1545,5 @@ async function markEventsFeatured(send) {
 
 module.exports = {
   applyRetryableDeliveryFilter,
+  outstandingEligibleDeliveries,
   hasOutstandingDeliveries, sendCampaign, prepareResumeCampaign, resumeCampaign, processScheduledSends, buildSubscriberQuery, resolveSegmentCustomerIds, countSegmentRecipients, narrowServiceLineFilter, loadPersonalizationContext, sanitizePersonalizationToken, excludeGloballySuppressed, excludeArchivedCustomers, SKIPPED_DELIVERY_STATUS, markEventsFeatured, sendingClaimIsStale };

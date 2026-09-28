@@ -406,10 +406,7 @@ router.get('/sends', async (req, res, next) => {
         // corrected in place and resumed (PATCH correct-and-resume; the same
         // predicate as hasOutstandingDeliveries, codex round 14 P2).
         db.raw('EXISTS (?) AS has_outstanding', [
-          NewsletterSender.applyRetryableDeliveryFilter(
-            db('newsletter_send_deliveries').whereRaw('newsletter_send_deliveries.send_id = newsletter_sends.id'),
-            'newsletter_send_deliveries',
-          ).select(db.raw('1')),
+          NewsletterSender.outstandingEligibleDeliveries('newsletter_sends.id', { correlate: true }).select(db.raw('1')),
         ]),
       )
       .orderByRaw('COALESCE(newsletter_sends.sent_at, newsletter_sends.created_at) DESC')

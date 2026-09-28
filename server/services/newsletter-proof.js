@@ -673,6 +673,18 @@ async function maybeHandleProofApproval(email) {
         subject: send.subject,
         errors: ['Approved, but validation now fails — nothing sent', ...errors],
       });
+      // Release the proof claim (token-scoped, as the live-recheck branch
+      // below does): a fact withdrawn or the claim scan tightened since the
+      // proof means the CORRECTED draft needs a fresh proof, and
+      // sendNewsletterProof skips any row with proof_sent_at set (codex
+      // round 17 P2).
+      try {
+        await db('newsletter_sends')
+          .where({ id: send.id, proof_token: token })
+          .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+      } catch (clearErr) {
+        logger.error(`[newsletter-proof] failed to release proof claim after validation failure for ${send.id}: ${clearErr.message}`);
+      }
       return true;
     }
   }

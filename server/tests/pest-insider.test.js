@@ -293,7 +293,8 @@ describe('pest-insider claim validation at the send gates', () => {
     const minutes = validate(flagship('Keep pets off the sprayed lawn for 30 minutes.'), { recipientCount: 100 }).errors;
     expect(minutes.some((e) => e.includes('Unverified claim (fixed_reentry_time)'))).toBe(true);
     // service / plan / program wording is treatment context too (codex round 16 P1)
-    for (const service of ['Our pest-control service is safe.', 'The WaveGuard plan is safe for the whole family.', 'Our program is completely safe around kids.']) {
+    // …including brand-owned wording (codex round 17 P1)
+    for (const service of ['Our pest-control service is safe.', 'The WaveGuard plan is safe for the whole family.', 'Our program is completely safe around kids.', "Waves' service is safe.", 'The Waves program is safe for pets.', "Waves Pest Control's treatment is safe once dry."]) {
       expect(validate(flagship(service), { recipientCount: 100 }).errors.some((e) => e.includes('Unverified claim (absolute_safety_claim)'))).toBe(true);
     }
     for (const benign of ['A family-safe fun run this Saturday.', 'Kid-safe bounce houses at the fall festival.', 'Gates open 30 minutes early for the boat parade.', 'A family-safe program of concerts all weekend.']) {

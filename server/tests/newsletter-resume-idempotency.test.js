@@ -40,7 +40,7 @@ db.raw = jest.fn(async () => ({ rowCount: 0 }));
 db.transaction = jest.fn(async (cb) => cb({ raw: db.raw }));
 const { recordTouchpoint } = require('../services/conversations');
 const RETRYABLE_DELIVERY_STATUSES_FOR_TEST = ['queued', 'failed', 'sending'];
-const { sendCampaign, prepareResumeCampaign, resumeCampaign } = require('../services/newsletter-sender');
+const { sendCampaign, prepareResumeCampaign, resumeCampaign, hasOutstandingDeliveries } = require('../services/newsletter-sender');
 
 // Tiny knex-shaped chain helper. Mirrors the pattern used in
 // invoice-receipt-email-idempotency.test.js / portal-url.test.js so the
@@ -564,6 +564,16 @@ describe('resumeCampaign — preconditions', () => {
       preclaimed: true,
       claimToken: expect.any(String),
     });
+  });
+
+  test('hasOutstandingDeliveries applies the resume precheck\'s own eligibility: active subscriber, not globally suppressed, not archived, retryable (codex round 17 P2)', async () => {
+    const q = chain({ first: { id: 'd-1' } });
+    db.mockImplementation((table) => { if (table !== 'newsletter_send_deliveries') throw new Error(`unexpected ${table}`); return q; });
+    await expect(hasOutstandingDeliveries('s')).resolves.toBe(true);
+    expect(q.join).toHaveBeenCalledWith('newsletter_subscribers', 'newsletter_subscribers.id', 'newsletter_send_deliveries.subscriber_id');
+    expect(q.where).toHaveBeenCalledWith({ 'newsletter_subscribers.status': 'active' });
+    expect(q.whereIn).toHaveBeenCalledWith('newsletter_send_deliveries.status', ['queued', 'failed', 'sending']);
+    expect(q.whereNotExists).toHaveBeenCalledTimes(2); // global suppression + archived customer
   });
 
   test('a correction saved between validation and the claim makes the claim miss: VERSION_CHANGED, nothing is sent (codex round 13 P1)', async () => {

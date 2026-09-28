@@ -395,6 +395,33 @@ describe('maybeHandleProofApproval', () => {
     expect(await maybeHandleProofApproval({ ...APPROVAL_EMAIL, subject: 'Re: invoice' })).toBe(false);
   });
 
+  test('an approval whose validation now fails releases the proof claim so the corrected draft gets a fresh proof (codex round 17 P2)', async () => {
+    const stale = {
+      ...PROOFED_DRAFT,
+      newsletter_type: 'pest-insider-monthly',
+      html_body: '<p>Termites swarm again after storms.</p>',
+      text_body: 'Termites swarm again after storms.',
+    };
+    const { sendsChain } = wireDb({ sends: { first: stale }, subscribers: { count: 5 } });
+    mockValidate.mockReturnValue({ errors: ['Unverified claim (termite_second_swarm): "Termites swarm again after storms"'], warnings: [] });
+    const previousGate = process.env.GATE_PEST_INSIDER_PROOF;
+    process.env.GATE_PEST_INSIDER_PROOF = 'true'; // the Pest Insider proof switch is on: the approval reaches validation
+    let r;
+    try {
+      r = await maybeHandleProofApproval(APPROVAL_EMAIL);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_PEST_INSIDER_PROOF; else process.env.GATE_PEST_INSIDER_PROOF = previousGate;
+    }
+    expect(r).toBe(true);
+    expect(mockSendCampaign).not.toHaveBeenCalled();
+    expect(mockTrigger).toHaveBeenCalledWith('newsletter_proof_blocked', expect.objectContaining({
+      sendId: 'send-1', errors: expect.arrayContaining(['Approved, but validation now fails — nothing sent']),
+    }));
+    expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34' });
+    const release = sendsChain.update.mock.calls.find(([patch]) => patch && patch.proof_token === null && patch.proof_sent_at === null);
+    expect(release).toBeTruthy();
+  });
+
   test('non-allowlisted sender cannot approve', async () => {
     wireDb({ sends: { first: PROOFED_DRAFT } });
     const r = await maybeHandleProofApproval({ ...APPROVAL_EMAIL, from_address: 'attacker@evil.com' });

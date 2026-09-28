@@ -973,7 +973,7 @@ const TREATMENT_CONTEXT = new RegExp(
   + '|technicians?|barriers?|baits?|granul\\w*|dusts?|fogg\\w*|misting|exterminat\\w*|fumigat\\w*|waveguard'
   + '|re-?ent(?:ry|er)\\w*|(?:once|until|when|after)\\s+(?:it\\s+(?:is|has)\\s+)?dr(?:y|ied|ies)'
   + '|(?:pest|lawn|mosquito|termite|rodent|ants?|fleas?|roach|bug|weed|fertiliz\\w*|irrigation)[-\\s]+(?:control|care|services?|programs?|plans?|treatments?|barriers?|defense)'
-  + '|our\\s+(?:services?|programs?|plans?|visits?|crew|team\\b))\\b',
+  + '|(?:our|waves[\'’]?s?|the\\s+waves|waves\\s+pest\\s+control(?:[\'’]s)?)\\s+(?:services?|programs?|plans?|visits?|crew|team\\b))\\b',
   'i',
 );
 const CLAIM_RULES = [
