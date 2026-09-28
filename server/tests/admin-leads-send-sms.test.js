@@ -117,12 +117,24 @@ test('the manual send carries the same phone-locked handoff the automated worker
   expect(result).toEqual({ sent: true, sawTrx: true });
 });
 
-// Follow-up to codex #5018 r15 P2: the phone lock above only serialized
-// ORDERING — it never actually stopped a same-moment duplicate. Now that the
-// lock is held, this route re-runs the automated lane's own linkSentRecently
-// read on that same connection, scoped to a short race window rather than
-// its 14-day dedupe window.
+// Follow-up to codex #5018 r15 P2, narrowed by its own pre-push Codex r1
+// P1: the phone lock above only serialized ORDERING — it never actually
+// stopped a same-moment duplicate. Now that the lock is held, this route
+// re-runs the automated lane's own linkSentRecently read on that same
+// connection, scoped to a short race window rather than its 14-day dedupe
+// window — but ONLY when this exact send carries a validated consultation
+// link (bearerCheck.consultationLeadId, the SAME resolution the route's
+// own bearer check just above already ran): this route is the general
+// Leads-page send-sms path, not a consultation-link-only one, so gating on
+// that is what keeps an ordinary reply untouched by the race guard.
 describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
+  let bearerSpy;
+  beforeEach(() => {
+    bearerSpy = jest.spyOn(require('../services/composer-customer-links'), 'bearerLinkSendCheck')
+      .mockResolvedValue({ ok: true, consultationLeadId: 'lead-qa' });
+  });
+  afterEach(() => { bearerSpy.mockRestore(); });
+
   test('an automated send landing just before this one refuses with 409, never dispatching', async () => {
     linkSentRecently.mockResolvedValueOnce(true);
     await send();
@@ -144,6 +156,23 @@ describe('the manual-send race guard (codex #5018 r15 P2 follow-up)', () => {
     db.transaction = jest.fn(async (fn) => fn(trx));
     const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
     const result = await withSmsHandoff(dispatch);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(result).toEqual({ sent: true, sawTrx: true });
+  });
+
+  // Pre-push Codex r1 P1 regression: an ORDINARY reply (no consultation
+  // link in this send at all) must never be blocked, however recently a
+  // link went out — linkSentRecently is never even consulted for it.
+  test('a plain-text reply with no consultation link is never blocked, even with a link just sent (Codex r1 P1)', async () => {
+    bearerSpy.mockResolvedValue({ ok: true }); // no consultationLeadId
+    linkSentRecently.mockResolvedValueOnce(true); // would refuse if consulted
+    await send({ message: 'Sounds good, see you then!', to: '+19415550103' });
+    const { withSmsHandoff } = sendCustomerMessage.mock.calls[0][0];
+    const trx = { raw: jest.fn(async () => {}) };
+    db.transaction = jest.fn(async (fn) => fn(trx));
+    const dispatch = jest.fn(async (t) => ({ sent: true, sawTrx: t === trx }));
+    const result = await withSmsHandoff(dispatch);
+    expect(linkSentRecently).not.toHaveBeenCalled();
     expect(dispatch).toHaveBeenCalledWith(trx);
     expect(result).toEqual({ sent: true, sawTrx: true });
   });

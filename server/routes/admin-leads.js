@@ -1464,8 +1464,14 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // so it's allowlisted in validators/send-window.js like the other
       // admin compose surfaces.
       entryPoint: 'admin_leads_send_sms',
-      // codex #5018 r15 P2, closed by its own r16/r17 follow-up: a
-      // staff-typed message (a manual consultation link included) can race
+      // codex #5018 r15 P2, closed by its own r16/r17 follow-up (pre-push
+      // Codex r1 P1: narrowed to consultation-carrying sends only — this
+      // route is the general Leads-page send-sms path, not a consultation-
+      // link-only one, and an unconditional race guard blocked every
+      // ordinary reply for the whole race window after any link had gone
+      // out): a staff-typed message that carries a validated consultation
+      // link (bearerCheck.consultationLeadId — the SAME check just above
+      // already resolved it, bound to this exact lead) can race
       // call-booking-link-text.js's own worker — its final linkSentRecently
       // check and this send could interleave, both landing as if the other
       // never happened. The SAME phone-locked handoff that lane's own
@@ -1475,13 +1481,17 @@ router.post('/:id/send-sms', async (req, res, next) => {
       // linkSentRecently read on the SAME held connection, scoped to
       // MANUAL_SEND_RACE_GUARD_WINDOW_MS (minutes, not the lane's own
       // 14-day dedupe window): manual semantics are otherwise UNCHANGED —
-      // staff can always resend an OLDER link; only a delivery landing in
-      // this same tiny race window is refused (409, below).
+      // staff can always resend an OLDER link, and a plain-text reply with
+      // no link is never touched by this check at all — only a link
+      // delivery landing in this same tiny race window is refused (409,
+      // below).
       withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
         await lockSmsPhone(trx, lead.phone);
-        const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
-        if (await linkSentRecently(trx, lead.id, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
-          return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+        if (bearerCheck.consultationLeadId) {
+          const { linkSentRecently, MANUAL_SEND_RACE_GUARD_WINDOW_MS } = require('../services/call-booking-link-text');
+          if (await linkSentRecently(trx, bearerCheck.consultationLeadId, new Date(), { windowMs: MANUAL_SEND_RACE_GUARD_WINDOW_MS })) {
+            return { ok: false, code: 'LINK_SENT_RECENTLY_RACE', reason: 'A booking link was just texted to this number a moment ago', retryable: false };
+          }
         }
         return dispatch(trx);
       }),
