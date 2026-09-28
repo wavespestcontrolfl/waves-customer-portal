@@ -588,29 +588,47 @@ function adoptGateSetWithCheckerRunning() {
 }
 
 
-/**
- * scheduleForInvoice arms an autopay customer's fresh row at 'autopay_hold'
- * with autopay_failures_observed starting at 0, but a customer already at or
- * past the failure threshold (ach_failure_log — the same durable, 90-day,
- * unresolved-only record handleAutopayFailure's own webhook counter reads)
- * would then need MORE new failures before ever releasing, even though
- * autopay is already known broken for them. Seeds the counter from that
- * history for adopted rows only, releasing immediately through the same
- * path the webhook uses when it is already at or past threshold.
- */
-async function initializeAdoptedAutopayHold(row, customerId) {
-  if (!row || row.status !== 'autopay_hold') return row;
-  let priorFailures = 0;
+// The customer's unresolved ACH failures in the last 90 days: the same
+// durable record handleAutopayFailure's own webhook counter reads. Read
+// BEFORE a row is created (an unreadable history skips the candidate for
+// this sweep; once the row exists the sweep never re-selects it, so there
+// would be no retry).
+async function priorAchFailures(customerId) {
   try {
-    priorFailures = Number((await db('ach_failure_log')
+    const count = Number((await db('ach_failure_log')
       .where({ customer_id: customerId, resolved: false })
       .where('failure_date', '>=', new Date(Date.now() - 90 * 24 * 60 * 60 * 1000))
       .count('* as cnt')
       .first())?.cnt || 0);
+    return { count };
   } catch (err) {
-    logger.warn(`[invoice-followups] adoption autopay-history read failed for customer ${customerId} — holding at 0 prior failures: ${err.message}`);
-    return row;
+    logger.warn(`[invoice-followups] adoption autopay-history read failed for customer ${customerId} — skipping this sweep: ${err.message}`);
+    return { unavailable: true };
   }
+}
+
+/**
+ * scheduleForInvoice arms an autopay customer's fresh row at 'autopay_hold'
+ * with autopay_failures_observed starting at 0, but a customer already at or
+ * past the failure threshold would then need MORE new failures before ever
+ * releasing, even though autopay is already known broken for them. Seeds
+ * the counter from the pre-read history for adopted rows only, releasing
+ * immediately through the same path the webhook uses when it is already at
+ * or past threshold. The history is keyed by the customer the LOCKED
+ * sequence row names (the invoice's owner under scheduleForInvoice's lock),
+ * re-read when that differs from the candidate's owner.
+ */
+async function initializeAdoptedAutopayHold(row, candidate, preRead) {
+  if (!row || row.status !== 'autopay_hold') return row;
+  let history = preRead;
+  if (row.customer_id && row.customer_id !== candidate.customer_id) {
+    history = await priorAchFailures(row.customer_id);
+    if (history.unavailable) {
+      logger.error(`[invoice-followups] adopted invoice ${row.invoice_id} is held for autopay but its owner's ACH history could not be read — seed it by hand (customer ${row.customer_id})`);
+      return row;
+    }
+  }
+  const priorFailures = history.count;
   if (!priorFailures) return row;
   if (priorFailures >= config.autopayFailureThreshold) {
     await releaseFromAutopayHold(row.invoice_id);
@@ -708,12 +726,17 @@ async function adoptOrphanInvoices({ dryRun = false } = {}) {
   const adoptedIds = [];
   for (const candidate of candidates) {
     try {
+      const achHistory = await priorAchFailures(candidate.customer_id);
+      if (achHistory.unavailable) {
+        skipped.push({ invoice_id: candidate.invoice_id, customer_id: candidate.customer_id, reason: 'ach_history_unreadable' });
+        continue;
+      }
       const armed = await scheduleForInvoice(candidate.invoice_id);
       if (!armed) continue;
       // Recorded the moment the row exists: a failure in the autopay
       // seeding below still leaves a row this run must not send.
       adoptedIds.push(candidate.invoice_id);
-      await initializeAdoptedAutopayHold(armed, candidate.customer_id);
+      await initializeAdoptedAutopayHold(armed, candidate, achHistory);
     } catch (err) {
       // One candidate's failure must never abort the whole sweep — the
       // next run re-selects it fresh.

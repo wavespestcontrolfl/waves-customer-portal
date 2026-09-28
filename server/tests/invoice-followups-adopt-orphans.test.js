@@ -125,7 +125,7 @@ function orphanCandidateQuery(rows) {
 function setupFullDb({
   orphanRows = [], previewInvoice = null, customer = null, activePlan = null,
   insertedRow = null, batchReads = [], seqUpdateResult = 1,
-  legacyLedgerRows = [], legacyLedgerError = null, achFailureCount = 0,
+  legacyLedgerRows = [], legacyLedgerError = null, achFailureCount = 0, achReadError = null,
 } = {}) {
   const orphanQuery = orphanCandidateQuery(orphanRows);
   const batchQueue = [...batchReads];
@@ -188,7 +188,7 @@ function setupFullDb({
       return qq;
     }
     if (table === 'ach_failure_log') {
-      const qq = { where: jest.fn(() => qq), count: jest.fn(() => qq), first: jest.fn(async () => ({ cnt: achFailureCount })) };
+      const qq = { where: jest.fn(() => qq), count: jest.fn(() => qq), first: jest.fn(async () => { if (achReadError) throw achReadError; return { cnt: achFailureCount }; }) };
       return qq;
     }
     throw new Error(`unexpected table in test: ${table}`);
@@ -424,6 +424,25 @@ describe('adoptOrphanInvoices seeds/releases an autopay-held row from prior ACH 
     expect(seedUpdate).toBeTruthy();
     expect(seedUpdate.wheres).toEqual([{ id: 'seq-new', status: 'autopay_hold' }]);
     expect(seedUpdate.patch.status).toBeUndefined(); // still held — no status flip
+  });
+
+  test('an unreadable ACH history fails closed BEFORE any row is created (the sweep could never retry a row that exists)', async () => {
+    process.env.GATE_DUNNING_ADOPT_ORPHANS = 'true';
+    process.env.GATE_LATE_PAYMENT_CHECKER_OFF = 'true';
+    process.env.GATE_DUNNING_LADDER_90 = 'true';
+    const c = autopayCandidate();
+    const { insertCalls } = setupFullDb({
+      orphanRows: c.orphanRows, previewInvoice: c.previewInvoice, customer: { id: 'cust-1' }, insertedRow: c.insertedRow,
+      achReadError: new Error('ach log unavailable'),
+    });
+    customerOnAutopay.mockResolvedValue(true);
+
+    const result = await adoptOrphanInvoices({ dryRun: false });
+
+    expect(result.adopted).toBe(0);
+    expect(result.skipped).toEqual([{ invoice_id: 'inv-1', customer_id: 'cust-1', reason: 'ach_history_unreadable' }]);
+    expect(insertCalls).toHaveLength(0);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('no prior failures — row is left exactly as scheduleForInvoice created it (regression)', async () => {
