@@ -5863,6 +5863,7 @@ router.get('/', async (req, res, next) => {
             prepaidApplied: checkoutInvoicePrepaidApplied,
             annualCoverageValidated,
             perApplicationFee: s.per_application_fee,
+            primaryLinePrice: s.primary_line_price,
           }),
         }) || predictCompletionBilling({
           lane: lane.mode,
@@ -6457,6 +6458,7 @@ router.get('/week', async (req, res, next) => {
               prepaidApplied: checkoutInvoicePrepaidApplied,
               annualCoverageValidated,
               perApplicationFee: s.per_application_fee,
+              primaryLinePrice: s.primary_line_price,
             }),
           }) || predictCompletionBilling({
             lane: lane.mode,

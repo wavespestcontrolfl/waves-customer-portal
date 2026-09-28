@@ -32,6 +32,15 @@
 
 const logger = require('./logger');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time.
+// Fallback to a direct env read when a test's partial
+// `jest.mock('../config/feature-gates', ...)` predates this export — same
+// strict `=== 'true'` semantics either way; production always has the real
+// export.
+const featureGatesForStampedZero = require('../config/feature-gates');
+const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
+  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
 
 const DEFAULT_LABOR_RATE = 35; // fallback if company_financials empty
 const DEFAULT_DRIVE_COST_PER_STOP = 6;
@@ -114,6 +123,18 @@ function deriveRevenue({ serviceRecord, scheduledService, customer, ignoreExisti
 
   const visitPrice = Number(scheduledService?.estimated_price);
   if (Number.isFinite(visitPrice) && visitPrice > 0) return round2(visitPrice);
+
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
+  // opposed to a genuinely blank row) records $0 revenue, never the
+  // monthly_rate fallback below — same predicate the completion resolver
+  // uses (completionInvoiceAmount). Guarded explicitly by the live gate
+  // (not just the predicate's own internal check) because this function
+  // never consulted the predicate at all before, so it must stay
+  // byte-identical while the gate is off.
+  if (stampedZeroFreeLive()
+    && hasAuthoritativeZeroPrice(scheduledService?.estimated_price, scheduledService?.primary_line_price)) {
+    return 0;
+  }
 
   // A callback is free unless the operator set an explicit price (handled above).
   // Detect it from EITHER side: the callback backfill (20260618000002) flags

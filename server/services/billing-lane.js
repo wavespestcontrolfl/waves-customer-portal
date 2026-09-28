@@ -17,6 +17,15 @@ const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 // unlike the CANCELLED_SERVICE_RESOLVED_STATUSES / estimate-first-application-invoice
 // requires below, which stay lazy/in-function on purpose.
 const { invoiceAmountDue, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus } = require('./invoice-helpers');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) — read at call time so a
+// flip needs no redeploy. Widens hasAuthoritativeZeroPrice below; see its
+// own header for what changes. Fallback to a direct env read when a test's
+// partial `jest.mock('../config/feature-gates', ...)` predates this export
+// (this module is required by hundreds of test files) — same strict
+// `=== 'true'` semantics either way; production always has the real export.
+const featureGatesForStampedZero = require('../config/feature-gates');
+const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
+  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
 
 // Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
 // as a literal so this module stays db-free for pure unit tests; the
@@ -166,14 +175,38 @@ function membershipDuesCoverVisit({
 // every "does this visit have its own price" gate below shares this ONE
 // predicate so the two can never be told apart in one spot and conflated in
 // another.
+//
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28, waves-billing skill
+// invariant #8 — "Unpriced = NULL, never $0. $0 means charge nothing."):
+// with the gate ON, ANY stamped 0 is this visit's own authoritative price,
+// in every billing lane — `primaryLinePrice` no longer matters. This
+// supersedes invariant #6's note that a bare $0/NULL row on the legacy
+// monthly/null lane falls through to monthly_rate/WaveGuard-tier billing —
+// while the gate is on, a STAMPED $0 (unlike a genuinely blank row) no
+// longer falls through anywhere. With the gate OFF, behavior is
+// byte-identical to before: only the discount-engine provenance shape (a
+// stamped 0 alongside a positive primary_line_price base — completion-
+// pricing.js's discountedVisit, pinned by completion-pricing.postgres.test.js
+// and discount-stack-pricing-provenance-postgres.test.js) reads as
+// authoritative; a bare stamped 0 with no primary_line_price stays
+// indistinguishable from null and keeps falling through to the fee/rate
+// fallback, exactly as documented below. This one function is EVERY
+// caller's "does this visit have its own price" fact — completionInvoiceAmount
+// and everything already routed through it inherit the widened gate-on
+// reading with no per-caller change; a handful of sites that compute a
+// visit's charge WITHOUT going through the resolver call this directly too
+// (guarded by stampedZeroFreeLive() at each of those call sites, since they
+// never consulted this predicate at all before and must stay byte-identical
+// off).
 function hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) {
   // Codex round 4 P1: estimatedPrice must be an ACTUAL stamped zero, not
   // absent — Number(null) === 0 and Number('') === 0, so without this guard
   // a never-priced row (null/'') with a positive primary_line_price on file
   // was misread as a deliberately free visit and skipped its fee fallback.
-  return estimatedPrice != null && estimatedPrice !== ''
-    && Number(estimatedPrice) === 0
-    && primaryLinePrice != null && Number(primaryLinePrice) > 0;
+  const isStampedZero = estimatedPrice != null && estimatedPrice !== '' && Number(estimatedPrice) === 0;
+  if (!isStampedZero) return false;
+  if (stampedZeroFreeLive()) return true;
+  return primaryLinePrice != null && Number(primaryLinePrice) > 0;
 }
 
 // Per-application customers bill the explicit visit price, else the
@@ -512,8 +545,23 @@ function predictCompletionBilling({
   // default keeps this function's predictions byte-identical when off.
   completionAutopayChargeEnabled = false,
 }) {
+  // A callback's stamped 0 is free via the isCallback exclusions below, not
+  // via GATE_STAMPED_ZERO_FREE — a callback is routinely stamped 0 by
+  // convention, so letting the gate's widened zero reading count it as "has
+  // its own price" here would flip a non-recurring member's callback from
+  // 'covered_membership' to 'no_charge'/'callback' as a pure gate side
+  // effect (a label change the office reads, with no billing-amount
+  // difference — completionInvoiceAmount returns 0 for a callback either
+  // way). So a callback keeps ONLY the narrow, gate-independent
+  // discount-engine-provenance reading (hasAuthoritativeZeroPrice's own
+  // off-state formula) here, whatever the gate says; every other call site
+  // in this file has no such pre-existing isCallback-driven label to
+  // protect and takes the (possibly widened) predicate directly.
   const hasVisitPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
-    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
+    || (isCallback
+      ? (estimatedPrice != null && estimatedPrice !== '' && Number(estimatedPrice) === 0
+        && primaryLinePrice != null && Number(primaryLinePrice) > 0)
+      : hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice));
   // no_charge is two different worlds and the office must be able to tell
   // them apart. A callback / always-free type / renewal-owned visit is
   // SUPPOSED to bill nothing. An unpriced self-pay visit bills nothing only
@@ -741,6 +789,10 @@ function attachedInvoiceAutoChargeLikely({
   prepaidApplied = false,
   annualCoverageValidated = null,
   perApplicationFee = null,
+  // Provenance signal for a genuine $0 (see hasAuthoritativeZeroPrice above)
+  // — optional, every existing caller keeps its current prediction without
+  // it.
+  primaryLinePrice = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
   // An UNAPPLIED out-of-band (cash/Zelle) prepayment demotes (GitHub r3
@@ -763,9 +815,16 @@ function attachedInvoiceAutoChargeLikely({
     // (approximation of the rail's bounded allowance — its authorization
     // predicates aren't cheaply readable here, and over-allowing only
     // risks a promise the rail then routes to review, never a charge).
+    // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 anchors
+    // at $0, never the acceptance fee — same predicate every other
+    // completion-time cap in this file uses. Guarded explicitly by the live
+    // gate (not just the predicate's own internal check) because this
+    // anchor calculation never consulted the predicate at all before, so
+    // it must stay byte-identical while the gate is off.
     const perAppAnchor = estimatedPrice != null && Number(estimatedPrice) > 0
       ? Number(estimatedPrice)
-      : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null);
+      : (stampedZeroFreeLive() && hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) ? 0
+        : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null));
     if (perAppAnchor == null) return false;
     let setupLineAmount = 0;
     try {

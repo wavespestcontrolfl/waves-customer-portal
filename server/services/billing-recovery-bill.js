@@ -25,6 +25,15 @@ const { customerOnAutopay } = require('./autopay-eligibility');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
 const { etDateString } = require('../utils/datetime-et');
+const { hasAuthoritativeZeroPrice } = require('./billing-lane');
+// GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time.
+// Fallback to a direct env read when a test's partial
+// `jest.mock('../config/feature-gates', ...)` predates this export — same
+// strict `=== 'true'` semantics either way; production always has the real
+// export.
+const featureGatesForStampedZero = require('../config/feature-gates');
+const stampedZeroFreeLive = featureGatesForStampedZero.stampedZeroFreeLive
+  || (() => process.env.GATE_STAMPED_ZERO_FREE === 'true');
 
 // Match the completion path's due date (the service date), so a recovered
 // 60/90-day-old visit ages correctly instead of resetting to today+30. A
@@ -186,7 +195,14 @@ function priceRefusalOrAmount(visit, billing) {
     ? 0
     : parseFloat(visit.prepaid_amount || 0);
   const rowPrice = parseFloat(visit.estimated_price || 0);
-  const price = rowPrice > 0 ? rowPrice : (billing.mode === 'per_application' ? billing.perApplicationFee : 0);
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a stamped 0 (as
+  // opposed to a genuinely blank row) is this visit's own price, never the
+  // per-application fee — same predicate the completion resolver uses.
+  // Guarded explicitly by the live gate (not just the predicate's own
+  // internal check) because this call site never consulted the predicate
+  // at all before, so it must stay byte-identical while the gate is off.
+  const stampedZero = stampedZeroFreeLive() && hasAuthoritativeZeroPrice(visit.estimated_price, null);
+  const price = rowPrice > 0 ? rowPrice : (stampedZero ? 0 : (billing.mode === 'per_application' ? billing.perApplicationFee : 0));
   if (!(price > 0)) return refuse(422, 'Visit has no price to invoice.');
   if (prepaid >= price) return refuse(409, 'Visit is already fully prepaid.');
   // Partial prepay needs the prepaid credit applied (completion does this via

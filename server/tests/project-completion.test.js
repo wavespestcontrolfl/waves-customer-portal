@@ -183,6 +183,64 @@ describe('project completion helpers', () => {
     expect(prepaidCoversAmount({ prepaid_amount: '350.00', prepaid_method: 'cash' }, 350)).toBe(true);
   });
 
+  // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): a STAMPED 0 (not a
+  // blank row) must never reach the monthly_rate fallback here either. Off
+  // is byte-identical to today.
+  describe('a stamped $0 project-backed visit — GATE_STAMPED_ZERO_FREE', () => {
+    afterEach(() => { delete process.env.GATE_STAMPED_ZERO_FREE; });
+
+    test('off: a bare stamped 0 still falls to monthly_rate, same as today', () => {
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { estimated_price: 0, create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(99);
+    });
+
+    test('on: a bare stamped 0 bills $0, never monthly_rate', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { estimated_price: 0, create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(0);
+    });
+
+    test('on: a genuinely blank (never-priced) row is unaffected — still falls to monthly_rate', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { estimated_price: null, create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(99);
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(99);
+    });
+
+    test('on: a callback stamped $0 is unaffected (still $0 — no monthly_rate either way)', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { estimated_price: 0, is_callback: true, create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(0);
+    });
+
+    test('on: a POSITIVE stamped price always wins, gate or not', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(projectCompletionInvoiceAmount({
+        scheduledService: { estimated_price: '55.00', create_invoice_on_complete: true },
+        customer: { monthly_rate: '99.00' },
+      })).toBe(55);
+    });
+
+    test('on: WDO pricing is unaffected (its own flat/default fee, unrelated to this predicate)', () => {
+      process.env.GATE_STAMPED_ZERO_FREE = 'true';
+      expect(projectCompletionInvoiceAmount({
+        project: { project_type: 'wdo_inspection', findings: { inspection_fee: '' } },
+        scheduledService: { estimated_price: '' },
+      })).toBe(250);
+    });
+  });
+
   test('recognizes only an explicit zero WDO fee as no-charge', () => {
     expect(projectIsExplicitlyNoCharge({
       project_type: 'wdo_inspection',
