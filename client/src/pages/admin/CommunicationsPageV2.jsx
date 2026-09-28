@@ -770,19 +770,31 @@ function ConversationViewV2({
 // 70 chars. Dynamic values (name, service type) pass through untouched: a
 // customer named José still gets greeted correctly, and the operator sees
 // the resulting body (and char count) before sending.
+// Say "Waves" once (owner ruling 2026-09-28). These bodies send as custom
+// copy, so the server's template brand dedupe never sees them: a service
+// name that itself starts with "Waves " (the catalog's "Waves Assessment")
+// drops the prefix, and a clause that already names Waves skips the
+// "it's Waves." intro.
+const SAYS_WAVES_RE = /\bWaves\b/;
+function withoutBrandPrefix(value) {
+  return String(value || "").replace(/^Waves\s+/, "");
+}
+
 export function buildReschedulePrefill({ firstName, day, serviceType, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Reschedule your ${day}${
-    serviceType ? ` ${serviceType}` : ""
+  const service = withoutBrandPrefix(serviceType);
+  return `Hi ${first}, it's Waves. Reschedule your ${day}${
+    service ? ` ${service}` : ""
   } visit here: ${url}`;
 }
 
 export function buildReservicePrefill({ firstName, laneLabel, url }) {
   const first = String(firstName || "").trim();
   if (!first || !url) return null;
-  return `Hi ${first}, it's Waves Pest Control. Book your free${
-    laneLabel ? ` ${laneLabel}` : ""
+  const lane = withoutBrandPrefix(laneLabel);
+  return `Hi ${first}, it's Waves. Book your free${
+    lane ? ` ${lane}` : ""
   } re-service here: ${url}`;
 }
 
@@ -839,7 +851,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   const first = String(firstName || "").trim();
   const line = String(clause || "").trim();
   if (!first || !line) return null;
-  return `Hi ${first}, it's Waves Pest Control. ${line}`;
+  return SAYS_WAVES_RE.test(line) ? `Hi ${first}! ${line}` : `Hi ${first}, it's Waves. ${line}`;
 }
 
 const ANALYZE_PHOTOS_MAX = 5;
