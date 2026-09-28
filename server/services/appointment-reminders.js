@@ -2780,7 +2780,10 @@ const AppointmentReminders = {
                 id: existing.id, source: 'cron_selfheal', confirmation_sent: true,
                 suppressed_by_sibling: false, windows_preclosed: false, cancelled: false,
               })
-              .update({ confirmation_sent: false, confirmation_sent_at: null })
+              // The row takes the booking's own source, so the re-arm is a
+              // one-time transition: a later registration of this visit sees
+              // a normal row and never re-arms a confirmation already sent.
+              .update({ confirmation_sent: false, confirmation_sent_at: null, source })
               .returning('*');
             if (rearmed) return { record: rearmed, serviceLabel: rearmed.service_type, inserted: false, reason: 'rearmed_selfheal' };
           }

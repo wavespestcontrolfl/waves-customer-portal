@@ -176,7 +176,7 @@ describe('registerAppointment re-arms a confirmation the self-heal sweep claimed
   const wire = () => {
     const b = rowReader(selfHealRow);
     b.update = jest.fn().mockReturnThis();
-    b.returning = jest.fn(async () => [{ ...selfHealRow, confirmation_sent: false, confirmation_sent_at: null }]);
+    b.returning = jest.fn(async () => [{ ...selfHealRow, confirmation_sent: false, confirmation_sent_at: null, source: 'admin_ib' }]);
     return b;
   };
 
@@ -186,7 +186,9 @@ describe('registerAppointment re-arms a confirmation the self-heal sweep claimed
       904, 5, '2099-09-15T09:00', 'Quarterly Pest Control', 'admin_ib',
       { sendConfirmation: true, deferConfirmation: true },
     );
-    expect(b.update).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null });
+    // One-time: the row takes the booking's source, so no later
+    // registration can re-arm a confirmation that has since gone out.
+    expect(b.update).toHaveBeenCalledWith({ confirmation_sent: false, confirmation_sent_at: null, source: 'admin_ib' });
     expect(b.where).toHaveBeenCalledWith({
       id: 'rem-sh', source: 'cron_selfheal', confirmation_sent: true,
       suppressed_by_sibling: false, windows_preclosed: false, cancelled: false,
