@@ -113,7 +113,11 @@ function composeYellowDigest(queue) {
   const summary = pending.length > 0
     ? `${yellow.length} more updated this week; review when you can.`
     : 'Review optional; nothing is blocked.';
-  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the pages already in
+  // scope — a count-only digest can't otherwise tell "same queue" from "a
+  // different set of pages" at a flat total.
+  const itemKeys = [...pending, ...yellow].map((page) => page.id).filter(Boolean).map(String);
+  return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length, headline, summary, itemKeys };
 }
 
 // Daily cron entry point with a weekly guard (same self-healing pattern as
@@ -184,6 +188,7 @@ async function sendYellowDigestLocked(opts = {}) {
       headline: composed.headline,
       summary: composed.summary,
       count: composed.pendingCount + composed.yellowCount,
+      itemKeys: composed.itemKeys,
       link: '/admin/knowledge?area=base&kbTab=field',
       sendEmail: () => mailer.sendOne({
         to,

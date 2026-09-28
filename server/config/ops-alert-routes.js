@@ -66,8 +66,13 @@ const OWNER_ROUTES = [
   { id: 'b08-uncharged-collectibles', area: 'Billing', link: '/admin/invoices' },
   { id: 'c10-membership-truth', area: 'Members', link: '/admin/customers' },
   { id: 'd16-drafts-pipeline-aging', area: 'Drafts', link: '/admin/communications' },
-  // Regex: the data-hygiene sweep's key carries its own generated suffix.
-  { id: /^local:data-hygiene/i, area: 'Data hygiene', link: null, headline: dataHygieneHeadline, counts: dataHygieneCounts },
+  // Regex: the data-hygiene sweep's key carries its own generated suffix —
+  // counters embedded MID-key ("..._sweep_1_fixed_63_exceptions_0_new_"),
+  // not just at the end, so ops-digest.js's trailing-token trim can never
+  // produce a stable alertClass for it on its own. `alertClass` is this
+  // route's own stable id, used instead whenever a route defines `counts`
+  // (admin-alerts-ring scope, alertClassFor).
+  { id: /^local:data-hygiene/i, area: 'Data hygiene', link: null, headline: dataHygieneHeadline, counts: dataHygieneCounts, alertClass: 'data-hygiene' },
 ];
 
 // Engineering audience: broken plumbing, Activity feed only — never the bell.

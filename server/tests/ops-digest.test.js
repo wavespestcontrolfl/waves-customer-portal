@@ -208,6 +208,58 @@ describe('deliverOpsDigest — ring gates are owner-audience only', () => {
   });
 });
 
+// Item identity (admin-alerts-ring-v2 follow-up): deliverOpsDigest's
+// optional itemKeys — stored normalized (deduped/sorted/capped) and wired
+// into whichever ring mechanism this call uses.
+describe('deliverOpsDigest — itemKeys', () => {
+  it('stores itemKeys deduped and sorted in metadata', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-keys', deduped: false });
+    await deliverOpsDigest({
+      key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 3,
+      itemKeys: ['call-2', 'call-1', 'call-2', ''], sendEmail: jest.fn(),
+    });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.itemKeys).toEqual(['call-1', 'call-2']);
+  });
+
+  it('omitted or empty itemKeys stores no itemKeys key at all', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-nokeys', deduped: false });
+    await deliverOpsDigest({ key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 3, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('itemKeys');
+  });
+
+  it('an ACT sender with no dedupeKey: itemKeys reach the ringGate — a different item rings even at a flat count', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-gate', deduped: false });
+    await deliverOpsDigest({
+      key: 'k', subject: 'ACT: something needs a decision', text: 't', count: 5,
+      itemKeys: ['call-9'], sendEmail: jest.fn(),
+    });
+    const { ringGate } = mockNotifyAdmin.mock.calls[0][3];
+    const conn = jest.fn(() => ({
+      where: () => conn(), whereRaw: () => conn(), orderBy: () => conn(),
+      first: async () => ({ metadata: { count: 5, itemKeys: ['call-1'] } }),
+    }));
+    conn.raw = () => ({});
+    await expect(ringGate(conn)).resolves.toBe(true);
+  });
+
+  it('an ACT dedupeKey+refreshOnDedupe sender: itemKeys reach ringOnRefresh', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-refresh', deduped: false });
+    await deliverOpsDigest({
+      key: 'promised-estimate', subject: 'ACT: 3 promised quotes never went out', text: 't',
+      dedupeKey: 'ops-digest:promised-estimate', refreshOnDedupe: true, count: 3,
+      itemKeys: ['call-9'], sendEmail: jest.fn(),
+    });
+    const { ringOnRefresh } = mockNotifyAdmin.mock.calls[0][3];
+    expect(ringOnRefresh({}, { count: 3, itemKeys: ['call-1'] })).toBe(true);
+    expect(ringOnRefresh({}, { count: 3, itemKeys: ['call-9'] })).toBe(false);
+  });
+});
+
 describe('deliverOpsDigest — kind/audience/feed derivation', () => {
   async function metadataFor(subject, extra = {}) {
     withGate(true);

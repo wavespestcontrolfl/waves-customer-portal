@@ -166,7 +166,12 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
   // `direction` above already says which way it's off).
   const headline = `Estimates — turf estimates running ${direction}`;
   const summary = `Avg ${Math.abs(avgDeltaPct)}% off across ${samples.length} services.`;
-  return { subject, text, html, avgDeltaPct, samples: samples.length, direction, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the largest-delta
+  // outliers already shown — a count-only digest can't otherwise tell
+  // "same offenders" from "a different set of services" at a flat sample
+  // count.
+  const itemKeys = outliers.map((row) => String(row.service_record_id)).filter(Boolean);
+  return { subject, text, html, avgDeltaPct, samples: samples.length, direction, headline, summary, itemKeys };
 }
 
 async function runTurfVarianceDigest(opts = {}) {
@@ -217,6 +222,7 @@ async function runTurfVarianceDigest(opts = {}) {
       headline: composed.headline,
       summary: composed.summary,
       count: composed.samples,
+      itemKeys: composed.itemKeys,
       link: '/admin/estimates',
       sendEmail: () => mailer.sendOne({
         to,

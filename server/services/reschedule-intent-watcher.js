@@ -344,7 +344,11 @@ function composeRescheduleIntentDigest(rows) {
   // the full list still lands in `detail`.
   const headline = `Schedule — ${total} reschedule text${total === 1 ? '' : 's'} not applied`;
   const summary = 'Reply or move each visit — automation runs them as booked.';
-  return { subject, text, html, count: total, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // agent_decisions ids — a count-only digest can't otherwise tell "same
+  // requests" from "different ones" at a flat total.
+  const itemKeys = flags.map((row) => String(row.id)).filter(Boolean);
+  return { subject, text, html, count: total, headline, summary, itemKeys };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js:
@@ -432,6 +436,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
       headline: composed.headline,
       summary: composed.summary,
       count: composed.count,
+      itemKeys: composed.itemKeys,
       link: '/admin/communications',
       sendEmail: () => mailer.sendOne({
         to,

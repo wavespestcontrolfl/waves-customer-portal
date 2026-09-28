@@ -186,11 +186,20 @@ function normalizeAdminNotificationText({ category, title, body, detail }) {
 // Bell-routing stamps an ops digest carries in metadata (ops-digest.js
 // digestRowFields); a change to any of them is a real refresh.
 const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
+// Ring-only-on-change stamps (admin-alerts-ring-v2 follow-up): a refresh
+// confined to THESE fields — count/newCount growing, or itemKeys naming a
+// different item — must still trigger the refresh and its ringOnRefresh
+// evaluation, or a swapped item behind unchanged title/body/link never
+// re-bells. Deliberately NOT folded into ROUTING_METADATA_KEYS: that list
+// feeds the audience-flip check in mergeRefreshMetadata below, which has
+// nothing to do with these.
+const RING_METADATA_KEYS = ['count', 'newCount', 'itemKeys'];
 
-// Did this emission change anything a standing keyed row shows or routes by?
-function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged }) {
+// Did this emission change anything a standing keyed row shows, routes by,
+// or rings on?
+function standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged }) {
   return versionChanged || existing.title !== nextTitle || existing.body !== nextBody
-    || existing.link !== nextLink || detailChanged || routingChanged;
+    || existing.link !== nextLink || detailChanged || routingChanged || ringMetadataChanged;
 }
 
 // notifyAdmin's refreshOnDedupe branch (admin-alerts-ring scope 2026-09-28):
@@ -209,20 +218,47 @@ async function resolveRingOnRefresh(ringOnRefresh, existing, existingMeta) {
 // on a quiet refresh — a FIX->ACT flip must never leave the owner's action
 // hidden behind a stale feed:'activity'.
 //
-// Ringing: this refresh clears read_at, so it must also be visible. A
-// caller that precomputed quiet:true from a different baseline (the ingest
-// route's 7-day lookback can find this very row) would otherwise ring a row
-// hidden behind feed:'activity' — `quiet` only ever rides on owner rows, so
-// clearing it restores the owner bell feed.
+// Ringing: this refresh clears read_at, so it must also be visible — AND
+// its own last-ring stamp advances (`rungAt`, admin-alerts-ring-v2
+// follow-up: findPriorRungRow's 7-day baseline is measured from the last
+// ring, not this row's original created_at). Two corrections on top of the
+// straight `{...existingMeta, ...metadata}` merge, chosen by the MERGED
+// audience (never a cached one — an audience flip lands in `metadata` above
+// this call):
+//   - owner, or no audience at all (the plain refreshOnDedupe shape most
+//     callers outside ops-digest.js use, which never sets `audience`), and
+//     the merged object still says quiet:true: a caller that precomputed
+//     quiet from a different baseline (the ingest route's 7-day lookback
+//     can find this very row) would otherwise ring a row hidden behind
+//     feed:'activity' — clear both to restore the owner bell feed.
+//     Already-false quiet is left alone (nothing to correct).
+//   - a DEFINED non-owner audience (engineering/fyi): `quiet` never applies
+//     to these rows at all — drop it outright rather than carry over a
+//     stale `true` this row inherited from when it was still an owner row
+//     (a FIX<->ACT flip under the SAME dedupeKey, gbp-sync-health). `feed`
+//     is left exactly as this emission composed it ('activity', its own
+//     value) — never forced.
 function mergeRefreshMetadata(existingMeta, metadata, shouldRing) {
   if (shouldRing) {
-    const merged = { ...existingMeta, ...metadata };
+    const merged = { ...existingMeta, ...metadata, rungAt: new Date().toISOString() };
+    // A DEFINED non-owner audience only — a caller outside ops-digest.js
+    // (most refreshOnDedupe dedupe rows) never sets `audience` at all, and
+    // that absence must keep today's plain behavior, not read as "not
+    // owner" and strip a `quiet` key those rows never gave meaning to.
+    if (merged.audience && merged.audience !== 'owner') {
+      const { quiet: _quiet, ...rest } = merged;
+      return rest;
+    }
     return merged.quiet === true ? { ...merged, quiet: false, feed: null } : merged;
   }
-  const audienceFlipped = Object.prototype.hasOwnProperty.call(metadata, 'audience')
-    && (existingMeta.audience ?? null) !== (metadata.audience ?? null);
-  if (audienceFlipped) return { ...existingMeta, ...metadata };
-  const { feed: _feed, quiet: _quiet, ...rest } = metadata;
+  // rungAt is a RING stamp — a caller may carry a precomputed value (the
+  // ingest route's own fresh-insert metadata also feeds this merge on a
+  // refresh), but only the shouldRing branch above may ever advance it.
+  const { rungAt: _incomingRungAt, ...metadataNoRungAt } = metadata;
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(metadataNoRungAt, 'audience')
+    && (existingMeta.audience ?? null) !== (metadataNoRungAt.audience ?? null);
+  if (audienceFlipped) return { ...existingMeta, ...metadataNoRungAt };
+  const { feed: _feed, quiet: _quiet, ...rest } = metadataNoRungAt;
   return { ...existingMeta, ...rest };
 }
 
@@ -236,7 +272,13 @@ function createPlainAdmin(service, { category, title, body, createOpts, ringGate
   }
   const gated = async (conn) => {
     const ring = await ringGate(conn);
-    const meta = ring ? createOpts.metadata : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity' };
+    // A ring stamps its own rungAt (admin-alerts-ring-v2 follow-up):
+    // findPriorRungRow's 7-day baseline reads this, not created_at, so a
+    // later refresh of a DIFFERENT row can find this one as "the prior
+    // ring" for its own window.
+    const meta = ring
+      ? { ...(createOpts.metadata || {}), rungAt: new Date().toISOString() }
+      : { ...(createOpts.metadata || {}), quiet: true, feed: 'activity' };
     return service.create({ recipientType: 'admin', category, title, body, ...createOpts, metadata: meta, connection: conn });
   };
   return callerTrx ? gated(callerTrx) : db.transaction(gated);
@@ -429,7 +471,14 @@ const NotificationService = {
           // #5236). Only keys this emission actually carries are compared.
           const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged })) {
+          // Ring-only-on-change stamps are content too (admin-alerts-ring-v2
+          // follow-up): count/newCount growing, or itemKeys naming a
+          // different item, must trigger the refresh (and ringOnRefresh's
+          // evaluation) even when title/body/link/routing are unchanged.
+          // Compared by JSON so an itemKeys array compares by value.
+          const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
+            && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             const shouldRing = await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
             const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,

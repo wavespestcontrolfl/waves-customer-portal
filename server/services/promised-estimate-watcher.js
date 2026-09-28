@@ -234,7 +234,11 @@ function composePromisedEstimateDigest(rows) {
   // the full list still lands in `detail`.
   const headline = `Estimates — ${total} promised quote${total === 1 ? '' : 's'} not sent`;
   const summary = `Oldest is ${oldest} day${oldest === 1 ? '' : 's'}.`;
-  return { subject, text, html, count: total, oldestDays: oldest, headline, summary };
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // call ids — a count-only digest can't otherwise tell "same 25" from "25
+  // different calls" when the backlog churns at a flat size.
+  const itemKeys = lines.map((l) => String(l.callId)).filter(Boolean);
+  return { subject, text, html, count: total, oldestDays: oldest, headline, summary, itemKeys };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -308,6 +312,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
       headline: composed.headline,
       summary: composed.summary,
       count: composed.count,
+      itemKeys: composed.itemKeys,
       link: '/admin/pipeline',
       // No rolling window: notifyAdmin's window is measured from created_at,
       // which refreshOnDedupe never advances, so a gap standing longer than

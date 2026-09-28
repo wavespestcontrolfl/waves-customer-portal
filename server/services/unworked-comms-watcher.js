@@ -614,11 +614,17 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
+  // Item identity (admin-alerts-ring-v2 follow-up): the shown page's own
+  // record ids across every lane — a count-only digest can't otherwise
+  // tell "same backlog" from "the whole list turned over" at a flat total.
+  const itemKeys = [...callbackCards, ...a, ...b, ...c, ...d].map((r) => String(r.id)).filter(Boolean);
+
   return {
     subject,
     text,
     html,
     total,
+    itemKeys,
     callbacks: aTotal,
     followUps: bTotal,
     unanswered: cTotal,
@@ -769,6 +775,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
       headline: composed.headline,
       summary: composed.summary,
       count: composed.total,
+      itemKeys: composed.itemKeys,
       link: '/admin/communications',
       // No dedupe/refresh here on purpose (pre-push audit P1): the loaders
       // drop callbacks, follow-ups and texts older than 30 days, so a

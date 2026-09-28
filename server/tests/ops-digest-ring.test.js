@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom,
+  normalizeItemKeys, hasNewItemKeys,
 } = require('../services/ops-digest');
 
 describe('alertClassFor', () => {
@@ -26,7 +27,11 @@ describe('alertClassFor', () => {
     ['b08-uncharged-collectibles:collectible-05415f76.12c70329.c24b5c1f', 'b08-uncharged-collectibles:collectible'],
     ['c32-gate-drift:drift-GATE_SCHEDULING_CAPACITY-2026-09-26', 'c32-gate-drift:drift-GATE_SCHEDULING_CAPACITY'],
     ['d19-committed-bookings:gap-17ed9362', 'd19-committed-bookings:gap'],
-    ['local:data-hygiene_sweep_N_fixed_N_exceptions_N_new_', 'local:data-hygiene_sweep_N_fixed_N_exceptions_N_new_'],
+    // A mapped route with `counts` (data-hygiene) gets a STABLE id, never
+    // the generic trailing trim — its counters sit mid-key, before a
+    // trailing "_new_" with nothing after it, which trimVariableTail can
+    // never reach on its own.
+    ['local:data-hygiene_sweep_N_fixed_N_exceptions_N_new_', 'local:data-hygiene'],
   ])('ops-crons %s -> %s', (key, expected) => {
     expect(alertClassFor(key, 'ops-crons')).toBe(expected);
   });
@@ -38,6 +43,19 @@ describe('alertClassFor', () => {
 
   test('a key with no colon at all is trimmed as a whole (no check id to protect)', () => {
     expect(alertClassFor('bare-039a882f', 'ops-crons')).toBe('bare');
+  });
+
+  // data-hygiene's real key shape: counters embedded mid-key
+  // ("N_fixed_N_exceptions_N_new_", a bare trailing separator with nothing
+  // after it) — two runs with different fixed/open counters must still
+  // land in the SAME alert class, or the ring test compares apples to
+  // oranges every single day.
+  test('data-hygiene: two runs with different fixed/open counters produce the same alertClass', () => {
+    const run1 = alertClassFor('local:data-hygiene_sweep_1_fixed_63_exceptions_0_new_', 'ops-crons');
+    const run2 = alertClassFor('local:data-hygiene_sweep_2_fixed_71_exceptions_3_new_', 'ops-crons');
+    expect(run1).toBe('local:data-hygiene');
+    expect(run2).toBe('local:data-hygiene');
+    expect(run1).toBe(run2);
   });
 });
 
@@ -103,7 +121,18 @@ describe('findPriorRungRow — query shape', () => {
     const whereRawSql = builder.whereRaw.mock.calls.map((c) => c[0]);
     expect(whereRawSql.some((sql) => /resolved/.test(sql))).toBe(true);
     expect(whereRawSql.some((sql) => /quiet/.test(sql))).toBe(true);
+    // Activity-only rows were never actually bell-visible — excluded from
+    // the baseline even though quiet<>'true' alone would let one through
+    // (an engineering row never carries a `quiet` key at all).
+    expect(whereRawSql.some((sql) => /feed/.test(sql) && /activity/.test(sql))).toBe(true);
     expect(whereRawSql.some((sql) => /source.*IS NULL/.test(sql))).toBe(true); // source: null -> no source
+    // Age baseline: the 7-day window and ordering read rungAt (falling back
+    // to created_at), not created_at alone.
+    expect(whereRawSql.some((sql) => /rungAt/.test(sql))).toBe(true);
+    expect(builder.orderBy).toHaveBeenCalledTimes(1);
+    const [orderArg] = builder.orderBy.mock.calls[0];
+    expect(orderArg.sql).toMatch(/rungAt/);
+    expect(orderArg.sql).toMatch(/DESC/);
     expect(builder.first).toHaveBeenCalledWith('metadata');
   });
 
@@ -248,5 +277,71 @@ describe('setKeyFor + the item-set comparison', () => {
       alertClass: 'd15-voicemail-callbacks:unreturned', source: 'ops-crons', key: null,
       opsKey: 'd15-voicemail-callbacks:unreturned-2026-09-23-86e082f1cd22', count: 1, newCount: null,
     })).resolves.toBe(true);
+  });
+});
+
+// Item identity (admin-alerts-ring-v2 follow-up): a count-only standing
+// digest (promised-estimate) can't tell "same N" from "N different items"
+// on its own — itemKeys closes that gap.
+describe('normalizeItemKeys + hasNewItemKeys', () => {
+  test('dedupes, sorts, and drops blanks', () => {
+    expect(normalizeItemKeys(['b', 'a', 'a', '', null, 'c'])).toEqual(['a', 'b', 'c']);
+  });
+  test('non-array or empty input normalizes to null', () => {
+    expect(normalizeItemKeys(undefined)).toBeNull();
+    expect(normalizeItemKeys('not-an-array')).toBeNull();
+    expect(normalizeItemKeys([])).toBeNull();
+    expect(normalizeItemKeys(['', null])).toBeNull();
+  });
+  test('caps at 200 entries', () => {
+    const many = Array.from({ length: 250 }, (_, i) => `id-${i}`);
+    expect(normalizeItemKeys(many)).toHaveLength(200);
+  });
+  test('hasNewItemKeys: true only when a current key is absent from the prior list', () => {
+    expect(hasNewItemKeys(['a', 'b'], ['a', 'b'])).toBe(false);
+    expect(hasNewItemKeys(['a', 'c'], ['a', 'b'])).toBe(true);
+  });
+  test('hasNewItemKeys: either side missing an array is never new (count/newCount stay the only signal)', () => {
+    expect(hasNewItemKeys(undefined, ['a'])).toBe(false);
+    expect(hasNewItemKeys(['a'], undefined)).toBe(false);
+    expect(hasNewItemKeys(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('ringDecision: itemKeys override an equal or smaller count', () => {
+  test('a swapped item rings even at an EQUAL count', () => {
+    expect(ringDecision({ count: 5, priorCount: 5, itemKeys: ['a', 'b'], priorItemKeys: ['a', 'c'] })).toBe(true);
+  });
+  test('a swapped item rings even at a SMALLER count (normally always quiet)', () => {
+    expect(ringDecision({ count: 3, priorCount: 5, itemKeys: ['a', 'x'], priorItemKeys: ['a', 'b', 'c', 'd', 'e'] })).toBe(true);
+  });
+  test('the same items at an equal count stay quiet', () => {
+    expect(ringDecision({ count: 5, priorCount: 5, itemKeys: ['a', 'b'], priorItemKeys: ['b', 'a'] })).toBe(false);
+  });
+  test('one side missing itemKeys falls back to the plain count/sameSet test, unaffected', () => {
+    expect(ringDecision({ count: 5, priorCount: 5, itemKeys: ['a', 'z'] })).toBe(false);
+    expect(ringDecision({ count: 5, priorCount: 5, priorItemKeys: ['a'] })).toBe(false);
+  });
+});
+
+describe('decideRingForNewRow / ringOnRefreshFrom: itemKeys wired through to the prior row', () => {
+  test('decideRingForNewRow: a different item set rings even at a flat count', async () => {
+    const conn = makeConn({ metadata: { count: 5, itemKeys: ['call-1', 'call-2'] } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'promised-estimate', source: null, key: 'promised-estimate',
+      count: 5, newCount: 0, itemKeys: ['call-1', 'call-3'],
+    })).resolves.toBe(true);
+  });
+  test('decideRingForNewRow: the same item set at a flat count stays quiet', async () => {
+    const conn = makeConn({ metadata: { count: 5, itemKeys: ['call-1', 'call-2'] } });
+    await expect(decideRingForNewRow(conn, {
+      alertClass: 'promised-estimate', source: null, key: 'promised-estimate',
+      count: 5, newCount: 0, itemKeys: ['call-2', 'call-1'],
+    })).resolves.toBe(false);
+  });
+  test('ringOnRefreshFrom: a different item set rings against the existing row\'s own itemKeys', () => {
+    const gate = ringOnRefreshFrom({ count: 5, newCount: 0, itemKeys: ['call-9'] });
+    expect(gate({}, { count: 5, itemKeys: ['call-1'] })).toBe(true);
+    expect(gate({}, { count: 5, itemKeys: ['call-9'] })).toBe(false);
   });
 });

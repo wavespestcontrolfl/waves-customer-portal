@@ -156,6 +156,16 @@ async function readJsonOrThrow(res, label) {
 // feed/quiet; only a ringing rewrite may flip them. Engineering/fyi (anyFix)
 // never gates — notifyAdmin's own default behavior applies, byte-identical
 // to before this scope.
+//
+// An audience flip (owner<->engineering) changes which surface the row
+// belongs to, not merely whether it rings — the same rule
+// notification-service.js's mergeRefreshMetadata applies to notifyAdmin's
+// own refresh path. Without it, a FIX->ACT flip whose count hasn't grown
+// (shouldRing false) would leave the now-owner row hidden behind a stale
+// feed:'activity' (codex round-1). Guarded on the STANDING row actually
+// carrying an `audience` already — a legacy/pre-scope row with no such key
+// is a new field appearing, not a flip, and must not force a routing write
+// on every quiet repeat.
 async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary, observedAt, findings }) {
   const fields = digestRowFields({ subject, text: body, headline, summary });
   const next = NotificationService.normalizeAdminText({
@@ -174,6 +184,9 @@ async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary,
   if (!contentChanged) return;
   const shouldRing = fields.audience !== 'owner'
     || ringOnRefreshFrom({ count: findings.length })(standingRow, standingMeta);
+  const audienceFlipped = Object.prototype.hasOwnProperty.call(standingMeta, 'audience')
+    && standingMeta.audience !== fields.audience;
+  const applyRouting = shouldRing || audienceFlipped;
   await trx('notifications').where({ id: standingRow.id }).update({
     title: next.title,
     body: next.body,
@@ -182,7 +195,10 @@ async function rewriteStandingGbpDigest(trx, { subject, body, headline, summary,
     metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
       subject, observedAt, kind: fields.kind, audience: fields.audience,
       alertClass: alertClassFor('gbp-sync-health', null), count: findings.length,
-      ...(shouldRing ? { feed: fields.feed, quiet: false } : {}),
+      ...(applyRouting ? { feed: fields.feed, quiet: false } : {}),
+      // Age baseline (admin-alerts-ring-v2 follow-up): findPriorRungRow
+      // reads the last RING, not created_at — only a genuine ring advances it.
+      ...(shouldRing ? { rungAt: new Date().toISOString() } : {}),
     })]),
   });
 }

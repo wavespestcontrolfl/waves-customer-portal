@@ -358,6 +358,28 @@ describe('the check -> destination map fills in what the caller did not send', (
       expect(opts.metadata.quiet).toBe(false);
       expect(opts.metadata.feed).toBeNull();
     });
+
+    // The FRESH-insert `quiet` above (decideRingForNewRow's 7-day lookback)
+    // and a REFRESH of an existing dedupeKey row (ringOnRefreshFrom, wired
+    // as opts.ringOnRefresh) are two different decisions — a refresh that
+    // rings must never end up hidden, and a quiet refresh must keep the
+    // standing row's own visibility (notification-service.js's
+    // mergeRefreshMetadata, unit-tested directly in
+    // notification-admin-dedupe-refresh.test.js). Here: the wired function
+    // itself, invoked against a fabricated existing row, agrees.
+    test('the wired ringOnRefresh rings when the backlog grew past the existing row, stays quiet when it did not', async () => {
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-hygiene-refresh', deduped: true, refreshed: true });
+      // "(0 new)" isolates the count-only comparison (newCount > 0 would
+      // otherwise always ring on its own, masking the count test below).
+      await post({
+        ...good(), key: 'local:data-hygiene_sweep_1_fixed_66_exceptions_0_new_',
+        subject: 'data-hygiene sweep — 1 fixed, 66 exceptions (0 new)',
+        link: undefined,
+      });
+      const { ringOnRefresh } = mockNotifyAdmin.mock.calls[0][3];
+      expect(ringOnRefresh({}, { count: 60 })).toBe(true); // backlog grew (60 -> 66)
+      expect(ringOnRefresh({}, { count: 66 })).toBe(false); // flat — the existing row's own visibility stands
+    });
   });
 
   // For an unmapped check with no route.counts(), the generic fallback is
@@ -387,6 +409,45 @@ describe('count fallback: only a LEADING number is a count', () => {
     expect(firstIntegerInSubject('promised on a call, NOT on the calendar — Mon 09-28 10:00 (…2108)')).toBeNull();
     expect(firstIntegerInSubject('Drafts/call pipelines quiet: 47 stale draft(s)')).toBeNull();
     expect(firstIntegerInSubject('')).toBeNull();
+  });
+});
+
+// admin-alerts-ring-v2 follow-up: count and newCount resolve INDEPENDENTLY
+// — a caller who supplies one but not the other must still get the
+// check-map's own value for the missing one, not have it replaced by the
+// parser's count (or dropped to null) just because the OTHER field was given.
+describe('resolveCounts: count and newCount resolve independently', () => {
+  const { resolveCounts } = router._private;
+  const dataHygieneSubject = 'Data hygiene sweep — 63 fixed, 66 exceptions (2 new)';
+  const dataHygieneRoute = { counts: (subject) => {
+    const m = /—\s*\d+\s+fixed,\s*(\d+)\s+exceptions?\s*\((\d+)\s+new\)/i.exec(subject);
+    return m ? { count: Number(m[1]), newCount: Number(m[2]) } : null;
+  } };
+  const noCountsRoute = { counts: null };
+
+  test('newCount alone: count still resolves from the check-map, not replaced by the parser or dropped to null', () => {
+    const result = resolveCounts({ count: null, newCount: 1, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 66, newCount: 1 });
+  });
+
+  test('count alone: newCount still resolves from the check-map', () => {
+    const result = resolveCounts({ count: 999, newCount: null, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 999, newCount: 2 });
+  });
+
+  test('neither given: both resolve from the check-map', () => {
+    const result = resolveCounts({ count: null, newCount: null, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 66, newCount: 2 });
+  });
+
+  test('both given: both are the caller\'s own values, verbatim', () => {
+    const result = resolveCounts({ count: 5, newCount: 1, subject: dataHygieneSubject, route: dataHygieneRoute });
+    expect(result).toEqual({ count: 5, newCount: 1 });
+  });
+
+  test('an unmapped check with no counts(): count falls back to the leading integer, newCount stays null even with a leading number', () => {
+    const result = resolveCounts({ count: null, newCount: null, subject: '42 scheduled-visit pair(s) overlap', route: noCountsRoute });
+    expect(result).toEqual({ count: 42, newCount: null });
   });
 });
 
@@ -439,6 +500,10 @@ describe('bell write', () => {
         // row for the class has no prior row to compare — rings.
         alertClass: 'e22-schedule-integrity:overlaps',
         quiet: false,
+        // admin-alerts-ring-v2 follow-up: a fresh insert that rings (not
+        // quiet) stamps its own rungAt — findPriorRungRow's 7-day baseline
+        // reads this, not created_at.
+        rungAt: expect.any(String),
       },
     });
   });
@@ -546,7 +611,7 @@ describe('bell write', () => {
 
   test('metadata cannot override the seam fields or pre-resolve the finding', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n2', deduped: false });
-    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', audience: 'fyi', feed: 'not-activity', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
+    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', audience: 'fyi', feed: 'not-activity', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', rungAt: 'spoof', keep: 1 } });
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.metadata).toEqual({
       keep: 1,
@@ -559,8 +624,12 @@ describe('bell write', () => {
       observedAt: expect.any(String),
       alertClass: 'e22-schedule-integrity:overlaps',
       quiet: false,
+      // admin-alerts-ring-v2 follow-up: the route's own stamp, not the
+      // caller's spoofed value (RESERVED_METADATA_KEYS strips it above).
+      rungAt: expect.any(String),
     });
     expect(opts.metadata.resolved).toBeUndefined();
+    expect(opts.metadata.rungAt).not.toBe('spoof');
     expect(validateDigest({ ...good(), metadata: { resolved: true } }).value.metadata).toEqual({});
   });
 });

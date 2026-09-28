@@ -167,25 +167,30 @@ function validateDigest(body) {
   };
 }
 
-// The caller's own count/newCount always win. Otherwise the check-map's own
-// counts(subject) (data-hygiene: open backlog + how many are new) — falling
-// back to the first integer anywhere in the subject as a generic `count`
-// (never a `newCount`: a bare number's meaning isn't safely guessable for an
-// unconverted check, so an unmatched check simply never reports newCount).
-// Only a LEADING number is a count ("42 scheduled-visit pair(s) overlap");
-// a number further in is usually a date or time ("… — Mon 09-28 10:00"),
+// `count` and `newCount` resolve INDEPENDENTLY — each caller-supplied value
+// wins on its own; only a value the caller left out falls back to the
+// check-map's own counts(subject) (data-hygiene: open backlog + how many
+// are new), then to the first integer anywhere in the subject as a generic
+// `count` (never a `newCount`: a bare number's meaning isn't safely
+// guessable for an unconverted check, so an unmatched check simply never
+// reports newCount). `{ newCount: 1 }` with no `count` must still resolve
+// the check-map's own count, not fall through to null alongside it. Only a
+// LEADING number is a count ("42 scheduled-visit pair(s) overlap"); a
+// number further in is usually a date or time ("… — Mon 09-28 10:00"),
 // which would compare two different findings as the same count.
 function firstIntegerInSubject(subject) {
   const m = /^\s*(\d+)\b/.exec(String(subject || ''));
   return m ? Number(m[1]) : null;
 }
 function resolveCounts({ count, newCount, subject, route }) {
-  if (count !== null && count !== undefined) return { count, newCount: newCount ?? null };
   const routeCounts = typeof route.counts === 'function' ? route.counts(subject) : null;
-  if (routeCounts && Number.isFinite(routeCounts.count)) {
-    return { count: routeCounts.count, newCount: Number.isFinite(routeCounts.newCount) ? routeCounts.newCount : null };
-  }
-  return { count: firstIntegerInSubject(subject), newCount: null };
+  const resolvedCount = count !== null && count !== undefined
+    ? count
+    : (routeCounts && Number.isFinite(routeCounts.count) ? routeCounts.count : firstIntegerInSubject(subject));
+  const resolvedNewCount = newCount !== null && newCount !== undefined
+    ? newCount
+    : (routeCounts && Number.isFinite(routeCounts.newCount) ? routeCounts.newCount : null);
+  return { count: resolvedCount, newCount: resolvedNewCount };
 }
 
 // A caller-composed bell title, 60 chars or less. Optional — the route
@@ -246,7 +251,7 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'audience', 'feed', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt', 'alertClass', 'count', 'newCount', 'quiet', 'rungAt'];
 
 // Observation time of a finding / clean run: the caller's ISO timestamp when
 // valid and not in the future, else now. Ordering resolves against ingests
@@ -371,6 +376,14 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
           // why a refresh that doesn't ring drops both from its merge).
           feed: resolvedAudience === 'owner' ? (quiet ? 'activity' : null) : 'activity',
           ...(resolvedAudience === 'owner' ? { quiet } : {}),
+          // Age baseline (admin-alerts-ring-v2 follow-up): findPriorRungRow's
+          // 7-day window reads metadata.rungAt, not created_at. This only
+          // takes effect on the FRESH-insert path (notifyAdmin's create()
+          // persists this object as-is) — a REFRESH recomputes its own
+          // rungAt from notification-service.js's mergeRefreshMetadata,
+          // which ignores this precomputed value entirely on a quiet
+          // refresh (shouldRing decided separately, by ringOnRefresh above).
+          ...(!quiet ? { rungAt: effectiveObservedAt } : {}),
         },
         trx,
       });

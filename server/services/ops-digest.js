@@ -25,6 +25,9 @@
 
 const logger = require('./logger');
 const crypto = require('node:crypto');
+// Pure config, no requires of its own — safe as a plain top-level require
+// (alertClassFor below needs the check → route map's own stable ids).
+const { resolveRoute } = require('../config/ops-alert-routes');
 
 // Resolved at CALL time, not load time: this module is required by fifteen
 // senders, several of which are loaded before their suites set gate env
@@ -125,11 +128,16 @@ function digestRowFields({ subject, text = null, html = null, headline = null, s
 //     GATE_SCHEDULING_CAPACITY — stops the trim, so identity embedded in the
 //     middle of a key survives.
 const TRAILING_VARIABLE_TOKEN_RE = /[-_.]([0-9a-f]+)$/i;
+// Trailing separator characters (a token boundary with nothing after it —
+// data-hygiene's key ends "..._new_", a bare trailing "_") are stripped
+// FIRST, and again after each removed token, so a run of separators can
+// never mask a hex token one step further in.
+const TRAILING_SEPARATOR_RE = /[-_.]+$/;
 function trimVariableTail(s) {
-  let next = s;
+  let next = String(s || '').replace(TRAILING_SEPARATOR_RE, '');
   let m;
   while ((m = TRAILING_VARIABLE_TOKEN_RE.exec(next))) {
-    next = next.slice(0, next.length - m[0].length);
+    next = next.slice(0, next.length - m[0].length).replace(TRAILING_SEPARATOR_RE, '');
   }
   return next;
 }
@@ -138,20 +146,59 @@ function alertClassFor(key, source) {
   if (source !== 'ops-crons') return k;
   const i = k.indexOf(':');
   if (i === -1) return trimVariableTail(k);
+  // A mapped check whose route defines `counts` (its own parsed backlog
+  // numbers, e.g. data-hygiene's "N fixed, M exceptions (K new)") embeds
+  // those counters MID-key, not only at the end — trimVariableTail only
+  // strips a trailing separator+hex token, so it can never reach a counter
+  // sitting before a further un-trimmable suffix. Such a route gets a
+  // STABLE class instead: the check-id prefix (through the ':') plus the
+  // route's own id, so two runs with different counters land in the same
+  // alert class.
+  const route = resolveRoute(k);
+  if (route && typeof route.counts === 'function' && route.alertClass) {
+    return k.slice(0, i + 1) + route.alertClass;
+  }
   return k.slice(0, i + 1) + trimVariableTail(k.slice(i + 1));
 }
 
-// The new-news test (owner audience only). Ring when the caller reports
-// newCount>0; when its count is higher than the comparison point's; when it
-// has a count and that point has none (a row from before PR 2); or, with the
-// counts equal or unknown, when the finding is about a DIFFERENT set of items
-// (`sameSet` false). A smaller count never rings — the list only shrank.
-// `sameSet` is always true for an in-process sender (one class, one list)
-// and for a refresh of the same dedupe row; for ops-crons it compares the
-// two keys with their dates removed (setKeyFor), so a different missed
-// booking or a different set of unreturned calls rings even at the same
-// count (a second d19 gap is still one gap).
-function ringDecision({ newCount, count, priorCount, sameSet = true }) {
+// Item identity (admin-alerts-ring-v2 follow-up): a count-only standing
+// digest (promised-estimate: just "N promised quotes") reads "5 -> 5" as no
+// change even when a different call replaced an old one. deliverOpsDigest's
+// optional `itemKeys` carries the sender's own record ids (never customer
+// names/phones/emails) so the ring test can tell "same 5" from "5 different
+// ones" — deduped, sorted, capped so the comparison and the stored column
+// both stay bounded.
+const MAX_ITEM_KEYS = 200;
+function normalizeItemKeys(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = [...new Set(raw.map((k) => String(k ?? '').trim()).filter(Boolean))].sort();
+  return cleaned.length ? cleaned.slice(0, MAX_ITEM_KEYS) : null;
+}
+// True only when BOTH sides carry an itemKeys array and the current one
+// names an item the prior list never did. Either side missing (a sender
+// that doesn't report itemKeys, or a prior row from before this existed)
+// leaves the count/newCount test as the only signal — never a false ring.
+function hasNewItemKeys(currentKeys, priorKeys) {
+  if (!Array.isArray(currentKeys) || !Array.isArray(priorKeys)) return false;
+  const prior = new Set(priorKeys);
+  return currentKeys.some((k) => !prior.has(k));
+}
+
+// The new-news test (owner audience only). Rings when itemKeys prove a
+// DIFFERENT item replaced an old one (overrides an equal or even smaller
+// count — a swapped item is new news the count alone would hide); when the
+// caller reports newCount>0; when its count is higher than the comparison
+// point's; when it has a count and that point has none (a row from before
+// PR 2); or, with the counts equal or unknown, when the finding is about a
+// DIFFERENT set of items (`sameSet` false). A smaller count never rings on
+// its own — the list only shrank. `sameSet` is always true for an
+// in-process sender (one class, one list) and for a refresh of the same
+// dedupe row; for ops-crons it compares the two keys with their dates
+// removed (setKeyFor), so a different missed booking or a different set of
+// unreturned calls rings even at the same count (a second d19 gap is still
+// one gap).
+function ringDecision({ newCount, count, priorCount, sameSet = true, itemKeys, priorItemKeys }) {
+  if (hasNewItemKeys(itemKeys, priorItemKeys)) return true;
   if (Number(newCount) > 0) return true;
   const hasCount = count !== undefined && count !== null;
   const hasPrior = priorCount !== undefined && priorCount !== null;
@@ -185,22 +232,39 @@ function metaCount(meta) {
 }
 
 const NEWS_WINDOW = `7 days`;
+// Age baseline: the last time a row actually RANG, not when it was first
+// created (admin-alerts-ring-v2 follow-up). A standing row refreshed today
+// but first created weeks ago must still count as a recent comparison
+// point, and — symmetrically — a row that rang once long ago and has sat
+// quiet ever since must age out of the 7-day window on its OWN last ring,
+// not its birth. Every ring stamps metadata.rungAt (ISO string): a fresh
+// row that rings (ringGate true, or the ingest route's own insert when not
+// quiet) and a refresh with shouldRing true (notification-service.js's
+// mergeRefreshMetadata). A row from before this stamp existed falls back to
+// created_at, which was always this row's only ring anyway.
+const RUNG_AT_EXPR = "COALESCE((metadata->>'rungAt')::timestamptz, created_at)";
 
-// The most recent RUNG (not quiet, not resolved) row of the same alert class
-// and source scope, within the last 7 days — the comparison point for a
-// fresh insert (no existing dedupe row to refresh). Ops-crons rows scope on
-// metadata.source = 'ops-crons'; in-process rows (source null) scope on no
-// source at all. Rows written before this scope have no alertClass: an
-// in-process row (source null) falls back to matching by its stable opsKey
-// (`key`); an ops-crons legacy row is NOT matched this way — its raw key was
-// one-shot anyway, so the first post-deploy row for that check just rings
-// once, which is acceptable (owner ruling).
+// The most recent RUNG (not quiet, not resolved, not Activity-only) row of
+// the same alert class and source scope, within the last 7 days of its OWN
+// last ring — the comparison point for a fresh insert (no existing dedupe
+// row to refresh). Ops-crons rows scope on metadata.source = 'ops-crons';
+// in-process rows (source null) scope on no source at all. A non-owner row
+// (metadata.feed = 'activity') is excluded even if it slips past the other
+// filters: it was never actually bell-visible, so it must never stand in as
+// "the prior ring" for a later owner-audience emission of the same alert
+// class (a check whose kind flips between runs). Rows written before this
+// scope have no alertClass: an in-process row (source null) falls back to
+// matching by its stable opsKey (`key`); an ops-crons legacy row is NOT
+// matched this way — its raw key was one-shot anyway, so the first
+// post-deploy row for that check just rings once, which is acceptable
+// (owner ruling).
 async function findPriorRungRow(conn, { alertClass, source, key }) {
   let q = conn('notifications')
     .where({ recipient_type: 'admin', category: CATEGORY })
     .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
     .whereRaw("COALESCE(metadata->>'quiet', '') <> 'true'")
-    .where('created_at', '>', conn.raw(`NOW() - interval '${NEWS_WINDOW}'`));
+    .whereRaw("COALESCE(metadata->>'feed', '') <> 'activity'")
+    .whereRaw(`${RUNG_AT_EXPR} > NOW() - interval '${NEWS_WINDOW}'`);
   q = source === null
     ? q.whereRaw("metadata->>'source' IS NULL")
     : q.whereRaw("metadata->>'source' = ?", [String(source)]);
@@ -210,13 +274,13 @@ async function findPriorRungRow(conn, { alertClass, source, key }) {
       m.orWhere((legacy) => legacy.whereRaw("metadata->>'alertClass' IS NULL").whereRaw("metadata->>'opsKey' = ?", [key]));
     }
   });
-  return q.orderBy('created_at', 'desc').first('metadata');
+  return q.orderBy(conn.raw(`${RUNG_AT_EXPR} DESC`)).first('metadata');
 }
 
 // Ring decision for a row about to be INSERTED fresh (no standing dedupe row
 // to refresh) — the comparison point is the most recent matching row found
 // above, not the specific row a dedupeKey would find (there may be none).
-async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = null, count, newCount }) {
+async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = null, count, newCount, itemKeys }) {
   const prior = await findPriorRungRow(conn, { alertClass, source, key });
   if (!prior) return true;
   const priorMeta = parseMeta(prior.metadata);
@@ -225,17 +289,23 @@ async function decideRingForNewRow(conn, { alertClass, source, key, opsKey = nul
   // A prior row with no stored key (not a real ops-crons shape) can't prove a
   // different set, so it falls back to the counts alone.
   const sameSet = !opsKey || !priorMeta.opsKey || setKeyFor(opsKey) === setKeyFor(priorMeta.opsKey);
-  return ringDecision({ newCount, count, priorCount: metaCount(priorMeta), sameSet });
+  return ringDecision({
+    newCount, count, priorCount: metaCount(priorMeta), sameSet,
+    itemKeys, priorItemKeys: Array.isArray(priorMeta.itemKeys) ? priorMeta.itemKeys : undefined,
+  });
 }
 
 // notifyAdmin's `ringOnRefresh` contract (PR 2): evaluated against the
 // EXISTING standing row a dedupeKey found, so a refresh only re-bells on
 // genuine new news — a resolved standing row (should not normally happen:
 // resolveOpsDigest drops the dedupeKey on resolve) also rings, for safety.
-function ringOnRefreshFrom({ count, newCount }) {
+function ringOnRefreshFrom({ count, newCount, itemKeys }) {
   return (existingRow, existingMeta) => {
     if (existingMeta?.resolved === true) return true;
-    return ringDecision({ newCount, count, priorCount: metaCount(existingMeta) });
+    return ringDecision({
+      newCount, count, priorCount: metaCount(existingMeta),
+      itemKeys, priorItemKeys: Array.isArray(existingMeta?.itemKeys) ? existingMeta.itemKeys : undefined,
+    });
   };
 }
 
@@ -249,7 +319,7 @@ function ringOnRefreshFrom({ count, newCount }) {
 // sender whose kind flips between runs (gbp-sync-health FIX<->ACT) is always
 // gated by the CURRENT emission's audience, never a cached one. Pulled out
 // to keep deliverOpsDigest's own complexity down.
-function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount }) {
+function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience, alertClass, key, count, newCount, itemKeys }) {
   const ownerAudience = resolvedAudience === 'owner';
   if (dedupeKey) {
     return {
@@ -257,12 +327,12 @@ function ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAu
       ...(dedupeWindowMs ? { dedupeWindowMs } : {}),
       ...(refreshOnDedupe ? {
         refreshOnDedupe: true,
-        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount }) } : {}),
+        ...(ownerAudience ? { ringOnRefresh: ringOnRefreshFrom({ count, newCount, itemKeys }) } : {}),
       } : {}),
     };
   }
   if (!ownerAudience) return {};
-  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount }) };
+  return { ringGate: (conn) => decideRingForNewRow(conn, { alertClass, source: null, key, count, newCount, itemKeys }) };
 }
 
 // system_settings.key is varchar(100); a full SHA-256 digest keeps even the
@@ -353,6 +423,12 @@ function inAppEnabled() {
  *                               comparable point's own count, or that point has none.
  * @param {number} [p.newCount]  how many of `count` are new since the last time this was
  *                               reported — >0 always rings, regardless of `count`.
+ * @param {string[]} [p.itemKeys]     the finding's own record ids (never customer names/
+ *                               phones/emails) — when BOTH this call and the comparison
+ *                               point carry itemKeys, a current key absent from the prior
+ *                               list rings even at an equal or smaller `count` (a
+ *                               count-only digest can't otherwise tell "same N" from "N
+ *                               different ones"). Deduped, sorted, capped at 200.
  * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
  * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
@@ -366,7 +442,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, headline = null, summary = null, audience = null, count, newCount, itemKeys, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, trx = null, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -377,6 +453,8 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
   const alertClass = alertClassFor(key, null);
   const countMeta = Number.isFinite(Number(count)) ? { count: Number(count) } : {};
   const newCountMeta = Number.isFinite(Number(newCount)) ? { newCount: Number(newCount) } : {};
+  const normalizedItemKeys = normalizeItemKeys(itemKeys);
+  const itemKeysMeta = normalizedItemKeys ? { itemKeys: normalizedItemKeys } : {};
   // Ring-only-on-change (owner audience only — see ringOptionsFor). Two
   // different mechanisms, matching the two ways a sender's row reaches the
   // table:
@@ -409,13 +487,14 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // Optional dedupe (2026-09-11 email shutoff): a daily digest that
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
-      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount }),
+      ...ringOptionsFor({ dedupeKey, dedupeWindowMs, refreshOnDedupe, resolvedAudience: fields.audience, alertClass, key, count, newCount, itemKeys: normalizedItemKeys }),
       metadata: {
         opsKey: key,
         subject,
         alertClass,
         ...countMeta,
         ...newCountMeta,
+        ...itemKeysMeta,
         ...(fallOff ? { fallOff: true } : {}),
         ...metadata,
         // kind/audience/feed are the seam's classification, written after the
@@ -564,4 +643,5 @@ module.exports = {
   deliverOpsDigest, resolveOpsDigest, readCleanWatermark, cleanWatermarkKey, inAppEnabled, htmlToText, CATEGORY,
   deriveKind, defaultAudienceFor, fallbackHeadline, truncateAtWord, digestRowFields,
   alertClassFor, ringDecision, findPriorRungRow, decideRingForNewRow, ringOnRefreshFrom, setKeyFor,
+  normalizeItemKeys, hasNewItemKeys,
 };
