@@ -2660,8 +2660,32 @@ function PlanSummaryCard({ data, mode }) {
     : `This year: ${visits} ${visitWord}`;
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
-      <div className="section-eyebrow">Your plan</div>
+      {/* h2, not .section-eyebrow: the glass theme hides every
+          .section-eyebrow outside the hero kicker, which left this card
+          with no visible title (codex P2 on #5177; same fix as
+          UpcomingVisitsCard). */}
+      <h2>Your plan</h2>
       <p className="map-context-copy">{yearLine}</p>
+    </section>
+  );
+}
+
+// "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
+// GATE_REPORT_NEAR_YOU): the lawn pest most often found around the
+// customer's city this past month. The server sends it only for a live lawn
+// report once enough other customers there had that pest, and strips it from
+// pdf/static/sms_preview renders; `mode` is the same belt-and-braces check
+// as PlanSummaryCard.
+function NearYouCard({ data, mode }) {
+  const nearYou = data.nearYou;
+  if (mode !== 'live' || !nearYou?.city || !nearYou?.pest) return null;
+  return (
+    <section data-glass="card" className="sr-section near-you-section" id="near-you">
+      {/* h2, not .section-eyebrow — see PlanSummaryCard. */}
+      <h2>Near you</h2>
+      <p className="map-context-copy">
+        Around {nearYou.city} this past month, {nearYou.pest} were the lawn pest we found most often.
+      </p>
     </section>
   );
 }
@@ -8984,6 +9008,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
         <PlanSummaryCard data={data} mode={mode} />
+
+        <NearYouCard data={data} mode={mode} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on

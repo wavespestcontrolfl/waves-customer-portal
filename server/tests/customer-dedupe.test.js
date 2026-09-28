@@ -815,7 +815,7 @@ describe('executeMerge', () => {
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
         state.repointUpdates.push(table);
-        state.events.push(['update', table]);
+        state.events.push(['update', table, q.args('where')?.[0], q.args('update')[0]]);
         return updates[table] ?? 1;
       }
       // blocker count checks (auto mode)
@@ -876,6 +876,19 @@ describe('executeMerge', () => {
     expect(state.events.slice(invoiceSweep).filter(([kind]) => kind === 'sessions_read')).toEqual([]);
     // ...and the loser's session is still actually cancelled in Stripe.
     expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_loser');
+  });
+
+  it('a prefs row moved whole to the kept profile has a legacy receipts-off cleared (owner ruling 2026-09-26)', async () => {
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    const prefsUpdates = state.events.filter(([kind, table]) => kind === 'update' && table === 'notification_prefs');
+    expect(prefsUpdates.map(([, , where, payload]) => [where, payload])).toEqual([
+      ['customer_id', { customer_id: WINNER }],
+      [{ customer_id: WINNER, payment_receipt: false }, { payment_receipt: true }],
+    ]);
   });
 
   it('takes the invoice-issued-closeout gate lock right after the property-preferences pair, sorted, before any customer row lock (GitHub r7 P2 #4127)', async () => {
