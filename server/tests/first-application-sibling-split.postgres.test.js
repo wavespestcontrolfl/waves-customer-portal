@@ -37,8 +37,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
   let db;
   const {
     loadCandidates,
-    representativeCandidatesByEstimate,
-    evaluateCandidate,
+    groupCandidatesByEstimate,
+    evaluateEstimateCandidates,
     clearStandingAlerts,
   } = require('../services/first-application-sibling-split');
 
@@ -110,23 +110,19 @@ suite('first-application-sibling-split — periodic sweep', () => {
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first();
   }
 
-  // Runs the sweep's own candidate-discovery + per-candidate evaluation on
+  // Runs the sweep's own candidate-discovery + per-estimate evaluation on
   // ONE connection (the test's own transaction) — the same two calls
-  // runFirstApplicationSiblingSplitSweep makes per candidate, just without
-  // the outer runExclusive lock or the per-candidate transaction split
+  // runFirstApplicationSiblingSplitSweep makes per estimate, just without
+  // the outer runExclusive lock or the per-estimate transaction split
   // (rollbackTest already isolates the whole test in one transaction).
+  // Every candidate row for this estimate is evaluated TOGETHER (see the
+  // module header) — never a picked-by-heuristic representative.
   async function sweepOnce(trx, estimateId) {
     const candidates = await loadCandidates(trx);
-    // Same consolidation runFirstApplicationSiblingSplitSweep applies
-    // (Codex round-3 P1) — never evaluate a stale/settled invoice candidate
-    // and its live replacement as two independent groups.
-    const representatives = representativeCandidatesByEstimate(candidates);
-    const mine = representatives.filter((c) => c.source_estimate_id === estimateId);
-    const results = [];
-    for (const candidate of mine) {
-      results.push(await evaluateCandidate(trx, candidate));
-    }
-    return results;
+    const groups = groupCandidatesByEstimate(candidates);
+    const mine = groups.find((g) => g[0].source_estimate_id === estimateId);
+    if (!mine) return [];
+    return [await evaluateEstimateCandidates(trx, mine)];
   }
 
   test('a diverging unpriced sibling raises exactly one durable alert row — invoice/visit money untouched', () => rollbackTest(async (trx) => {
@@ -575,13 +571,14 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(results).toEqual([]);
   }));
 
-  // Codex on head 3681fe5c5e: a THREE-program group (A anchor + B + C). B
-  // and C both diverge; staff then price and separately invoice B ONLY (a
-  // partial split), leaving C still unpriced and un-invoiced. B's own new
-  // invoice must never itself register as a second, competing candidate
-  // for this estimate — the real alert (naming C, still uncovered by A's
-  // combined invoice) must stay open, never silently wiped by a bogus
-  // 'clear' verdict evaluated from B's own invoice's point of view.
+  // A THREE-program group (A anchor + B + C). B and C both diverge; staff
+  // then price and separately invoice B ONLY (a partial split), leaving C
+  // still unpriced and un-invoiced. B's own new invoice legitimately
+  // registers as a second candidate for this estimate too (see the module
+  // header — this is by design now, not a bug to prevent), but
+  // evaluateEstimateCandidates evaluating both together must still keep
+  // the real alert open (naming C, still uncovered by A's combined
+  // invoice) — never silently cleared by B's own narrow 'clear' verdict.
   test('a partially completed THREE-program split (B priced + invoiced, C still uncovered) keeps the real alert open', () => rollbackTest(async (trx) => {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -621,9 +618,11 @@ suite('first-application-sibling-split — periodic sweep', () => {
       subtotal: 200, total: 200, created_at: new Date('2026-09-01T00:00:00Z'),
     });
 
-    // B and C both diverge from the anchor.
+    // B and C both diverge from the anchor onto the SAME new day — the
+    // exact shape where B's own narrow view, once split off, would read C
+    // as "aligned" with it (same date as B) rather than diverging.
     await trx('scheduled_services').where({ id: bId }).update({ scheduled_date: '2026-10-02' });
-    await trx('scheduled_services').where({ id: cId }).update({ scheduled_date: '2026-10-03' });
+    await trx('scheduled_services').where({ id: cId }).update({ scheduled_date: '2026-10-02' });
     const [firstResult] = await sweepOnce(trx, estimateId);
     expect(firstResult.action).toBe('alerted');
     expect(firstResult.divergingSiblingIds).toEqual([bId, cId].map(String).sort());
@@ -634,20 +633,23 @@ suite('first-application-sibling-split — periodic sweep', () => {
     // well AFTER the anchor's own invoice, exactly like a real hand-split
     // done days later.
     await trx('scheduled_services').where({ id: bId }).update({ estimated_price: 60 });
+    const bInvoiceId = randomUUID();
     await trx('invoices').insert({
-      id: randomUUID(), customer_id: customerId, scheduled_service_id: bId,
+      id: bInvoiceId, customer_id: customerId, scheduled_service_id: bId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
       line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
       subtotal: 60, total: 60, created_at: new Date('2026-09-05T00:00:00Z'),
     });
 
-    // loadCandidates must find exactly ONE candidate for this estimate —
-    // the true anchor's invoice — never B's own new invoice too.
+    // loadCandidates deliberately returns BOTH rows for this estimate now
+    // — the true anchor's invoice AND B's own new invoice (each
+    // structurally qualifies; see the module header for why picking "the"
+    // one by any heuristic is unsafe). evaluateEstimateCandidates is what
+    // must get this right by evaluating them together.
     const candidates = await loadCandidates(trx);
     const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
-    expect(mine).toHaveLength(1);
-    expect(mine[0].invoice_id).toBe(anchorInvoiceId);
+    expect(mine.map((c) => c.invoice_id).sort()).toEqual([anchorInvoiceId, bInvoiceId].sort());
 
     const [result] = await sweepOnce(trx, estimateId);
     expect(result.action).toBe('alerted');
@@ -661,6 +663,31 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const newDedupeKey = DEDUPE_KEY(estimateId, [cId]);
     const stillOpen = await readBell(trx, newDedupeKey);
     expect(stillOpen.read_at).toBeNull();
+
+    // Now the anchor's OWN invoice is voided and reissued (a fresh #2 for
+    // the SAME anchor visit), minted AFTER B's own split invoice — the
+    // exact combination that broke an earlier "earliest invoice wins"
+    // heuristic (Codex on head daf724131f): the reissue is "younger" than
+    // B's own invoice, so age alone can't tell them apart. C is still
+    // uncovered throughout.
+    await trx('invoices').where({ id: anchorInvoiceId }).update({ status: 'void' });
+    const anchorReplacementId = randomUUID();
+    await trx('invoices').insert({
+      id: anchorReplacementId, customer_id: customerId, scheduled_service_id: anchorId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'First Service Application',
+      notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 200, amount: 200 }]),
+      subtotal: 200, total: 200, created_at: new Date('2026-09-10T00:00:00Z'),
+    });
+
+    const [afterReissue] = await sweepOnce(trx, estimateId);
+    expect(afterReissue.action).toBe('alerted');
+    expect(afterReissue.divergingSiblingIds).toEqual([cId]);
+    const stillOpenAfterReissue = await readBell(trx, newDedupeKey);
+    expect(stillOpenAfterReissue.read_at).toBeNull();
+    const meta = typeof stillOpenAfterReissue.metadata === 'string' ? JSON.parse(stillOpenAfterReissue.metadata) : stillOpenAfterReissue.metadata;
+    expect(meta.invoiceId).toBe(anchorReplacementId);
   }));
 
   test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
@@ -748,8 +775,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const spy = jest.spyOn(notificationService, 'notifyAdmin').mockRejectedValueOnce(new Error('injected notifyAdmin failure'));
     try {
       const candidates = await loadCandidates(trx);
-      const mine = candidates.find((c) => c.source_estimate_id === ids.estimateId);
-      await expect(evaluateCandidate(trx, mine)).rejects.toThrow('injected notifyAdmin failure');
+      const mine = candidates.filter((c) => c.source_estimate_id === ids.estimateId);
+      await expect(evaluateEstimateCandidates(trx, mine)).rejects.toThrow('injected notifyAdmin failure');
     } finally {
       spy.mockRestore();
     }

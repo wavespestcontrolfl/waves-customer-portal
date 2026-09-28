@@ -147,21 +147,45 @@
 // created while the combined invoice is technically left untouched (round
 // 4's original concern) still clears the alert without dollar proof.
 //
-// One representative row per estimate (Codex round-3 P1): loadCandidates
-// can return MORE THAN ONE invoice row for the same estimate — a stale,
-// now-settled invoice a standing alert still names (the second half of
-// loadCandidates) alongside its LIVE replacement for the same anchor visit
-// (the alerted invoice was voided and re-minted). Evaluating each
-// independently — one per transaction, in whichever order loadCandidates
-// returned them — let the settled row's own 'clear' verdict undo the live
-// row's own 'alert' verdict for the SAME group. runSweepInner runs every
-// candidate through representativeCandidatesByEstimate first, which always
-// prefers a live (non-settled) row as the one that governs the group.
+// EVERY live candidate anchor for an estimate is evaluated TOGETHER, never
+// picked by a heuristic (pre-push history on head daf724131f and its
+// predecessors): loadCandidates can return MORE THAN ONE invoice row for
+// the same estimate — not just a stale/live pair for the SAME anchor
+// (a voided-and-reissued invoice), but genuinely DIFFERENT anchors once a
+// 3+ program group is partially split (a split-off sibling's own new
+// invoice can independently satisfy the structural "still covered
+// sibling" check on account of some OTHER, still-unresolved sibling).
+// Three heuristics were tried and each failed on a real scenario: "prefer
+// live over settled, newest wins" let a split sibling's newer invoice
+// silently outrank the true anchor; "only the group's earliest live
+// invoice may be a candidate" then excluded a split sibling correctly but
+// ALSO excluded a legitimate reissue of the true anchor's own invoice
+// (younger, by construction, than a split sibling invoiced BEFORE the
+// reissue). No current-state-only heuristic can reliably tell "the true
+// combined invoice, reissued" apart from "a split-off sibling's own
+// separate invoice" — both are, symmetrically, a live invoice for a
+// priced, recurring, top-level visit with at least one other still-needy
+// sibling somewhere in the same estimate.
 //
-// Durability: each candidate estimate group is evaluated in its OWN
-// transaction. A failure on one group is logged and left for the next
-// tick to retry — it never blocks or rolls back any other group's
-// evaluation in the same run.
+// So groupCandidatesByEstimate does NOT choose — it only groups raw rows
+// by source_estimate_id. evaluateEstimateCandidates (the per-estimate
+// transaction unit) then evaluates EVERY row in that group independently
+// against the SAME shared members list, and takes the UNION: any row that
+// finds a genuine divergence wins (its diverging set is added to the
+// alert), and the estimate clears ONLY when EVERY row agrees nothing is
+// wrong. This is safe in both directions: a split-off sibling's own
+// invoice can only ever say 'clear' from its own narrow view (the true
+// anchor always already "has its own invoice" — the shared one — from
+// that narrow perspective, so it can never itself manufacture a false
+// alert), while a stale/settled duplicate for the same anchor trivially
+// says 'clear' too and simply contributes nothing to the union. The true
+// anchor's own row, whenever it is live, always still says 'alert' for a
+// genuinely uncovered sibling — and one 'alert' is enough.
+//
+// Durability: each candidate ESTIMATE (every row for it together) is
+// evaluated in its OWN transaction. A failure on one estimate is logged
+// and left for the next tick to retry — it never blocks or rolls back any
+// other estimate's evaluation in the same run.
 
 const db = require('../models/db');
 const logger = require('./logger');
@@ -265,35 +289,20 @@ const CANDIDATE_COLUMNS = [
   'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
 ];
 
-// Consolidates multiple candidate INVOICE rows for the SAME estimate down
-// to ONE representative to evaluate (Codex round-3 P1 on the pre-push
-// fix): loadCandidates' second half can return a stale, now-SETTLED
-// invoice a standing alert still names alongside its LIVE replacement for
-// the same anchor visit (the alerted invoice was voided and re-minted).
-// Evaluating both independently — one per transaction, in whichever order
-// loadCandidates happened to return them — let the settled row's own
-// 'clear' verdict undo the live row's own 'alert' verdict for the SAME
-// estimate group. A live (non-settled) row always wins: that is the
-// invoice actually governing the group right now. Only when EVERY row for
-// the estimate is settled (the group is genuinely, fully resolved) does a
-// settled row represent it — any one of them decides the same 'clear'
-// verdict either way, so ties there are broken by newest invoice only for
-// determinism, not correctness.
-function representativeCandidatesByEstimate(candidates) {
+// Groups candidate INVOICE rows by estimate — a plain grouping, never a
+// pick-one-representative filter (see the module header for why: no
+// current-state heuristic reliably tells "the true combined invoice,
+// reissued" apart from "a split-off sibling's own separate invoice", so
+// evaluateEstimateCandidates evaluates every row in each group together
+// instead of this function choosing one). Preserves loadCandidates' own
+// order within each group (oldest invoice first — no significance beyond
+// determinism).
+function groupCandidatesByEstimate(candidates) {
   const byEstimate = new Map();
   for (const candidate of candidates) {
     const key = candidate.source_estimate_id;
-    const current = byEstimate.get(key);
-    if (!current) { byEstimate.set(key, candidate); continue; }
-    const currentLive = !isInvoiceSettled(current.invoice_status);
-    const candidateLive = !isInvoiceSettled(candidate.invoice_status);
-    if (candidateLive && !currentLive) {
-      byEstimate.set(key, candidate);
-    } else if (candidateLive === currentLive) {
-      const currentCreated = current.invoice_created_at ? new Date(current.invoice_created_at).getTime() : 0;
-      const candidateCreated = candidate.invoice_created_at ? new Date(candidate.invoice_created_at).getTime() : 0;
-      if (candidateCreated > currentCreated) byEstimate.set(key, candidate);
-    }
+    if (!byEstimate.has(key)) byEstimate.set(key, []);
+    byEstimate.get(key).push(candidate);
   }
   return [...byEstimate.values()];
 }
@@ -349,27 +358,18 @@ async function loadStaleAlertInvoiceIds(conn) {
 // multi-program estimate where every program was independently priced AND
 // invoiced from day one (neither OR branch matches for such a sibling).
 // Invoice title/notes text is never consulted — a copy edit on the invoice
-// can no longer drop a candidate out of every future scan. PLUS: only the
-// group's EARLIEST live invoice may register as a candidate (Codex on head
-// 3681fe5c5e) — once a sibling is priced AND separately invoiced (a
-// partial split in a 3+ program group), that sibling's OWN new invoice can
-// ALSO satisfy the "still covered sibling" check above on account of some
-// OTHER, still-unresolved sibling, becoming a second, illegitimate
-// candidate for the same estimate whose own bogus 'clear' verdict would
-// silently wipe the real, still-open alert (evaluateCandidate's 'clear'
-// branch calls clearStandingAlerts with no exceptKey — every alert under
-// the estimate's prefix, not just this row's own dedupeKey). The true
-// combined invoice is always the group's oldest live one — minted once at
-// acceptance; every later invoice for a sibling is by construction a
-// hand-split RESOLUTION, never a second combined one — so this keeps
-// exactly one candidate row per estimate at the SQL level, which is what
-// representativeCandidatesByEstimate's one-row-per-estimate consolidation
-// (and clearStandingAlerts' own no-exceptKey blast radius) both assume.
-// The second-half "stale" re-fetch below intentionally skips ALL of this
-// structural re-checking: those invoice ids are already known relevant
-// from a standing alert's own metadata, and re-deriving structural
-// eligibility on every tick would risk dropping one the moment every
-// sibling finally gets its own invoice.
+// can no longer drop a candidate out of every future scan. This CAN return
+// more than one row for the same estimate — a split-off sibling's own new
+// invoice can independently satisfy the "still covered sibling" check on
+// account of some OTHER, still-unresolved sibling, same as the true
+// anchor's own row can. That is deliberately NOT resolved here with a
+// heuristic (age or otherwise — see the module header for why every one
+// tried broke on a real scenario); evaluateEstimateCandidates evaluates
+// every row for an estimate together instead. The second-half "stale"
+// re-fetch below intentionally skips ALL of this structural re-checking:
+// those invoice ids are already known relevant from a standing alert's own
+// metadata, and re-deriving structural eligibility on every tick would
+// risk dropping one the moment every sibling finally gets its own invoice.
 //
 // Deliberately UNBOUNDED by row count (Codex P1): the set this query
 // selects is already bounded by "currently non-settled" — operationally
@@ -402,44 +402,6 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
                 .from('invoices as sib_invoice')
                 .whereRaw('sib_invoice.scheduled_service_id = sib.id')
                 .whereNotIn('sib_invoice.status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
-            });
-        });
-    })
-    // Only the EARLIEST live invoice anywhere in this estimate's top-level
-    // visit group may register as a candidate (Codex on head 3681fe5c5e):
-    // once a sibling gets priced AND its own live invoice minted (a
-    // partial split — the exact scenario the OR clause above exists to
-    // keep discovering), that sibling's OWN new invoice can ALSO satisfy
-    // the "still covered sibling exists" check above on account of some
-    // OTHER, still-unresolved sibling in a 3+ program group — becoming a
-    // SECOND, illegitimate candidate row for the SAME estimate. Both rows
-    // then reach evaluateCandidate independently; each 'clear' verdict
-    // calls clearStandingAlerts with no exceptKey, unconditionally wiping
-    // every standing alert under the estimate's prefix — so the split
-    // sibling's own bogus "clear" (it sees only the true anchor as its one
-    // diverging "sibling", which already has ITS OWN live invoice — the
-    // shared one — and reads that as resolved) silently wipes out the
-    // REAL, still-open alert the true anchor's row would have kept firing
-    // for the group's genuinely unresolved sibling. The true combined
-    // invoice is ALWAYS the group's oldest live invoice — it is minted
-    // once, at acceptance, and every later invoice for a sibling is by
-    // construction a hand-split RESOLUTION, never a second combined one —
-    // so excluding any row with an earlier live competitor in the same
-    // group keeps representativeCandidatesByEstimate's one-row-per-estimate
-    // invariant intact at the SQL level, before it ever reaches JS.
-    .whereNotExists(function earlierLiveGroupInvoiceExists() {
-      this.select(1)
-        .from('invoices as earlier_inv')
-        .join('scheduled_services as earlier_anchor', 'earlier_anchor.id', 'earlier_inv.scheduled_service_id')
-        .whereRaw('earlier_anchor.customer_id = anchor.customer_id')
-        .whereRaw('earlier_anchor.source_estimate_id = anchor.source_estimate_id')
-        .whereNull('earlier_anchor.recurring_parent_id')
-        .whereNotIn('earlier_inv.status', SETTLED_INVOICE_STATUSES)
-        .where((earlier) => {
-          earlier.whereRaw('earlier_inv.created_at < i.created_at')
-            .orWhere((tie) => {
-              tie.whereRaw('earlier_inv.created_at = i.created_at')
-                .whereRaw('earlier_inv.id < i.id');
             });
         });
     })
@@ -590,63 +552,81 @@ async function raiseDivergenceAlert(conn, {
   );
 }
 
-// Re-derives one candidate's estimate group fresh and acts on the verdict —
-// the whole unit a single transaction covers.
-async function evaluateCandidate(conn, candidate) {
-  const {
-    anchor_id: anchorId, customer_id: customerId, source_estimate_id: estimateId,
-    invoice_id: invoiceId, invoice_status: invoiceStatus, invoice_number: invoiceNumber,
-    invoice_total: invoiceTotal,
-    anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
-  } = candidate;
+// Re-derives one estimate's group fresh and acts on the COMBINED verdict
+// across every candidate row for it — the whole unit a single transaction
+// covers. See the module header for why this evaluates every row rather
+// than picking one: any row finding a genuine divergence is enough to
+// alert (their diverging sets are unioned); the estimate clears only when
+// EVERY row agrees nothing is wrong.
+async function evaluateEstimateCandidates(conn, candidatesForEstimate) {
+  const { customer_id: customerId, source_estimate_id: estimateId } = candidatesForEstimate[0];
   const members = await loadGroupMembers(conn, { customerId, sourceEstimateId: estimateId });
-  const anchor = members.find((m) => String(m.id) === String(anchorId))
-    || { id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt };
-  const verdict = evaluateGroupDivergence({ anchor, members, invoiceStatus });
   const prefix = DEDUPE_PREFIX(estimateId);
-  if (verdict.action === 'clear') {
+
+  const perAnchor = candidatesForEstimate.map((candidate) => {
+    const {
+      anchor_id: anchorId, invoice_id: invoiceId, invoice_status: invoiceStatus,
+      invoice_number: invoiceNumber, invoice_total: invoiceTotal,
+      anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
+    } = candidate;
+    const anchor = members.find((m) => String(m.id) === String(anchorId))
+      || { id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt };
+    return {
+      anchor,
+      verdict: evaluateGroupDivergence({ anchor, members, invoiceStatus }),
+      invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber, total: invoiceTotal } : null,
+    };
+  });
+
+  const alerting = perAnchor.filter((p) => p.verdict.action === 'alert');
+  if (!alerting.length) {
     const cleared = await clearStandingAlerts(conn, prefix);
     return {
-      estimateId, action: 'cleared', reason: verdict.reason, cleared,
+      estimateId, action: 'cleared', reason: perAnchor[0].verdict.reason, cleared,
     };
   }
-  const sortedIds = [...new Set(verdict.diverging.map((d) => String(d.id)))].sort();
+
+  // Union every alerting anchor's own unresolved diverging set — the same
+  // member row, if flagged from more than one anchor's perspective, is
+  // deduped by id (the row objects are identical either way, since every
+  // anchor evaluates against the SAME shared `members` list).
+  const unresolvedUnion = new Map();
+  for (const p of alerting) {
+    for (const d of p.verdict.diverging) unresolvedUnion.set(String(d.id), d);
+  }
+  const diverging = [...unresolvedUnion.values()];
+  const sortedIds = [...new Set(diverging.map((d) => String(d.id)))].sort();
   const dedupeKey = `${prefix}${sortedIds.join(',')}`;
+  const { anchor, invoice } = alerting[0];
   // Any OTHER standing alert for this estimate (a different diverging set
   // than the one we're about to raise/refresh) is stale — clear it first.
   await clearStandingAlerts(conn, prefix, { exceptKey: dedupeKey });
   await raiseDivergenceAlert(conn, {
-    estimateId,
-    anchor,
-    diverging: verdict.diverging,
-    customerId,
-    invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber, total: invoiceTotal } : null,
-    dedupeKey,
+    estimateId, anchor, diverging, customerId, invoice, dedupeKey,
   });
   return { estimateId, action: 'alerted', divergingSiblingIds: sortedIds };
 }
 
 async function runSweepInner() {
   const candidates = await loadCandidates(db);
-  // One representative row per estimate (Codex round-3 P1) — never evaluate
-  // a stale/settled invoice candidate and its live replacement as two
-  // independent groups for the same estimate.
-  const representatives = representativeCandidatesByEstimate(candidates);
+  // Every row for an estimate is evaluated TOGETHER (see the module
+  // header) — never a picked-by-heuristic representative.
+  const groups = groupCandidatesByEstimate(candidates);
   let alerted = 0;
   let cleared = 0;
   let failed = 0;
-  for (const candidate of representatives) {
+  for (const group of groups) {
     try {
-      const result = await db.transaction((trx) => evaluateCandidate(trx, candidate));
+      const result = await db.transaction((trx) => evaluateEstimateCandidates(trx, group));
       if (result.action === 'alerted') alerted += 1;
       else if (result.action === 'cleared' && result.cleared) cleared += 1;
     } catch (err) {
       failed += 1;
-      logger.error(`[first-application-sibling-split] sweep failed for estimate ${candidate.source_estimate_id}: ${err.message}`);
+      logger.error(`[first-application-sibling-split] sweep failed for estimate ${group[0].source_estimate_id}: ${err.message}`);
     }
   }
   if (failed) {
-    throw new Error(`${failed} of ${representatives.length} first-application sibling-split group(s) failed this tick — left for the next run`);
+    throw new Error(`${failed} of ${groups.length} first-application sibling-split group(s) failed this tick — left for the next run`);
   }
   return {
     scanned: candidates.length, alerted, cleared, failed,
@@ -666,10 +646,10 @@ module.exports = {
   evaluateGroupDivergence,
   divergenceStateFingerprint,
   loadCandidates,
-  representativeCandidatesByEstimate,
+  groupCandidatesByEstimate,
   loadGroupMembers,
   clearStandingAlerts,
   raiseDivergenceAlert,
-  evaluateCandidate,
+  evaluateEstimateCandidates,
   SETTLED_INVOICE_STATUSES,
 };

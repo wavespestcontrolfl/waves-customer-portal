@@ -12,7 +12,7 @@ const {
   evaluateGroupDivergence,
   divergingSiblings,
   divergenceStateFingerprint,
-  representativeCandidatesByEstimate,
+  groupCandidatesByEstimate,
   isInvoiceSettled,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
@@ -174,34 +174,32 @@ describe('divergenceStateFingerprint', () => {
   });
 });
 
-describe('representativeCandidatesByEstimate', () => {
+// groupCandidatesByEstimate is a PLAIN grouping, never a pick-one filter
+// (Codex history on heads 3681fe5c5e and daf724131f: "prefer live over
+// settled, newest wins" and "only the group's earliest live invoice" were
+// both tried and both broke on a real multi-anchor scenario — see the
+// module header). evaluateEstimateCandidates evaluates every row in each
+// group together instead.
+describe('groupCandidatesByEstimate', () => {
   const row = (over = {}) => ({
     source_estimate_id: 'est-1', invoice_status: 'draft', invoice_created_at: '2026-09-01T00:00:00Z', ...over,
   });
 
-  test('a single row per estimate passes through unchanged', () => {
+  test('a single row per estimate becomes a group of one', () => {
     const r = row();
-    expect(representativeCandidatesByEstimate([r])).toEqual([r]);
+    expect(groupCandidatesByEstimate([r])).toEqual([[r]]);
   });
 
-  test('a live row always wins over a settled row for the same estimate, regardless of order', () => {
-    const live = row({ invoice_id: 'live', invoice_status: 'draft' });
-    const settled = row({ invoice_id: 'settled', invoice_status: 'void', invoice_created_at: '2026-09-05T00:00:00Z' });
-    expect(representativeCandidatesByEstimate([settled, live])).toEqual([live]);
-    expect(representativeCandidatesByEstimate([live, settled])).toEqual([live]);
+  test('multiple rows for the same estimate stay grouped together, in order', () => {
+    const a = row({ invoice_id: 'a' });
+    const b = row({ invoice_id: 'b', invoice_status: 'void' });
+    expect(groupCandidatesByEstimate([a, b])).toEqual([[a, b]]);
   });
 
-  test('two live rows for the same estimate — the newer invoice wins', () => {
-    const older = row({ invoice_id: 'older', invoice_created_at: '2026-09-01T00:00:00Z' });
-    const newer = row({ invoice_id: 'newer', invoice_created_at: '2026-09-10T00:00:00Z' });
-    expect(representativeCandidatesByEstimate([older, newer])).toEqual([newer]);
-  });
-
-  test('rows for different estimates are kept independently', () => {
+  test('rows for different estimates are kept in separate groups', () => {
     const a1 = row({ source_estimate_id: 'est-a', invoice_id: 'a' });
     const b1 = row({ source_estimate_id: 'est-b', invoice_id: 'b' });
-    expect(representativeCandidatesByEstimate([a1, b1])).toEqual(expect.arrayContaining([a1, b1]));
-    expect(representativeCandidatesByEstimate([a1, b1])).toHaveLength(2);
+    expect(groupCandidatesByEstimate([a1, b1])).toEqual([[a1], [b1]]);
   });
 });
 
