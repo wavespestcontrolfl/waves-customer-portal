@@ -111,6 +111,17 @@ function linkFor(n) {
   return link;
 }
 
+// An ops_digest row's full report lives only in the Agents → Activity feed
+// (`detail`). When the row's own tap goes somewhere else — a mapped work page
+// like /admin/communications, or nowhere — a secondary "Full report" link
+// keeps it one tap away; `focus=` loads that row whatever its age or read
+// state (codex r3 P0 on #5236). Null when the row's tap already opens it.
+function reportLinkFor(n) {
+  if (!n || n.category !== 'ops_digest' || !n.id) return null;
+  if (n.link && ACTIVITY_FEED_LINK_RE.test(n.link)) return null;
+  return `/admin/agents?tab=activity&focus=${encodeURIComponent(n.id)}`;
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -394,6 +405,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     dialogFocusRef.current = node;
   };
 
+  // The row's "Full report" link: its own click, never the row's (the row
+  // would navigate to its mapped work page instead).
+  const openReport = async (e, n, report) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!n.read_at) await markRead(n.id);
+    setOpen(false);
+    window.location.href = report;
+  };
+
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
     // write (expired token the refresh couldn't save) must not clear badges.
@@ -623,6 +644,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
               {!loading && !loadFailed && tab === 'account' && notifications.map(n => {
                 const href = linkFor(n);
                 const chip = digestKindChip(n);
+                const report = reportLinkFor(n);
                 return (
                 <div key={n.id}
                   role={href ? 'link' : undefined}
@@ -671,8 +693,23 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     {n.body && (
                       <div style={{
                         fontSize: 14, color: isDark ? '#52525B' : CUSTOMER_SURFACE.body, marginTop: 4, lineHeight: 1.4,
-                        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                        // Two lines for ops digests only — their full report is one
+                        // tap away (reportLinkFor); every other row, customer rows
+                        // included, keeps its whole body as before.
+                        ...(n.category === 'ops_digest'
+                          ? { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }
+                          : {}),
                       }}>{n.body}</div>
+                    )}
+                    {report && (
+                      <button type="button"
+                        onClick={(e) => openReport(e, n, report)}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        style={{
+                          marginTop: 6, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+                          fontSize: 14, fontWeight: 600, textDecoration: 'underline',
+                          color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
+                        }}>Full report</button>
                     )}
                     <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
                       {timeAgo(n.created_at)}
@@ -771,6 +808,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   {items.map(n => {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
+                    const report = reportLinkFor(n);
                     const title = displayTitle(n);
                     return (
                     <div key={n.id}
@@ -819,6 +857,15 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                             overflow: 'hidden', textOverflow: 'ellipsis',
                             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
                           }}>{n.body}</div>
+                        )}
+                        {report && (
+                          <button type="button"
+                            onClick={(e) => openReport(e, n, report)}
+                            onKeyDown={(e) => e.stopPropagation()}
+                            style={{
+                              marginTop: 4, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+                              fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
+                            }}>Full report</button>
                         )}
                         <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
                           {timeAgo(n.created_at)}
@@ -893,4 +940,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor };

@@ -183,6 +183,10 @@ function normalizeAdminNotificationText({ category, title, body, detail }) {
   return applyAdminBrevityGuard({ category, title: strippedTitle, body: strippedBody, detail: strippedDetail });
 }
 
+// Bell-routing stamps an ops digest carries in metadata (ops-digest.js
+// digestRowFields); a change to any of them is a real refresh.
+const ROUTING_METADATA_KEYS = ['kind', 'audience', 'feed'];
+
 const NotificationService = {
   scopeAdminFeedToRole,
   // The admin row text exactly as create() would persist it (emoji-stripped,
@@ -344,7 +348,13 @@ const NotificationService = {
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
           const detailChanged = (existing.detail || null) !== (nextDetail || null);
-          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged)) {
+          // Routing metadata is content too: a FIX -> ACT flip with identical
+          // text must still merge the new feed/kind/audience, or the owner's
+          // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
+          // #5236). Only keys this emission actually carries are compared.
+          const routingChanged = ROUTING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
+            && (existingMeta[k] ?? null) !== (metadata[k] ?? null));
+          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink || detailChanged || routingChanged)) {
             const refreshed = { title: nextTitle, body: nextBody, detail: nextDetail, link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);

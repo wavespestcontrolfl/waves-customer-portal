@@ -663,3 +663,72 @@ describe('NotificationBell admin MOBILE path (<768px) — same digest treatment'
     }
   });
 });
+
+describe('NotificationBell "Full report" link (codex r3 P0 on #5236)', () => {
+  const { reportLinkFor } = _test;
+
+  it('points a mapped or linkless ops_digest row at its focused Activity item, and nothing else', () => {
+    expect(reportLinkFor({ id: 'd1', category: 'ops_digest', link: '/admin/communications' }))
+      .toBe('/admin/agents?tab=activity&focus=d1');
+    expect(reportLinkFor({ id: 'd2', category: 'ops_digest', link: null }))
+      .toBe('/admin/agents?tab=activity&focus=d2');
+    // The row's own tap already opens the report.
+    expect(reportLinkFor({ id: 'd3', category: 'ops_digest', link: '/admin/agents?tab=activity' })).toBeNull();
+    // Never on a non-digest row.
+    expect(reportLinkFor({ id: 'r1', category: 'review', link: '/admin/reviews' })).toBeNull();
+  });
+
+  it('opens the report without following the row to its mapped work page', async () => {
+    const previousLocation = window.location;
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      if (String(url).includes('/read')) return jsonResponse({ success: true });
+      return jsonResponse({
+        notifications: [{
+          id: 'd7', category: 'ops_digest', title: 'Comms — 7 callbacks waiting',
+          body: 'Plus 93 unanswered texts.', metadata: { kind: 'ACT' },
+          created_at: new Date().toISOString(), read_at: null, link: '/admin/communications',
+        }],
+      });
+    });
+    const hrefSpy = vi.fn();
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const report = await screen.findByRole('button', { name: 'Full report' });
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, set href(v) { hrefSpy(v); } },
+      });
+      fireEvent.click(report);
+      await waitFor(() => expect(hrefSpy).toHaveBeenCalledWith('/admin/agents?tab=activity&focus=d7'));
+      expect(hrefSpy).not.toHaveBeenCalledWith('/admin/communications');
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  });
+
+  it('leaves a customer row on a phone unclamped and without a report link', async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    const longBody = 'Your technician is on the way and will arrive within the window you picked. '.repeat(3).trim();
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 1 });
+      return jsonResponse({
+        notifications: [{
+          id: 'c1', category: 'appointment', title: 'On the way', body: longBody,
+          created_at: new Date().toISOString(), read_at: null, link: null,
+        }],
+      });
+    });
+    try {
+      render(<NotificationBell type="customer" customerId="cust-1" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const body = await screen.findByText(longBody);
+      expect(body.style.WebkitLineClamp || '').toBe('');
+      expect(screen.queryByRole('button', { name: 'Full report' })).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+    }
+  });
+});

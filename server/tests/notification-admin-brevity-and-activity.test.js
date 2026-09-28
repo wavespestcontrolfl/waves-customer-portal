@@ -203,6 +203,27 @@ describe('notifyAdmin refresh — detail participates in the change comparison a
     expect(mockRows.notifications[0].read_at).toBeNull();
   });
 
+  test('a routing-only change (FIX -> ACT, identical text) still refreshes and clears the stale feed (codex r3 P0 on #5236)', async () => {
+    const base = { dedupeKey: 'k-route', refreshOnDedupe: true, detail: 'same report' };
+    await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Reviews — sync down', null, {
+      ...base, metadata: { kind: 'FIX', audience: 'engineering', feed: 'activity' },
+    });
+    mockRows.notifications[0].read_at = new Date();
+    const again = await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Reviews — sync down', null, {
+      ...base, metadata: { kind: 'ACT', audience: 'owner', feed: null },
+    });
+    expect(again.refreshed).toBe(true);
+    const meta = typeof mockRows.notifications[0].metadata === 'string'
+      ? JSON.parse(mockRows.notifications[0].metadata) : mockRows.notifications[0].metadata;
+    expect(meta).toMatchObject({ kind: 'ACT', audience: 'owner', feed: null });
+    expect(mockRows.notifications[0].read_at).toBeNull();
+    // Same routing again → plain dedupe.
+    const third = await NotificationService.notifyAdmin(DIGEST_CATEGORY, 'Reviews — sync down', null, {
+      ...base, metadata: { kind: 'ACT', audience: 'owner', feed: null },
+    });
+    expect(third.refreshed).toBeUndefined();
+  });
+
   test('an identical re-emission (same title/body/link/detail) stays a plain dedupe — no rewrite, no re-bell', async () => {
     await NotificationService.notifyAdmin('system', 'Standing check', 'body', {
       dedupeKey: 'k2', refreshOnDedupe: true, detail: 'same detail',
