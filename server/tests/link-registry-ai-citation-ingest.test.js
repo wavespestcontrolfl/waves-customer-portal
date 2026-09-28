@@ -9,6 +9,7 @@ const { isEnabled } = require('../config/feature-gates');
 const {
   runAiCitationFeeder, aggregateCitations, citationDetail, sinceDate, SOURCE, DEFAULT_LOOKBACK_DAYS,
 } = require('../services/seo/link-registry-ai-citation-ingest');
+const { touchKey, TOUCH_DETAIL_MAX } = require('../services/seo/link-registry');
 
 function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
   const store = { domains: [...domains], sources: [], mentions: [...mentions], queries: [...queries], updates: [], selects: [] };
@@ -20,7 +21,12 @@ function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
       ignore() { return q; },
       returning() { return q.then(); },
       select(...cols) { st.select = cols; store.selects.push({ table, cols }); return q; },
-      where(a, op, v) { if (typeof a === 'object' && op === undefined) st.where = a; else st.cmp.push([a, op, v]); return q; },
+      leftJoin() { return q; },
+      where(a, op, v) {
+        if (typeof a === 'function') { st.activeToggle = true; return q; } // the managed-query toggle (see readMeasuredMentions)
+        if (typeof a === 'object' && op === undefined) st.where = a; else st.cmp.push([a, op, v]);
+        return q;
+      },
       whereIn(col, vals) { st.whereIn = [col, vals]; return q; },
       whereNotNull(col) { st.whereNotNull = col; return q; },
       orderBy() { return q; },
@@ -48,11 +54,17 @@ function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
             return rows;
           }
           if (table === 'seo_llm_mentions') {
+            const col = (c) => String(c).replace(/^m\./, '');
             let rows = store.mentions;
-            for (const [col, op, v] of st.cmp) {
-              if (op === '>=') rows = rows.filter((r) => new Date(r[col]) >= new Date(v));
+            // check_date is an ET calendar DATE, compared as 'YYYY-MM-DD' strings like Postgres DATE >= 'YYYY-MM-DD'
+            for (const [c, op, v] of st.cmp) {
+              if (op === '>=') rows = rows.filter((r) => String(r[col(c)]) >= String(v));
             }
-            if (st.whereNotNull) rows = rows.filter((r) => r[st.whereNotNull] != null);
+            if (st.whereNotNull) rows = rows.filter((r) => r[col(st.whereNotNull)] != null);
+            if (st.activeToggle) {
+              // the LEFT JOIN + (m.query_id IS NULL OR q.active = true)
+              rows = rows.filter((r) => r.query_id == null || store.queries.some((qr) => qr.id === r.query_id && qr.active === true));
+            }
             return rows;
           }
           if (table === 'seo_llm_mention_queries') return store.queries;
@@ -62,7 +74,7 @@ function fakeDb({ domains = [], mentions = [], queries = [] } = {}) {
     };
     return q;
   };
-  const db = jest.fn(builder);
+  const db = jest.fn((table) => builder(String(table).split(' as ')[0]));
   db.fn = { now: () => 'NOW()' };
   db.transaction = jest.fn(async (fn) => fn(db));
   db._store = store;
@@ -174,17 +186,43 @@ describe('aggregateCitations (pure)', () => {
 describe('citationDetail', () => {
   // Codex P1 2026-09-28: the detail carries the durable `ai_citation:` prefix
   // the authority guard reads, and the exact cited URLs the path investigator
-  // extracts — whole URLs only, within the dedupe-key bound.
-  test('starts with the ai_citation: prefix and carries whole cited URLs within the bound', () => {
+  // extracts — whole URLs only.
+  test('starts with the ai_citation: prefix and carries every sampled URL, whole', () => {
     const d = {
       category: 'editorial', subtype: 'listicle_candidate', citationCount: 3, platforms: ['gemini'], questions: [],
       sampleUrls: ['https://cityvetted.com/sarasota/pest-control', 'https://cityvetted.com/bradenton/pest-control', 'https://cityvetted.com/venice/pest-control-companies-long-path'],
     };
     const label = citationDetail(d);
     expect(label.startsWith('ai_citation:editorial:listicle_candidate')).toBe(true);
-    expect(label.length).toBeLessThanOrEqual(120);
-    expect(label).toContain('https://cityvetted.com/sarasota/pest-control');
-    for (const url of label.split(' ').slice(1)) expect(d.sampleUrls).toContain(url); // never a truncated URL
+    expect(label.split(' ').slice(1)).toEqual(d.sampleUrls); // all of them, in order, never truncated
+  });
+
+  // Codex P1 2026-09-28 (round 5): a long first URL (long slug + query
+  // string) pushed the label past 120 chars and the old character cap then
+  // dropped EVERY cited page, including a later short one. The list is now
+  // bounded by URL count only; the full label survives, and link-registry's
+  // touchKey hashes the over-long dedupe key instead.
+  test('a long first URL no longer drops the cited pages — full URLs kept, touch_key hashed', () => {
+    const longUrl = `https://cityvetted.com/sarasota/best-pest-control-companies-near-me-2026-reviewed-and-rated?utm_source=${'x'.repeat(80)}&ref=answer-engine`;
+    const shortUrl = 'https://cityvetted.com/venice/pest-control';
+    const d = { category: 'listing', sampleUrls: [longUrl, shortUrl] };
+    const label = citationDetail(d);
+    expect(label).toBe(`ai_citation:listing ${longUrl} ${shortUrl}`);
+    expect(label.length).toBeGreaterThan(TOUCH_DETAIL_MAX);
+    // the investigator's plain URL regex recovers both exact pages
+    expect(label.match(/https?:\/\/[^\s"'<>]+/g)).toEqual([longUrl, shortUrl]);
+    // the dedupe-key index entry stays bounded via the existing digest fallback
+    expect(touchKey(SOURCE, null, label)).toMatch(/^ai_citation:sha256:[0-9a-f]{32}$/);
+  });
+
+  test('the list is bounded by URL COUNT: aggregateCitations samples at most 5 distinct URLs per (host, category)', () => {
+    const urls = Array.from({ length: 8 }, (_, i) => `https://www.bbb.org/us/fl/sarasota/profile/pest-control/company-${i}`);
+    const [agg] = aggregateCitations([mention({ cited_urls: urls }), mention({ id: 'm2', cited_urls: [urls[0]] })], []);
+    expect(agg.citationCount).toBe(9);
+    expect(agg.sampleUrls).toEqual(urls.slice(0, 5));
+    expect(citationDetail(agg).split(' ').slice(1)).toEqual(urls.slice(0, 5));
+    // and citationDetail itself never emits more than 5, even if handed more
+    expect(citationDetail({ category: 'listing', sampleUrls: urls }).split(' ').slice(1)).toEqual(urls.slice(0, 5));
   });
 
   test('with no sample URLs it is just the prefix and category', () => {
@@ -193,10 +231,31 @@ describe('citationDetail', () => {
 });
 
 describe('sinceDate', () => {
-  test('defaults to a positive lookback even for a non-positive input', () => {
-    expect(sinceDate(NOW, DEFAULT_LOOKBACK_DAYS).getTime()).toBe(NOW.getTime() - 30 * 86400e3);
-    expect(sinceDate(NOW, 0).getTime()).toBe(NOW.getTime() - 1 * 86400e3);
-    expect(sinceDate(NOW, -5).getTime()).toBe(NOW.getTime() - 1 * 86400e3);
+  // Codex P1 2026-09-28 (round 5): check_date is an ET calendar DATE, so the
+  // cutoff is an ET 'YYYY-MM-DD' — N ET days INCLUDING today.
+  test('returns the oldest ET calendar day of an N-day window, today inclusive', () => {
+    expect(sinceDate(NOW, DEFAULT_LOOKBACK_DAYS)).toBe('2026-08-29'); // 2026-09-27 ET and the 29 days before it
+    expect(sinceDate(NOW, 7)).toBe('2026-09-21');
+  });
+
+  test('defaults to a positive lookback (today only) for a non-positive input', () => {
+    expect(sinceDate(NOW, 1)).toBe('2026-09-27');
+    expect(sinceDate(NOW, 0)).toBe('2026-09-27');
+    expect(sinceDate(NOW, -5)).toBe('2026-09-27');
+  });
+
+  test('a run between 00:00 UTC and ET midnight anchors on the ET day, not the UTC day', () => {
+    // 2026-09-28T02:30Z is 22:30 EDT on 2026-09-27 — still Sept 27 in ET.
+    const lateEvening = new Date('2026-09-28T02:30:00Z');
+    expect(sinceDate(lateEvening, 30)).toBe('2026-08-29');
+    expect(sinceDate(lateEvening, 1)).toBe('2026-09-27');
+    // same ET day at noon ⇒ same cutoff (run time within the ET day never shifts it)
+    expect(sinceDate(new Date('2026-09-27T16:00:00Z'), 30)).toBe(sinceDate(lateEvening, 30));
+  });
+
+  test('a window spanning the November DST change still returns an ET calendar day', () => {
+    // 2026-11-02T03:30Z is 22:30 EST on 2026-11-01 (DST ended that morning).
+    expect(sinceDate(new Date('2026-11-02T03:30:00Z'), 7)).toBe('2026-10-26');
   });
 });
 
@@ -271,6 +330,41 @@ describe('runAiCitationFeeder', () => {
     const r = await runAiCitationFeeder(db, { now: NOW });
     expect(r).toEqual({ gated: false, dryRun: false, scanned: 0, domains: 0, byCategory: {}, enqueued: 0, inserted: 0, touched: 0, existing: 0, candidates: [] });
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  // Codex P1 2026-09-28 (round 5): at 22:30 EDT on Sept 27 (02:30Z Sept
+  // 28) a 30-day window's oldest ET day is Aug 29 — a UTC-instant cutoff
+  // would have moved it to Aug 30 and silently dropped that day's rows.
+  test('the lookback cutoff is an ET calendar day, pinned at a run between 00:00 UTC and ET midnight', async () => {
+    const db = fakeDb({
+      mentions: [
+        mention({ id: 'before', check_date: '2026-08-28', cited_urls: ['https://www.bbb.org/before'] }),
+        mention({ id: 'oldest', check_date: '2026-08-29', cited_urls: ['https://www.yelp.com/biz/oldest'] }),
+      ],
+    });
+    const r = await runAiCitationFeeder(db, { now: new Date('2026-09-28T02:30:00Z'), lookbackDays: 30, dryRun: true });
+    expect(r.scanned).toBe(1);
+    expect(r.candidates.map((c) => c.domain)).toEqual(['yelp.com']);
+  });
+
+  // Codex P2 2026-09-28 (round 5): a deactivated managed query stops feeding
+  // the registry; an unmanaged/legacy row (null query_id) has no toggle and
+  // is kept — the same rule as gsc-opportunity-miner.js's mineAeoGaps.
+  test('drops rows from a deactivated managed query; keeps active-managed and unmanaged rows', async () => {
+    const db = fakeDb({
+      queries: [
+        { id: 'q-on', query: Q1_SARASOTA_PEST, city: 'Sarasota', service: 'pest control', active: true },
+        { id: 'q-off', query: Q4_SARASOTA_TERMITE, city: 'Sarasota', service: 'termite', active: false },
+      ],
+      mentions: [
+        mention({ id: 'on', query_id: 'q-on', cited_urls: ['https://www.bbb.org/active'] }),
+        mention({ id: 'off', query: Q4_SARASOTA_TERMITE, query_id: 'q-off', cited_urls: ['https://www.angi.com/inactive'] }),
+        mention({ id: 'legacy', query_id: null, cited_urls: ['https://www.yelp.com/biz/legacy'] }),
+      ],
+    });
+    const r = await runAiCitationFeeder(db, { now: NOW, dryRun: true });
+    expect(r.scanned).toBe(2);
+    expect(r.candidates.map((c) => c.domain).sort()).toEqual(['bbb.org', 'yelp.com']);
   });
 
   test('a lookbackDays window excludes rows outside it', async () => {

@@ -243,6 +243,20 @@ describe('classifyUrl', () => {
       expect(r).toMatchObject({ category: 'community_video' });
     });
 
+    // Codex P2 2026-09-28 (round 5): a special-host exclusion is final — the
+    // forbes.com path rule (only /home-improvement qualifies) is never undone
+    // by the listicle heuristic, even for a URL full of best/local tokens
+    // cited on a provider question. The Facebook content route above is the
+    // other special-host exclusion branch.
+    test('a forbes.com page outside /home-improvement stays an unpromotable other on a provider question with best/local tokens', () => {
+      const url = 'https://www.forbes.com/sites/someauthor/2026/09/01/best-pest-control-sarasota/';
+      expect(classifyUrl(url, { providerIntent: true }))
+        .toEqual({ category: 'other', host: 'forbes.com', rule: 'special:forbes.com:excluded_path' });
+      // the qualifying path is unchanged, with or without providerIntent
+      expect(classifyUrl('https://www.forbes.com/home-improvement/pest-control/best-pest-control-sarasota/', { providerIntent: true }))
+        .toEqual({ category: 'editorial', host: 'forbes.com', rule: 'special:forbes.com' });
+    });
+
     test('providerIntent defaults to false when omitted — byte-identical to pre-heuristic behavior', () => {
       const r = classifyUrl('https://www.unknownlocaldirectory.example/best-pest-control-sarasota-fl');
       expect(r).toEqual({ category: 'other', host: 'unknownlocaldirectory.example', rule: 'unmatched' });

@@ -52,22 +52,38 @@ const { ensureDomain, isNeverTargetHost } = require('./link-registry');
 const { classifyUrl, isLocallyRelevant, isProviderIntentQuestion, ENQUEUABLE_CATEGORIES } = require('./ai-citation-classifier');
 const { AI_CITATION_SOURCE_DETAIL_PREFIX } = require('./link-authority-policy');
 const { MEASUREMENT_VERSION, cleanUrls } = require('./aeo-measurement');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const benchmark = require('../../data/aeo-benchmark-v1.json');
 
 const SOURCE = 'ai_citation';
 const DEFAULT_LOOKBACK_DAYS = 30;
+// The ONE bound on a touch's source_detail size: at most this many complete
+// cited URLs per (host, category), deduped. Codex P1 2026-09-28 (round 5):
+// the label is NEVER cut by character count — a character cap dropped every
+// cited page (even a later short one) as soon as the first URL was long,
+// losing exactly the exact-page hints link-path-investigator.js's
+// `touchUrls` reads. The stored source_detail column is `text` on both
+// seo_link_domains and seo_link_domain_sources (backlink_registry_step1
+// migration; nothing alters it since), and link-registry.js's touchKey()
+// already swaps an over-120-char detail for a fixed-length sha256 digest in
+// the (domain_id, touch_key) btree, so a long label is bounded where it
+// matters (the index entry) while the full detail is kept.
 const MAX_SAMPLE_URLS = 5;
-// The touch's source_detail sits in link-registry.js's TOUCH_DETAIL_MAX (120
-// chars) bounded btree entry that decides whether the DEDUPE key (touch_key)
-// stays literal or falls back to a sha256 digest — kept well under it, so
-// the touch_key stays literal AND readable. The stored source_detail column
-// itself has no DB length limit; this bound is purely about staying inside
-// that dedupe-key threshold (Codex 2026-09-28: "keep the detail within
-// whatever limit [ensureDomain] enforces").
-const TOUCH_DETAIL_MAX = 120;
 
+/**
+ * sinceDate(now, lookbackDays) → 'YYYY-MM-DD', the OLDEST Eastern calendar
+ * day in the window (inclusive). seo_llm_mentions.check_date is an ET
+ * calendar DATE, so the cutoff is one too (Codex P1 2026-09-28, round 5): a
+ * fixed 24h-multiple subtracted from `now` is a UTC instant, and between
+ * 00:00 UTC and ET midnight (or across a DST change) the oldest ET day would
+ * slide in or out of the window depending on the run time. Same convention
+ * as llm-mention-prober.js's getDashboard — N ET days INCLUDING today, so
+ * the default 30 reads today plus the 29 ET days before it. A non-positive
+ * lookback still reads today.
+ */
 function sinceDate(now, lookbackDays) {
-  return new Date(now.getTime() - Math.max(1, lookbackDays) * 24 * 60 * 60e3);
+  const days = Math.max(1, Math.floor(Number(lookbackDays)) || 1);
+  return etDateString(addETDays(now, -(days - 1)));
 }
 
 /**
@@ -139,13 +155,25 @@ function aggregateCitations(rows, queryRows) {
   return [...groups.values()].map((d) => ({ ...d, platforms: [...d.platforms].sort(), questions: [...d.questions.values()] }));
 }
 
-/** readMeasuredMentions(db, { since }) → the measured rows this feeder classifies. */
+/**
+ * readMeasuredMentions(db, { since }) → the measured rows this feeder
+ * classifies. `since` is an ET 'YYYY-MM-DD' (sinceDate).
+ *
+ * Honors the managed-query admin toggle (Codex P2 2026-09-28, round 5),
+ * mirroring gsc-opportunity-miner.js's mineAeoGaps: history from a managed
+ * query an operator has DEACTIVATED is dropped (LLMMentionProber.getQueries
+ * treats the managed list as authoritative, so a disabled query must stop
+ * feeding the registry too), while unmanaged/legacy rows (null query_id)
+ * have no toggle and are kept.
+ */
 async function readMeasuredMentions(db, { since }) {
-  return db('seo_llm_mentions')
-    .where({ measurement_version: MEASUREMENT_VERSION, answer_available: true, citations_complete: true })
-    .where('check_date', '>=', since)
-    .whereNotNull('cited_urls')
-    .select('id', 'query', 'query_id', 'llm_platform', 'check_date', 'cited_urls');
+  return db('seo_llm_mentions as m')
+    .leftJoin('seo_llm_mention_queries as q', 'm.query_id', 'q.id')
+    .where({ 'm.measurement_version': MEASUREMENT_VERSION, 'm.answer_available': true, 'm.citations_complete': true })
+    .where('m.check_date', '>=', since)
+    .whereNotNull('m.cited_urls')
+    .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
+    .select('m.id', 'm.query', 'm.query_id', 'm.llm_platform', 'm.check_date', 'm.cited_urls');
 }
 
 /**
@@ -154,19 +182,15 @@ async function readMeasuredMentions(db, { since }) {
  * ALWAYS starts with AI_CITATION_SOURCE_DETAIL_PREFIX — that prefix is what
  * isDiscoveryOnlyDomain reads on a domain's FIRST-touch source_detail (set
  * once by ensureDomain, never rewritten) as its durable discovery-only
- * signal. Complete URLs only — never a truncated one link-path-investigator's
- * `touchUrls` regex would extract as a broken page — appended one at a time
- * while the whole label stays within TOUCH_DETAIL_MAX; a category+subtype
- * alone (zero URLs fit, or none were sampled) still starts with the prefix.
+ * signal. Every sampled URL, complete and untruncated — the list is bounded
+ * by COUNT (MAX_SAMPLE_URLS, in aggregateCitations), never by characters;
+ * see MAX_SAMPLE_URLS for why the length is safe. A category+subtype alone
+ * (none sampled) still starts with the prefix.
  */
 function citationDetail(d) {
-  let label = `${AI_CITATION_SOURCE_DETAIL_PREFIX}${d.category}${d.subtype ? `:${d.subtype}` : ''}`;
-  for (const url of d.sampleUrls) {
-    const next = `${label} ${url}`;
-    if (next.length > TOUCH_DETAIL_MAX) break;
-    label = next;
-  }
-  return label;
+  const label = `${AI_CITATION_SOURCE_DETAIL_PREFIX}${d.category}${d.subtype ? `:${d.subtype}` : ''}`;
+  const urls = (d.sampleUrls || []).slice(0, MAX_SAMPLE_URLS);
+  return urls.length ? `${label} ${urls.join(' ')}` : label;
 }
 
 /**

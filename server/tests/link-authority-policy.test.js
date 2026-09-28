@@ -560,6 +560,18 @@ describe('owner-queue safety guard: ai_citation-discovered domains never read AU
     expect(P.isDiscoveryOnlyDomain(domain({ source: 'competitor_gap', source_detail: 'competitor_gap_scan ai_citation:' }))).toBe(false);
   });
 
+  // Codex P1 2026-09-28 (round 5): the feeder now keeps every sampled cited
+  // URL in full, so a first-touch detail routinely runs past 120 chars. The
+  // prefix guard reads the stored column (text, unbounded), never the hashed
+  // touch_key, so a long detail is still discovery-only.
+  test('a long (> 120 char) ai_citation source_detail still reads as discovery-only', () => {
+    const longDetail = `ai_citation:editorial:listicle_candidate https://cityvetted.com/sarasota/best-pest-control-companies?utm_source=${'x'.repeat(120)} https://cityvetted.com/venice/pest-control`;
+    expect(longDetail.length).toBeGreaterThan(120);
+    const d = domain({ source: 'legacy_unknown', source_detail: longDetail, enrichment: null });
+    expect(P.isDiscoveryOnlyDomain(d)).toBe(true);
+    expect(level(P.decideAuthority({ path: path(), domain: d, policy: autoAllowsEverything() }), 'execution')).toBe('OWNER_FREE');
+  });
+
   test('AI_CITATION_SOURCE is the registry enum value', () => {
     expect(R.LINK_SOURCES).toContain(P.AI_CITATION_SOURCE);
     expect(P.AI_CITATION_SOURCE).toBe('ai_citation');

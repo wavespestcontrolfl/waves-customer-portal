@@ -215,8 +215,10 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
   let u;
   try { u = new URL(urlString); } catch { return null; }
   const host = canonicalProspectDomain(u.hostname) || u.hostname.toLowerCase().replace(/^www\./, '');
-  // The ONE path to 'other' — every fallthrough in this function funnels
+  // The ONE PROMOTABLE path to 'other' — every generic fallthrough funnels
   // through here, so the heuristic is applied (or not) in exactly one place.
+  // A SPECIAL_HOSTS exclusion never comes through here: it returns its own
+  // unpromotable result below.
   const other = (rule) => {
     if (providerIntent && (isLocallyRelevant(urlString) || hasBestToken(urlString))) {
       return { category: 'editorial', host, rule: `heuristic:listicle_candidate:${rule}`, subtype: 'listicle_candidate' };
@@ -239,7 +241,13 @@ function classifyUrl(urlString, { providerIntent = false } = {}) {
     // community track — never 'other', where the provider-intent listicle
     // heuristic below could promote it to an enqueued 'editorial' candidate.
     if (specialHost === 'facebook.com') return { category: 'community_video', host, rule: 'special:facebook.com:content_route' };
-    return other(`special:${specialHost}:excluded_path`);
+    // Every other special-host exclusion (today: forbes.com outside
+    // /home-improvement) is a FINAL, unpromotable `other` — never other(),
+    // whose provider-intent listicle heuristic would promote a
+    // `forbes.com/sites/.../best-pest-control-sarasota` straight back to
+    // `editorial` and silently bypass the explicit path rule (Codex P2
+    // 2026-09-28, round 5). The host-level rule already decided this page.
+    return { category: 'other', host, rule: `special:${specialHost}:excluded_path` };
   }
 
   if (matchesAny(host, competitorDomains())) return { category: 'competitor', host, rule: 'competitor_domain' };
