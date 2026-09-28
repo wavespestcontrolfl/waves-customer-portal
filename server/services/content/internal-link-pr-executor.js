@@ -658,11 +658,9 @@ class InternalLinkPrExecutor {
         message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
       });
     } catch (err) {
-      // The merge did not land (mergePr throws before moving main): drop the
-      // in-flight marker. If it did land despite the error, the marker left
-      // behind by a failed clear lets mergeInFlightGate recover it.
-      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where({ status: 'pr_open', failure_reason: MERGE_IN_FLIGHT })
-        .update({ failure_reason: null, updated_at: new Date() }).catch(() => {});
+      // The MERGE_IN_FLIGHT marker stays: an error can be ambiguous (the
+      // PATCH that moved main may have succeeded with its response lost), so
+      // only mergeInFlightGate's ancestry check on the next tick may clear it.
       // Main moved between the check and the merge: re-verify next tick.
       if (err?.code === 'BLOG_BASE_MOVED') return { status: 'hold', reason: 'base_moved', pr_number: prNumber };
       throw err;
@@ -1292,6 +1290,9 @@ class InternalLinkPrExecutor {
     await db(TABLE)
       .where({ id: taskId })
       .whereIn('status', ['pr_open', 'merged', 'deployed'])
+      // Never overwrite a pending-merge marker: it is the only record that a
+      // merge may have landed (mergeInFlightGate settles it).
+      .where((q) => q.whereNull('failure_reason').orWhereNot('failure_reason', MERGE_IN_FLIGHT))
       .update({
         failure_reason: String(reason || '').slice(0, 500),
         updated_at: new Date(),

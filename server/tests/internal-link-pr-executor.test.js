@@ -1332,10 +1332,19 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
-  test('holds when main moves between the check and the merge', async () => {
+  test('holds when main moves between the check and the merge, keeping the in-flight marker for the ancestry check', async () => {
+    const updates = [];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = base(table);
+      q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
+      return q;
+    });
     GitHubClient.mergePr.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'BLOG_BASE_MOVED' }));
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'base_moved' });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
+    // Recorded before the write, never cleared on the error path.
+    expect(updates).toEqual([expect.objectContaining({ failure_reason: 'internal_link_merge_in_flight' })]);
   });
 
   test('never merges on "silence" when the review was never requested; re-requests instead', async () => {
