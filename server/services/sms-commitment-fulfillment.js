@@ -54,7 +54,9 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 //     overdue bell was an ask staff had answered within minutes): the bell
 //     means nobody from Waves responded. R3 and 17's reply_answerable stamp
 //     are gone.
-const FULFILLMENT_POLICY = 18;
+// 19: the no-model close is a customer's ask only (basis 'request'); a
+//     promise Waves made is never closed by a later reply.
+const FULFILLMENT_POLICY = 19;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -137,6 +139,10 @@ const operatorReply = (record) => record.operator_sent === true || STAFF_APPROVE
 // queued before the ask never answers it (scheduled_at, the loader).
 const writtenAfterAsk = (record, commitment) => !record.scheduled_at
   || new Date(record.scheduled_at) > new Date(commitment.sms_context?.source_at);
+// The owner's any-reply ruling (2026-09-28) covers a customer's ask (basis
+// 'request'). A promise Waves made (basis 'promise') is kept by doing it,
+// never by a later reply ("Thanks!" is no prep guide): the model judges it.
+const customerAsk = (commitment) => commitment.kind === 'other' && commitment.sms_context?.basis === 'request';
 // A call a person placed: the staff bridge rings a staff phone first and
 // dials the customer only after that person presses 1 (call-bridge.js,
 // sourced by admin-communications.js and tech-line.js). Automated outbound
@@ -695,7 +701,7 @@ function admissibleWitness(record, commitment, records = []) {
   // ("is jane@… the email on my account?"); a person's reply or call back
   // answers it whatever the address (Codex #5169 r1 P2, owner ruling
   // 2026-09-28).
-  if (emails.size && record.type !== 'email_delivery' && !(['sms', 'call'].includes(record.type) && commitment.kind === 'other')) return false;
+  if (emails.size && record.type !== 'email_delivery' && !(['sms', 'call'].includes(record.type) && customerAsk(commitment))) return false;
   const after = new Date(commitment.sms_context?.source_at);
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
@@ -752,8 +758,9 @@ function witnessTypes(commitment) {
   // Owner ruling 2026-09-28 (reversing R3, 2026-09-24): a general `other` ask
   // is answered by any text a person from Waves sends after it (operatorReply
   // in witnesses.sms — never an automated notice, never a bare 'manual'
-  // type) or a call back that reached the customer (personCallBack), which close
-  // it without the model (replyFulfillment), as well as by a visit event
+  // type) or a call back that reached the customer (personCallBack), which
+  // close a customer's ask without the model (replyFulfillment) and are
+  // judged by the model for a promise Waves made, as well as by a visit event
   // (R1) or money landing (R2), which the model still judges.
   if (PAYMENT_WITNESS_KINDS.includes(commitment.kind)) return ['visit', 'payment', 'sms', 'call'];
   // `callback` keeps its existing mix: a real call back, or the same visible
@@ -859,16 +866,17 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
 
-// Owner ruling 2026-09-28: a general (`other`) ask is handled once a person
-// from Waves responds — any text a person sent, or a call back that
-// reached the customer, after it (witnessAllowed) — whatever was said, so no model judges
-// whether it was enough: the bell means nobody responded. The earliest
+// Owner ruling 2026-09-28: a customer's general ask (customerAsk) is handled
+// once a person from Waves responds — any text a person sent, or a call back
+// that reached the customer, after it (witnessAllowed) — whatever was said,
+// so no model judges whether it was enough: the bell means nobody
+// responded. A promise Waves made is not an ask: the model judges it. The earliest
 // response loaded is the witness. Source failures cannot hide it: the loaded
 // response happened whatever a failed or truncated channel held. Inside an
 // open window (eventOnly) a message waits for the deadline, as before. Null
 // when nobody responded; the model then judges any event evidence.
 function replyFulfillment(evidence, commitment, { eventOnly = false } = {}) {
-  if (commitment.kind !== 'other') return null;
+  if (!customerAsk(commitment)) return null;
   const replies = evidence.records.filter((row) => ['sms', 'call'].includes(row.type)
     && witnessAllowed(row, commitment, evidence.records, eventOnly));
   if (!replies.length) return null;

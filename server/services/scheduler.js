@@ -4136,52 +4136,15 @@ function initScheduledJobs() {
             // any error — an unknowable account state must not send figures.
             let amountsStale = false;
             if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
-              const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
-              const bodyAmounts = (String(msg.message_body || '').match(AMOUNT_FORMS_RE) || [])
-                .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
-              if (bodyAmounts.length) {
-                try {
-                  const ContextAggregator = require('./context-aggregator');
-                  const customerRow = await db('customers').where({ id: msg.customer_id }).first();
-                  const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
-                  const cents = (v) => Math.round(Number(v) * 100);
-                  // CURRENT OBLIGATIONS ONLY (Codex r10): a paid balance
-                  // moves the same figure into recent payments, so a union
-                  // set would keep authorizing the stale "your balance is
-                  // $X" claim. At fire time only what the customer still
-                  // owes may validate an amount; a just-paid figure blocks.
-                  // Payment ACKNOWLEDGEMENTS may cite payment-history
-                  // amounts (Codex r11: "we received your $95 payment") —
-                  // but only when the body actually reads as an ack, so a
-                  // stale "your balance is $X" can never re-authorize via
-                  // the payment row (r10).
-                  // "payment" must appear NEAR the ack verb (Codex r12) — a
-                  // generic "Thanks for reaching out — your balance is $X"
-                  // must not unlock payment-history amounts.
-                  const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
-                  // Monthly-membership dues are a CURRENT obligation, so they
-                  // belong in this set on the same terms as the balance
-                  // (codex #3141 r3). Without them a reviewed "$98.50/mo"
-                  // reply that an operator scheduled instead of sending
-                  // immediately was deterministically retired here as a stale
-                  // amount, so the monthly lane could be drafted and approved
-                  // but never actually sent. Shared definition with the
-                  // drafter's draft-time guard — these two lists had already
-                  // drifted once — and it re-reads the FRESH context above,
-                  // so a lane that stopped collecting between review and fire
-                  // publishes nothing and correctly blocks the send.
-                  const authorized = new Set([
-                    ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
-                    ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
-                    ...ContextAggregator.authorizedDuesCents(ctx),
-                    ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
-                  ].filter((v) => Number.isFinite(v)));
-                  amountsStale = bodyAmounts.some((a) => !authorized.has(a));
-                } catch (err) {
-                  logger.warn(`[scheduler] amount revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-                  amountsStale = true;
-                }
-              }
+              // Shared with the immediate Agent Review send since PR #5119
+              // follow-up #2 (sms-amount-recheck): fresh context, current
+              // obligations only, payment history only for an ack, fail
+              // closed on any error.
+              const { outgoingAmountsStale } = require('./sms-amount-recheck');
+              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version');
+              amountsStale = (await outgoingAmountsStale({
+                customerId: msg.customer_id, body: msg.message_body, promptVersion: amountDecision?.prompt_version ?? null,
+              })).stale;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4252,11 +4215,15 @@ function initScheduledJobs() {
               try {
                 // Scoped to drafts that recorded an escalation (Codex r5):
                 // wording alone never blocks a scheduled reply.
-                const { followupPromiseIsStale } = require('./sms-followup-sla');
+                const { followupPromiseBlockReason } = require('./sms-followup-sla');
                 const slaDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'prompt_version');
-                if (followupPromiseIsStale({ inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version, body: msg.message_body })) slaStale = true;
+                  .first('input_snapshot', 'prompt_version', 'suggested_message', 'created_at');
+                if (followupPromiseBlockReason({
+                  inputSnapshot: slaDecision?.input_snapshot, promptVersion: slaDecision?.prompt_version,
+                  originalBody: slaDecision?.suggested_message ?? null, body: msg.message_body,
+                  draftedAt: slaDecision?.created_at ?? null,
+                })) slaStale = true;
               } catch (err) {
                 logger.warn(`[scheduler] SLA phrase revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 slaStale = true;
