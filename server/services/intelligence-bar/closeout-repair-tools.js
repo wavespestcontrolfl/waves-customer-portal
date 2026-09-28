@@ -41,7 +41,7 @@ const { enqueueServiceReportV1EmailDelivery } = require('../service-report/deliv
 const { isUserFeatureEnabled } = require('../feature-flags');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { detectServiceLine } = require('../service-report/service-line-configs');
-const { enqueueReceiptDelivery, receiptEmailOptOutState } = require('../receipt-delivery-queue');
+const { enqueueReceiptDelivery, receiptEmailOptOutState, expectedEmailSkip } = require('../receipt-delivery-queue');
 // Lazy: invoice-email pulls in the invoice/PDF graph — loaded only when a
 // receipt step is planned, never at IB boot.
 const invoiceEmail = () => require('../invoice-email');
@@ -158,6 +158,13 @@ async function receiptRecipients(invoiceId, knex) {
   if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
   if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
   const resolved = await invoiceEmail().resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory: 'payment_receipt' });
+  // Only the worker's own expected skips (no email on file, opted out, Email
+  // not the chosen receipt channel) mean "no email, on purpose". Any other
+  // refusal — a settings lookup outage, an aborted resolution — is unknown,
+  // not "nobody": the worker could still email someone the card didn't name.
+  if (!resolved.ok && !expectedEmailSkip(resolved)) {
+    return { blocker: `the receipt email recipient could not be verified (${String(resolved.error || resolved.code || 'unknown').replace(/\.$/, '')})` };
+  }
   const email = resolved.ok ? String(resolved.recipient.email).trim().toLowerCase() : null;
   const payerBilled = Boolean(invoice.payer_id);
   const phone = payerBilled ? null

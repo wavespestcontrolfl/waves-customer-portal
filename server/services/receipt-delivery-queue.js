@@ -347,6 +347,8 @@ function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
 
 module.exports = {
   receiptEmailOptOutState,
+  // Also the IB closeout repair card's rule for "no email, on purpose".
+  expectedEmailSkip,
   enqueueReceiptDelivery,
   claimDueReceiptDeliveryJobs,
   processDueReceiptDeliveryJobs,

@@ -12,6 +12,8 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 jest.mock('../services/receipt-delivery-queue', () => ({
   enqueueReceiptDelivery: jest.fn(),
   receiptEmailOptOutState: jest.fn(async () => ({ receiptKillSwitch: false, prefsLookupFailed: false })),
+  // The worker's real classification.
+  expectedEmailSkip: jest.requireActual('../services/receipt-delivery-queue').expectedEmailSkip,
 }));
 jest.mock('../services/invoice-email', () => ({ resolveReceiptEmailRecipient: jest.fn() }));
 jest.mock('../services/invoice', () => ({ explicitBillingAppSelected: jest.fn(async () => false), receiptAmountFor: jest.fn(async () => '129.00') }));
@@ -362,12 +364,22 @@ describe('queue_receipt — the receipt worker, with its own recipient resolutio
   test('a phone-less customer who chose App for receipts is still reachable, and the card says so (GH Codex P1)', async () => {
     getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
     db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID], customers: [{ ...CUSTOMER, phone: null }] }));
-    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, error: 'Receipt email is not selected', code: 'billing_email_not_selected' });
+    // The real routedReceiptRefusal shape for "Email is not the chosen receipt channel".
+    resolveReceiptEmailRecipient.mockResolvedValue({ ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' });
     explicitBillingAppSelected.mockResolvedValueOnce(true);
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
     expect(explicitBillingAppSelected).toHaveBeenCalledWith('cust-1', 'payment_receipt');
     expect(preview.steps[0]).toEqual(expect.objectContaining({ step: 'queue_receipt', recipients: [], text_to: null, app: true }));
     expect(preview.steps[0].effect).toMatch(/may also send a Waves app notification/);
+  });
+
+  test('an email-resolution outage blocks the step even with a phone on file (GH Codex P1)', async () => {
+    getCloseoutStatus.mockResolvedValue(status({ facts: UNSENT }));
+    db.mockImplementation(fakeDb({ service_records: [RECORD], invoices: [PAID] }));
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'Receipt delivery preferences unavailable', code: 'billing_prefs_unavailable' });
+    const res = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
+    expect(res.code).toBe('nothing_repairable');
+    expect(res.manual).toEqual([expect.objectContaining({ fact: 'invoiceDelivery', fix: expect.stringMatching(/could not be verified \(Receipt delivery preferences unavailable\)/) })]);
   });
 
   test('opted out, unreadable settings, no recipient, or an existing job → manual, never planned', async () => {
