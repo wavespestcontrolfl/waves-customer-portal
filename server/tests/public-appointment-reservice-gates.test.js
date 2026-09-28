@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn() }));
 jest.mock('../services/tech-photo', () => ({ resolveTechPhotoUrl: jest.fn() }));
+// services/visit-prep.js (loaded by the appointment router) requires the S3
+// PhotoService, which builds its client from config.s3 at load time.
+jest.mock('../services/photos', () => ({ deletePhoto: jest.fn() }));
 
 const fs = require('node:fs');
 const path = require('node:path');
