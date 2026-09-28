@@ -561,7 +561,45 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
       estimateId, action: 'cleared', reason: 'invoice_missing', cleared,
     };
   }
-  const anchor = membersForInvoice.find((m) => String(m.id) === String(freshInvoice.scheduled_service_id));
+  // Re-read the STAMPED MEMBER rows fresh too, inside this same
+  // transaction — membersForInvoice's own dates/statuses/stamp membership
+  // are exactly the snapshot loadCandidates took OUTSIDE any per-group
+  // transaction (Codex round-10 P2). A schedule edit (or a status change)
+  // committing after that snapshot but before this group's own turn in the
+  // sweep would otherwise make this evaluation clear a divergence that has
+  // since gotten worse, or raise a stale alert for one that has since
+  // resolved, until the next tick catches up. Selected columns mirror
+  // loadCandidates' own selection exactly. Deliberately NOT locked FOR
+  // UPDATE: this module never writes scheduled_services, only reads it to
+  // decide on an advisory alert, so a plain fresh read inside the
+  // transaction is enough to fix the staleness — locking every member row
+  // here would add contention against the many unrelated writers
+  // (reschedule, dispatch, tech assignment, completion) that touch
+  // scheduled_services, for no correctness benefit to this read-only
+  // decision. (The invoice row above IS locked FOR UPDATE — its status is
+  // what actually gets compared and acted on for settlement.)
+  const freshMembers = await conn('scheduled_services as m')
+    .where('m.first_application_invoice_id', invoiceId)
+    .select(
+      'm.id', 'm.scheduled_date', 'm.completed_at', 'm.status',
+      'm.customer_id', 'm.source_estimate_id',
+      'm.first_application_invoice_id as invoice_id',
+    );
+  if (freshMembers.length < 2) {
+    // The stamp is never rewritten by any real write path today (owner
+    // ruling: accept-time-only) — so dropping below 2 members here, when
+    // groupCandidatesByInvoice handed this evaluation 2+ only moments ago,
+    // can only be a manual NULL edit on one member since loadCandidates
+    // last scanned. The group has genuinely dissolved: clear any standing
+    // alert for this estimate rather than leave it open with no group left
+    // to ever re-evaluate it.
+    const cleared = await clearStandingAlerts(conn, prefix);
+    return {
+      estimateId, action: 'cleared', reason: 'not_a_pair', cleared,
+    };
+  }
+
+  const anchor = freshMembers.find((m) => String(m.id) === String(freshInvoice.scheduled_service_id));
   if (!anchor) {
     // The invoice's own scheduled_service_id isn't among the stamped
     // members — stampCombinedFirstApplicationInvoiceCoverage always
@@ -596,13 +634,13 @@ async function evaluateEstimateCandidates(conn, membersForInvoice) {
   // office has already hand-split that visit off the shared invoice.
   // "Live" excludes the FULL canonical canceled vocabulary, not just
   // void.
-  const memberIds = membersForInvoice.map((m) => m.id);
+  const memberIds = freshMembers.map((m) => m.id);
   const ownInvoiceIds = await conn('invoices')
     .whereIn('scheduled_service_id', memberIds)
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .pluck('scheduled_service_id');
   const ownInvoiceSet = new Set(ownInvoiceIds.map(String));
-  const members = membersForInvoice.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
+  const members = freshMembers.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
   const anchorWithFlag = members.find((m) => String(m.id) === String(anchor.id));
 
   const verdict = evaluateGroupDivergence({ anchor: anchorWithFlag, members, invoiceStatus: governingInvoice.status });
