@@ -24,7 +24,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const { applyRescore, revalidateStaleRescoreCandidate } = require('../services/event-curation');
 
-function wireDb({ approveRows = 1 } = {}) {
+function wireDb({ approveRows = 1, rescoreRows = 1 } = {}) {
   const calls = [];
   const whereRawCalls = [];
   db.fn = { now: jest.fn(() => 'NOW()') };
@@ -38,7 +38,7 @@ function wireDb({ approveRows = 1 } = {}) {
     update: jest.fn((patch) => {
       calls.push(patch);
       const isApprovalWrite = patch.admin_status === 'approved';
-      return Promise.resolve(isApprovalWrite ? approveRows : 1);
+      return Promise.resolve(isApprovalWrite ? approveRows : rescoreRows);
     }),
   };
   db.mockImplementation(() => chain);
@@ -114,6 +114,17 @@ describe('applyRescore write path obeys canApprove, not decision.approve alone',
     // precision, so a bare equality would never match even the SAME row.
     expect(updatedAtClause.sql).toMatch(/date_trunc\('milliseconds',\s*updated_at\)\s*=\s*\?/);
     expect(curatedAtClause.sql).toMatch(/date_trunc\('milliseconds',\s*curated_at\)\s*=\s*\?/);
+  });
+
+  test('the fallback score write is version-pinned too, and a mismatch leaves the row untouched', async () => {
+    const { whereRawCalls } = wireDb({ approveRows: 0, rescoreRows: 0 });
+    const outcome = await applyRescore(row, APPROVING_DECISION, { canApprove: true });
+    expect(outcome).toBe('skipped');
+    // Two pinned writes attempted (approval, then the plain rescore), each
+    // carrying both version predicates.
+    expect(whereRawCalls).toHaveLength(4);
+    expect(whereRawCalls.filter((c) => c.bindings[0] === row.updated_at)).toHaveLength(2);
+    expect(whereRawCalls.filter((c) => c.bindings[0] === row.curated_at)).toHaveLength(2);
   });
 
   test('a concurrent write between fetch and this UPDATE (WHERE matches 0 rows) never approves — the row is left "raced", not approved', async () => {

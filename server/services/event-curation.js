@@ -641,22 +641,22 @@ async function applyRescore(row, decision, { canApprove = decision.approve } = {
     }),
     curation_note: note,
   };
+  // Every rescore write is pinned to the snapshot the decision came from; on
+  // a version mismatch the row is left untouched for the next run.
+  const unchangedSinceRead = () => db('events_raw')
+    .where({ id: row.id, admin_status: 'pending' })
+    .whereNull('merged_into')
+    .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+    .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at]);
   if (canApprove) {
-    const updated = await db('events_raw')
-      .where({ id: row.id, admin_status: 'pending' })
-      .whereNull('merged_into')
+    const updated = await unchangedSinceRead()
       .whereNotNull('event_url')
       .whereNot('event_type', 'unknown')
       .whereNotIn('freshness_status', CURATION_FRESHNESS_EXCLUSIONS)
-      .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
-      .whereRaw("date_trunc('milliseconds', curated_at) = ?", [row.curated_at])
       .update({ ...assessmentFields, admin_status: 'approved', approved_via: 'auto_curation' });
     if (updated) return 'approved';
   }
-  const updated = await db('events_raw')
-    .where({ id: row.id, admin_status: 'pending' })
-    .whereNull('merged_into')
-    .update(assessmentFields);
+  const updated = await unchangedSinceRead().update(assessmentFields);
   return updated ? (canApprove ? 'raced' : 'rescored') : 'skipped';
 }
 
