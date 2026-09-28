@@ -179,17 +179,24 @@ async function refreshReviewFrontmatter(draft, brief) {
 // frozen for the whole loop — repair may only change the body bytes.
 // A competitor page the writer relied on is named in the post but never
 // linked (owner ruling 2026-09-28), so its URL goes in notes_for_reviewer,
-// which never publishes. Only competitor-host URLs are taken from the notes:
-// every other source is linked in the body, where the link allowlist
-// applies. Each URL is read whole from one of the detector's URL starts to
-// the next space (never joined across lines), a balanced "(2026)" kept and
-// only unmatched wrapping punctuation trimmed, as sourceUrls does (Codex r7
-// on #5191), then normalized to the https URL a browser requests
-// (evidenceUrl), so every consumer (the review, the publish-day snapshots)
-// gets the same clean list.
+// which never publishes. Two kinds of notes URL are taken: competitor hosts,
+// and public-record pages (BBB, ConsumerAffairs, any .gov), which the price
+// guard accepts as the source of a competitor price (content-guardrails
+// competitorPriceEvidenced) — dropping them here reviewed a sourced price
+// without its source (Codex r10 on #5191). Every other source is linked in
+// the body, where the link allowlist applies. Each URL is read whole from
+// one of the detector's URL starts to the next space (never joined across
+// lines), a balanced "(2026)" kept and only unmatched wrapping punctuation
+// trimmed, as sourceUrls does (Codex r7 on #5191), then normalized to the
+// https URL a browser requests (evidenceUrl), so every consumer (the review,
+// the publish-day snapshots) gets the same clean list.
 function evidenceUrlsFor(draft) {
   const { isCompetitorHost } = require('./competitor-links');
-  return notesEvidenceUrls(draft).filter((url) => isCompetitorHost(new URL(url).hostname));
+  const { isPublicRecordHost } = require('./content-guardrails');
+  return notesEvidenceUrls(draft).filter((url) => {
+    const host = new URL(url).hostname;
+    return isCompetitorHost(host) || isPublicRecordHost(host);
+  });
 }
 
 // Every URL in the draft's notes_for_reviewer, read and normalized as above.

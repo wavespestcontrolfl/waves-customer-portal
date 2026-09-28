@@ -889,6 +889,11 @@ describe('countsTowardTrustBuild', () => {
 });
 
 describe('isDeterministicPublishError', () => {
+  test('COMPETITOR_LINK parks: a link in the live page outside the edit fails every retry (Codex r10 on #5191)', () => {
+    const err = new Error('competitor link "https://www.orkin.com/x" in the page — publish refused');
+    err.code = 'COMPETITOR_LINK';
+    expect(isDeterministicPublishError(err)).toBe(true);
+  });
   test('BLOG_BODY_IMAGES_FAILED parks like the hero failure', () => {
     const err = new Error('autonomous blog body image 1 generation failed');
     err.code = 'BLOG_BODY_IMAGES_FAILED';

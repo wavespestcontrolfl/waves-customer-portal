@@ -530,8 +530,31 @@ describe('autonomous-runner._snapshotInterceptSources', () => {
     await runner._snapshotInterceptSources(opp, { body: 'Plain body.', notes_for_reviewer: notes }, {});
     const sent = seeder.snapshotSources.mock.calls[0][0];
     expect(sent).toHaveLength(10);
-    expect(sent[0]).toBe('https://example.com/a/');
+    // Half the cap is reserved for the notes' evidence, ahead of the rest
+    // (Codex r10 on #5191); a long notes list cannot crowd out the manifest.
+    expect(sent.slice(0, 5)).toEqual(Array.from({ length: 5 }, (_, i) => `https://www.orkin.com/page-${i}`));
+    expect(sent[5]).toBe('https://example.com/a/');
     expect(sent.every((u) => /^https:\/\//.test(u))).toBe(true);
+  });
+
+  test('unpublished evidence keeps its snapshots when manifest and body sources fill the cap (Codex r10 on #5191)', async () => {
+    // A competitor page in the notes is on no published page: this snapshot
+    // is its only publish-day audit, so it must not be the part the cap drops.
+    jest.spyOn(seeder, 'snapshotSources').mockResolvedValueOnce({ attempted: 10, ok: 10, snapshots: [] });
+    db.mockImplementation(() => ({ where: jest.fn(() => ({ update: jest.fn(() => Promise.resolve(1)) })) }));
+    const opp = {
+      id: 'opp-1',
+      bucket: 'operator_intercept',
+      signal_metadata: { intercept_brief: { sources: Array.from({ length: 10 }, (_, i) => `https://example.com/m-${i}`) } },
+    };
+    await runner._snapshotInterceptSources(opp, {
+      body: 'Plain body.',
+      notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms and https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc',
+    }, {});
+    const sent = seeder.snapshotSources.mock.calls[0][0];
+    expect(sent).toHaveLength(10);
+    expect(sent.slice(0, 2)).toEqual(['https://www.orkin.com/terms', 'https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc']);
+    expect(sent).toContain('https://example.com/m-0');
   });
 });
 

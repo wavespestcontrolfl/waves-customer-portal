@@ -2212,7 +2212,14 @@ class AutonomousRunner {
       // One cap on the FINAL list (Codex r2 on #5191): the body sweep caps
       // itself, but manifest sources and the notes' evidence add to it, and
       // the outer timeout below cannot cancel snapshots already started.
+      // The notes' evidence goes FIRST, up to half the cap (Codex r10): it is
+      // on no published page, so this snapshot is its only publish-day
+      // audit, and appended last it was the first thing the cap dropped.
+      // Half, not all: the writer controls the notes, and a long list there
+      // must not crowd out the operator's own sources.
+      const reservedEvidence = evidenceUrls.slice(0, Math.floor(SNAPSHOT_SOURCE_LIMIT / 2));
       const sources = Array.from(new Set([
+        ...reservedEvidence,
         ...(Array.isArray(manifestSources) ? manifestSources : []),
         ...citedUrls,
         ...evidenceUrls,
@@ -4363,6 +4370,13 @@ function isDeterministicPublishError(err) {
   // the Astro build), not transient — park for review instead of releasing the
   // claim and re-running the same token-laden draft.
   if (err?.code === 'BLOG_MDX_TOKEN_LEAK') return true;
+  // A competitor link in the page to be committed (astro-publisher
+  // competitorFreeMarkdown) is edit-required too. On a metadata rewrite or
+  // refresh it can sit in the LIVE page, outside anything the run edits, so
+  // a retry regenerates the same refusal forever — park it for a human to
+  // remove the link (owner ruling 2026-09-28: refuse, don't rewrite; Codex
+  // r10 on #5191).
+  if (err?.code === 'COMPETITOR_LINK') return true;
   const message = String(err?.message || '');
   return [
     /^unsupported autonomous draft for Astro publish:/,

@@ -1433,13 +1433,20 @@ function competitorEvidenceTarget(ownerName) {
   return { hosts, keys };
 }
 
+// A public-record host: the trusted citation hosts (BBB, ConsumerAffairs, …)
+// and any .gov. Shared with editorial-evidence, which hands such a notes URL
+// to the review for the same reason this accepts it.
+function isPublicRecordHost(host) {
+  return hostAllowed(normalizeHost(host), new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost)));
+}
+
 function urlEvidences(rawUrl, { hosts, keys }, { bound }) {
   let url;
   try { url = new URL(String(rawUrl || '').trim()); } catch { return false; }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
   const host = normalizeHost(url.hostname);
   if (hosts.some((h) => host === h || host.endsWith(`.${h}`))) return true;
-  if (!bound && !hostAllowed(host, new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost)))) return false;
+  if (!bound && !isPublicRecordHost(host)) return false;
   let path = url.pathname;
   try { path = decodeURIComponent(path); } catch { /* keep the raw path */ }
   const pathKey = nameKey(path);
@@ -6762,6 +6769,7 @@ module.exports = {
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
   priceEvidenceUrls,
+  isPublicRecordHost,
   isThirdPartyPriceCitation,
   // single source of truth for the re-entry/safety compliance predicate
   // (AGENTS.md "Compliance language on any customer surface") — consumed by

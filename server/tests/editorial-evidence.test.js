@@ -427,7 +427,7 @@ test('prepareDraft hands the review the competitor pages the writer listed in no
     notes_for_reviewer: 'Evidence sources: https://www.orkin.com/terms' }, { page_type: 'supporting-blog' });
   expect(reviewer.review).toHaveBeenCalledWith(expect.objectContaining({ sourceUrls: ['https://www.orkin.com/terms'] }));
 });
-test('evidenceUrlsFor: only competitor pages come from the notes — every other source is linked in the body (Codex r6 on #5191)', () => {
+test('evidenceUrlsFor: competitor pages come from the notes; an ordinary source is linked in the body (Codex r6 on #5191)', () => {
   expect(evidence.evidenceUrlsFor({ notes_for_reviewer: [
     'Evidence sources:',
     '- https://www.orkin.com/terms (their plan terms)',
@@ -440,6 +440,19 @@ test('evidenceUrlsFor: only competitor pages come from the notes — every other
   expect(evidence.evidenceUrlsFor({ notes_for_reviewer: 'Source: https\\://www.orkin.com/terms' })).toEqual(['https://www.orkin.com/terms']);
   expect(evidence.evidenceUrlsFor({ notes_for_reviewer: null })).toEqual([]);
   expect(evidence.evidenceUrlsFor(null)).toEqual([]);
+});
+test('evidenceUrlsFor: a public-record page in the notes reaches the review too — the price guard accepts it as a source (Codex r10 on #5191)', () => {
+  expect(evidence.evidenceUrlsFor({ notes_for_reviewer: [
+    'Evidence sources:',
+    '- https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html',
+    '- https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc/complaints',
+    '- https://www.alabamaag.gov/terminix-settlement/',
+    '- https://example.org/aptive-blog-post (neither: cite it in the body instead)',
+  ].join('\n') })).toEqual([
+    'https://www.consumeraffairs.com/homeowners/aptive-environmental-llc.html',
+    'https://www.bbb.org/us/ga/atlanta/profile/pest-control/orkin-llc/complaints',
+    'https://www.alabamaag.gov/terminix-settlement/',
+  ]);
 });
 test('evidence URLs reach the review as https in every form a browser follows, never published (Codex r3, r5 on #5191)', () => {
   expect(evidence.sourceUrls("Per Orkin's terms, plans renew yearly.", {}, ['https://www.orkin.com/terms']))
