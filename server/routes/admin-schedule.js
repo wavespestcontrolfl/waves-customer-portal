@@ -23846,7 +23846,10 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
         failures: generated.failures,
       });
-      return res.json({ report: fallbackReport, fallback: true, deterministic: true, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });
+      // No photoGroundingUsed here (Codex #5145 r5): the deterministic
+      // fallback is built from structured actions only and never reads the
+      // photo captions, so the client must not treat captions as inputs to it.
+      return res.json({ report: fallbackReport, fallback: true, deterministic: true });
     }
 
     const { report } = generated;

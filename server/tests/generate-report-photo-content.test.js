@@ -276,3 +276,26 @@ test('gate on + at least one caption: the response carries photoGroundingUsed: t
   const body = res.json.mock.calls[0][0];
   expect(body.photoGroundingUsed).toBe(true);
 });
+
+// Codex #5145 r5: the deterministic fallback is composed from structured
+// actions only and never reads the captions, so its response must not tell
+// the client that photo content grounded the installed copy.
+test('gate on + captions, both providers fail → the deterministic fallback omits photoGroundingUsed', async () => {
+  process.env.GATE_REPORT_PHOTO_CONTENT = 'true';
+  mockProvider.mockImplementation(async () => ({ ok: false, reason: 'provider_unavailable' }));
+  try {
+    const res = mkRes();
+    await handler(mkReq({
+      actionsCompleted: ['Removed exterior webs'],
+      photoCaptions: ['Webbing under the front eave.'],
+    }), res);
+    expect(res.statusCode).toBe(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.fallback).toBe(true);
+    expect(body.deterministic).toBe(true);
+    expect(body).not.toHaveProperty('photoGroundingUsed');
+    expect(body.report).not.toContain('Webbing under the front eave');
+  } finally {
+    mockProvider.mockImplementation(async () => ({ ok: true, text: 'WHAT WE DID\n\nTreated the exterior perimeter.\n\nWHAT WE FOUND\n\nNo activity noted.' }));
+  }
+});
