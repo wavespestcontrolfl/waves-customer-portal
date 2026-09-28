@@ -240,6 +240,64 @@ async function pendingDepositForVisit(scheduledServiceId, database = db) {
   return credit ? Number(credit.amount) || 0 : 0;
 }
 
+function conflict409(message) {
+  const e = new Error(message);
+  e.status = 409;
+  return e;
+}
+
+// In-lock checks before the mint. The lock must be on the visit's CURRENT
+// owner (a merge that committed between the owner read and the lock leaves
+// the old row locked); an open card hold and a reprice since the approval
+// refuse.
+async function preMintRefusal({ owner, visit, price, scheduledServiceId, expectedPrice, refuseLiveCardHold, trx }) {
+  if (owner?.customer_id && String(owner.customer_id) !== String(visit.customer_id)) {
+    return 'The visit changed customers while billing — try again.';
+  }
+  if (refuseLiveCardHold && await liveCardHoldForVisit(scheduledServiceId, trx)) {
+    return 'A card hold is still open on this visit — completion captures or releases it; bill it from Billing Recovery after resolving the hold.';
+  }
+  if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
+    return `The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`;
+  }
+  return null;
+}
+
+async function alreadyHandledRefusal(trx, visit, scheduledServiceId) {
+  const existingInvoice = await trx('invoices')
+    .where(function () {
+      this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
+    })
+    .whereNot('status', 'void')
+    .first();
+  if (existingInvoice) return 'An invoice already exists for this visit.';
+  const existingDisposition = await trx('visit_billing_dispositions')
+    .where('scheduled_service_id', scheduledServiceId)
+    .first();
+  if (existingDisposition) return 'Visit has already been handled.';
+  return null;
+}
+
+// After the mint: the invoice must be the approved one. createFromService
+// mints for the completion record's current owner and re-resolves Bill-To,
+// so a merge/repoint or a payer assigned after the assessment refuses; the
+// approved total and its subtotal / discount / tax split must match.
+function postMintRefusal(created, visit, { expectedTotal, expectedBreakdown }) {
+  if (String(created.customer_id || '') !== String(visit.customer_id || '')) {
+    return 'The visit changed customers while billing — reload it and bill it from Billing Recovery.';
+  }
+  if (created.payer_id) return 'The visit became third-party billed while billing — handle it via the payer AP flow.';
+  if (expectedBreakdown && (cents(created.subtotal) !== cents(expectedBreakdown.subtotal)
+    || cents(created.discount_amount || 0) !== cents(expectedBreakdown.discount || 0)
+    || cents(created.tax_amount || 0) !== cents(expectedBreakdown.tax || 0))) {
+    return 'The invoice line items, discounts or tax changed since they were approved.';
+  }
+  if (expectedTotal !== null && cents(created.total) !== cents(expectedTotal)) {
+    return `The invoice total changed since it was approved ($${Number(expectedTotal).toFixed(2)} → $${Number(created.total).toFixed(2)}).`;
+  }
+  return null;
+}
+
 // expectedPrice: the amount an approval showed (IB closeout repair). The
 // assessment runs under the mint lock, so a reprice between the approval
 // and this write refuses instead of minting a different figure.
@@ -277,44 +335,11 @@ async function billVisit(scheduledServiceId, {
         throw e;
       }
       const { visit, price, rowPrice } = assessed;
-      // The lock must be on the visit's CURRENT owner: a merge that committed
-      // between the owner read and the lock leaves us holding the old row.
-      if (owner?.customer_id && String(owner.customer_id) !== String(visit.customer_id)) {
-        const e = new Error('The visit changed customers while billing — try again.');
-        e.status = 409;
-        throw e;
-      }
-      if (refuseLiveCardHold && await liveCardHoldForVisit(scheduledServiceId, trx)) {
-        const e = new Error('A card hold is still open on this visit — completion captures or releases it; bill it from Billing Recovery after resolving the hold.');
-        e.status = 409;
-        throw e;
-      }
-      if (expectedPrice !== null && cents(price) !== cents(expectedPrice)) {
-        const e = new Error(`The visit's price changed since it was approved ($${Number(expectedPrice).toFixed(2)} → $${price.toFixed(2)}).`);
-        e.status = 409;
-        throw e;
-      }
+      const preRefusal = await preMintRefusal({ owner, visit, price, scheduledServiceId, expectedPrice, refuseLiveCardHold, trx });
+      if (preRefusal) throw conflict409(preRefusal);
 
-      const existingInvoice = await trx('invoices')
-        .where(function () {
-          this.where('service_record_id', visit.service_record_id).orWhere('scheduled_service_id', scheduledServiceId);
-        })
-        .whereNot('status', 'void')
-        .first();
-      if (existingInvoice) {
-        const e = new Error('An invoice already exists for this visit.');
-        e.status = 409;
-        throw e;
-      }
-
-      const existingDisposition = await trx('visit_billing_dispositions')
-        .where('scheduled_service_id', scheduledServiceId)
-        .first();
-      if (existingDisposition) {
-        const e = new Error('Visit has already been handled.');
-        e.status = 409;
-        throw e;
-      }
+      const handled = await alreadyHandledRefusal(trx, visit, scheduledServiceId);
+      if (handled) throw conflict409(handled);
 
       // Canonical completion path (replays scheduled-service line items + discounts).
       // THIS transaction is threaded through (codex #3344 r6 P1): we hold
@@ -343,34 +368,8 @@ async function billVisit(scheduledServiceId, {
         refuseDepositCredit,
       });
 
-      // Self-pay is pinned through the mint: createFromService re-resolves
-      // Bill-To, so a payer assigned after the assessment would mint a
-      // payer-owned invoice — refuse and roll back instead.
-      // …and the customer: createFromService mints for the completion
-      // record's CURRENT owner, so a merge/repoint after the assessment
-      // must refuse rather than bill another account.
-      if (String(created.customer_id || '') !== String(visit.customer_id || '')) {
-        const e = new Error('The visit changed customers while billing — reload it and bill it from Billing Recovery.');
-        e.status = 409;
-        throw e;
-      }
-      if (created.payer_id) {
-        const e = new Error('The visit became third-party billed while billing — handle it via the payer AP flow.');
-        e.status = 409;
-        throw e;
-      }
-      if (expectedBreakdown && (cents(created.subtotal) !== cents(expectedBreakdown.subtotal)
-        || cents(created.discount_amount || 0) !== cents(expectedBreakdown.discount || 0)
-        || cents(created.tax_amount || 0) !== cents(expectedBreakdown.tax || 0))) {
-        const e = new Error('The invoice line items, discounts or tax changed since they were approved.');
-        e.status = 409;
-        throw e;
-      }
-      if (expectedTotal !== null && cents(created.total) !== cents(expectedTotal)) {
-        const e = new Error(`The invoice total changed since it was approved ($${Number(expectedTotal).toFixed(2)} → $${Number(created.total).toFixed(2)}).`);
-        e.status = 409;
-        throw e;
-      }
+      const postRefusal = postMintRefusal(created, visit, { expectedTotal, expectedBreakdown });
+      if (postRefusal) throw conflict409(postRefusal);
 
       await trx('visit_billing_dispositions').insert({
         scheduled_service_id: scheduledServiceId,
