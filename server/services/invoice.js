@@ -5172,6 +5172,14 @@ const InvoiceService = {
         logger.warn(
           `[invoice] source-estimate lookup failed for service ${serviceRecordId}: ${err.message}`,
         );
+        // A caller that must not consume deposit money cannot tell a
+        // deposit-bearing visit from a plain one without this read — fail
+        // closed instead of minting a full-balance draft.
+        if (refuseDepositCredit) {
+          const refusal = new Error("Deposit provenance could not be read — bill it from Billing Recovery.");
+          refusal.status = 409;
+          throw refusal;
+        }
       }
     }
     if (sourceEstimateId) {

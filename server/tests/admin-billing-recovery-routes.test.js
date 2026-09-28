@@ -96,6 +96,8 @@ describe('admin billing-recovery routes', () => {
     jest.clearAllMocks();
     // Refusals now surface from inside the mint transaction.
     installTransaction();
+    // Current schema: the billing-mode columns are probed before they are read.
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
   });
 
   test('technician cannot bill a visit (write requires admin)', async () => {
@@ -121,7 +123,8 @@ describe('admin billing-recovery routes', () => {
       const body = await res.json();
       expect(res.status).toBe(409);
       expect(body.error).toMatch(/autopay/i);
-      expect(customerOnAutopay).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }));
+      // Fail closed on an unreadable payment method (GH Codex P1).
+      expect(customerOnAutopay).toHaveBeenCalledWith(expect.objectContaining({ id: 'cust-1' }), expect.objectContaining({ failClosed: true }));
       expect(InvoiceService.createFromService).not.toHaveBeenCalled();
     });
   });
@@ -487,5 +490,52 @@ describe('billVisit refuseDepositCredit', () => {
     const result = await billVisit('ss-1', { expectedPrice: 129, refuseDepositCredit: true });
     expect(InvoiceService.createFromService).toHaveBeenCalledWith('sr-1', expect.objectContaining({ refuseDepositCredit: true }));
     expect(result).toEqual(expect.objectContaining({ ok: false, status: 409, error: expect.stringMatching(/deposit credit/) }));
+  });
+});
+
+describe('billVisit fails closed on unverifiable coverage (GH Codex P1)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+  });
+
+  test('an autopay lookup error refuses instead of reading as "not on autopay"', async () => {
+    const { billVisit } = require('../services/billing-recovery-bill');
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
+      return makeQB({ first: null });
+    });
+    customerOnAutopay.mockRejectedValue(new Error('payment_methods read failed'));
+    installTransaction((arg) => {
+      if (arg === 'invoices' || arg === 'visit_billing_dispositions') return makeQB({ first: null });
+      throw new Error('fall through');
+    });
+    const result = await billVisit('ss-1', { expectedPrice: 129 });
+    expect(result).toEqual(expect.objectContaining({ ok: false, status: 503, error: expect.stringMatching(/Autopay status could not be verified/) }));
+    expect(InvoiceService.createFromService).not.toHaveBeenCalled();
+  });
+
+  test('a pre-migration schema skips the billing-mode read instead of erroring inside the transaction', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    db.schema = { hasColumn: jest.fn(async (table, col) => !(table === 'customers' && col === 'billing_mode')) };
+    const customersRead = jest.fn();
+    db.mockImplementation((arg) => {
+      if (typeof arg === 'object' && arg.ss) return makeQB({ first: BILLABLE_VISIT });
+      if (arg === 'customers') { customersRead(); return makeQB({ first: null }); }
+      return makeQB({ first: null });
+    });
+    customerOnAutopay.mockResolvedValue(false);
+    const assessed = await assessVisitBillable('ss-1');
+    expect(customersRead).not.toHaveBeenCalled();
+    expect(assessed).toEqual(expect.objectContaining({ ok: true, price: 129, dueDate: '2026-04-14' }));
+  });
+
+  test('a caller-pinned service record narrows the visit read to that record', async () => {
+    const { assessVisitBillable } = require('../services/billing-recovery-bill');
+    const qb = makeQB({ first: BILLABLE_VISIT });
+    db.mockImplementation((arg) => (typeof arg === 'object' && arg.ss ? qb : makeQB({ first: null })));
+    customerOnAutopay.mockResolvedValue(false);
+    await assessVisitBillable('ss-1', { serviceRecordId: 'sr-1' });
+    expect(qb.where).toHaveBeenCalledWith('sr.id', 'sr-1');
   });
 });

@@ -337,15 +337,20 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
   test('plans a draft invoice at the Bill amount; the card says draft, not sent, before tax', async () => {
     getCloseoutStatus.mockResolvedValue({ ...status({ facts: UNBILLED }), serviceId: SVC });
     db.mockImplementation(fakeDb({ service_records: [RECORD] }));
-    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {} });
+    BillingRecoveryBill.assessVisitBillable.mockResolvedValue({ ok: true, price: 129, rowPrice: 129, visit: {}, dueDate: '2026-09-14' });
     const preview = await executeCloseoutRepairTool('repair_closeout', { service_id: SVC });
-    expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.anything());
+    // Pinned to closeout-status's canonical completion record (GH Codex P2).
+    expect(BillingRecoveryBill.assessVisitBillable).toHaveBeenCalledWith(SVC, expect.objectContaining({ serviceRecordId: 'rec-1' }));
+    expect(preview.steps[0]).toEqual(expect.objectContaining({ due_date: '2026-09-14', service_record_id: 'rec-1' }));
     expect(preview.steps).toEqual([expect.objectContaining({ step: 'bill_visit', scheduled_service_id: SVC, amount: 129, kind: 'billing' })]);
     expect(preview.notifies_customer).toBe(false);
     expect(BillingRecoveryBill.billVisit).not.toHaveBeenCalled();
     const contract = buildContract({ toolName: 'repair_closeout', params: { service_id: SVC }, preview });
     expect(contract.effects).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'billing', label: expect.stringMatching(/DRAFT invoice.*not sent, not charged.*visit price \$129\.00/) })]));
     expect(contract.notifies_customer).toBe(false);
+    expect(contract.effects.map((e) => e.label).join('\n')).toMatch(/visit price \$129\.00, due 2026-09-14 .*total is set at creation/);
+    // The 'billed' disposition cannot be removed from the portal (GH Codex P2).
+    expect(contract.irreversible).toBe(true);
   });
 
   test('a visit carrying unapplied estimate deposit money stays manual', async () => {
@@ -386,7 +391,7 @@ describe('bill_visit — the Billing Recovery "Bill" action as a repair step', (
     });
     expect(run.success).toBe(true);
     expect(run.receipt).toEqual([expect.objectContaining({ step: 'bill_visit', status: 'completed', invoice_id: 'inv-9' })]);
-    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true }));
+    expect(BillingRecoveryBill.billVisit).toHaveBeenCalledWith(SVC, expect.objectContaining({ actorId: 'tech-admin', expectedPrice: 129, refuseDepositCredit: true, serviceRecordId: 'rec-1' }));
 
     // Repriced after the card: the executor's plan no longer matches.
     BillingRecoveryBill.billVisit.mockClear();

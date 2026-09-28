@@ -162,35 +162,18 @@ async function loadContact(customerId, knex) {
  * precondition reads — never writes. Deterministic for the same state so the
  * two-step fingerprint binds it.
  */
-async function planCloseoutRepair(status, { knex = db } = {}) {
-  const facts = status.facts || {};
+// Report link + report email. Both bind to the record the report facts were
+// derived from (closeout-status reportRecordId), which can be a sibling of
+// status.record — eligibility, dedupe and execution all use that record.
+async function planReportSteps(status, getContact, knex) {
+  const facts = status.facts;
   const steps = [];
-  const manual = [];
   const skipped = [];
-  const addManual = (name, why) => {
-    const f = facts[name];
-    manual.push({ fact: name, state: f.state, reason: f.reason, fix: why || MANUAL_REMEDY[name] });
-  };
-
-  if (facts.completion?.state !== 'done') {
-    if (facts.completion) addManual('completion');
-    return { steps, manual, skipped };
-  }
-
-  // The report facts were derived from the record owning the report artifact
-  // (closeout-status reportRecordId), which can be a sibling of status.record
-  // — eligibility, dedupe and execution all bind to that same record.
   const recordId = status.reportRecordId || null;
   const recordRow = recordId
     ? await knex('service_records').where({ id: recordId })
       .first('id', 'status', 'report_template_version', 'report_view_token', 'structured_notes', 'recap_sms_sent_at', 'customer_id', 'service_line', 'service_type')
     : null;
-
-  let contact = null;
-  const getContact = async () => {
-    contact = contact || await loadContact(status.visit?.customerId || null, knex);
-    return contact;
-  };
 
   const reportFact = facts.report;
   const publishable = reportFact?.state === 'pending'
@@ -203,106 +186,144 @@ async function planCloseoutRepair(status, { knex = db } = {}) {
   const deliveryFact = facts.reportDelivery;
   const emailCandidate = deliveryFact?.state === 'pending'
     && (deliveryFact.reason === 'not_enqueued' || (publishable && deliveryFact.reason === 'report_not_published'));
-  if (emailCandidate) {
-    let blocker = await reportEmailBlocker(status, recordRow, knex);
-    // Same resolver the delivery worker sends through — the card names who
-    // gets the email, and a plan with nobody to email is not offered.
-    const { customer, prefs } = blocker ? {} : await getContact();
-    const fullRecipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs)
-      .map((r) => String(r.email || '').trim().toLowerCase()).filter(Boolean).sort();
-    const recipients = fullRecipients.map(maskEmail).filter(Boolean);
-    if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
-    if (blocker) skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
-    else {
-      steps.push({
-        step: 'queue_report_email',
-        fact: 'reportDelivery',
-        reason: deliveryFact.reason,
-        service_record_id: recordRow.id,
-        recipients,
-        // Binds the FULL addresses (masks can collide): the confirm-time
-        // fingerprint and the executor's plan match both cover this key.
-        recipients_key: crypto.createHash('sha256').update(JSON.stringify(fullRecipients)).digest('hex').slice(0, 16),
-        ...(publishable ? { depends_on: 'publish_report' } : {}),
-      });
-    }
+  if (!emailCandidate) return { steps, skipped };
+  let blocker = await reportEmailBlocker(status, recordRow, knex);
+  // Same resolver the delivery worker sends through — the card names who
+  // gets the email, and a plan with nobody to email is not offered.
+  const { customer, prefs } = blocker ? {} : await getContact();
+  const fullRecipients = blocker ? [] : getServiceReportEmailRecipients(customer, prefs)
+    .map((r) => String(r.email || '').trim().toLowerCase()).filter(Boolean).sort();
+  const recipients = fullRecipients.map(maskEmail).filter(Boolean);
+  if (!blocker && !recipients.length) blocker = 'no report email recipient on file, or report emails are turned off';
+  if (blocker) {
+    skipped.push({ fact: 'reportDelivery', reason: deliveryFact.reason, why: blocker });
+    return { steps, skipped };
   }
+  steps.push({
+    step: 'queue_report_email',
+    fact: 'reportDelivery',
+    reason: deliveryFact.reason,
+    service_record_id: recordRow.id,
+    recipients,
+    // Binds the FULL addresses (masks can collide): the confirm-time
+    // fingerprint and the executor's plan match both cover this key.
+    recipients_key: crypto.createHash('sha256').update(JSON.stringify(fullRecipients)).digest('hex').slice(0, 16),
+    ...(publishable ? { depends_on: 'publish_report' } : {}),
+  });
+  return { steps, skipped };
+}
 
-  const invoiceFact = facts.invoice;
-  if (invoiceFact?.state === 'pending' && BILLABLE_INVOICE_REASONS.has(invoiceFact.reason)) {
-    // The same read-only checks the Bill button re-runs before minting: a
-    // refusal (autopay, payer, prepaid, callback, unpriced…) is the manual fix.
-    const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { database: knex });
-    // Deposit-bearing visits stay manual: the mint would consume estimate
-    // deposit money, an effect this card does not preview or bind.
-    const deposit = assessed.ok ? await BillingRecoveryBill.pendingDepositForVisit(status.serviceId, knex) : 0;
-    if (!assessed.ok) skipped.push({ fact: 'invoice', reason: invoiceFact.reason, why: String(assessed.error).replace(/\.$/, '') });
-    else if (deposit > 0) {
-      skipped.push({ fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply — bill it from Billing Recovery` });
-    } else {
-      steps.push({
-        step: 'bill_visit',
-        fact: 'invoice',
-        reason: invoiceFact.reason,
-        scheduled_service_id: status.serviceId,
-        amount: Number(assessed.price.toFixed(2)),
-      });
-    }
+// Draft invoice through the Billing Recovery "Bill" checks, pinned to the
+// canonical completion record closeout-status resolved.
+async function planInvoiceStep(status, knex) {
+  const invoiceFact = status.facts.invoice;
+  if (!(invoiceFact?.state === 'pending' && BILLABLE_INVOICE_REASONS.has(invoiceFact.reason))) return {};
+  const serviceRecordId = status.record?.id || null;
+  // The same read-only checks the Bill button re-runs before minting: a
+  // refusal (autopay, payer, prepaid, callback, unpriced…) is the manual fix.
+  const assessed = await BillingRecoveryBill.assessVisitBillable(status.serviceId, { serviceRecordId, database: knex });
+  if (!assessed.ok) return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: String(assessed.error).replace(/\.$/, '') } };
+  // Deposit-bearing visits stay manual: the mint would consume estimate
+  // deposit money, an effect this card does not preview or bind.
+  const deposit = await BillingRecoveryBill.pendingDepositForVisit(status.serviceId, knex);
+  if (deposit > 0) {
+    return { skip: { fact: 'invoice', reason: invoiceFact.reason, why: `an unapplied estimate deposit ($${deposit.toFixed(2)}) would apply — bill it from Billing Recovery` } };
   }
+  return {
+    step: {
+      step: 'bill_visit',
+      fact: 'invoice',
+      reason: invoiceFact.reason,
+      scheduled_service_id: status.serviceId,
+      service_record_id: serviceRecordId,
+      amount: Number(assessed.price.toFixed(2)),
+      due_date: assessed.dueDate || null,
+    },
+  };
+}
 
+// Every open fact no step covers, with where it gets fixed.
+function manualItems(facts, steps, skipped) {
+  const manual = [];
   const planned = new Set(steps.map((s) => s.fact));
   const skippedFacts = new Set(skipped.map((s) => s.fact));
   for (const [name, f] of Object.entries(facts)) {
     if (!f || planned.has(name)) continue;
     if (f.state === 'unknown') {
       manual.push({ fact: name, state: f.state, reason: f.reason, fix: 'Lookup outage — status is unverified, not missing; re-check before acting.' });
-    } else if ((f.state === 'pending' || f.state === 'failed') && !skippedFacts.has(name)) {
-      // The report email waits on the report it would deliver.
-      if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
-      addManual(name);
+      continue;
     }
+    if (!['pending', 'failed'].includes(f.state) || skippedFacts.has(name)) continue;
+    // The report email waits on the report it would deliver.
+    if (name === 'reportDelivery' && f.reason === 'report_not_published' && planned.has('report')) continue;
+    manual.push({ fact: name, state: f.state, reason: f.reason, fix: MANUAL_REMEDY[name] });
   }
   for (const s of skipped) manual.push({ fact: s.fact, state: facts[s.fact].state, reason: s.reason, fix: `Not repairable here: ${s.why}.` });
+  return manual;
+}
+
+async function planCloseoutRepair(status, { knex = db } = {}) {
+  const facts = status.facts || {};
+  if (facts.completion?.state !== 'done') {
+    const manual = facts.completion
+      ? [{ fact: 'completion', state: facts.completion.state, reason: facts.completion.reason, fix: MANUAL_REMEDY.completion }]
+      : [];
+    return { steps: [], manual, skipped: [] };
+  }
+  let contact = null;
+  const getContact = async () => {
+    contact = contact || await loadContact(status.visit?.customerId || null, knex);
+    return contact;
+  };
+  const report = await planReportSteps({ ...status, facts }, getContact, knex);
+  const invoice = await planInvoiceStep({ ...status, facts }, knex);
+  const steps = [...report.steps, ...(invoice.step ? [invoice.step] : [])];
+  const skipped = [...report.skipped, ...(invoice.skip ? [invoice.skip] : [])];
   // Who the card is about — resolved by the server, never the model.
   const who = steps.length ? (await getContact()).customer : null;
   const customerName = who ? [who.first_name, who.last_name].filter(Boolean).join(' ') || null : null;
-  return { steps, manual, skipped, customerName };
+  return { steps, manual: manualItems(facts, steps, skipped), skipped, customerName };
 }
 
+const STEP_RUNNERS = {
+  async publish_report(step, knex) {
+    const token = await ensureReportToken(step.service_record_id, knex);
+    if (!token) return { status: 'failed', detail: 'service record not found' };
+    return { status: 'completed', detail: 'report link published' };
+  },
+  async queue_report_email(step, knex) {
+    const row = await knex('service_records').where({ id: step.service_record_id })
+      .first('id', 'customer_id', 'report_view_token', 'scheduled_service_id');
+    if (!row?.report_view_token) return { status: 'failed', detail: 'report link is not published' };
+    const portalUrl = publicPortalUrl();
+    const queued = await enqueueServiceReportV1EmailDelivery({
+      serviceRecordId: row.id,
+      customerId: row.customer_id,
+      token: row.report_view_token,
+      reportUrl: `${portalUrl}/report/${row.report_view_token}`,
+      pdfUrl: `${portalUrl}/api/reports/${row.report_view_token}`,
+      payload: { scheduled_service_id: row.scheduled_service_id || null, source: 'ib_closeout_repair' },
+    }, knex);
+    if (!queued?.ok) return { status: 'failed', detail: queued?.error || 'report email could not be queued' };
+    if (queued.queued === false) return { status: 'completed', detail: `report email already ${queued.delivery?.status || 'queued'} — nothing new queued`, delivery_id: queued.delivery?.id || null };
+    return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
+  },
+  async bill_visit(step, knex) {
+    const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, {
+      actorId: step.actor_id || null,
+      expectedPrice: step.amount,
+      refuseDepositCredit: true,
+      serviceRecordId: step.service_record_id || null,
+      database: knex,
+    });
+    if (!billed.ok) return { status: 'failed', detail: billed.error };
+    return { status: 'completed', detail: 'draft invoice created (not sent)', invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };
+  },
+};
+
 async function runStep(step, { knex = db } = {}) {
-  switch (step.step) {
-    case 'bill_visit': {
-      const billed = await BillingRecoveryBill.billVisit(step.scheduled_service_id, {
-        actorId: step.actor_id || null, expectedPrice: step.amount, refuseDepositCredit: true, database: knex,
-      });
-      if (!billed.ok) return { status: 'failed', detail: billed.error };
-      return { status: 'completed', detail: `draft invoice created (not sent)`, invoice_id: billed.invoice.id, total: billed.invoice.total ?? null };
-    }
-    case 'publish_report': {
-      const token = await ensureReportToken(step.service_record_id, knex);
-      if (!token) return { status: 'failed', detail: 'service record not found' };
-      return { status: 'completed', detail: 'report link published' };
-    }
-    case 'queue_report_email': {
-      const row = await knex('service_records').where({ id: step.service_record_id })
-        .first('id', 'customer_id', 'report_view_token', 'scheduled_service_id');
-      if (!row?.report_view_token) return { status: 'failed', detail: 'report link is not published' };
-      const portalUrl = publicPortalUrl();
-      const queued = await enqueueServiceReportV1EmailDelivery({
-        serviceRecordId: row.id,
-        customerId: row.customer_id,
-        token: row.report_view_token,
-        reportUrl: `${portalUrl}/report/${row.report_view_token}`,
-        pdfUrl: `${portalUrl}/api/reports/${row.report_view_token}`,
-        payload: { scheduled_service_id: row.scheduled_service_id || null, source: 'ib_closeout_repair' },
-      }, knex);
-      if (!queued?.ok) return { status: 'failed', detail: queued?.error || 'report email could not be queued' };
-      if (queued.queued === false) return { status: 'completed', detail: `report email already ${queued.delivery?.status || 'queued'} — nothing new queued`, delivery_id: queued.delivery?.id || null };
-      return { status: 'completed', detail: 'report email queued', delivery_id: queued.delivery?.id || null };
-    }
-    default:
-      return { status: 'failed', detail: `unknown step ${step.step}` };
-  }
+  const runner = STEP_RUNNERS[step.step];
+  return runner ? runner(step, knex) : { status: 'failed', detail: `unknown step ${step.step}` };
 }
 
 async function executeCloseoutRepair(steps, { knex = db } = {}) {
@@ -329,7 +350,8 @@ async function executeCloseoutRepair(steps, { knex = db } = {}) {
 
 function stepsKey(steps) {
   return JSON.stringify((steps || []).map((s) => [
-    s.step, s.service_record_id || null, s.scheduled_service_id || null, s.depends_on || null, s.recipients_key || null, s.amount ?? null,
+    s.step, s.service_record_id || null, s.scheduled_service_id || null, s.depends_on || null, s.recipients_key || null,
+    s.amount ?? null, s.due_date || null,
   ]));
 }
 
@@ -345,7 +367,7 @@ function previewFromPlan(serviceId, status, plan) {
       ...s,
       kind: STEP_EFFECTS[s.step].kind,
       effect: s.step === 'bill_visit'
-        ? `${STEP_EFFECTS[s.step].label}: visit price $${s.amount.toFixed(2)} — the draft replays the visit's line items and discounts and adds tax; review it before sending`
+        ? `${STEP_EFFECTS[s.step].label}: visit price $${s.amount.toFixed(2)}${s.due_date ? `, due ${s.due_date}` : ''} — the draft replays the visit's line items and discounts and adds tax, so its total is set at creation; review it before sending`
         : s.recipients ? `${STEP_EFFECTS[s.step].label} — to ${s.recipients.length ? s.recipients.join(', ') : 'no recipient on file'}` : STEP_EFFECTS[s.step].label,
     })),
     manual: plan.manual,
