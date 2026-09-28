@@ -710,6 +710,13 @@ const BANNED_TOTAL_RE = new RegExp(`(?:${PRICED_TOTAL_LEAD}|${BARE_TOTAL_NUMBER}
 // "cuarenta Y nueve" must still read as one number, not two clauses.
 const PRICE_SENTENCE_SPLIT_RE = new RegExp(`${SENTENCE_SPLIT_RE.source}|[;:]`);
 const PRICE_CLAUSE_SPLIT_RE = /,|[+&]|\b(?:or|but|while|whereas|along\s+with|as\s+well\s+as|plus|pero|mientras|junto\s+con|adem[aá]s\s+de(?:l|\s+la)?|m[aá]s)\b|(?<![a-záéíóúñü])o(?![a-záéíóúñü])|(?<!\b(?:hundred|thousand|diez|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento)\s)(?:\band\b|(?<![a-záéíóúñü])y(?![a-záéíóúñü]))/i;
+// A plan label may introduce its own bare price after list punctuation:
+// "119 por aplicación; para el premium, 99". Remove only punctuation that
+// is syntactically between that label and that amount before clause splitting;
+// carrying generic numeric context across the comma would turn a later date,
+// phone number, or visit count into a price.
+const PLAN_LIST_PRICE_NUMBER = `(?:[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})`;
+const PUNCTUATED_PLAN_PRICE_RE = new RegExp(`(\\b(?:para\\s+(?:el|la)\\s+)?${PLAN_NOUN}\\b)\\s*[,=:-]\\s*(?=${PLAN_LIST_PRICE_NUMBER}\\b${COUNT_NOUN_AHEAD})`, 'gi');
 const COORDINATED_PRICE_NUMBER = BARE_PRICE_NUMBER;
 const BARE_COORDINATED_PRICE_RE = new RegExp(`${COORDINATED_PRICE_NUMBER}\\b${COUNT_NOUN_AHEAD}`, 'gi');
 const COORDINATED_YEAR_COUNT_RE = new RegExp(`${BARE_YEAR_TOTAL_NUMBER}${YEAR_TOTAL_TAIL}`, 'i');
@@ -751,7 +758,8 @@ function amount_requires_unit(value, record, { spoken }) {
     const total = [...text.matchAll(BANNED_TOTAL_RE)].find((m) => !m.groups.bareYear
       || !isBareAnnualCount(parseBillingAmount(m.groups.bareYear)));
     if (total) return ['fail', `plan total "${total[0]}" spoken: "${clip(text, 160)}"`];
-    for (const sentence of text.split(PRICE_SENTENCE_SPLIT_RE)) {
+    const pricedText = text.replace(PUNCTUATED_PLAN_PRICE_RE, '$1 ');
+    for (const sentence of pricedText.split(PRICE_SENTENCE_SPLIT_RE)) {
       let priorPrice = false;
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
@@ -1022,20 +1030,50 @@ function windowStripper(allowWindow) {
 // returned. Keeping the date and hour in one matcher prevents a returned
 // Sunday and a returned 9 AM on Saturday from grounding "Sunday at 9."
 const RETURNED_SLOT_RE = new RegExp(`\\b(${Object.keys(WEEKDAY_ES).join('|')})\\s+(${Object.keys(MONTH_ES).join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\s+at\\s+(1[0-2]|0?[1-9])(?::([0-5]\\d))?\\s*(a\\.?\\s?m\\.?|p\\.?\\s?m\\.?)\\b`, 'gi');
-function returnedVisitSlots(record, before) {
+const SLOT_UNAVAILABLE_RESPONSE_RE = /\b(?:no\s+longer\s+(?:open|available)|not\s+(?:open|available)|unavailable|ya\s+no\s+(?:est[aá]|queda)\s+(?:abiert[oa]|disponible)|dej[oó]\s+de\s+estar\s+disponible)\b/i;
+const HISTORICAL_SLOT_MENTION_RE = /\b(?:antes\s+)?(?:estaba|era|hab[ií]a\s+sido|fue)\s+(?:abiert[oa]|disponible|una\s+opci[oó]n)|\b(?:ofrec(?:[ií]|imos|ieron)|se\s+ofreci[oó]|hab[ií]amos\s+ofrecido)(?![a-záéíóúñü])/i;
+const CURRENT_SLOT_AVAILABILITY_RE = /\b(?:sigue|todav[ií]a)\s+(?:estando\s+)?disponible|\b(?:est[aá]|queda)\s+disponible\b/i;
+const SLOT_HISTORY_BOUNDARY_RE = /[.!?;]|\b(?:pero|sino|aunque|sin\s+embargo|ahora\s+bien)\b/i;
+const SLOT_COORDINATE_LEAD = '(?:(?:ahora\\s+)|(?:antes\\s+)?(?:estaba|era|hab[ií]a\\s+sido)\\s+(?:disponible|una\\s+opci[oó]n)\\s+)?';
+const SLOT_COORDINATE_BOUNDARY_RE = new RegExp(`\\by\\s+(?=${SLOT_COORDINATE_LEAD}(?:el\\s+)?(?:${Object.values(WEEKDAY_ES).join('|')}|(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})))`, 'gi');
+const SPANISH_RETURNED_SLOT_DATE_RE = new RegExp(`\\b(?:el\\s+)?(?:${Object.values(WEEKDAY_ES).join('|')}|(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')}))`, 'i');
+
+function slotsFromToolText(text) {
   const slots = [];
-  for (const event of (record.events || []).filter((e) => e.kind === 'tool' && e.ok === true && e.index < before && ['find_slots', 'get_availability'].includes(e.name))) {
-    RETURNED_SLOT_RE.lastIndex = 0;
-    for (const match of String(event.text || '').matchAll(RETURNED_SLOT_RE)) {
-      const hour12 = Number(match[4]);
-      const pm = /^p/i.test(match[6]);
-      slots.push({
-        weekday: match[1].toLowerCase(), month: match[2].toLowerCase(), day: Number(match[3]),
-        hour: (hour12 % 12) + (pm ? 12 : 0), minute: Number(match[5] || 0),
-      });
-    }
+  RETURNED_SLOT_RE.lastIndex = 0;
+  for (const match of String(text || '').matchAll(RETURNED_SLOT_RE)) {
+    const hour12 = Number(match[4]);
+    const refTail = String(text || '').slice(match.index + match[0].length);
+    slots.push({
+      weekday: match[1].toLowerCase(), month: match[2].toLowerCase(), day: Number(match[3]),
+      hour: (hour12 % 12) + (/^p/i.test(match[6]) ? 12 : 0), minute: Number(match[5] || 0),
+      ref: /^\s*\(slot_ref:\s*([^\s)]+)/i.exec(refTail)?.[1] || null,
+    });
   }
   return slots;
+}
+
+const sameReturnedSlot = (a, b) => a.weekday === b.weekday && a.month === b.month
+  && a.day === b.day && a.hour === b.hour && a.minute === b.minute;
+
+function returnedVisitSlotState(record, before) {
+  let active = [];
+  let inactive = [];
+  const events = (record.events || []).filter((e) => e.kind === 'tool' && e.index < before);
+  for (const event of events) {
+    if (event.ok === true && ['find_slots', 'get_availability'].includes(event.name)) {
+      inactive = [...inactive, ...active];
+      active = slotsFromToolText(event.text);
+      inactive = inactive.filter((old) => !active.some((slot) => sameReturnedSlot(old, slot)));
+      continue;
+    }
+    if (event.name !== 'request_booking' || !SLOT_UNAVAILABLE_RESPONSE_RE.test(String(event.text || ''))) continue;
+    const failedRef = String(event.input?.slot_ref || '');
+    const rejected = active.filter((slot) => slot.ref && slot.ref === failedRef);
+    active = active.filter((slot) => !rejected.includes(slot));
+    inactive = [...inactive, ...rejected];
+  }
+  return { active, inactive };
 }
 
 const RETURNED_PERIOD_RE = /^(?:next week|this week|la (?:próxima|proxima) semana)$/i;
@@ -1054,7 +1092,7 @@ function returnedSlotClock(hour, minute) {
   return `(?:${twelveHourClock}${twentyFourHourClock})`;
 }
 
-function returnedSlotStripper(slots) {
+function returnedSlotStripper(slots, mentionAllowed = () => true) {
   const patterns = slots.map(({ weekday, month, day, hour, minute }) => {
     const weekdayEs = WEEKDAY_ES[weekday];
     const monthEs = MONTH_ES[month];
@@ -1062,7 +1100,29 @@ function returnedSlotStripper(slots) {
     const date = `(?:${weekday}(?:\\s*,?\\s+${month}\\s+${day}(?:st|nd|rd|th)?)?|${month}\\s+${day}(?:st|nd|rd|th)?|(?:el\\s+)?${weekdayEs}(?:\\s*,?\\s+${dayEs}\\s+de\\s+${monthEs})?|(?:el\\s+)?${dayEs}\\s+de\\s+${monthEs})`;
     return new RegExp(`\\b${date}\\b\\s*,?\\s*(?:at\\s+|a\\s+)?${returnedSlotClock(hour, minute)}`, 'gi');
   });
-  return (text) => patterns.reduce((out, re) => out.replace(re, ` ${GROUNDED_TIME_MARKER} `), text);
+  return (text) => patterns.reduce((out, re) => out.replace(re, (match, ...args) => {
+    const offset = args.at(-2);
+    return mentionAllowed(out, offset, match.length) ? ` ${GROUNDED_TIME_MARKER} ` : match;
+  }), text);
+}
+
+function inactiveSlotMentionIsHistorical(text, offset, length) {
+  const leftClause = text.slice(0, offset).split(SLOT_HISTORY_BOUNDARY_RE).pop();
+  SLOT_COORDINATE_BOUNDARY_RE.lastIndex = 0;
+  const leftBoundary = [...`${leftClause}${text.slice(offset, offset + length)}`.matchAll(SLOT_COORDINATE_BOUNDARY_RE)].pop();
+  let before = leftBoundary ? leftClause.slice(leftBoundary.index + leftBoundary[0].length) : leftClause;
+  const inherited = leftBoundary ? leftClause.slice(0, leftBoundary.index) : '';
+  const priorSlotAt = [inherited.indexOf(GROUNDED_TIME_MARKER), SPANISH_RETURNED_SLOT_DATE_RE.exec(inherited)?.index]
+    .filter((index) => Number.isInteger(index) && index >= 0).sort((a, b) => a - b)[0] ?? inherited.length;
+  const sharedOperator = inherited.slice(0, priorSlotAt);
+  if (!before.trim() && (clauseIsNegated(sharedOperator) || HISTORICAL_SLOT_MENTION_RE.test(sharedOperator))) before = sharedOperator;
+  const rightClause = text.slice(offset + length).split(SLOT_HISTORY_BOUNDARY_RE)[0];
+  SLOT_COORDINATE_BOUNDARY_RE.lastIndex = 0;
+  const rightBoundary = SLOT_COORDINATE_BOUNDARY_RE.exec(rightClause);
+  const after = rightBoundary ? rightClause.slice(0, rightBoundary.index) : rightClause;
+  const sentence = `${before}${text.slice(offset, offset + length)}${after}`;
+  if (CURRENT_SLOT_AVAILABILITY_RE.test(sentence) && !clauseIsNegated(sentence)) return false;
+  return clauseIsNegated(sentence) || HISTORICAL_SLOT_MENTION_RE.test(sentence);
 }
 
 // Relative dates have four legitimate sources. Keeping those sources in one
@@ -1131,9 +1191,11 @@ function no_visit_time(value, record, { utterances }) {
     let grounded = utterance.index > groundedFromIndex;
     let activeStrip = grounded ? strip : null;
     if (returnedMode) {
-      const returnedSlots = returnedVisitSlots(record, utterance.index);
-      grounded = returnedSlots.length > 0;
-      activeStrip = returnedSlotStripper(returnedSlots);
+      const returnedSlots = returnedVisitSlotState(record, utterance.index);
+      grounded = returnedSlots.active.length + returnedSlots.inactive.length > 0;
+      const stripActive = returnedSlotStripper(returnedSlots.active);
+      const stripInactive = returnedSlotStripper(returnedSlots.inactive, inactiveSlotMentionIsHistorical);
+      activeStrip = (candidate) => stripInactive(stripActive(candidate));
     }
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
@@ -3171,6 +3233,7 @@ const ENGLISH_EVIDENCE_WORDS = [
   'arrange', 'arranges', 'arranged', 'arranging', 'arrangement',
   'guarantee', 'guarantees', 'guaranteed', 'guaranteeing',
   'acknowledge', 'acknowledges', 'acknowledged', 'acknowledging', 'acknowledgement', 'acknowledgment', 'acknowledgements', 'acknowledgments',
+  'affirmative', 'indeed',
   // Contractions ("Don't worry.", "It's done.") and short replies.
   "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
   "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",
