@@ -348,6 +348,10 @@ const REGISTRY = {
             invoiceId: meta.invoice_id,
             channel: 'sms',
             purpose: 'late_payment',
+            source: 'invoice_followup_replay',
+            // A recheck retry's own standing reservation is not a previous
+            // reminder (shadow spacing only).
+            ...(meta.ledger_reservation_key ? { spacingExcludeKey: `followup-replay:${meta.ledger_reservation_key}` } : {}),
             logTag: 'invoice-followup-replay',
           });
           if (!permitted) return { eligible: false, reason: 'collections-policy-denied' };

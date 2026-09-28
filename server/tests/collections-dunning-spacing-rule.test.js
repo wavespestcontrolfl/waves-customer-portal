@@ -36,7 +36,9 @@ function row(overrides = {}) {
 // terminal select() resolving to the supplied rows.
 function fakeDatabase(rows) {
   const q = {};
-  ['where', 'whereIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  q.wheres = [];
+  q.where = jest.fn((...args) => { q.wheres.push(args); return q; });
+  ['whereIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.select = jest.fn(async () => rows);
   return jest.fn(() => q);
 }
@@ -46,10 +48,11 @@ describe('constants', () => {
     expect(SPACING_DAYS).toBe(7);
   });
 
-  test('OVERDUE_SOURCES is exactly the five dunning-rail sources', () => {
+  test('OVERDUE_SOURCES is exactly the five dunning rails plus the follow-up rail\'s deferred replay', () => {
     expect([...OVERDUE_SOURCES].sort()).toEqual([
       'balance_reminder_late_payment_check',
       'balance_reminder_workflow',
+      'invoice_followup_replay',
       'invoice_followups',
       'late_payment_checker',
       'previsit_balance_reminder',
@@ -173,6 +176,19 @@ describe('dunning spacing replay event reduction', () => {
     expect(collapsed.map(({ id }) => id)).toEqual(['fu-sms', 'other-invoice', 'checker-keyless', 'fu-next-step']);
   });
 
+  test('keyless legs of every rail collapse by customer + source + invoice set within 15 minutes (Codex r3)', () => {
+    const leg = (id, minutes, overrides = {}) => event(id, minutes / 60, { metadata: {}, invoice_ids: ['inv-1'], ...overrides });
+    const collapsed = collapseDunningReminderEvents([
+      leg('checker-sms', 0, { source: 'late_payment_checker', channel: 'sms' }),
+      leg('checker-email', 1, { source: 'late_payment_checker', channel: 'email' }),
+      leg('balance-sms', 0, { source: 'balance_reminder_late_payment_check', channel: 'sms' }),
+      leg('balance-email', 2, { source: 'balance_reminder_late_payment_check', channel: 'email', invoice_ids: '["inv-1"]' }),
+      leg('checker-later', 60, { source: 'late_payment_checker' }),
+      leg('checker-other-invoice', 1, { source: 'late_payment_checker', invoice_ids: ['inv-2'] }),
+    ]);
+    expect(collapsed.map(({ id }) => id).sort()).toEqual(['balance-email', 'checker-email', 'checker-later', 'checker-other-invoice']);
+  });
+
   test('JSON metadata dedupes and the latest sent retry wins with an id-stable timestamp tie', () => {
     const events = collapseDunningReminderEvents([
       event('first', 1, { source: 'invoice_followups', metadata: JSON.stringify({ notificationEventKey: 'retry' }) }),
@@ -261,6 +277,21 @@ describe('lastOverdueReminderWithin7d', () => {
       now: NOW, database, excludeLedgerIds: ['ledger-9'],
     });
     expect(result).toBeNull();
+  });
+
+  test('the query is closed at now, so a row committed after the evaluation time never holds (Codex r3)', async () => {
+    const database = fakeDatabase([]);
+    await lastOverdueReminderWithin7d('cust-1', { now: NOW, database });
+    const q = database.mock.results[0].value;
+    expect(q.wheres).toContainEqual(['occurred_at', '<=', NOW]);
+  });
+
+  test('excludeIdempotencyKey drops a retry\'s own standing reservation (Codex r3)', async () => {
+    const own = row({ id: 'ledger-own', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:abc', occurred_at: new Date(NOW.getTime() - HOUR_MS).toISOString() });
+    const other = row({ id: 'ledger-other', source: 'invoice_followup_replay', idempotency_key: 'followup-replay:xyz', occurred_at: new Date(NOW.getTime() - 2 * HOUR_MS).toISOString() });
+    const database = fakeDatabase([own, other]);
+    const result = await lastOverdueReminderWithin7d('cust-1', { now: NOW, database, excludeIdempotencyKey: 'followup-replay:abc' });
+    expect(result).toEqual(other);
   });
 
   test('no rows at all returns null', async () => {

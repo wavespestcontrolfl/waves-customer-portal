@@ -85,6 +85,10 @@ async function collectionsChannelPermitted({
   offLedgerBalanceCents = 0,
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
+  // Shadow spacing only (dunning-spacing.js): the rail sending, and a
+  // reservation key the rail's own retry may already have written.
+  source = null,
+  spacingExcludeKey = null,
   logTag = 'collections',
   detail = false,
   database,
@@ -99,6 +103,8 @@ async function collectionsChannelPermitted({
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
       ...(database ? { database } : {}),
+      ...(source ? { source } : {}),
+      ...(spacingExcludeKey ? { spacingExcludeKey } : {}),
     });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a

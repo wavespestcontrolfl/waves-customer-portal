@@ -226,3 +226,21 @@ describe('non-overdue-reminder purposes never reach the shadow check', () => {
     expect(DunningSpacing.lastOverdueReminderWithin7d).toHaveBeenCalled();
   });
 });
+
+describe('a caller that names its rail (Codex #5189 r3)', () => {
+  test('the exempt in-call pay link never reaches the shadow check', async () => {
+    process.env.GATE_DUNNING_SPACING_SHADOW = 'true';
+    armAllowedBaseline();
+    await evalSms('late_payment', { source: 'collections_voice_paylink' });
+    expect(DunningSpacing.lastOverdueReminderWithin7d).not.toHaveBeenCalled();
+  });
+
+  test('the follow-up replay is observed, with its own reservation key excluded', async () => {
+    process.env.GATE_DUNNING_SPACING_SHADOW = 'true';
+    armAllowedBaseline();
+    await evalSms('late_payment', { source: 'invoice_followup_replay', spacingExcludeKey: 'followup-replay:abc' });
+    expect(DunningSpacing.lastOverdueReminderWithin7d).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+      excludeIdempotencyKey: 'followup-replay:abc',
+    }));
+  });
+});

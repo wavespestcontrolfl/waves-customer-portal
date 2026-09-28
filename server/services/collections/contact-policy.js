@@ -149,11 +149,17 @@ function dunningSpacingShadowLive() {
 // changing `result` in any way. Never throws into the caller — a shadow
 // read failing must never turn an allow into policy_evaluation_error.
 async function dunningSpacingShadowLog(customerId, {
-  channel, purpose, now, excludeLedgerIds, database, result,
+  channel, purpose, now, excludeLedgerIds, database, result, source = null, spacingExcludeKey = null,
 }) {
   if (!dunningSpacingShadowLive() || !DunningSpacing.OVERDUE_PURPOSES.has(purpose)) return;
+  // A caller that names its rail is observed only when that rail is one of
+  // the designated reminder rails (Codex #5189 r3: the in-call pay link
+  // evaluates with purpose late_payment but is exempt).
+  if (source && !DunningSpacing.OVERDUE_SOURCES.has(source)) return;
   try {
-    const holding = await DunningSpacing.lastOverdueReminderWithin7d(customerId, { now, excludeLedgerIds, database });
+    const holding = await DunningSpacing.lastOverdueReminderWithin7d(customerId, {
+      now, excludeLedgerIds, database, excludeIdempotencyKey: spacingExcludeKey,
+    });
     if (!holding) return;
     const hoursSince = (now.getTime() - new Date(holding.occurred_at).getTime()) / (60 * 60 * 1000);
     const verdict = result.allowed ? 'allowed' : `denied:${result.denialReasons.join(',')}`;
@@ -269,7 +275,7 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null, database 
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db, source = null, spacingExcludeKey = null } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -626,7 +632,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // rule would have held, logs it, and returns `result` UNCHANGED — see
     // dunning-spacing.js's module header.
     await dunningSpacingShadowLog(customerId, {
-      channel, purpose, now, excludeLedgerIds, database, result,
+      channel, purpose, now, excludeLedgerIds, database, result, source, spacingExcludeKey,
     });
 
     return result;

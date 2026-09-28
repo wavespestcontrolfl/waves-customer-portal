@@ -43,6 +43,9 @@
 
 const OVERDUE_SOURCES = new Set([
   'invoice_followups',
+  // The follow-up rail's deferred SMS, delivered after the send window
+  // (deferred-replay-registry.js; Codex #5189 r3).
+  'invoice_followup_replay',
   'late_payment_checker',
   'previsit_balance_reminder',
   'balance_reminder_late_payment_check',
@@ -90,32 +93,43 @@ function compareReplayRows(a, b) {
 // One notification event may write a row per selected channel. For replay
 // evidence it is one customer contact: discard confirmed undelivered attempts
 // first, then use the latest sent row as the event's representative. Keyless
-// legacy rows remain independent contacts, except historical follow-up legs
-// (legacyFollowupEventKey). Sorting here makes the reducer
+// rows group by customer + source + invoice set within SIBLING_WINDOW_MS.
+// Sorting here makes the reducer
 // deterministic even when it is exercised without the replay query.
-// Follow-up ledger rows written before invoice-followups stamped a shared
-// notificationEventKey carry only metadata.step_id (Codex #5189 r2). One
-// step of one invoice's sequence is one touch (the step advances once it
-// sends), so source + invoice + step groups those historical legs.
-function legacyFollowupEventKey(row) {
-  if (row?.source !== 'invoice_followups') return null;
-  const stepId = metadataOf(row).step_id;
-  let invoiceIds = row.invoice_ids;
-  if (typeof invoiceIds === 'string') {
-    try { invoiceIds = JSON.parse(invoiceIds); } catch { invoiceIds = null; }
+// Keyless multi-channel legs (Codex #5189 r2/r3): every rail has written
+// one ledger row per channel for a single touch without a shared
+// notificationEventKey (invoice-followups before it stamped one, the
+// late-payment checker, balance-reminder). Rows from the SAME customer,
+// SAME source and SAME invoice set within SIBLING_WINDOW_MS of the event's
+// first leg are one touch: a rail's channel legs land seconds apart, and no
+// rail reminds about the same invoices twice from one source minutes apart.
+const SIBLING_WINDOW_MS = 15 * 60 * 1000;
+
+function invoiceSetOf(row) {
+  let ids = row?.invoice_ids;
+  if (typeof ids === 'string') {
+    try { ids = JSON.parse(ids); } catch { ids = null; }
   }
-  if (!stepId || !Array.isArray(invoiceIds) || invoiceIds.length !== 1) return null;
-  return `invoice-followup-legacy:${invoiceIds[0]}:${stepId}`;
+  return Array.isArray(ids) ? ids.map(String).sort() : [];
 }
 
 function collapseDunningReminderEvents(rows) {
   const sent = [...(rows || [])].filter(countsAsSent).sort(compareReplayRows);
   const events = [];
   const keyedEventIndexes = new Map();
+  const keylessEvents = new Map();
   for (const row of sent) {
     const rawEventKey = metadataOf(row).notificationEventKey;
-    const eventKey = typeof rawEventKey === 'string' && rawEventKey.trim() ? rawEventKey : legacyFollowupEventKey(row);
+    const eventKey = typeof rawEventKey === 'string' && rawEventKey.trim() ? rawEventKey : null;
     if (!eventKey) {
+      const siblingKey = JSON.stringify([String(row.customer_id), row.source, invoiceSetOf(row)]);
+      const open = keylessEvents.get(siblingKey);
+      const at = new Date(row.occurred_at).getTime();
+      if (open && at - open.startedAt <= SIBLING_WINDOW_MS) {
+        events[open.index] = row; // ascending order, so this is the latest leg
+        continue;
+      }
+      keylessEvents.set(siblingKey, { index: events.length, startedAt: at });
       events.push(row);
       continue;
     }
@@ -190,7 +204,9 @@ function isWithin7d(row, now) {
  * (a caller's own same-run siblings) before the newest-first pick, same
  * convention as contact-policy.js's other frequency windows.
  */
-async function lastOverdueReminderWithin7d(customerId, { now = new Date(), excludeLedgerIds = [], database } = {}) {
+async function lastOverdueReminderWithin7d(customerId, {
+  now = new Date(), excludeLedgerIds = [], excludeIdempotencyKey = null, database,
+} = {}) {
   if (!customerId || !database) return null;
   const windowStart = new Date(now.getTime() - SPACING_MS);
   const rows = await database('collections_contact_ledger')
@@ -198,11 +214,15 @@ async function lastOverdueReminderWithin7d(customerId, { now = new Date(), exclu
     .whereIn('source', [...OVERDUE_SOURCES])
     .whereIn('purpose', [...OVERDUE_PURPOSES])
     .where('occurred_at', '>', windowStart)
+    // Closed at the evaluation time (Codex #5189 r3): a row another rail
+    // commits after `now` was captured is not a previous reminder.
+    .where('occurred_at', '<=', now)
     .orderBy('occurred_at', 'desc')
-    .select('id', 'channel', 'source', 'purpose', 'occurred_at', 'metadata');
+    .select('id', 'channel', 'source', 'purpose', 'occurred_at', 'metadata', 'idempotency_key');
   const excluded = new Set((excludeLedgerIds || []).map(String));
   return (rows || []).find((row) => {
     if (excluded.has(String(row.id))) return false;
+    if (excludeIdempotencyKey && row.idempotency_key === excludeIdempotencyKey) return false;
     // Belt & suspenders vs. the query's own source/purpose filter — a test
     // double or a future query change must not silently widen this.
     if (!isOverdueReminderRow(row)) return false;
