@@ -203,7 +203,17 @@ export default function MobileCheckoutSheet({
   // that fee — see resolveScheduledServiceCharge's own header,
   // admin-schedule.js), so offering the pickers would let the tech add an
   // extra the server then 409s.
-  const feeOnlyPerApplicationPreview = !attachedInvoicePrediction
+  // Codex pre-push P1 (round 13, Codex r11 finding): this must ALSO require
+  // !hasOwnPrice explicitly — it is read directly (not just inside the
+  // `price` ternary's own hasOwnPrice-gated branch) further below, to hide
+  // the Add Service / Add Item pickers. Without this, an EXPLICITLY priced
+  // per_application visit whose prediction still happens to carry kind
+  // 'invoice'/'auto_charge'/'prepaid' (completionInvoiceAmount's precedence
+  // doesn't change kind based on WHERE the amount came from) would
+  // incorrectly hide its supported checkout controls and claim the visit
+  // needs a price it already has.
+  const feeOnlyPerApplicationPreview = !hasOwnPrice
+    && !attachedInvoicePrediction
     && service.billingLane?.mode === 'per_application'
     && ['invoice', 'auto_charge', 'prepaid'].includes(predictionKind);
   const price = hasOwnPrice
@@ -365,6 +375,22 @@ export default function MobileCheckoutSheet({
   const siblingCollectible = !!siblingCoverage?.collectible;
   const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
+  // Codex pre-push P1 (round 13, Codex r11 finding): resolveScheduledServiceCharge
+  // refuses the per_application_fee_at_completion shape UNCONDITIONALLY —
+  // even when this visit already has an open, otherwise-collectible
+  // attached invoice (mirrors round-9 P1's own "never trust an existing
+  // invoice blindly for this exact shape" posture) — so openVisitInvoice's
+  // positive amountDue is NOT actually chargeable through this sheet
+  // either, although it drives totalBeforePrepaid to a positive number
+  // below and would otherwise leave Charge enabled for a tap the server
+  // then 409s. Scoped to the SAME shape as feeOnlyPerApplicationPreview
+  // (unpriced, non-callback, per_application lane) — a callback or an
+  // explicit price is unaffected, and stays on the normal attached-invoice
+  // collection flow.
+  const attachedInvoiceRefusedForFeeAtCompletion = !hasOwnPrice
+    && !service.isCallback
+    && service.billingLane?.mode === 'per_application'
+    && !!openVisitInvoice;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
   // instead of falling back to a preview that fails after tender pick.
@@ -427,7 +453,8 @@ export default function MobileCheckoutSheet({
   // existing, separately-tested self-pay flow this must not disable.
   const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
     || (!hasOwnPrice && payerBilled && !invoicePreview)
-    || siblingBlocksCharge;
+    || siblingBlocksCharge
+    || attachedInvoiceRefusedForFeeAtCompletion;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -648,6 +675,8 @@ export default function MobileCheckoutSheet({
               ? 'Payment processing — nothing to collect'
               : priceRefreshBlocksCharge
                 ? 'Price needs a refresh — reopen this visit'
+                : attachedInvoiceRefusedForFeeAtCompletion
+                ? 'Bills at completion — see the invoice or set a price'
                 : siblingNeedsReview
                 ? 'Needs review on Customer 360 — can’t charge here'
                 : siblingCollectible && nothingToCharge
@@ -880,9 +909,20 @@ export default function MobileCheckoutSheet({
           <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
             {processingVisitInvoice
               ? 'A payment for this invoice is already processing — do not collect again.'
-              : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
-                {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
-                the Invoices page before charging.</>}
+              // Codex pre-push P1 (round 13, Codex r11 finding): this visit
+              // bills its acceptance fee at completion — resolveScheduledServiceCharge
+              // refuses the mint for it even with this invoice already
+              // attached (the same "never trust an existing invoice blindly
+              // for this shape" posture round-9 P1 established), so the
+              // ordinary "charging collects this invoice" copy would be
+              // wrong here — every tap 409s.
+              : attachedInvoiceRefusedForFeeAtCompletion
+                ? <>This visit bills its application fee at completion, so Charge Now can’t collect{' '}
+                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'this invoice'} here — settle it from
+                  the Invoices page, or set a price on this visit first.</>
+                : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
+                  {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
+                  the Invoices page before charging.</>}
           </div>
         ) : feeOnlyPerApplicationPreview ? (
           <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>

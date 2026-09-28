@@ -319,6 +319,36 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
   });
 
+  // Codex pre-push P1 (round 13, Codex r11 finding): feeOnlyPerApplicationPreview
+  // must require !hasOwnPrice explicitly — it is read directly (not only
+  // inside `price`'s own hasOwnPrice-gated branch) to hide the Add
+  // Service / Add Item pickers. An EXPLICITLY priced per_application visit
+  // whose prediction still happens to carry kind 'invoice' (completionInvoiceAmount's
+  // precedence doesn't change kind based on WHERE the amount came from)
+  // must keep its normal Charge button and checkout-extra controls.
+  it('a PRICED per_application visit keeps its Charge button and Add Service / Add Item controls', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: 120,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 98, grossAmount: 98, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $120.00' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Service' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Item or Discount' })).toBeInTheDocument();
+    expect(screen.queryByText(/bills its application fee at completion/)).not.toBeInTheDocument();
+  });
+
   // Older cached payload (or a kind that never nets against THIS customer's
   // prepaid, like 'payer') carries no grossAmount at all — falls back to
   // `amount` rather than crashing on a missing field.
@@ -446,7 +476,46 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
   // all — so the missing-grossAmount refresh guard must not fire here; it
   // would otherwise disable checkout indefinitely for every unpriced,
   // partially-prepaid visit that already has an open attached invoice.
+  // Lane is monthly_membership (never per_application — see the round-13
+  // "Bills at completion" test below for why that lane's attached invoice
+  // is refused instead of charged here).
   it('does not block checkout on the missing-grossAmount guard when an attached invoice already drives the total', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'monthly_membership',
+            source: 'explicit',
+            monthlyRate: 40,
+            // No grossAmount — same shape predictionFromAttachedInvoice
+            // always produces, never a stale/legacy payload.
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
+    // $214 invoice total, $60 prepaid credited once.
+    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
+  });
+
+  // Owner ruling — REFUSE EXTRAS-ONLY MINTS FOR THE FEE SHAPE (round 13,
+  // Codex r11 finding): resolveScheduledServiceCharge refuses the
+  // per_application_fee_at_completion shape UNCONDITIONALLY, even when this
+  // visit already has an open, otherwise-collectible attached invoice — so
+  // the SAME fixture as the test above, but under the per_application lane
+  // the ruling actually narrows, must NOT preview a live "Charge $X" button
+  // (it would 409 on every tap). "Bills at completion — see the invoice or
+  // set a price" replaces it, and the copy block explains why instead of
+  // promising the tap will work.
+  it('refuses checkout for an unpriced per_application visit even with an attached invoice already driving the total', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -460,17 +529,15 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
             mode: 'per_application',
             source: 'explicit',
             monthlyRate: null,
-            // No grossAmount — same shape predictionFromAttachedInvoice
-            // always produces, never a stale/legacy payload.
             prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
           },
         }}
         onClose={() => {}}
       />,
     );
-    expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
-    // $214 invoice total, $60 prepaid credited once.
-    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Charge $154.00' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Bills at completion — see the invoice or set a price' })).toBeDisabled();
+    expect(screen.getByText(/Charge Now can.t collect invoice WPC-2099-0001 here/)).toBeInTheDocument();
   });
 
   // Codex pre-push P2 (round 3): predictionFromAttachedInvoice returns
