@@ -637,6 +637,53 @@ describe('next-visit claims fixture table', () => {
     ['We arrive Monday, August 3 between 8 and 10 AM, specifically at 9 AM.', ['ungrounded_time:9 AM']],
     ['Captures were recorded at between 2 and 3 traps.', []],
     ['Activity dropped from 3 to 2 stations.', []],
+    // Fail closed (codex r3 on #5055): inside a future visit claim every
+    // temporal token must agree with the one authoritative appointment, so
+    // an unlisted phrasing is rejected instead of passing unseen.
+    // lowercase months are months unless a verb follows (L304)
+    ['Your next visit is mar 3, arriving 8–10 AM.', ['ungrounded_date:mar 3']],
+    ['Your next visit is may 4, arriving 8–10 AM.', ['ungrounded_date:may 4']],
+    ['Your next visit is may the 4th.', ['ungrounded_date:may the 4th']],
+    ['We will be back in May.', ['ungrounded_date:May']],
+    ['We will be back in March when activity peaks.', ['ungrounded_date:March']],
+    ['Some traps may need moving before your next visit.', []],
+    ['Stains may mar the finish before your next visit.', []],
+    // a part of the day must be one the arrival window covers (L260)
+    ['Your next visit is Monday afternoon.', ['ungrounded_day_period:afternoon']],
+    ['We will be back Monday evening.', ['ungrounded_day_period:evening']],
+    ['We will be back Monday PM.', ['ungrounded_day_period:pm']],
+    ['Your next visit is tomorrow morning.', ['ungrounded_relative_date:tomorrow']],
+    ['Your next visit is this afternoon.', ['ungrounded_relative_date:this afternoon']],
+    ['Your next visit is Monday morning, arriving 8–10 AM.', []],
+    // every other token type: relative words, spans, ordinals, numeric
+    // dates, bare arrival ranges and hours, abbreviated weekdays
+    ['Your next visit is next week.', ['ungrounded_relative_date:next week']],
+    ['We will be back over the weekend.', ['ungrounded_relative_date:weekend']],
+    ['We will be back a week from Monday.', ['ungrounded_relative_date:a week from monday']],
+    ['We will be back on the 4th.', ['ungrounded_date:on the 4th']],
+    ['We will be back on the 3rd.', []],
+    ['Your next visit is 8/4.', ['ungrounded_date:8/4']],
+    ['Your next visit is 8/3.', []],
+    ['We will be back Monday, 7–8.', ['ungrounded_window:7–8']],
+    ['We will be back Monday by 9.', ['ungrounded_time:BY 9']],
+    ['We will be back Tue.', ['ungrounded_weekday:Tue']],
+    ['Your second visit is Monday, August 3.', []],
+    // completed visits are history, not appointments (L332); anything short
+    // of clearly past stays under validation
+    ["At today's September 28 visit, we inspected the traps.", []],
+    ['We treated on Sep. 3.', []],
+    ['Since our visit on Aug. 1, activity has dropped.', []],
+    ['Our last visit was Aug. 1.', []],
+    ['Our technician visited on Sep. 3.', []],
+    ['We treated on Sep. 3 and will return Sep. 10.', ['ungrounded_date:Sep. 3', 'ungrounded_date:Sep. 10']],
+    ['Our technician came by Sep. 3 and returns Sep. 10.', ['ungrounded_date:Sep. 3', 'ungrounded_date:Sep. 10']],
+    ['Our technician inspected the traps, and the follow-up is Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We treated the yard, follow-up Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We noted your follow-up as Tuesday.', ['ungrounded_weekday:Tuesday']],
+    ['We set the follow-up for Tuesday.', ['ungrounded_weekday:Tuesday']],
+    // care copy that makes no visit claim keeps its ordinary time words
+    ['Keep pets inside this afternoon.', []],
+    ['Water the lawn in the morning.', []],
   ])('%s', (text, expected) => {
     expect(problemsFor(text)).toEqual(expected);
   });
@@ -697,6 +744,19 @@ describe('next-visit claims fixture table', () => {
     expect(withoutStaleVisitClaims(block, facts.nextVisit)).toBe('We checked 7 traps today. '
       + 'A follow-up visit in 10–14 days is recommended. Contact us tomorrow if activity returns.');
     expect(withoutStaleVisitClaims(block, null)).toBe(block);
+    // a sentence about the completed visit is ratified history, never a
+    // stale appointment (codex r3 on #5055, L332)
+    const october = { date: 'Monday, October 5', window: '8–10 AM' };
+    expect(withoutStaleVisitClaims(
+      "At today's September 28 visit, we inspected the traps. We will return tomorrow.",
+      october,
+    )).toBe("At today's September 28 visit, we inspected the traps.");
+    expect(withoutStaleVisitClaims('Since our visit on Aug. 1, activity has dropped.', october))
+      .toBe('Since our visit on Aug. 1, activity has dropped.');
+    // an abbreviation that ends a clause ends the sentence, so only the
+    // stale promise leaves (codex r3 on #5055, L154)
+    expect(withoutStaleVisitClaims('Keep food sealed and remove clutter, etc. We will return tomorrow.', october))
+      .toBe('Keep food sealed and remove clutter, etc.');
   });
 
   // Sentence boundaries: abbreviations and decimals never end a sentence,
@@ -712,6 +772,11 @@ describe('next-visit claims fixture table', () => {
     ['J. Smith approved the plan. Keep pets inside.', ['J. Smith approved the plan.', 'Keep pets inside.']],
     ['Water 1.5 inches weekly. Keep pets inside.', ['Water 1.5 inches weekly.', 'Keep pets inside.']],
     ['We checked the traps! Keep pets inside? Yes.', ['We checked the traps!', 'Keep pets inside?', 'Yes.']],
+    // "etc."-style abbreviations end the sentence before a capitalized word
+    // (codex r3 on #5055, L154); a lowercase word or a date still continues
+    ['Keep food sealed and remove clutter, etc. We will return tomorrow.', ['Keep food sealed and remove clutter, etc.', 'We will return tomorrow.']],
+    ['Bring in pet food, etc. before dusk. Keep pets inside.', ['Bring in pet food, etc. before dusk.', 'Keep pets inside.']],
+    ['Seal gaps, vents, etc. Monday works too.', ['Seal gaps, vents, etc. Monday works too.']],
   ])('sentences of %s', (block, expected) => {
     expect(splitSentences(block)).toEqual(expected);
   });
