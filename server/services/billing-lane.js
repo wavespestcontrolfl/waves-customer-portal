@@ -20,7 +20,12 @@ const { invoiceAmountDue, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStat
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) — the canonical call-time
 // reader, so a flip needs no redeploy. Widens hasAuthoritativeZeroPrice
 // below; the other readers in this change call it through this module.
-const stampedZeroFreeLive = () => require('../config/feature-gates').stampedZeroFreeLive();
+// A feature-gates module without the reader (older partial test mocks)
+// reads as gate off — today's behavior — same guard as closeout-alerts.
+const stampedZeroFreeLive = () => {
+  const gates = require('../config/feature-gates');
+  return typeof gates.stampedZeroFreeLive === 'function' && gates.stampedZeroFreeLive() === true;
+};
 
 // Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
 // as a literal so this module stays db-free for pure unit tests; the
