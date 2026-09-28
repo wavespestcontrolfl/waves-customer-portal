@@ -205,6 +205,42 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(payload.prompt_version).toBe('house_voice_v12_real_answers');
   });
 
+  test('persists the drafter\'s facts-generated instant as input_snapshot.facts_generated_at (Codex #5194 P2)', async () => {
+    seedActiveSchedulingThread();
+    const factsAt = new Date('2026-09-28T23:59:30.000Z');
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'A teammate will follow up.', intended_actions: [{ type: 'escalate', note: 'followup_promised' }], auto_send_safe: false, missing_info: null },
+      passes: 1,
+      converged: true,
+      model: MODELS.OPENAI_SMS_DRAFT,
+      promptVersion: 'house_voice_v12_real_answers',
+      factsGeneratedAt: factsAt,
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-10',
+    });
+
+    const snapshot = JSON.parse(lastDecisionInsert().input_snapshot);
+    expect(snapshot.facts_generated_at).toBe(factsAt.toISOString());
+  });
+
+  test('omits facts_generated_at when the drafter returns none (legacy/frozen replay)', async () => {
+    seedActiveSchedulingThread();
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers',
+    });
+
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-11',
+    });
+
+    expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('facts_generated_at');
+  });
+
   test('passes the already-resolved estimate id through to generateGroundedDraft (pre-push audit P2)', async () => {
     // fetchOpenTimesBlock's getAvailableSlots(city, estimateId, {customerId})
     // needs THAT estimate's own service minutes, not a generic default —
