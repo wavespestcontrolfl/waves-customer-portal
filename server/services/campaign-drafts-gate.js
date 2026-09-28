@@ -152,7 +152,15 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
     .first('id');
   if (recentCampaignSms) return 'recent_campaign_sms';
 
-  const noticeCols = await prepayNoticeCooldownColumns();
+  return recentPrepayRenewalTouch(customerId);
+}
+
+// The annual-prepay renewal conversation, as one touch: a renewal notice in
+// the window ('recent_prepay_notice'), or — once the termite renewal-charge
+// lane's schema is present — durable renewal-charge contact
+// ('recent_renewal_charge_contact', Codex #4971 r4 P2).
+async function recentPrepayRenewalTouch(customerId) {
+  const { cols: noticeCols, renewalChargeLane } = await prepayNoticeCooldownColumns();
   const recentPrepayNotice = await db('annual_prepay_terms')
     .where({ customer_id: customerId })
     .where(function () {
@@ -160,8 +168,41 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
     })
     .first('id');
   if (recentPrepayNotice) return 'recent_prepay_notice';
-
+  if (renewalChargeLane && (await recentTermiteRenewalContact(customerId))) return 'recent_renewal_charge_contact';
   return null;
+}
+
+// Codex #4971 r4 P2: the termite renewal charge counts as a customer touch
+// only on DURABLE contact evidence — never its bookkeeping stamps. The old
+// renewal_charge_attempted_at / renewal_charge_skipped_at columns fire on a
+// fence claim that never reached Stripe, or a skip whose pay link was never
+// delivered (the customer heard nothing), and miss a pay link delivered
+// later by a recovery leg. Counted instead, in the window: the renewal
+// successor's invoice delivery stamps (sent_at / sms_sent_at /
+// email_sent_at — the time-bounded form of the charge module's
+// whereInvoiceDelivered), or a charge attempt on it with PROVIDER evidence
+// (whereAttemptPresented — a PaymentIntent id, so Stripe actually processed
+// the request; Codex #4971 r22 P2: submitted_at alone is committed BEFORE
+// the Stripe call, so a crash in that gap stamps it with no contact made),
+// dated by submitted_at (created_at for a PaymentIntent-only row).
+async function recentTermiteRenewalContact(customerId) {
+  const { whereAttemptPresented } = require('./termite-annual-renewal-charge')._private;
+  const recent = db.raw(COOLDOWN_INTERVAL);
+  return db('annual_prepay_terms as t')
+    .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+    .where('t.customer_id', customerId)
+    .whereNotNull('t.renewed_from_term_id')
+    .whereNotNull('t.annual_plan_version')
+    .where(function durableRenewalContact() {
+      this.where('i.sent_at', '>', recent)
+        .orWhere('i.sms_sent_at', '>', recent)
+        .orWhere('i.email_sent_at', '>', recent)
+        .orWhereExists(function chargePresentedByStripe() {
+          whereAttemptPresented(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = i.id'))
+            .whereRaw(`coalesce(a.submitted_at, a.created_at) > ${COOLDOWN_INTERVAL}`);
+        });
+    })
+    .first('t.id');
 }
 
 // Renewal-notice witness columns that count as a customer-facing renewal
@@ -175,15 +216,27 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
 // quietly checking only the base columns and missing a termite notice.
 const BASE_NOTICE_COLUMNS = ['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at'];
 const TERMITE_NOTICE_COLUMNS = ['notice_45_sent_at', 'notice_45_late_sent_at', 'notice_30_late_sent_at'];
+// Codex #4971 (termite annual renewal-charge, dark behind
+// GATE_TERMITE_ANNUAL_PLAN): a customer whose card was just tried, or who
+// was just sent the renewal invoice, is EXACTLY as mid-renewal-conversation
+// as one who only got a notice. r4 P2: that touch is read from durable
+// contact evidence (recentTermiteRenewalContact), not from the lane's own
+// bookkeeping columns — this one only says the lane's schema is present
+// (same "queried only once present" rolling-deploy discipline).
+const TERMITE_RENEWAL_CHARGE_LANE_COLUMN = 'renewal_charge_attempted_at';
 let cachedNoticeColumns = null;
 async function prepayNoticeCooldownColumns() {
   if (cachedNoticeColumns) return cachedNoticeColumns;
-  const present = await Promise.all(TERMITE_NOTICE_COLUMNS.map((c) => db.schema.hasColumn('annual_prepay_terms', c)));
-  const cols = [...BASE_NOTICE_COLUMNS, ...TERMITE_NOTICE_COLUMNS.filter((c, i) => present[i])];
+  const candidateCols = [...TERMITE_NOTICE_COLUMNS, TERMITE_RENEWAL_CHARGE_LANE_COLUMN];
+  const present = await Promise.all(candidateCols.map((c) => db.schema.hasColumn('annual_prepay_terms', c)));
+  const result = {
+    cols: [...BASE_NOTICE_COLUMNS, ...TERMITE_NOTICE_COLUMNS.filter((c, i) => present[i])],
+    renewalChargeLane: present[present.length - 1],
+  };
   // Cache only the complete set: a partial result (mid rolling deploy)
   // is re-probed next call so a column added moments later is picked up.
-  if (present.every(Boolean)) cachedNoticeColumns = cols;
-  return cols;
+  if (present.every(Boolean)) cachedNoticeColumns = result;
+  return result;
 }
 
 /**

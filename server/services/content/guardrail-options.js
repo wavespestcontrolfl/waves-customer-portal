@@ -18,6 +18,8 @@
  */
 
 const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
+const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
+const { HUB_SITE_KEYS, normalizeSpokeSites } = require('../content-astro/spoke-sites');
 
 const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
 
@@ -67,10 +69,28 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   // seeds carry it outside the intercept bucket and the quality gate's
   // hub_link_present check REQUIRES the draft to contain it.
   const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link || null;
+  // Related-post links (related-posts.js, supporting-blog only) — an OPTIONAL
+  // allowance, not a checklist like internal_links_to_add: the writer may
+  // link some of these, never all are required. Threaded from
+  // voice_constraints.related_posts (no dedicated content_briefs column; see
+  // content-brief-builder._composeBrief) so the gate accepts exactly the
+  // paths the brief actually proposed — never a guessed blog-post slug.
+  let relatedPostLinks = brief?.voice_constraints?.related_posts;
+  if (typeof relatedPostLinks === 'string') { try { relatedPostLinks = JSON.parse(relatedPostLinks); } catch (_) { relatedPostLinks = []; } }
+  const relatedPostPaths = (Array.isArray(relatedPostLinks) ? relatedPostLinks : [])
+    .map((entry) => (typeof entry === 'string' ? entry : entry?.path))
+    .filter(Boolean);
   const allowedInternalLinks = [
     ...(Array.isArray(briefLinks) ? briefLinks : []),
     ...(curatedHubLink ? [curatedHubLink] : []),
   ];
+  const selectedRelatedHosts = brief?.voice_constraints?.related_posts_target_sites;
+  const effectiveSpoke = resolveSpokeTarget(brief);
+  const effectiveRelatedHosts = normalizeSpokeSites(effectiveSpoke ? [effectiveSpoke] : HUB_SITE_KEYS).sort();
+  const frozenRelatedHosts = normalizeSpokeSites(selectedRelatedHosts).sort();
+  const relatedTargetMatches = selectedRelatedHosts != null
+    && frozenRelatedHosts.length === effectiveRelatedHosts.length
+    && frozenRelatedHosts.every((host, index) => host === effectiveRelatedHosts[index]);
   const isRefresh = brief.action_type === 'refresh_existing_page';
   // A supporting-blog run IS a blog target: the affiliate gate builds its
   // product index only for blog targets, so without this every valid
@@ -118,6 +138,18 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
     // (Codex).
     forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
     allowedInternalLinks,
+    // The network kill switch is evaluated again at publication time. If it
+    // changes a frozen spoke brief into a hub publish (or vice versa), the
+    // frozen paths stay bound to their FROZEN host set (never the drifted
+    // effective one) and relatedPostLinksLive tells internalRouteFinding to
+    // quarantine every reference to them — relative or absolute — as denied,
+    // rather than dropping their identity: emptying relatedPostLinks let a
+    // wrong-host link past the host check entirely if check_existing_content
+    // separately re-admitted the same path into the generic allowlist
+    // (Codex #4984 r6+ P1).
+    relatedPostLinks: relatedPostPaths,
+    relatedPostHosts: frozenRelatedHosts,
+    relatedPostLinksLive: relatedTargetMatches,
     isRefresh,
   };
 }

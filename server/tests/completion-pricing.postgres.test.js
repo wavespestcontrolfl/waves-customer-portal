@@ -207,6 +207,25 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     expect(await pricing.committedCompletionPrice(trx, record.id, review)).toBe(0);
     await expect(pricing.committedCompletionPrice(trx, record.id, { witness: 'b'.repeat(64) })).rejects.toMatchObject({ code: 'completion_pricing_resume_unavailable' });
   }));
+  // Codex round 4 P1 follow-through: completionInvoiceAmount's
+  // primaryLinePrice must actually reach loadCompletionPricing's own
+  // currentCharge derivation, not just predictCompletionBilling's schedule
+  // preview and the Charge Now resolver — the completion-pricing review
+  // this reads before a technician submits was ANOTHER real caller that
+  // fell back to per_application_fee on a row already stamped with a
+  // provenance-backed $0 net (positive primary_line_price alongside it),
+  // previewing a bill completion itself would never cut.
+  test('a stamped $0 net with a positive primary_line_price previews as $0, never the acceptance fee', () => rollbackTest(async (trx) => {
+    const { jobId, customerId } = await fixture(trx, { jobPrice: 100 });
+    await trx('customers').where({ id: customerId }).update({ per_application_fee: 100 });
+    // Mirrors the discount engine's own frozen shape (discountedVisit) WITHOUT
+    // running a review: a fully-discounted application's estimated_price is 0
+    // net while primary_line_price keeps the positive pre-discount base — the
+    // provenance signal hasAuthoritativeZeroPrice looks for.
+    await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 0, primary_line_price: 100 });
+    const view = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
+    expect(view.currentAmount).toBe(0);
+  }));
   test('missing tier rules, a changed tier and excluded line flags cannot introduce a benefit', () => rollbackTest(async (trx) => {
     const { jobId, customerId, estimateId, soldLine } = await fixture(trx, { net: 100 });
     await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [{ ...soldLine, discountable: false }] } } } });

@@ -260,6 +260,17 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.errors.join('\n')).toMatch(/bogus_field is not allowed/);
   });
 
+  test('accepts the vendored cost-guide price_range and next_steps fields, shape-checked', () => {
+    expect(validateBlogFrontmatter(validFrontmatter({
+      post_type: 'cost',
+      price_range: ['termite_bait_install', 'termite_trenching'],
+      next_steps: [{ label: 'Get a quote', href: '/pest-control-calculator/' }],
+    }))).toEqual({ ok: true, errors: [] });
+    const blank = validateBlogFrontmatter(validFrontmatter({ price_range: [''] }));
+    expect(blank.ok).toBe(false);
+    expect(blank.errors.join('\n')).toMatch(/price_range\.0 must be at least 1 character/);
+  });
+
   test('reports a meta_description over the max length', () => {
     const result = validateBlogFrontmatter(validFrontmatter({ meta_description: 'x'.repeat(200) }));
     expect(result.ok).toBe(false);
@@ -1038,6 +1049,61 @@ describe('Astro publisher autonomous draft adapter', () => {
     expect(gh.createIssueComment).toHaveBeenCalledWith(42, expect.stringContaining('@codex review'));
   });
 
+  test('a cost-guide draft commits the mapped price_range; a model-emitted list never ships', async () => {
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 43, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/43' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage({
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        title: 'Termite Treatment Cost in Bradenton',
+        slug: '/termite-treatment-cost-bradenton/',
+        canonical: 'https://www.wavespestcontrol.com/termite-treatment-cost-bradenton/',
+        primary_keyword: 'termite treatment cost bradenton',
+        category: 'termite',
+        post_type: 'cost',
+        price_range: ['model_invented_key'],
+      }),
+      body: 'What shapes termite treatment pricing for Bradenton homes.',
+    }, { action_type: 'new_supporting_blog' });
+
+    const committed = gh.putFile.mock.calls.find(([arg]) => arg.path.endsWith('.mdx'))[0];
+    const parsed = require('../services/content-astro/frontmatter').parse(committed.content);
+    expect(parsed.data.price_range).toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    expect(gh.createPr.mock.calls[0][0].body).toContain('Price card (`price_range`): termite_bait_install, termite_bait_monitoring, termite_trenching');
+  });
+
+  test('updating a live post keeps its owner-set price_range verbatim', async () => {
+    gh.createBranch.mockResolvedValue({});
+    const livePath = 'src/content/blog/pest-control/pest-control-cost-venice.mdx';
+    const live = { sha: 'live-sha', path: livePath, content: '---\ntitle: Old\nslug: /pest-control/pest-control-cost-venice/\nprice_range:\n  - one_time_pest\n---\nold body' };
+    gh.getFile.mockImplementation(async (path) => (path === livePath ? live : null));
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 44, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/44' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    await AstroPublisher.publishOrUpdatePage({
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        title: 'Pest Control Cost in Venice',
+        slug: '/pest-control/pest-control-cost-venice/',
+        canonical: 'https://www.wavespestcontrol.com/pest-control/pest-control-cost-venice/',
+        primary_keyword: 'pest control cost venice',
+        post_type: 'cost',
+      }),
+      body: 'What shapes pest control pricing for Venice homes.',
+    }, { action_type: 'new_supporting_blog' });
+
+    const committed = gh.putFile.mock.calls.find(([arg]) => arg.path === livePath)[0];
+    const parsed = require('../services/content-astro/frontmatter').parse(committed.content);
+    expect(parsed.data.price_range).toEqual(['one_time_pest']);
+  });
+
   test('migrates a legacy .md post to .mdx instead of writing components into Markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -1629,6 +1695,50 @@ describe('Astro publisher hero image republish', () => {
       astro_status: 'pr_open',
       astro_pr_number: 123,
     }));
+  });
+
+  describe('cost-guide price card on the scheduled/admin lane', () => {
+    const costPost = () => ({
+      id: 'post-1',
+      title: 'Termite Treatment Cost in Bradenton',
+      slug: 'termite-treatment-cost-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to understand what shapes termite treatment pricing and what to ask before booking. Learn more here.',
+      keyword: 'termite treatment cost bradenton',
+      category: 'termite',
+      post_type: 'cost',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Termite bait station beside a Bradenton home',
+      content: '## What shapes the price\n\nHome size, construction type, and the treatment approach all shape what termite work costs in Bradenton.',
+    });
+    const livePath = 'src/content/blog/termite-treatment-cost-bradenton.md';
+    const publishAndReadCommitted = async () => {
+      const queries = [chain({ first: jest.fn().mockResolvedValue(costPost()) }), chain()];
+      db.mockImplementation(() => queries.shift() || chain());
+      await AstroPublisher.publishAstro('post-1');
+      const md = gh.putFile.mock.calls.map(([arg]) => arg).find((arg) => arg.path === livePath);
+      return require('../services/content-astro/frontmatter').parse(md.content).data;
+    };
+
+    test('a cost row publishes with the mapped price_range', async () => {
+      expect((await publishAndReadCommitted()).price_range)
+        .toEqual(['termite_bait_install', 'termite_bait_monitoring', 'termite_trenching']);
+    }, 60000);
+
+    test('a republish keeps the live post\'s owner-set price_range verbatim', async () => {
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === livePath) return { sha: 'live-sha', content: '---\ntitle: Old\nprice_range:\n  - termite_trenching\n---\nold body' };
+        return path.endsWith('/hero.webp') ? { sha: 'existing-hero-sha' } : null;
+      });
+      expect((await publishAndReadCommitted()).price_range).toEqual(['termite_trenching']);
+    }, 60000);
   });
 
   test('recomputes FAQPage schema after an editorial repair adds a visible FAQ section', async () => {

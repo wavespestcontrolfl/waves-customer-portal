@@ -1219,3 +1219,165 @@ describe('Consolidated lawn report', () => {
     expect(document.body.textContent).not.toContain(payload.protocol.structuredObservations[1]);
   });
 });
+
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS) — regression coverage for codex round-2 P2:
+// the glass theme hides EVERY .section-eyebrow outside the hero kicker
+// (html[data-glass-theme] .service-report-v1 .section-eyebrow), so the
+// card's title must ride a real heading element instead, the same way its
+// sibling live-report cards (e.g. the companion section header) do.
+describe('ReportViewPage — "Your upcoming visits" card title', () => {
+  it('renders the title as a real <h2> heading, not a glass-suppressed .section-eyebrow', async () => {
+    const payload = {
+      ...pestReportV2,
+      upcomingVisitsCard: {
+        visits: [
+          { serviceType: 'Lawn Care Treatment', scheduledDate: '2026-12-01', windowStart: '09:00:00' },
+        ],
+      },
+    };
+    renderReport(payload);
+
+    const heading = await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(heading.tagName).toBe('H2');
+    // The glass suppression rule targets .section-eyebrow specifically —
+    // the title must not ALSO ride on one inside this card.
+    expect(heading.closest('[data-section="upcoming-visits"]')?.querySelector('.section-eyebrow')).toBeNull();
+    expect(screen.getByText('Dates and windows are subject to change')).toBeInTheDocument();
+  });
+});
+
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year (never a price — prices only ever live on
+// estimate pages, and no "at no charge" money claim), live mode only.
+describe('ReportViewPage — "Your plan" section (planSummary)', () => {
+  it('live mode with planSummary renders the section and the count line with the re-service clause, no money claim', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 4, reservicesThisYear: 1 };
+    const { container } = renderReport(payload);
+
+    // A real <h2>: the glass theme hides every .section-eyebrow outside the
+    // hero, so the title must not ride one (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Your plan', level: 2 });
+    const section = container.querySelector('#your-plan');
+    expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
+    expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
+    expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  it('omits the re-service clause and keeps singular/plural correct when there are no re-services', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 1, reservicesThisYear: 0 };
+    const { container } = renderReport(payload);
+
+    await screen.findByText('Your plan');
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText('This year: 1 visit')).toBeInTheDocument();
+    // Scoped to this section — the page footer separately mentions
+    // WaveGuard's free re-service perk, which is unrelated copy.
+    expect(within(section).queryByText(/re-service/)).toBeNull();
+  });
+
+  it('renders nothing when the payload carries no planSummary', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(screen.queryByText('Your plan')).toBeNull();
+    expect(container.querySelector('#your-plan')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries planSummary (belt-and-braces — the server already strips it)', async () => {
+    // `mode` reads window.location.search directly (not react-router's
+    // location — MemoryRouter never touches the real jsdom location), so
+    // pdf mode has to be set the same way the app itself reads it.
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0 };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(screen.queryByText('Your plan')).toBeNull();
+      expect(container.querySelector('#your-plan')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});
+
+// "Near you" line (owner ask 2026-09-28, lawn only): a fixed sentence naming
+// the lawn pest found most often around the customer's city, live mode only.
+describe('ReportViewPage — "Near you" line (nearYou)', () => {
+  it('live mode with nearYou renders the fixed sentence', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+    const { container } = renderReport(payload);
+
+    // A real <h2>, never a glass-hidden .section-eyebrow (codex P2 on #5177).
+    const heading = await screen.findByRole('heading', { name: 'Near you', level: 2 });
+    const section = container.querySelector('#near-you');
+    expect(section).not.toBeNull();
+    expect(section.contains(heading)).toBe(true);
+    expect(section.querySelector('.section-eyebrow')).toBeNull();
+    expect(within(section).getByText('Around Parrish this past month, chinch bugs were the lawn pest we found most often.')).toBeInTheDocument();
+  });
+
+  it('renders nothing when the payload carries no nearYou', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.nearYou;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(container.querySelector('#near-you')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries nearYou (the server already strips it)', async () => {
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.nearYou = { city: 'Parrish', pest: 'chinch bugs' };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(container.querySelector('#near-you')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
+  });
+});
+
+// Ask Waves (codex P2 on #5167): a staff browser sends its portal JWT on the
+// /ask request, as on the /data read, so the server can leave staff QA
+// questions out of customer engagement; a customer's browser sends none.
+describe('ReportViewPage — Ask Waves request carries the staff JWT only for staff', () => {
+  async function askAndReadHeaders() {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    fireEvent.change(input, { target: { value: 'What was applied today?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ask' }));
+    let askCall;
+    await waitFor(() => {
+      askCall = globalThis.fetch.mock.calls.find(([url]) => String(url).endsWith('/ask'));
+      expect(askCall).toBeTruthy();
+    });
+    return askCall[1].headers;
+  }
+
+  it('a staff browser sends Authorization: Bearer <portal JWT>', async () => {
+    localStorage.setItem('waves_admin_token', 'staff-jwt');
+    const headers = await askAndReadHeaders();
+    expect(headers.Authorization).toBe('Bearer staff-jwt');
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+
+  it('a customer browser sends no Authorization header', async () => {
+    const headers = await askAndReadHeaders();
+    expect(headers).not.toHaveProperty('Authorization');
+  });
+});

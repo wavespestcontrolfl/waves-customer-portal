@@ -165,7 +165,12 @@ describe('compliance service with pg date columns as JS Date objects', () => {
       db
         .mockReturnValueOnce(chain({ rows: [blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30'))] }))
         .mockReturnValueOnce(chain({ rows: [{ id: 'cust-1', first_name: 'A', last_name: 'B', city: 'Sarasota', zip: '34231', lawn_type: 'St. Augustine' }] }))
-        .mockReturnValueOnce(chain({ first: { count: '2' } }));
+        .mockReturnValueOnce(chain({ rows: [
+          { category: 'fertilizer', product_name: 'LESCO 24-0-10 Turfgrass Granular Fertilizer' },
+          { category: 'Fertilizer', product_name: 'Acme 16-4-8 Fertilizer' },
+          // potassium only: filed as fertilizer, puts no nitrogen down
+          { category: 'fertilizer', product_name: 'LESCO K-Flow 0-0-25 Liquid Fertilizer' },
+        ] }));
 
       const status = await ComplianceService.getNitrogenStatus();
 
@@ -182,7 +187,7 @@ describe('compliance service with pg date columns as JS Date objects', () => {
       db
         .mockReturnValueOnce(chain({ rows: [blackoutLimit(pgDate('2026-06-01'), pgDate('2026-09-30'))] }))
         .mockReturnValueOnce(chain({ rows: [{ id: 'cust-4', first_name: 'G', last_name: 'H', city: 'Sarasota', zip: null, lawn_type: 'Zoysia' }] }))
-        .mockReturnValueOnce(chain({ first: { count: '0' } }));
+        .mockReturnValueOnce(chain({ rows: [] }));
 
       const status = await ComplianceService.getNitrogenStatus();
 
@@ -198,7 +203,7 @@ describe('compliance service with pg date columns as JS Date objects', () => {
       db
         .mockReturnValueOnce(chain({ rows: [blackoutLimit(null, null)] }))
         .mockReturnValueOnce(chain({ rows: [{ id: 'cust-5', first_name: 'I', last_name: 'J', city: 'Sarasota', zip: '34231', lawn_type: 'Zoysia' }] }))
-        .mockReturnValueOnce(chain({ first: { count: '0' } }));
+        .mockReturnValueOnce(chain({ rows: [] }));
       const status = await ComplianceService.getNitrogenStatus();
       expect(status.blackoutPeriods[0]).toMatchObject({ start: null, end: null });
       expect(status.customers[0].blackoutActive).toBe(false);

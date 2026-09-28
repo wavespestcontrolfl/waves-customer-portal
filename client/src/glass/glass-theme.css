@@ -562,6 +562,15 @@ html[data-glass-theme] .waves-ask-answer {
   font-size: 16px;
   line-height: 1.5;
 }
+/* AW-06 (Answer usefulness): several answer builders join recorded facts /
+   next actions with "\n" (e.g. report-assistant.js's answerAppliedToday,
+   answerNextSteps, answerFindings; project-report-assistant.js's
+   answerFindings/answerTreatment) so they read as separate lines instead of
+   one run-on sentence. Plain text collapses "\n" to a space by default —
+   pre-line preserves those breaks while still collapsing runs of spaces. */
+html[data-glass-theme] .waves-ask-answer-text {
+  white-space: pre-line;
+}
 html[data-glass-theme] .waves-ask-dismiss {
   flex: 0 0 auto;
   min-width: 44px;

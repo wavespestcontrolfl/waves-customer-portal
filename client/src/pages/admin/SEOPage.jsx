@@ -2035,6 +2035,14 @@ function BacklinksTab() {
                 </div>
                 <div>
                   <div className="text-ui-body text-ink-secondary">
+                    Recommended rate
+                  </div>
+                  <div className="text-[24px] text-zinc-900">
+                    {aeoRate(llmDash.benchmark.recommendedRate)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-ui-body text-ink-secondary">
                     Questions observed
                   </div>
                   <div className="text-[24px] text-zinc-900">
@@ -2045,14 +2053,82 @@ function BacklinksTab() {
               </div>
               <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:0px]">
                 {llmDash.benchmark.activeQuestions} questions active ·{" "}
-                {llmDash.benchmark.measured} measured answers. Excluded:{" "}
-                {llmDash.benchmark.legacy} legacy, {llmDash.benchmark.noAnswer}{" "}
-                no answer, {llmDash.benchmark.unresolved} unresolved. Historical
-                observations used a different citation method. Compare the same
+                {llmDash.benchmark.measured} measured answers (a model change
+                keeps its answers separate). Recommended counts a mentioned
+                answer with positive sentiment ranked in the top 3 brands
+                {llmDash.benchmark.unclassified > 0
+                  ? `; ${llmDash.benchmark.unclassified} mentioned answers with no sentiment reading are left out of that rate`
+                  : ""}
+                . Coverage of the{" "}
+                {llmDash.benchmark.coverage?.expected ?? 0} expected
+                question×engine pairs, by each pair's latest answer:{" "}
+                {llmDash.benchmark.coverage?.measured ?? 0} measured,{" "}
+                {llmDash.benchmark.coverage?.noAnswer ?? 0} no answer,{" "}
+                {llmDash.benchmark.coverage?.unresolved ?? 0} unresolved,{" "}
+                {llmDash.benchmark.coverage?.legacy ?? 0} legacy,{" "}
+                {llmDash.benchmark.coverage?.missing ?? 0} not yet observed.
+                Historical observations used a different citation method. Compare the same
                 questions and model in repeat runs. This view uses the latest
                 observations within 30 days; sampling dates may differ by
                 engine.
               </p>
+            </UiCard>
+          )}
+          {llmDash?.citedUrlHealth && (
+            <UiCard className="p-6">
+              <h3 className="text-ui-body text-zinc-900 font-medium [margin-top:0px]">
+                Owned page health
+              </h3>
+              <p className="text-ui-body text-ink-secondary [line-height:1.6] [margin-bottom:8px]">
+                Daily check of every owned URL an answer engine cited in the
+                last 30 days — a citation with no live page behind it is worse
+                than no citation. {llmDash.citedUrlHealth.checked} of{" "}
+                {llmDash.citedUrlHealth.candidates ??
+                  llmDash.citedUrlHealth.checked}{" "}
+                cited URLs checked
+                {llmDash.citedUrlHealth.lastCheckedOn
+                  ? ` (last: ${llmDash.citedUrlHealth.lastCheckedOn})`
+                  : ""}
+                , {llmDash.citedUrlHealth.bad} broken
+                {llmDash.citedUrlHealth.unchecked > 0
+                  ? `, ${llmDash.citedUrlHealth.unchecked} not checked yet`
+                  : ""}
+                .
+              </p>
+              {llmDash.citedUrlHealth.badUrls.length === 0 ? (
+                <p className="text-ui-body text-ink-secondary [margin-bottom:0px]">
+                  {llmDash.citedUrlHealth.checked === 0 &&
+                  llmDash.citedUrlHealth.unchecked > 0
+                    ? "Not checked yet — the nightly check runs at 1:20 AM ET."
+                    : llmDash.citedUrlHealth.unchecked > 0
+                      ? `No broken URLs among those checked; ${llmDash.citedUrlHealth.unchecked} not checked yet — the nightly check runs at 1:20 AM ET.`
+                      : "No broken owned URLs detected."}
+                </p>
+              ) : (
+                llmDash.citedUrlHealth.badUrls.map((b) => (
+                  <div
+                    key={b.url}
+                    className="[padding:8px_0] border-b border-hairline border-zinc-200 text-ui-body"
+                  >
+                    <a
+                      href={b.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900 break-words"
+                    >
+                      {b.url}
+                    </a>
+                    <div className="text-ink-secondary">
+                      {b.verdict}
+                      {b.finalUrl && b.finalUrl !== b.url
+                        ? ` · final: ${b.finalUrl}`
+                        : ""}{" "}
+                      · cited {b.citationCount}x · checked{" "}
+                      {b.lastCheckedOn}
+                    </div>
+                  </div>
+                ))
+              )}
             </UiCard>
           )}
           <AeoRateTable

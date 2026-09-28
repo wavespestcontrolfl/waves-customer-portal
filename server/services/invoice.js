@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState, billingLegContactTime, previouslySettledBillingLegs } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -21,6 +21,7 @@ const { explicitBillingChannels } = require("./billing-delivery-channels");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
+const { hasAuthoritativeZeroPrice } = require("./billing-lane");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -1760,7 +1761,53 @@ async function buildScheduledServiceInvoiceLines(
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);
 
-  const storedNetAmount = hasNumericValue(scheduled.estimated_price)
+  // Codex pre-push P1: a stamped estimated_price of 0 is not the visit's
+  // authoritative frozen net the way a stamped POSITIVE price is — it's
+  // the same "no price on this row" shape as null, and completionInvoiceAmount
+  // / predictCompletionBilling / resolveScheduledServiceCharge (billing-lane.js,
+  // admin-schedule.js) all defer to their fee/rate fallback for exactly that
+  // shape. Anchoring the reconciliation on a bare hasNumericValue(0) === true
+  // read 0 as the real net and wiped the freshly-computed fee-fallback
+  // primaryBase (above, via firstPositiveNumber — which already treats 0 the
+  // same as absent) straight back down to $0 through a "Scheduled price
+  // adjustment" line, so a $97.20 fee visit with a $40 checkout extra minted
+  // $40, not the $137.20 the checkout preview showed. `scheduledAmount`
+  // above uses the same positive-price precedence for primaryBase; mirror it
+  // here so the two never disagree on what "no price" means. The legacy
+  // callback-reconciliation shape this guards (a stale gross primary_line_price
+  // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
+  // is unaffected — both sides still resolve to 0 there.
+  //
+  // Codex pre-push P1 (round 3): that same bare-0 check ALSO caught the
+  // opposite, supported shape — completion-pricing's discount engine froze
+  // a fully-discounted application at a genuine $0 net (a positive
+  // primary_line_price gross base stamped alongside it — see
+  // hasAuthoritativeZeroPrice, billing-lane.js), which is exactly
+  // `primaryBaseKnown` above. Treating it as "no price, use the fallback"
+  // let a positive fallbackAmount (e.g. the per-application fee another
+  // caller resolved for a DIFFERENT reason) reconcile a real $0 invoice
+  // back up to that fee. completion-pricing.postgres.test.js's "fully
+  // discounted application stays zero" pins this with fallbackAmount
+  // matching (0) — this guard is for a caller whose fallback does NOT.
+  // Codex round 4 P0: this used to re-derive the check inline as
+  // `Number(scheduled.estimated_price) === 0`, and Number(null) === 0 —
+  // so a NEVER-PRICED row (estimated_price null, no reconciliation
+  // authority at all) with a positive primary_line_price misread as an
+  // authoritative zero, reconciling a genuinely-owed fee (e.g. the
+  // fallbackAmount another caller correctly resolved) back down to $0.
+  // Delegate to the shared predicate so this can never drift from
+  // completionInvoiceAmount / predictCompletionBilling's own reading of
+  // the same provenance signal.
+  const authoritativeZero = primaryBaseKnown
+    && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
+  // Whether storedNetAmount below actually came from a stamped price on this
+  // row (a real positive estimated_price, or the provenance-backed genuine
+  // $0) versus the fee/rate fallback another caller resolved because this
+  // row was NEVER priced. Only the stamped case is trustworthy enough to
+  // reconcile the replay DOWN to (below) — the fallback case is the ground
+  // truth net either way, so it must reconcile in BOTH directions.
+  const storedNetIsAuthoritative = Number(scheduled.estimated_price) > 0 || authoritativeZero;
+  const storedNetAmount = storedNetIsAuthoritative
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(
@@ -1782,6 +1829,30 @@ async function buildScheduledServiceInvoiceLines(
       discount_dollars: adjustment,
       use_stored_discount: true,
       stored_discount_source: "scheduled_service",
+    });
+  } else if (
+    // Codex round 5 P1: with no authoritative net on this row, a stale
+    // positive primary_line_price left over from a different pricing
+    // regime (e.g. a per-application row that was never priced but still
+    // carries an old primary_line_price) fed a replay total BELOW the
+    // fee/rate fallback another caller resolved as the intended net —
+    // the checkout preview shows the fallback (e.g. a $97.20 acceptance
+    // fee) while the minted invoice only totaled the stale $50 primary
+    // line, because the reconciliation above only ever corrected DOWNWARD.
+    // fallbackAmount is the ground truth here (nothing stamped on the row
+    // to contradict it), so top the replay UP to match it too.
+    !storedNetIsAuthoritative
+    && hasNumericValue(storedNetAmount)
+    && replayNetAmount < storedNetAmount
+  ) {
+    const adjustment = roundMoney(storedNetAmount - replayNetAmount);
+    lineItems.push({
+      client_id: `scheduled_price_topup_${scheduledServiceId}`,
+      description: "Scheduled price adjustment",
+      quantity: 1,
+      unit_price: adjustment,
+      amount: adjustment,
+      category: null,
     });
   }
 
@@ -3438,6 +3509,160 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   });
 }
 
+// Codex #4971 r5 P1 — the Bill-To fence, extended to termite renewal
+// invoices. A combined-visit invoice re-judges its live owner at claim time
+// (claimPacketInvoiceForSend); a termite annual-plan RENEWAL invoice is the
+// other self-pay bill minted ahead of delivery, with no completion packet,
+// so its claim re-resolves the CUSTOMER DEFAULT payer (the same resolver and
+// shape as stripe.js's PAYER_BILLED_GUARD) under the same held rows: the
+// customer row FOR SHARE (every payer_id writer takes it FOR UPDATE) and the
+// payer it names FOR SHARE (the activation writer takes it FOR UPDATE). A
+// payer that committed first is seen here and refuses the send (payer_billed
+// — nothing claimed, nothing sent); a payer write that comes after waits for
+// the claim, then finds the invoice in flight (packetInvoiceSendInFlight) and
+// refuses with invoice_send_in_flight. A worker-preclaimed send that finds a
+// payer leaves the queue as a draft stamped for that payer, like a withdrawn
+// combined-visit send, so it is never retried to the homeowner.
+async function claimBillToFencedSend(invoiceId, pre, options) {
+  if (!pre || pre.payer_id) return null;
+  if (pre.visit_completion_packet_id) return claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, options);
+  const renewal = await termiteRenewalTermForInvoice(invoiceId, pre.annual_prepay_term_id);
+  return renewal ? claimRenewalInvoiceForSend(invoiceId, renewal, options) : null;
+}
+
+// The renewal SUCCESSOR term an invoice is the prepay invoice of, or null.
+// Keyed on the invoice's own annual_prepay_term_id link — written strictly
+// by the renewal mint (termite-annual-renewal-charge.js mintRenewalSuccessor)
+// — so an invoice with no term link costs no lookup at all.
+async function termiteRenewalTermForInvoice(invoiceId, termId, database = db) {
+  if (!termId) return null;
+  return database("annual_prepay_terms").where({ id: termId, prepay_invoice_id: invoiceId })
+    .whereNotNull("renewed_from_term_id").whereNotNull("annual_plan_version").first("id", "customer_id", "renewed_from_term_id");
+}
+
+// Codex #4971 r14 P1: the WHOLE queued send of a termite renewal invoice —
+// the claim-time renewal clearance, the Bill-To fence and claim, the account
+// credit application and the provider handoff — runs under the renewal gate
+// (parent + successor keys, the off-pool session lock), exactly as an
+// immediate renewal send does (termite-annual-renewal-charge.js
+// withPayLinkClearance holds the gate across deliverRenewalInvoice →
+// sendViaSMSAndEmail). The gate used to cover only the claim, so a parent
+// cancel or refund committing between the claim and the provider saw the
+// invoice 'sending', deferred its withdrawal, and the worker still spent
+// credit and delivered a live pay link. Now a parent decision / refund
+// either waits for the send, or commits first and the claim-time clearance
+// (run inside, re-entrant) refuses it. An invoice with no renewal link takes
+// no lookup and no lock. A gate that cannot be taken (lock_timeout, the
+// session cap) is a pre-provider refusal (deliveryNeverAttempted), so the
+// scheduled worker retries it instead of stranding its claim.
+async function withRenewalSendGate(invoice, send) {
+  const renewal = await termiteRenewalTermForInvoice(invoice.id, invoice.annual_prepay_term_id);
+  if (!renewal) return send();
+  let entered = false;
+  try {
+    return await require("./termite-annual-renewal-charge").withRenewalGate(renewal, () => {
+      entered = true;
+      return send();
+    });
+  } catch (err) {
+    if (!entered && err && typeof err === "object") err.deliveryNeverAttempted = true;
+    throw err;
+  }
+}
+
+// Codex #4971 r16 P1 (finding 1): the gate's own SESSION can die at any
+// point while the queued send it wraps (withRenewalSendGate above) is
+// running — a dropped raw connection releases every advisory lock the
+// session held at Postgres's end immediately, but nothing here would
+// otherwise notice. termite-annual-renewal-charge.js's own immediate sends
+// (decideAndCharge's Stripe submission, the pay-link / charge-failed-notice
+// text) already assert this right before each provider call
+// (assertRenewalLockAlive there); this file's OWN provider handoffs never
+// did, so a queued/scheduled renewal send (processScheduledSends ->
+// withRenewalSendGate -> sendViaSMSAndEmail) could still reach Twilio/
+// SendGrid after the lock backing its own eligibility read was gone.
+// Called from INSIDE sendViaSMSAndEmail itself — the ONE function every
+// renewal send (immediate or queued) hands off to a provider through — so
+// every caller is covered without threading a flag through each one. A
+// no-op outside any held gate (an ordinary, non-renewal invoice send never
+// pays this any attention at all).
+function assertRenewalGateAlive() {
+  const mod = require("./annual-prepay-renewals");
+  if (typeof mod.assertParentDecisionLockAlive === "function") mod.assertParentDecisionLockAlive();
+}
+
+// Codex #4971 r11 P1: the renewal's own clearance (a parent cancelled or
+// refunded, an account deleted, a dispute, the grace window closed) is
+// re-judged HERE, at the claim every renewal send goes through — the
+// scheduled-send worker included, hours after the send was queued — under
+// the renewal gate, before the Bill-To fence below
+// (termite-annual-renewal-charge.js withRenewalSendClearance). A refused
+// send never reaches a provider; a worker's queue claim is given back first
+// (releaseRefusedRenewalSend) so the refusal never retries to the homeowner.
+async function claimRenewalInvoiceForSend(invoiceId, renewal, options = {}) {
+  return require("./termite-annual-renewal-charge").withRenewalSendClearance(renewal.id, {
+    claim: () => claimRenewalInvoiceUnderFence(invoiceId, renewal.customer_id, options),
+    release: (verdict) => releaseRefusedRenewalSend(invoiceId, verdict, options),
+  });
+}
+
+// A worker-preclaimed renewal send the clearance refused: a DURABLE refusal
+// leaves the queue for good (a draft, so the withdrawal can void it); a
+// transient one (the parent's or the renewal's own payment in dispute) goes
+// back to the queue a day later, spending no attempt, and is re-judged then.
+// Nothing to release for a send this call has not claimed yet.
+async function releaseRefusedRenewalSend(invoiceId, verdict, { allowClaimed = false, claimToken = null } = {}) {
+  if (!allowClaimed || !claimToken) return;
+  const held = verdict.durable
+    ? { status: "draft", scheduled_send_at: null }
+    : { status: "scheduled", scheduled_send_at: new Date(Date.now() + 24 * 60 * 60 * 1000) };
+  await db("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
+    ...held, send_claim_token: null, scheduled_send_error: `renewal_send_withheld: ${verdict.reason}`, updated_at: new Date(),
+  });
+}
+
+async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+  return db.transaction(async (trx) => {
+    const payerId = await customerDefaultPayerLocked(customerId, trx);
+    if (!payerId) {
+      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+    }
+    if (allowClaimed && claimToken) {
+      await trx("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
+        status: "draft", send_claim_token: null, scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date(),
+      });
+    }
+    return { payerBilled: true, payerId };
+  });
+}
+
+async function customerDefaultPayerLocked(customerId, trx) {
+  const customer = await trx("customers").where({ id: customerId }).forShare().first("id", "payer_id");
+  if (customer?.payer_id) await trx("payers").where({ id: customer.payer_id }).forShare().first("id");
+  const resolved = await require("./payer").resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  return resolved?.payerId || null;
+}
+
+// Codex #4971 r5 P1 (c): a pay link that rides OUTSIDE the invoice send —
+// the termite renewal's "your payment didn't go through" text — hands off
+// under the SAME claim: the invoice is claimed through the Bill-To fence
+// above (so it reads as in flight to every payer writer while the provider
+// has it), the handoff runs, and the claim is restored to the invoice's
+// prior status. A payer-billed invoice refuses ({ ok: false, code:
+// 'payer_billed' }) and nothing is handed off.
+async function withPayLinkSendClaim(invoiceId, handoff) {
+  const pre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+  if (!pre || pre.payer_id || pre.payer_statement_id) return { ok: false, code: "payer_billed" };
+  const fenced = await claimBillToFencedSend(invoiceId, pre, {});
+  if (fenced?.payerBilled) return { ok: false, code: "payer_billed" };
+  const claim = fenced ? fenced.claim : await claimInvoiceForSend(invoiceId, {});
+  try {
+    return await handoff(claim.invoice);
+  } finally {
+    await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, claim.consumedQueuedSendRows || [], db, claim.invoice.send_claim_token);
+  }
+}
+
 // A combined-visit invoice settled entirely by account credit is paid without
 // a payment webhook or a manual payment: the packet's requested review is
 // enrolled from the coverage path itself (best-effort; the recovery sweep
@@ -3532,7 +3757,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
 
 const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
 
-async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
+async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
   try {
     const marked = await whereSendClaimOwned(
@@ -3541,7 +3766,7 @@ async function markAcceptedChannelPendingEmail(invoiceId, claimToken) {
         .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
       claimToken,
     ).update({
-      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [new Date()]),
+      sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
       scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
       updated_at: new Date(),
     });
@@ -3627,6 +3852,73 @@ async function loadAnnualPrepayTermForInvoice(invoiceId, database = db) {
 // voids unsent replacements by it.
 function rodentSetupRebillMarker(invoiceId) {
   return `[rodent-setup-rebill:${invoiceId}]`;
+}
+
+// Extracted from voidInvoice's own requireUnsettled option (Codex round-3
+// audit P0 self-review, AGENTS.md L412-418 — keeps the surrounding
+// transaction's own complexity from growing past the ceiling for a
+// genuinely self-contained sub-decision). Runs under trx's row lock
+// (`.forUpdate()`) — the actual chokepoint a caller's own, separately-
+// committing eligibility check cannot close on its own. Throws a typed
+// error (never returns) the caller can classify without string-matching:
+// INVOICE_PROCESSING_REFUSE_VOID (still clearing — ambiguous, not
+// settled) or INVOICE_SETTLED_REFUSE_VOID (durable paid/prepaid evidence).
+async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
+  const lockedInvoice = await trx("invoices").where({ id }).forUpdate()
+    .first("status", "paid_at", "credit_applied", "total");
+  if (!lockedInvoice) throw new Error("Invoice not found");
+  const lockedStatusKey = String(lockedInvoice.status || "").toLowerCase();
+  // 'processing' (an ACH debit mid-clearing) is durably neither paid nor
+  // unpaid yet — a DIFFERENT refusal code from a genuinely DURABLE
+  // settlement (paid_at set, status paid/prepaid, or credit applied), so
+  // the caller can retire the former as settled but defer-and-retry the
+  // latter rather than conflating them.
+  if (lockedStatusKey === "processing") {
+    const err = new Error("Invoice reads processing — the payment has not durably cleared yet; refusing to void while ambiguous");
+    err.code = "INVOICE_PROCESSING_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  if (["paid", "prepaid"].includes(lockedStatusKey) || lockedInvoice.paid_at) {
+    const err = new Error(`Invoice already reads ${lockedInvoice.status}${lockedInvoice.paid_at ? " (paid_at set)" : ""} — refusing to void a settled invoice`);
+    err.code = "INVOICE_SETTLED_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  // Codex #4971 round-4 (post-merge audit) P1: ANY positive credit_applied
+  // used to read as full settlement here, but partial application is a
+  // supported, ordinary state (customer-credit.js's auto-apply, or a
+  // partial admin apply) — $10 applied to a $249 invoice still leaves $239
+  // due, and the invoice's own `status` stays whatever it was (never
+  // 'prepaid') for exactly that reason; see invoiceAmountDue's own doc.
+  // Settled means the balance is FULLY covered (amount due <= 0, i.e.
+  // credit + payments >= total) — checked here against credit alone since
+  // a real payment already returned above via paid_at/status. A credit
+  // that covers the total is the SAME durable settlement as before. A
+  // credit that does NOT cover it is genuinely ambiguous — some money is
+  // already committed against this invoice, so this caller must not
+  // silently void-and-restore it (that is a different operator-driven
+  // "un-prepay" contract, not this one) nor mark its own lapse retired —
+  // it gets its OWN typed code so the caller defers for staff review
+  // instead of either voiding or completing.
+  const creditAppliedAmt = parseFloat(lockedInvoice.credit_applied || 0);
+  if (creditAppliedAmt > 0) {
+    const totalAmt = parseFloat(lockedInvoice.total || 0);
+    if (creditAppliedAmt >= totalAmt) {
+      const err = new Error(`Invoice already reads ${lockedInvoice.status} (credit applied) — refusing to void a settled invoice`);
+      err.code = "INVOICE_SETTLED_REFUSE_VOID";
+      err.invoiceStatus = lockedInvoice.status;
+      throw err;
+    }
+    const err = new Error(`Invoice carries partial account credit ($${creditAppliedAmt.toFixed(2)} of $${totalAmt.toFixed(2)}) — neither settled nor cleanly voidable; refusing until staff review`);
+    err.code = "INVOICE_PARTIAL_CREDIT_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  // Same reconciliation guard the termite-annual-renewal grace lapse used
+  // to run in its OWN separate transaction — folded in here so it runs
+  // under this SAME row lock too.
+  await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
 }
 
 const InvoiceService = {
@@ -5319,9 +5611,9 @@ const InvoiceService = {
     let pre = null;
     try {
       if (!allowClaimed) {
-        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
-        const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
-          ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) : null;
+        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+        // A termite renewal invoice takes the same fence (claimBillToFencedSend).
+        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
@@ -5591,6 +5883,7 @@ const InvoiceService = {
     // or hasEmailLeg's own nested SMS/App-only leg) — that is definitionally
     // an SMS/App send, matching the byte-identical fallback below.
     let acceptedChannelResults = null;
+    let settledEvent = {};
     // The pending leg's queueing decision (Codex round-3 P1/P2 #4963), set
     // once known inside the try block below — before finalizeInvoiceAfterSms
     // is ever called, even though this closure is defined here. null means
@@ -5612,6 +5905,16 @@ const InvoiceService = {
     // invoice stays under its 'sending' claim for processScheduledSends'
     // existing stale-claim recovery to park for operator review — never a
     // half-committed "stamped but the retry vanished" state.
+    const smsFinalizationStamp = (trx) => {
+      if (!acceptedChannelResults) return new Date();
+      const legs = require('./messaging/billing-prior-delivery')
+        .settledLegTimes({ channelResults: acceptedChannelResults });
+      // App and Text share this invoice rail. A new acceptance wins over an
+      // older sibling, while all-old replay uses the latest stored rail time.
+      if (legs.freshSms) return new Date();
+      if (legs.smsAccepted) return trx.raw("COALESCE(sms_sent_at, ?::timestamptz)", [legs.smsAt]);
+      return new Date();
+    };
     const finalizeInvoiceAfterSms = () => db.transaction(async (trx) => {
       // Stamp each channel's OWN durable delivery evidence (the same
       // convention invoice-email.js's markEmailDelivered and this same
@@ -5623,6 +5926,9 @@ const InvoiceService = {
       // for one leg). No fan-out at all (acceptedChannelResults null) is
       // definitionally the plain SMS path — byte-identical to before.
       const emailAccepted = legAccepted(acceptedChannelResults?.email);
+      const emailTime = acceptedChannelResults?.email?.sentAt;
+      const originalEmailTime = emailTime && !Number.isNaN(new Date(emailTime).getTime())
+        ? new Date(emailTime) : null;
       const smsOrAppAccepted = acceptedChannelResults
         ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push, "push"))
         : true;
@@ -5636,15 +5942,19 @@ const InvoiceService = {
         // hasEmailLeg always excludes Email from THIS call's own fan-out
         // (billing-channel-routing.js selectedLegs), so acceptedChannelResults
         // never carries an accepted email leg here — sms_sent_at is correct.
-        sms_sent_at: new Date(),
+        sms_sent_at: smsFinalizationStamp(trx),
         updated_at: new Date(),
       } : {
           status: trx.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
           ),
-          sent_at: new Date(),
-          ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
-          ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+          sent_at: settledEvent.deduped
+            ? trx.raw("COALESCE(sent_at, ?::timestamptz)", [settledEvent.eventVisibleAt || null])
+            : new Date(),
+          ...(smsOrAppAccepted ? { sms_sent_at: smsFinalizationStamp(trx) } : {}),
+          ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped
+            ? trx.raw("COALESCE(email_sent_at, ?::timestamptz)", [originalEmailTime])
+            : new Date() } : {}),
           scheduled_send_at: null,
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(trx),
           scheduled_request_review: false,
@@ -5761,6 +6071,17 @@ const InvoiceService = {
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
       acceptedChannelResults = sendResult.channelResults || null;
+      const legStates = Object.entries(acceptedChannelResults || {})
+        .map(([channel, leg]) => ({ channel, leg, state: billingLegDeliveryState(channel, leg) }));
+      if (legStates.some(({ state }) => state === "deduped")
+        && legStates.every(({ state }) => state !== "delivered")) {
+        const originalTimes = legStates.filter(({ state }) => state === "deduped")
+          .flatMap(({ leg }) => [leg.eventVisibleAt, leg.sentAt])
+          .map((value) => (value == null ? null : new Date(value)))
+          .filter((value) => value && !Number.isNaN(value.getTime()));
+        settledEvent = { deduped: true, ...(originalTimes.length
+          ? { eventVisibleAt: new Date(Math.max(...originalTimes.map((value) => value.getTime()))) } : {}) };
+      }
       // Codex round-2 P1 (#4963): billing-channel-routing.js's
       // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
       // retry/hold as the top-level `sendResult` when one leg (Email, say)
@@ -5872,7 +6193,7 @@ const InvoiceService = {
 
       smsDelivered = true;
       const finalized = await finalizeInvoiceAfterSms();
-      if (!finalized) return { sent: true, payUrl, claimLost: true };
+      if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true };
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -5887,7 +6208,7 @@ const InvoiceService = {
       // accepted (Codex round-2 P2 #4963), never the legacy "sent via SMS"
       // wording for an Email-only or App-only send.
       const deliveredVia = describeInvoiceDeliveryChannels(acceptedChannelResults);
-      await db("activity_log")
+      if (!settledEvent.deduped) await db("activity_log")
         .insert({
           customer_id: customer.id,
           action: "invoice_sent",
@@ -5919,7 +6240,7 @@ const InvoiceService = {
       await releaseDirectSmsClaim();
 
       return {
-        sent: true, payUrl, ...queueOutcome,
+        sent: true, payUrl, ...settledEvent, ...queueOutcome,
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -5949,12 +6270,12 @@ const InvoiceService = {
         );
         try {
           const finalized = await finalizeInvoiceAfterSms();
-          if (!finalized) return { sent: true, payUrl, claimLost: true, finalizeError: err.message };
+          if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true, finalizeError: err.message };
         } catch (retryErr) {
           logger.error(
             `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
           );
-          return { sent: true, payUrl, finalizeError: err.message };
+          return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
         }
         // Finalize is durable — run the normal post-delivery bookkeeping
         // (each leg best-effort/idempotent, mirroring the happy path) so a
@@ -5965,7 +6286,7 @@ const InvoiceService = {
         } catch (e) {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
         }
-        await db("activity_log")
+        if (!settledEvent.deduped) await db("activity_log")
           .insert({
             customer_id: invoice.customer_id,
             action: "invoice_sent",
@@ -5993,8 +6314,8 @@ const InvoiceService = {
         }
         const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, ...queueOutcome };
-        return { sent: true, payUrl, finalizeError: err.message };
+        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, ...settledEvent, finalizeError: err.message, ...queueOutcome };
+        return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
         const scheduledServiceId = await linkedScheduledServiceId(invoice);
@@ -6053,16 +6374,38 @@ const InvoiceService = {
       // not_zero_due chokepoint outcome (Codex round-6 P2 #4131) — a real
       // caller never sets this, so a race can retry at most once.
       _zeroDueRetried = false,
+      // Internal-only: set by the renewal-gate re-entry below so the inner
+      // call does not re-read the term link. Never set by a real caller.
+      _underRenewalGate = false,
     } = {},
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true,
+      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried: true, _underRenewalGate,
     });
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+    // Codex #4971 r24 P1: a termite RENEWAL invoice's send holds the renewal
+    // gate through its ENTIRE provider handoff — not only while the claim is
+    // checked (claimRenewalInvoiceForSend's clearance) — for EVERY caller,
+    // the direct operator/admin sends included, not just the scheduled
+    // worker (withRenewalSendGate) and the renewal sweep. Otherwise a parent
+    // cancellation or refund committing while the invoice is 'sending' still
+    // lets the SMS/email deliver a live pay link. Re-entrant: a caller that
+    // already holds these keys (the worker, the sweep) runs straight through
+    // withParentDecisionLock's held-key skip; the flag only spares the
+    // re-read on the inner call.
+    if (!_underRenewalGate && accrualPre?.annual_prepay_term_id) {
+      const renewal = await termiteRenewalTermForInvoice(invoiceId, accrualPre.annual_prepay_term_id);
+      if (renewal) {
+        return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
+          requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
+          emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+        }));
+      }
+    }
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
@@ -6075,23 +6418,22 @@ const InvoiceService = {
     // (it runs the SAME packet ownership fence first on its own, so a live
     // payer withdrawal still always wins over a zero-due settlement) and
     // this wrapper maps its descriptor to its own result shape.
+    // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
-    if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
-      try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
-      } catch (err) {
-        const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
-        if (zeroDueResult) return zeroDueResult;
-        // The scheduled-send worker already fenced and claimed this send; a
-        // transient failure of the re-judge here left no provider request
-        // behind, so the invoice goes back to its queue slot instead of
-        // sitting in 'sending' until stale-claim recovery strands it.
-        if (!allowClaimed) throw err;
-        await restoreSendClaim(invoiceId, "scheduled", true, [], db, claimToken);
-        logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
-        return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
-          sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
-      }
+    try {
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+    } catch (err) {
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (zeroDueResult) return zeroDueResult;
+      // The scheduled-send worker already fenced and claimed this send; a
+      // transient failure of the re-judge here left no provider request
+      // behind, so the invoice goes back to its queue slot instead of
+      // sitting in 'sending' until stale-claim recovery strands it.
+      if (!allowClaimed) throw err;
+      await restoreSendClaim(invoiceId, "scheduled", true, [], db, claimToken);
+      logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
+      return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
+        sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
     }
     if (packetClaim?.payerBilled) {
       return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
@@ -6122,6 +6464,19 @@ const InvoiceService = {
     // flips the now-'sending' invoice to 'prepaid' — nothing to collect, report it
     // covered; on a delivery failure the !ok path below restores the claim and
     // reverses this seam's applied credit.
+    // Codex #4971 r27 P1: consuming account credit is a money-moving step of
+    // a renewal send — and a fully credit-covered renewal returns below
+    // without ever reaching a provider handoff's own assertion — so the
+    // renewal gate is re-asserted here first. A lost gate restores the send
+    // claim and throws; nothing was applied, nothing was sent.
+    if (_underRenewalGate) {
+      try {
+        assertRenewalGateAlive();
+      } catch (gateErr) {
+        await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, consumedQueuedSendRows, db, claim.invoice.send_claim_token);
+        throw gateErr;
+      }
+    }
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
@@ -6157,14 +6512,8 @@ const InvoiceService = {
     // at schedule time — the success path below clears
     // scheduled_request_review unconditionally, so without this fallback an
     // early manual send silently drops it. An explicit true/false still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(claim.invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = claim.invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(claim.invoice, requestReview, reviewDelayMinutes);
 
     // Third-party Bill-To: a payer-billed invoice must NOT text the homeowner
     // a pay link — AR and the pay link route to the payer (email) instead.
@@ -6173,14 +6522,14 @@ const InvoiceService = {
       sms.error = "Suppressed — invoice billed to a third-party payer";
       sms.code = "payer_billed";
     } else if (!operatorInitiated
-      && claim.invoice.sms_sent_at
       && String(claim.invoice.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED)) {
       // A prior automated attempt delivered Text/App but could not start its
-      // selected Email leg. The dedicated marker ties sms_sent_at to this
-      // schedule episode; a historical stamp alone must not suppress a new
-      // delivery after unvoid + explicit reschedule.
+      // selected Email leg. The dedicated marker is this episode's positive
+      // acceptance proof even when the original acceptance time is unknown;
+      // a historical stamp alone never suppresses a new delivery.
       sms.ok = true;
       sms.deduped = true;
+      sms.eventVisibleAt = claim.invoice.sms_sent_at;
     } else {
       try {
         // The nested call does not adopt (adoptsQueuedInvoiceSend: false
@@ -6188,6 +6537,10 @@ const InvoiceService = {
         // the provider sees the text. A throw here is pre-provider: the
         // SMS leg reports a definite non-delivery and the rows restore.
         await fenceAdoptedRowsBeforeHandoff(consumedQueuedSendRows, claim.invoice.send_claim_token);
+        // Codex #4971 r16 P1 (finding 1): immediately before THIS provider
+        // handoff — the gate's session can die at any point while this
+        // whole send is running, not just at entry.
+        assertRenewalGateAlive();
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
           claimToken: claim.invoice.send_claim_token,
@@ -6294,6 +6647,11 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
+          if (smsResult.deduped) {
+            sms.deduped = true;
+            sms.eventVisibleAt = smsResult.eventVisibleAt;
+            sms.originalAt = billingLegContactTime(smsResult);
+          }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
@@ -6423,6 +6781,11 @@ const InvoiceService = {
       email.code = sms.code;
     } else {
       try {
+        // Codex #4971 r16 P1 (finding 1): the SAME assertion as the SMS leg
+        // above, immediately before THIS separate provider handoff — a lock
+        // loss between the two legs (the SMS leg's own network round trip)
+        // must still be caught before the email leg reaches SendGrid.
+        assertRenewalGateAlive();
         const r = await sendInvoiceEmail(invoiceId, {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
@@ -6430,7 +6793,9 @@ const InvoiceService = {
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
-        else if (r?.error) email.error = r.error;
+        if (r?.deduped) email.deduped = true;
+        if (r?.sentAt) email.sentAt = r.sentAt;
+        if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
@@ -6442,6 +6807,7 @@ const InvoiceService = {
     }
 
     const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
       // A direct caller owns this claim, so it must put the accepted Text/App
@@ -6472,7 +6838,7 @@ const InvoiceService = {
             .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
             .update({
               status: "scheduled",
-              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [now]),
+              sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
               scheduled_send_at: new Date(now.getTime() + 5 * 60 * 1000),
               scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
               scheduled_send_attempts: alreadyPending ? owned.scheduled_send_attempts : 0,
@@ -6499,7 +6865,7 @@ const InvoiceService = {
       };
     }
     if (emailMustRetry && sms.ok
-      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token)) {
+      && !await markAcceptedChannelPendingEmail(invoiceId, claim.invoice.send_claim_token, acceptedSmsAt)) {
       logger.error(`[invoice] Email retry for ${invoiceId} parked because its accepted Text/App leg has no durable retry marker`);
       return {
         ok: false,
@@ -6561,6 +6927,7 @@ const InvoiceService = {
         }
       }
       if (!adoptedQueueUnrestored) {
+        const priorSettlement = previouslySettledBillingLegs([sms, email]);
         const finalized = await whereSendClaimOwned(
           db("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
           claim.invoice.send_claim_token,
@@ -6569,7 +6936,8 @@ const InvoiceService = {
             status: db.raw(
               "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
             ),
-            sent_at: new Date(),
+            sent_at: priorSettlement
+              ? db.raw("COALESCE(sent_at, ?::timestamptz)", [priorSettlement.originalAt]) : new Date(),
             scheduled_send_at: null,
             scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
             scheduled_request_review: false,
@@ -6673,8 +7041,6 @@ const InvoiceService = {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
     }
-    const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
     // closeout writes it, so deciding first would classify it standalone
@@ -6684,48 +7050,9 @@ const InvoiceService = {
     // the paid webhook enrolls nothing later either); otherwise the fresh
     // read below sees whatever linkage now stands.
     if (effectiveRequestReview && ownedDeliveryFinalized) {
-      try {
-        const ReviewService = require("./review-request");
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly`);
-        } else {
-          const inv = await db("invoices")
-            .where({ id: invoiceId })
-            .select("customer_id", "service_record_id", "status")
-            .first();
-          // Unpaid COMPLETION invoices defer the review ask to payment — the
-          // Stripe paid-invoice webhook enrolls then, reading the completion's
-          // requestReview intent from the service record. Enrolling here would
-          // text a review ask alongside an open pay link (Codex P1, PR #3104
-          // r1). Standalone invoices (no service_record_id) keep the legacy
-          // at-delivery ask: their operator opt-in has no other trigger (a
-          // cash/manual payment never reaches the webhook).
-          const deferToPayment = inv
-            && inv.service_record_id
-            && !["paid", "prepaid"].includes(String(inv.status || ""));
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
-          } else if (inv && await issuedCloseoutOwnsRecord(inv.service_record_id)) {
-            // A closeout that committed its record (frozen requestReview:
-            // false) but reported closed: false — post-commit failure, or a
-            // later send on an already-closed visit — still owns the ask
-            // (pre-push P1 r7): the durable provenance decides, not this
-            // invocation's return value.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${inv.service_record_id} was committed by the invoice-issued closeout`);
-          } else if (inv) {
-            await ReviewService.enrollPostService({
-              customerId: inv.customer_id,
-              serviceRecordId: inv.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+      });
     }
     return { ok, sms, email, payUrl, creditApplied: sms.ok ? 0 : (sendCreditResult?.applied || 0),
       ...queueOutcome,
@@ -6770,6 +7097,10 @@ const InvoiceService = {
       // claim out from under it. Callers with no claim to release (the
       // deferred-queue rails, project reports) omit it — unchanged.
       claimToken = null,
+      eventVisibleAt = null,
+      smsEventVisibleAt = undefined,
+      emailEventVisibleAt = undefined,
+      deduped = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -6788,29 +7119,25 @@ const InvoiceService = {
     // so a delivery finalized through this path (combined project send,
     // completion SMS with invoice) must not silently drop it. An explicit
     // true/false from the caller still wins.
-    let effectiveRequestReview = requestReview;
-    let effectiveReviewDelayMinutes = reviewDelayMinutes;
-    if (effectiveRequestReview == null) {
-      effectiveRequestReview = Boolean(invoice.scheduled_request_review);
-      if (effectiveRequestReview && effectiveReviewDelayMinutes == null) {
-        effectiveReviewDelayMinutes = invoice.scheduled_review_delay_minutes;
-      }
-    }
+    const { requestReview: effectiveRequestReview, reviewDelayMinutes: effectiveReviewDelayMinutes } =
+      require('./invoice-delivery-review').reviewDecisionForInvoice(invoice, requestReview, reviewDelayMinutes);
 
     const now = new Date();
+    // A known prior acceptance without a valid original timestamp cannot
+    // acquire this retry's clock time as its first delivery stamp.
     const updates = {
       status: db.raw(
         "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
       ),
-      sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
+      ...require('./messaging/billing-prior-delivery').invoiceDeliveryStampUpdates(db, {
+        deduped, eventVisibleAt, smsEventVisibleAt, emailEventVisibleAt, sms, email, now,
+      }),
       scheduled_send_at: null,
       scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
     };
-    if (sms) updates.sms_sent_at = db.raw("COALESCE(sms_sent_at, ?)", [now]);
-
     const finalizeQuery = db("invoices")
       .where({ id: invoiceId })
       .whereIn("status", SEND_FINALIZABLE_STATUSES);
@@ -6847,7 +7174,7 @@ const InvoiceService = {
       );
     }
 
-    await db("activity_log")
+    if (!deduped) await db("activity_log")
       .insert({
         customer_id: finalInvoice.customer_id,
         action: "invoice_sent",
@@ -6878,51 +7205,10 @@ const InvoiceService = {
     // closeout that completed the visit quietly suppresses the ask outright
     // — its record froze requestReview: false, so nothing enrolls later.
     if (updated && effectiveRequestReview) {
-      try {
-        if (issuedCloseout?.closed) {
-          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly (source=${source})`);
-        } else {
-          // The DURABLE linkage, re-read after the closeout (GitHub r5 P1
-          // #4127) — never the pre-closeout row: a closeout that committed
-          // the record and this invoice's back-link but failed in its
-          // post-commit work reports closed: false (the attempt stays
-          // resumable), and the stale read would still say "standalone".
-          const linked = await db("invoices")
-            .where({ id: invoiceId })
-            .select("service_record_id", "status")
-            .first();
-          const linkage = linked ? { ...finalInvoice, ...linked } : finalInvoice;
-          // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
-          // P1, PR #3104 r1): delivery of an unpaid completion invoice must
-          // not start review outreach — the paid webhook enrolls on payment
-          // from the service record's requestReview intent. Standalone
-          // invoices (no service_record_id) keep the legacy at-delivery ask.
-          const deferToPayment = linkage.service_record_id
-            && !["paid", "prepaid"].includes(String(linkage.status || ""));
-          const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
-          if (deferToPayment) {
-            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
-          } else if (await issuedCloseoutOwnsRecord(linkage.service_record_id)) {
-            // Durable provenance over this invocation's verdict (pre-push
-            // P1 r7): a closeout that committed the record but failed after
-            // — or a resend on a visit it already closed — reports closed:
-            // false, yet the record froze requestReview: false.
-            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${linkage.service_record_id} was committed by the invoice-issued closeout (source=${source})`);
-          } else {
-            const ReviewService = require("./review-request");
-            await ReviewService.enrollPostService({
-              customerId: invoice.customer_id,
-              serviceRecordId: linkage.service_record_id || null,
-              triggeredBy: "auto",
-              delayMinutes: effectiveReviewDelayMinutes,
-            });
-          }
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
-        );
-      }
+      await require('./invoice-delivery-review').enrollReviewAfterInvoiceDelivery({
+        invoiceId, issuedCloseout, delayMinutes: effectiveReviewDelayMinutes,
+        source, fallbackInvoice: finalInvoice,
+      });
     }
 
     return finalInvoice;
@@ -7091,8 +7377,8 @@ const InvoiceService = {
         // and send at their requested time. Fail toward deferral on a
         // lookup error: worst case an email waits for 8:00 AM, never a
         // night text.
-        const acceptedChannelPendingEmail = Boolean(inv.sms_sent_at)
-          && String(inv.scheduled_send_error || "").startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
+        const acceptedChannelPendingEmail = String(inv.scheduled_send_error || "")
+          .startsWith(BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED);
         let hasSmsLeg = !inv.payer_id && !acceptedChannelPendingEmail;
         if (hasSmsLeg) {
           try {
@@ -7181,12 +7467,12 @@ const InvoiceService = {
 
       let result;
       try {
-        result = await this.sendViaSMSAndEmail(claimed.id, {
+        result = await withRenewalSendGate(claimed, () => this.sendViaSMSAndEmail(claimed.id, {
           requestReview: Boolean(claimed.scheduled_request_review),
           reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
           allowClaimed: true,
           claimToken: claimed.send_claim_token,
-        });
+        }));
       } catch (err) {
         if (err?.code === "queued_pay_link") {
           // A live deferred text already owns this pay link's delivery, so
@@ -7383,21 +7669,32 @@ const InvoiceService = {
         })
       : "";
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
-    const receiptPayment = await db("payments")
+    const amount = await InvoiceService.receiptAmountFor(invoice);
+    return { amount, cardLine, receiptUrl };
+  },
+
+  // The amount a receipt states, read-only: net cash kept when a refund is
+  // recorded on the payment row, otherwise the amount due. Shared by the
+  // receipt SMS and the IB closeout repair card (which must not mint the
+  // short link receiptSmsFacts does).
+  // failClosed: an unreadable payments row throws instead of falling back to
+  // the amount due (which would drop a recorded refund) — for callers that
+  // show and pin the amount (the IB card).
+  async receiptAmountFor(invoice, { failClosed = false } = {}) {
+    const paymentQuery = db("payments")
       .where({ customer_id: invoice.customer_id })
       .whereIn("status", ["paid", "refunded"])
       .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
       .orderBy("created_at", "desc")
-      .first()
-      .catch(() => null);
+      .first();
+    const receiptPayment = failClosed ? await paymentQuery : await paymentQuery.catch(() => null);
     const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
     const receiptAmount = receiptRefunded > 0
       ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
       : invoiceAmountDue(invoice);
-    const amount = Number.isFinite(receiptAmount)
+    return Number.isFinite(receiptAmount)
       ? receiptAmount.toFixed(2)
       : "0.00";
-    return { amount, cardLine, receiptUrl };
   },
 
   async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
@@ -8432,7 +8729,7 @@ const InvoiceService = {
     return edited;
   },
 
-  async voidInvoice(id) {
+  async voidInvoice(id, { requireUnsettled = false } = {}) {
     // Refuse to void a paid invoice. A paid invoice has a payments-ledger
     // row + (usually) a Stripe charge; flipping it to "void" silently
     // hides the revenue from dashboards but leaves the money collected
@@ -8520,6 +8817,18 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
+      // ('prepaid') termite annual invoice restores its account credit and
+      // COMMITS here, before the term sync below ever runs. A renewal charge
+      // already past its final parent re-check could otherwise submit while
+      // this void is in flight and consume that returned credit. The
+      // parent-decision gate for the termite term(s) tied to this invoice is
+      // therefore this transaction's FIRST lock — before the statement /
+      // invoice row locks, the void and the credit restore — so the void
+      // either commits before the charge's re-check (which then refuses a
+      // voided parent) or waits until the charge's submission is done. No-op
+      // without a termite term.
+      await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [id] });
       // Phase 2: lock + re-verify the parent statement is still OPEN inside the
       // transaction (the pre-check above is a fast fail, but a concurrent close
       // could finalize the statement between it and this write — that would let
@@ -8532,6 +8841,20 @@ const InvoiceService = {
         if (locked && locked.status !== "open") {
           throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
         }
+      }
+      // Codex round-3 P0 (termite-annual-renewal grace lapse): a caller
+      // that needs "genuinely still unpaid" as its OWN eligibility fact —
+      // not just "voidable by assertInvoiceVoidable's transition matrix,
+      // which deliberately ALLOWS voiding a credit-settled 'prepaid'
+      // invoice for an operator's legitimate un-prepay" — opts into this
+      // extra precondition. It runs under THIS row's own lock (the
+      // `.forUpdate()` read below), closing the exact race a caller's OWN
+      // separate eligibility-check transaction can't: account credit (or
+      // any other settlement) landing in the gap between that check
+      // committing and this void call starting. Every existing caller
+      // (requireUnsettled defaults off) is byte-identical to before.
+      if (requireUnsettled) {
+        await assertInvoiceGenuinelyUnsettledLocked(trx, id);
       }
       const [updated] = await trx("invoices")
         .where({ id, status: current.status })
@@ -10698,6 +11021,11 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // Codex #4971 pre-push P0 (lock order): this void can take a
+            // credit-settled ('prepaid') invoice and restore its credit, so
+            // a termite renewal parent-decision gate tied to it is this
+            // transaction's FIRST lock (no-op without a termite term).
+            await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [candidate.id] });
             // Phase 2: parent-before-child lock order (matches the edit/void
             // paths) so a concurrent accrued edit/void + this cancellation can't
             // AB-BA deadlock. Lock the statement FIRST (using the
@@ -10972,6 +11300,9 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+// The receipt SMS leg's phone-less App admission — shared with the IB closeout
+// repair card so it describes the same reach sendReceipt has.
+module.exports.explicitBillingAppSelected = explicitBillingAppSelected;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
@@ -10994,3 +11325,4 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
+module.exports.withPayLinkSendClaim = withPayLinkSendClaim;

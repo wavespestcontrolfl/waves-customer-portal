@@ -30,19 +30,29 @@ const knownSlugs = new Set([...entriesBySlug.keys(), ...plannedSlugs]);
 // ── enums (mirrors validate.js) ──────────────────────────────────────────
 
 const ENUMS = {
-  kind: ['organism', 'sign'],
-  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex'],
+  // `turfgrass`, `weed`, `host_plant`, `disease`, `disorder` are the
+  // plant/condition kinds from the L1 loader PR (BRIEF-PLANTS.md "Kinds and
+  // sections"); no entry of any of these kinds exists yet — the content PR
+  // (L1b) adds them to `entries/*.json` once the owner reviews them.
+  kind: ['organism', 'sign', 'turfgrass', 'weed', 'host_plant', 'disease', 'disorder'],
+  rank: ['species', 'subspecies', 'genus', 'subfamily', 'family', 'order', 'group', 'complex', 'condition'],
   size: ['tiny', 'small', 'medium', 'large'],
   where: ['kitchen', 'bathroom', 'bedroom', 'living-areas', 'lanai-patio', 'lawn-garden', 'attic-walls', 'garage-storage', 'lights-windows', 'on-pets', 'trees-shrubs', 'pool-water'],
-  looks: ['ant-like', 'roach-like', 'winged-swarmer', 'worm-caterpillar', 'spider', 'flying-biter', 'small-fly', 'crawler', 'lawn-damage', 'wasp-bee', 'beetle', 'true-bug', 'moth-butterfly', 'snail-slug-worm', 'lizard-frog', 'snake', 'mammal', 'bird', 'plant-damage', 'sign'],
+  looks: ['ant-like', 'roach-like', 'winged-swarmer', 'worm-caterpillar', 'spider', 'flying-biter', 'small-fly', 'crawler', 'lawn-damage', 'wasp-bee', 'beetle', 'true-bug', 'moth-butterfly', 'snail-slug-worm', 'lizard-frog', 'snake', 'mammal', 'bird', 'plant-damage', 'sign',
+    // BRIEF-PLANTS.md "looks (existing values plus new)" — the L1b lawn/plant content.
+    'weed', 'grass', 'palm', 'shrub-tree', 'leaf-spots', 'yellowing', 'wilting-dieback', 'mushroom-conk'],
   verdict: ['ally', 'harmless', 'watch', 'call'],
   range: ['common', 'occasional', 'rare'],
   urgency: ['low', 'moderate', 'high'],
   line: ['pest', 'termite', 'mosquito', 'lawn', 'tree_shrub', 'rodent', 'none'],
   key: ['pest', 'mosquito', 'flea', 'lawnPestControl', null],
-  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone', 'bat_exclusion'],
+  referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone', 'bat_exclusion',
+    // BRIEF-PLANTS.md service.referral — the L1b lawn/plant content.
+    'arborist', 'extension_office'],
   // Revision 2 (outside review, 2026-09-26): what it is / the risk / what to do.
-  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife'],
+  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife',
+    // BRIEF-PLANTS.md "role gains…" — the L1b lawn/plant content.
+    'weed', 'lawn_grass', 'landscape_plant', 'plant_disease', 'plant_disorder'],
   risk: ['low', 'defensive', 'irritant', 'medical'],
   action: ['leave_alone', 'monitor', 'fix_conditions', 'inspection', 'specialist', 'report'],
   season_basis: ['observed', 'swarming', 'year_round', 'unverified'],
@@ -85,8 +95,17 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     expect(e.aliases.length).toBeGreaterThanOrEqual(1);
     for (const a of e.aliases) expect(a).toMatch(/^[a-z][a-z \-]*[a-z]$/);
 
-    expect(typeof e.scientific_name).toBe('string');
-    expect(e.scientific_name.trim().length).toBeGreaterThan(0);
+    // BRIEF-PLANTS.md: disorders (abiotic) carry scientific_name: null, rank
+    // "condition" — every other kind (including every pest kind) keeps the
+    // pre-existing non-empty-taxon requirement, unweakened.
+    if (e.kind === 'disorder') {
+      expect(e.scientific_name).toBeNull();
+      expect(e.rank).toBe('condition');
+    } else {
+      expect(typeof e.scientific_name).toBe('string');
+      expect(e.scientific_name.trim().length).toBeGreaterThan(0);
+      expect(e.rank).not.toBe('condition');
+    }
     expect(ENUMS.rank).toContain(e.rank);
 
     expect(groupIds.has(e.group)).toBe(true);
@@ -121,7 +140,14 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     }
 
     expect(Array.isArray(e.look_alikes)).toBe(true);
-    expect(e.look_alikes.length).toBeGreaterThanOrEqual(1);
+    // BRIEF-PLANTS.md: "look_alikes: 1-3 for plants, 0-3 for conditions".
+    // Every pest-section entry (any kind) keeps the pre-existing minimum of 1,
+    // unweakened; plant kinds (turfgrass/weed/host_plant) also require 1;
+    // condition kinds (disease/disorder, and sting-nematode's organism kind
+    // under the condition section) may legitimately carry 0.
+    const isPlantContentKind = ['turfgrass', 'weed', 'host_plant'].includes(e.kind);
+    const laMin = (catalog.sectionOf(e) === 'pest' || isPlantContentKind) ? 1 : 0;
+    expect(e.look_alikes.length).toBeGreaterThanOrEqual(laMin);
     expect(e.look_alikes.length).toBeLessThanOrEqual(3);
     for (const la of e.look_alikes) {
       expect(knownSlugs.has(la.slug)).toBe(true);
@@ -133,6 +159,14 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(typeof la.photo_can_confirm).toBe('boolean');
       expect([undefined, 'sign', 'organism']).toContain(la.photo_veto_applies_to);
       if (la.photo_veto_applies_to) expect(la.photo_can_confirm).toBe(false);
+
+      // The rest of this loop is the live pest engine's photography-safety
+      // rules for venomous/stinging/risky-wildlife organisms and signs —
+      // meaningless (and a false positive: e.g. a mildly irritant weed's sap
+      // is fine to photograph up close) for a plant/condition entry, so it is
+      // scoped to pest-section entries only, unweakened for all 239 of them.
+      if (catalog.sectionOf(e) !== 'pest') continue;
+
       // Any pair with a venomous snake on either side: no photo settles it
       // and the tip never brings anyone closer (Codex #4974 r3).
       const venomousSnake = (slug) => {
@@ -176,7 +210,16 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       }
     }
 
-    expect(ENUMS.size).toContain(e.size);
+    // BRIEF-PLANTS.md: "size is omitted for plants and conditions (organisms
+    // keep it)". Pest kinds (organism, sign) always carried size before this
+    // PR and still do — this covers pest organisms/signs AND sting-nematode
+    // (kind organism, condition section) identically, by kind rather than
+    // section, unweakened for the pre-existing 239.
+    if (e.kind === 'organism' || e.kind === 'sign') {
+      expect(ENUMS.size).toContain(e.size);
+    } else {
+      expect(e.size === undefined || e.size === null).toBe(true);
+    }
     expect(Array.isArray(e.where)).toBe(true);
     expect(e.where.length).toBeGreaterThanOrEqual(1);
     for (const w of e.where) expect(ENUMS.where).toContain(w);
@@ -350,12 +393,19 @@ describe('owner approval content binding', () => {
     expect(catalog.isApproved(entry)).toBe(true);
   });
 
-  // Owner approved every fact-check-clean entry 2026-09-27 (after #5106);
-  // only house-centipede keeps an open fact-check.
-  test('every fact-check-clean entry is owner-approved; house-centipede stays draft', () => {
-    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(238);
-    expect(allEntries.filter((entry) => entry.review.status === 'draft').map((entry) => entry.slug))
-      .toEqual(['house-centipede']);
+  // Owner approved every fact-check-clean pest entry 2026-09-27 (after
+  // #5106) and house-centipede 2026-09-28 once its range fact-check closed
+  // (#5114). The L1b lawn/plant content (119 entries: 72 plant + 47
+  // condition) lands owner-approved nowhere yet — every one stays
+  // `review.status: "draft"` until the owner's review pass, so none of it is
+  // nameable by any engine (Codex #5143's whole reason for existing).
+  test('every pest entry is owner-approved; every plant/condition entry is still draft', () => {
+    const approved = allEntries.filter((entry) => entry.review.status === 'owner_approved');
+    const draft = allEntries.filter((entry) => entry.review.status === 'draft');
+    expect(approved).toHaveLength(239);
+    expect(draft).toHaveLength(119);
+    expect(approved.every((entry) => catalog.sectionOf(entry) === 'pest')).toBe(true);
+    expect(draft.every((entry) => catalog.sectionOf(entry) !== 'pest')).toBe(true);
   });
 });
 
@@ -374,6 +424,112 @@ describe('index.json — groups and subgroups', () => {
   });
 });
 
+describe('L1: plant and condition sections (index additions, no content)', () => {
+  const SECTIONS = new Set(['pest', 'plant', 'condition']);
+  const NEW_GROUP_IDS = [
+    'turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees',
+    'nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases',
+    'nutrient-disorders', 'water-and-site', 'cultural-and-chemical',
+  ];
+  const NEW_SUBGROUP_IDS = ['date-palms', 'fan-palms', 'turf-nutrient', 'palm-nutrient'];
+  const NEW_SITE_CATEGORIES = [
+    'Lawn grasses', 'Lawn weeds', 'Palms', 'Shrubs & trees',
+    'Lawn problems', 'Plant & palm problems', 'Lawn & plant problems',
+  ];
+
+  test('every category (old and new) declares a section in {pest, plant, condition}', () => {
+    for (const cat of Object.values(index.categories)) {
+      expect(SECTIONS.has(cat.section)).toBe(true);
+    }
+    expect(index.categories.plant.section).toBe('plant');
+    expect(index.categories.condition.section).toBe('condition');
+    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
+      expect(index.categories[id].section).toBe('pest');
+    }
+  });
+
+  test('every new group exists, names a real category, and resolves through the loader', () => {
+    for (const id of NEW_GROUP_IDS) {
+      expect(groupIds.has(id)).toBe(true);
+      const group = catalog.getGroup(id);
+      expect(group).toBeTruthy();
+      expect(index.categories[group.category]).toBeTruthy();
+    }
+    // All 13 new groups sit under `plant`/`condition` — including
+    // `nematodes` (Codex #5143 r1 P2: a nematode's `kind` stays `organism`,
+    // but it can never be a photo identity — a soil assay is the only
+    // confirmation — so it must not be visible to the pest engine at all;
+    // the loader doesn't tie `kind` to `section`, so this is a pure
+    // category move).
+    for (const id of ['turfgrasses', 'broadleaf-weeds', 'grassy-weeds', 'sedges', 'palms', 'shrubs-trees']) {
+      expect(catalog.getGroup(id).category).toBe('plant');
+    }
+    for (const id of ['nematodes', 'turf-diseases', 'ornamental-diseases', 'palm-diseases', 'nutrient-disorders', 'water-and-site', 'cultural-and-chemical']) {
+      expect(catalog.getGroup(id).category).toBe('condition');
+    }
+  });
+
+  test('every new subgroup exists and names a real (new) group', () => {
+    for (const id of NEW_SUBGROUP_IDS) {
+      expect(subgroupIds.has(id)).toBe(true);
+      const sg = catalog.getSubgroup(id);
+      expect(sg).toBeTruthy();
+      expect(groupIds.has(sg.group)).toBe(true);
+    }
+    expect(catalog.getSubgroup('date-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('fan-palms').group).toBe('palms');
+    expect(catalog.getSubgroup('turf-nutrient').group).toBe('nutrient-disorders');
+    expect(catalog.getSubgroup('palm-nutrient').group).toBe('nutrient-disorders');
+  });
+
+  test('the 7 new site_categories are declared', () => {
+    for (const sc of NEW_SITE_CATEGORIES) expect(index.site_categories).toContain(sc);
+  });
+
+  test('sectionOf resolves category/group/subgroup nodes to the right section', () => {
+    expect(catalog.sectionOf(catalog.getCategory('plant'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getCategory('condition'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getCategory('insect'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getGroup('turfgrasses'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getGroup('turf-diseases'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('nematodes'))).toBe('condition');
+    expect(catalog.sectionOf(catalog.getGroup('ants'))).toBe('pest');
+    expect(catalog.sectionOf(catalog.getSubgroup('date-palms'))).toBe('plant');
+    expect(catalog.sectionOf(catalog.getSubgroup('turf-nutrient'))).toBe('condition');
+    // Bare id/slug form (not just a node object) resolves the same way.
+    expect(catalog.sectionOf('turfgrasses')).toBe('plant');
+    expect(catalog.sectionOf('fire-ant')).toBe('pest');
+    expect(catalog.sectionOf('not-a-real-node')).toBeNull();
+  });
+
+  // L1b landed the 119 drafted lawn/plant entries (72 plant + 47 condition);
+  // the pest section (239) is unaffected and still equals the unfiltered
+  // catalog's pre-L1b size.
+  test('listEntries({ section }) filters by section; L1b landed the 119 plant/condition entries', () => {
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
+    expect(catalog.listEntries()).toHaveLength(358);
+    expect(catalog.listEntries({ section: 'plant' }).every((e) => ['turfgrass', 'weed', 'host_plant'].includes(e.kind))).toBe(true);
+    expect(catalog.listEntries({ section: 'condition' }).every((e) => ['disease', 'disorder', 'organism'].includes(e.kind))).toBe(true);
+  });
+
+  test('a group generic that would equal a section-defining category name (e.g. "a plant") does not collide with the category itself, but no group claims that exact generic today', () => {
+    // "plant" and "condition" resolve to their categories (Codex-style
+    // collision guard already handles category-vs-group generics keyed off
+    // the category's own id/label, not a hardcoded string — see
+    // buildNameIndices' `categoryNames`/`generic()`). No plant/condition
+    // group's generic literally equals "a plant" or the condition
+    // category's generic, so there is nothing to guard against yet; this
+    // pins that fact rather than adding unneeded collision-avoidance code
+    // ahead of any real entries.
+    const plantGroupGenerics = index.groups.filter((g) => g.category === 'plant').map((g) => g.generic);
+    expect(plantGroupGenerics).not.toContain('a plant');
+    expect(catalog.resolveName('plant')).toMatchObject({ node: { level: 'category', id: 'plant' } });
+    expect(catalog.resolveName('condition')).toMatchObject({ node: { level: 'category', id: 'condition' } });
+  });
+});
+
 describe('cross-worker slugs (planned_slugs contract)', () => {
   test('a look-alike target that is not yet a built entry must be in planned_slugs', () => {
     for (const e of allEntries) {
@@ -385,10 +541,25 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
     }
   });
 
-  test('the complete 239-entry catalog has no planned slugs left', () => {
-    expect(allEntries).toHaveLength(239);
-    expect(index.planned_slugs).toEqual([]);
+  // Through the pest catalog's own build, `planned_slugs` staged only pest
+  // placeholders and had to end empty once the 239-entry catalog was
+  // complete. The L1 loader PR (plant/condition sections) staged the
+  // lawn/plant build's 119 not-yet-built plant and condition slugs there too,
+  // so cross-worker look-alike and differential references validated before
+  // that content landed. L1b (this PR) built every one of those 119 slugs, so
+  // `planned_slugs` is back to empty — what must never happen is a placeholder
+  // (pest OR plant/condition) going unbuilt, or a built entry staying listed
+  // as planned.
+  test('the whole catalog is complete: no entry is missing, and no built entry is still "planned"', () => {
+    expect(allEntries).toHaveLength(358);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
     for (const slug of entriesBySlug.keys()) expect(plannedSlugs.has(slug)).toBe(false);
+  });
+
+  test('planned_slugs is empty again now that the L1b lawn/plant content has landed', () => {
+    expect(index.planned_slugs).toEqual([]);
   });
 });
 
@@ -397,9 +568,15 @@ describe('name collisions', () => {
   // (Codex #4873 r1): Apis mellifera is both the swarm and the wall colony,
   // so it names the bees subgroup, never one of them. A name that would only
   // meet at a category is too broad and must not exist.
-  test('shared names resolve to a common node unless the common name spans unrelated arachnid groups', () => {
+  test('shared names resolve to a common node unless the common name spans unrelated arachnid groups, or three unrelated disease groups', () => {
     const unresolved = catalog.nameIndexCollisions().filter((c) => !c.resolvesTo);
-    expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs']));
+    // "leaf spot" (L1b lawn/plant content): a generic alias on one entry in
+    // each of turf-diseases, ornamental-diseases and palm-diseases, none of
+    // which identifies its own full common name — same shape as
+    // daddy-longlegs, and just as genuinely ambiguous: a bare "leaf spot"
+    // really could be any of the three, so it stays unresolved rather than
+    // guessing one plant family's disease over another's.
+    expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs', 'leaf spot']));
   });
 
   test.each(['honey bee', 'honey bees', 'honeybee', 'honeybees', 'Apis mellifera'])(
@@ -902,8 +1079,20 @@ describe('loader API surface', () => {
   test('listEntries filters by group, subgroup, and kind', () => {
     expect(catalog.listEntries({ group: 'ants' }).length).toBe(19);
     expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(4);
-    expect(catalog.listEntries({ kind: 'organism' }).length).toBe(allEntries.length - 12);
+    // The pest section's own kind mix is unchanged by L1b: still 227 organism
+    // + 12 sign = 239. `kind: 'organism'` alone now also picks up
+    // sting-nematode (condition section), so the pest-only comparison stays
+    // scoped to `section: 'pest'`.
+    expect(catalog.listEntries({ section: 'pest', kind: 'organism' }).length).toBe(catalog.listEntries({ section: 'pest' }).length - 12);
     expect(catalog.listEntries({ kind: 'sign' }).length).toBe(12);
+    // L1b's own kind mix: 6 turfgrass + 29 weed + 37 host_plant = 72 plant;
+    // 24 disease + 22 disorder = 46 condition kinds, plus sting-nematode
+    // (kind organism) = 47 condition-section entries.
+    expect(catalog.listEntries({ kind: 'turfgrass' }).length).toBe(6);
+    expect(catalog.listEntries({ kind: 'weed' }).length).toBe(29);
+    expect(catalog.listEntries({ kind: 'host_plant' }).length).toBe(37);
+    expect(catalog.listEntries({ kind: 'disease' }).length).toBe(24);
+    expect(catalog.listEntries({ kind: 'disorder' }).length).toBe(22);
   });
 
   test('getNode resolves entries, subgroups, groups, and categories', () => {
@@ -1028,7 +1217,12 @@ describe('unnamed answers show only fixed text (real catalog)', () => {
 });
 
 describe('catalog size (sanity)', () => {
-  test('exactly 239 entries are loaded (60 owner-A + 179 owner-B/C)', () => {
-    expect(allEntries.length).toBe(239);
+  // 239 pest (60 owner-A + 179 owner-B/C) + 119 L1b lawn/plant draft entries
+  // (72 plant + 47 condition) = 358.
+  test('exactly 358 entries are loaded (239 pest + 72 plant + 47 condition)', () => {
+    expect(allEntries.length).toBe(358);
+    expect(catalog.listEntries({ section: 'pest' })).toHaveLength(239);
+    expect(catalog.listEntries({ section: 'plant' })).toHaveLength(72);
+    expect(catalog.listEntries({ section: 'condition' })).toHaveLength(47);
   });
 });

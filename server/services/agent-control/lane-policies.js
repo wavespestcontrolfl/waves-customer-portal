@@ -297,6 +297,7 @@ const LANE_RUNTIME = {
   // M3: the gated runner submits allowlisted listings with no per-item approval and records evidence in seo_link_attempts (Codex r12).
   signup_worker: { side_effect_class: 'irreversible_external', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
   link_investigator: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
+  internal_link_judge: { side_effect_class: 'read_only', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check' },
   // event, not daily (Codex r17): the 3am tick returns before the prober when GATE_SEO_INTELLIGENCE is off, and each provider
   // skips without credentials — a dark or unconfigured lane must not page as gone-silent.
   mentions_prober: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'search', fallback_class: 'measurement', eval_family: null, ...LONG_BATCH },

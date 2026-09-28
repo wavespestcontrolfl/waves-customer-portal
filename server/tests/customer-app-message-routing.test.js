@@ -494,6 +494,32 @@ test('request delivery forwards the queued status and transition identity to the
 });
 
 describe('explicit billing channel combinations', () => {
+  test('a later native guard refusal preserves an observed original App event', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockImplementation(async (_to, _body, hooks) => {
+      expect(await hooks.preSendCheck()).toMatchObject({ ok: false });
+      expect(hooks.explicitPushOnly).toBe(true);
+      return { success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt };
+    });
+    const result = await sendCustomerMessage({ ...input, purpose: 'billing', preSendCheck: async () => false,
+      metadata: { billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:prior', appOnly: true } });
+    expect(result).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(require('../services/messaging/billing-channel-routing').billingLegDeliveryState('push', result)).toBe('deduped');
+    expect(result.bellPersisted).toBeUndefined();
+    expect(result.providerMessageId).toBeUndefined();
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
+
+  test('an already visible App event keeps its settlement evidence without a Text fallback', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(await sendCustomerMessage({ ...input, purpose: 'billing', metadata: {
+      billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:event-1', appOnly: true,
+    } })).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
   const combinations = [
     ['email'], ['sms'], ['push'], ['email', 'sms'],
     ['email', 'push'], ['sms', 'push'], ['email', 'sms', 'push'],
@@ -1228,6 +1254,24 @@ describe('invoice_send_via_sms explicit billing Email leg (send-customer-message
     const [, hooks] = sendBillingChannelEmail.mock.calls[0];
     await expect(hooks.preSendCheck({ database: db })).resolves.toMatchObject({ ok: true });
     expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
+  });
+
+  test('an accepted Email replay keeps its deduped identity and original time through routing', async () => {
+    prefs.invoice_channels = ['email'];
+    const acceptedAt = new Date('2026-01-02T14:00:00Z');
+    sendBillingChannelEmail.mockResolvedValueOnce({ sent: true, provider: 'email',
+      deliveryOutcome: 'accepted', providerMessageId: 'email:prior', deduped: true, sentAt: acceptedAt });
+
+    const result = await sendCustomerMessage(invoiceInput({
+      withProviderHandoff: jest.fn(async (dispatch) => dispatch()),
+      billingEmailPreSendCheck: jest.fn(async () => ({ ok: true })),
+    }));
+
+    expect(result).toMatchObject({ sent: true, deliveryOutcome: 'accepted', deduped: true });
+    expect(result.channelResults.email).toMatchObject({
+      sent: true, deliveryOutcome: 'accepted', deduped: true, sentAt: acceptedAt,
+    });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
   });
 
   test('an Email+Text explicit selection runs both legs; the Text leg still goes through withProviderHandoff', async () => {

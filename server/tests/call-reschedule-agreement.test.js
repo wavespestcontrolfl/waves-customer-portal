@@ -122,6 +122,14 @@ describe('groundRescheduleAgreement', () => {
     expect(committed('We will see you Friday at three')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Okay we will see you then')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('We will see you Thursday at two AM')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('We will see you Thursday at two sharp a.m')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    expect(committed('I am seeing you Thursday at two')).toMatchObject({ ok: true });
+    expect(ground(v2({ evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+      quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two in the afternoon works for me'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two in the afternoon works for me'),
+    ] }), 'Caller: Thursday at two in the afternoon works for me.\nAgent: We will see you Thursday at two AM.'))
+      .toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
     expect(committed('Great, we will see you Thursday at two').ok).toBe(true);
     expect(committed('Great, we will see you Thursday at two PM').ok).toBe(true);
     // Codex #5092 r16: "minutes before" is a minute count too.
@@ -153,8 +161,9 @@ describe('groundRescheduleAgreement', () => {
     expect(at({ hour: 'two thirty' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(at({ day: 'Friday' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     expect(at({ period: 'in the morning' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
-    // Nobody said which half of the day: not an agreed time.
-    expect(at({ period: null })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    // No period recorded while the quote does say one: the recorded words
+    // do not match what was said.
+    expect(at({ period: null })).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(at({ period: 'morning or afternoon' })).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
     // The same words for the slot they do state.
     expect(agreedAt('2026-09-24T10:00:00-04:00', 'We will see you Thursday at 10 AM.', { day: 'Thursday', hour: '10', period: 'AM' }).ok).toBe(true);
@@ -256,6 +265,87 @@ describe('groundRescheduleAgreement', () => {
     expect(jan31('February 29th', '2028-02-29T14:00:00-05:00').ok).toBe(true);
   });
 
+  // Owner decision 2026-09-28: a reschedule's hour said with no AM/PM reads
+  // as business hours (7-11 morning, 12 and 1-6 afternoon).
+  test('an hour said without AM/PM reads as business hours', () => {
+    const plain = (slot, text, hour) => agreedAt(slot, text, { day: 'Thursday', hour, period: null });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday, 2 to 4.', '2').ok).toBe(true);
+    expect(plain('2026-09-24T02:00:00-04:00', 'We will move it to Thursday, 2 to 4.', '2')).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(plain('2026-09-24T10:00:00-04:00', 'We will see you Thursday at ten.', 'ten').ok).toBe(true);
+    expect(plain('2026-09-24T12:00:00-04:00', 'We will see you Thursday at twelve.', 'twelve').ok).toBe(true);
+    // Outside business hours an unstated hour states nothing.
+    expect(plain('2026-09-24T20:00:00-04:00', 'We will see you Thursday at eight.', 'eight')).toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+    expect(plain('2026-09-24T08:00:00-04:00', 'We will see you Thursday at eight.', 'eight').ok).toBe(true);
+    expect(plain('2026-09-24T11:00:00-04:00', 'We will be there Thursday between 11 and midnight.', '11')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5163 r1: "in the a.m." is a period.
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two in the a.m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // "Morning appointment" may be the old visit or the new one: fails closed.
+    expect(plain(THURSDAY_2PM, 'I will move your morning appointment to Thursday at two.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5163 r2: any sign of a period in the agreement's sentences, the
+    // caller's acceptance included, blocks the fallback; zero minutes too.
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two sharp a.m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two a m.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two o five.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at two o clock.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'I really am moving you to Thursday at two, a tech will call.', 'two').ok).toBe(true);
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Yes, Thursday at two AM works for me'),
+      ],
+    }), 'Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: Yes, Thursday at two AM works for me.'))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // Codex #5163 r3: "I mean a.m." / "I said AM" / "I prefer AM" are the morning.
+    for (const said of ['We will move it to Thursday at two, I mean a.m.', 'We will move it to Thursday at two, I said AM.', 'I prefer AM, we will move it to Thursday at two.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').reason]).toEqual([said, 'agreed_slot_ungrounded']);
+    }
+    // Codex #5163 r4: only an exact hour takes the business-hours reading.
+    for (const said of ['We will move it to Thursday around two.', 'We will move it to Thursday by two.', 'We will move it to Thursday at two or four.', 'We will move it to Thursday at 02:00.']) {
+      expect([said, plain(THURSDAY_2PM, said, said.includes('02') ? '02' : 'two').ok]).toEqual([said, false]);
+    }
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday between two and four.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00.', '2').ok).toBe(true);
+    // Codex #5163 r5: nothing after the hour may correct it or offer another,
+    // and a month's day number is never the hour.
+    for (const said of ['We will move it to Thursday at two, actually three.', 'We will move it to Thursday at two, or four.', 'We will move it to Thursday at two sharp or four.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').ok]).toEqual([said, false]);
+    }
+    expect(agreedAt('2027-03-02T14:00:00-05:00', 'We will move it to March 2.', { day: 'March 2', hour: '2', period: null }).ok).toBe(false);
+    // Codex #5163 r6: doubt or a length after the hour, and an unrecorded "next".
+    for (const said of ['We will see you Thursday at two, I think.', 'We will see you Thursday at two, approximately.', 'The treatment on Thursday is for two to four hours.']) {
+      expect([said, plain(THURSDAY_2PM, said, 'two').ok]).toEqual([said, false]);
+    }
+    expect(plain(THURSDAY_2PM, 'We will move you to two next Thursday.', 'two').ok).toBe(false);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thanks so much.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two, thank you, have a great day.', 'two').ok).toBe(true);
+    expect(plain(THURSDAY_2PM, 'We will move it to Thursday at 2:00 or 4:00.', '2').ok).toBe(false);
+    // A quote cut short before a qualifier is judged by its whole turn.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will move it to Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will move it to Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: We will move it to Thursday at two or four.\nCaller: ${ACCEPT}`).ok).toBe(false);
+    // "Am" the verb is not a period.
+    expect(plain(THURSDAY_2PM, 'I am moving you to Thursday at two.', 'two').ok).toBe(true);
+    // Nor one said just past the end of the quote, in the same sentence.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: We will see you Thursday at two in the morning.\nCaller: ${ACCEPT}`))
+      .toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    // A period said in the quote but not recorded never falls back.
+    expect(plain(THURSDAY_2PM, 'We will see you Thursday at two in the morning.', 'two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+  });
+
   test('a weekday beside an explicit date describes that date', () => {
     const at = (text, day) => agreedAt('2026-12-17T12:00:00-05:00', text, { day, hour: 'noon', period: null });
     expect(at('We will see you Thursday, December 17 at noon.', 'Thursday, December 17').ok).toBe(true);
@@ -303,6 +393,142 @@ describe('groundRescheduleAgreement', () => {
     // Without the moved appointment, slot words naming no day ground nothing.
     expect(ground(v2({ scheduling: { agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' } } })))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' });
+  });
+
+  // Follow-ups after #5163 (owner go-ahead 2026-09-28): three wrong-move
+  // closures and three loosenings measured on the 20-call replay.
+  test('follow-ups: relative weeks, alternatives before the hour, and inexact commitments fail', () => {
+    const plainDay = (text, words, slot = THURSDAY_2PM) => agreedAt(slot, text, words);
+    const thu = { day: 'Thursday', hour: 'two', period: null };
+    expect(plainDay('We will move you to Thursday a week from now at two.', thu).ok).toBe(false);
+    expect(plainDay('We will move you to the following Thursday at two.', thu).ok).toBe(false);
+    expect(plainDay('We will see you at three or Thursday at two.', thu).ok).toBe(false);
+    expect(plainDay('We will see you either Thursday at two.', thu).ok).toBe(false);
+    // The agent's own commitment must say the unstated hour exactly.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: thu },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We should arrive around Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two, please'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two, please'),
+      ],
+    }), 'Caller: Thursday at two, please.\nAgent: We should arrive around Thursday at two.')).toMatchObject({ ok: false });
+  });
+
+  test('follow-ups: real phrasings that now ground', () => {
+    // A courtesy word right after the hour, and a date whose number equals the hour.
+    expect(agreedAt(THURSDAY_2PM, 'Thursday at two is perfect.', { day: 'Thursday', hour: 'two', period: null }).ok).toBe(true);
+    expect(agreedAt('2026-10-10T10:00:00-04:00', 'We will move it to October 10 at 10.', { day: 'October 10', hour: '10', period: null }).ok).toBe(true);
+    // The agent need not repeat the day the caller named; "9 o'clock" needs no lead word.
+    const nine = { day: 'tomorrow', hour: '9', period: null };
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "Yep, we'll see them at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow. I'll let them know."),
+      ],
+    }), "Caller: Can we make it earlier?\nAgent: Yep, we'll see them at 9.\nCaller: Okay, 9 o'clock tomorrow. I'll let them know.").ok).toBe(true);
+    // A relative day in the commitment is a day, and must be the recorded one.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see them in two days at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see them in two days at 9.")).toMatchObject({ ok: false });
+    for (const commit of ["We'll see them May 3 at 9.", "We'll see them 9/25 at 9."]) {
+      expect([commit, ground(v2({
+        scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: nine },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', commit),
+          quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+          quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+        ],
+      }), `Caller: Okay, 9 o'clock tomorrow.\nAgent: ${commit}`).ok]).toEqual([commit, false]);
+    }
+    // A bound before "o'clock" is still a bound.
+    for (const said of ["We will be there tomorrow before 9 o'clock.", "We will be there tomorrow by 9 o'clock."]) {
+      expect([said, agreedAt('2026-09-24T09:00:00-04:00', said, { day: 'tomorrow', hour: '9', period: null }).ok]).toEqual([said, false]);
+    }
+    // A day the agent does name must be the recorded one.
+    expect(ground(v2({
+      scheduling: { agreed_slot_words: { day: 'Thursday', hour: 'two', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Friday at two'),
+        quote('/scheduling/confirmed_start_at', 'caller', 'Thursday at two, please'),
+        quote('/scheduling/caller_accepted_slot', 'caller', 'Thursday at two, please'),
+      ],
+    }), 'Caller: Thursday at two, please.\nAgent: We will see you Friday at two.')).toMatchObject({ ok: false, reason: 'agent_commitment_not_the_slot' });
+    // An agent's leading "No," answering the caller is not a refusal.
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'No, we will just pop in Thursday at noon.', { day: 'Thursday', hour: 'noon', period: null }).ok).toBe(true);
+    expect(agreedAt('2026-09-24T12:00:00-04:00', 'No, we will not come Thursday at noon.', { day: 'Thursday', hour: 'noon', period: null }).ok).toBe(false);
+  });
+
+  test('follow-ups: an availability phrase names the visit to move; "do not move" still fails', () => {
+    const SAME = 'We will see you at two in the afternoon then.';
+    const moved = (callerLine, movedQuote) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'tomorrow', agreed_slot_words: { day: null, hour: 'two', period: 'in the afternoon' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', SAME),
+        quote('/scheduling/confirmed_start_at', 'agent', SAME),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+      ],
+    }), `Caller: ${callerLine}\nAgent: ${SAME}\nCaller: ${ACCEPT}`);
+    expect(moved("We're not going to be home tomorrow morning.", "We're not going to be home tomorrow").ok).toBe(true);
+    expect(moved("I can't make it tomorrow.", "I can't make it tomorrow").ok).toBe(true);
+    expect(moved('Do not move my visit tomorrow.', 'Do not move my visit tomorrow')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+  });
+
+  // Codex #5207 r1: each loosening kept to its own case.
+  test('follow-ups r1: loosenings do not reach past their case', () => {
+    const thu = { day: 'Thursday', hour: 'two', period: null };
+    // A leading "No," only before "we'll"/"I'll".
+    expect(agreedAt(THURSDAY_2PM, 'No, Thursday at two PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    // "9 o'clock" without a lead only at a clause start or after a plain yes.
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Avoid 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "Okay, 9 o'clock Thursday.", { day: 'Thursday', hour: '9', period: null }).ok).toBe(true);
+    // The agent's "let me know" / "I will let you know" is not a booking.
+    expect(agreedAt(THURSDAY_2PM, 'Thursday at two, let me know.', thu).ok).toBe(false);
+    // A same-day commitment may end "have a nice day".
+    const SAME = 'We will see you at two PM, have a nice day.';
+    expect(ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-24', moved_appointment_words: 'September 24th', agreed_slot_words: { day: null, hour: 'two', period: 'PM' } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', SAME),
+        quote('/scheduling/confirmed_start_at', 'agent', SAME),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', 'my September 24th visit'),
+      ],
+    }), `Caller: Can you move my September 24th visit?\nAgent: ${SAME}\nCaller: ${ACCEPT}`).ok).toBe(true);
+    // "now" is not a plain commitment word.
+    expect(ground(v2({
+      scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00', agreed_slot_words: { day: 'tomorrow', hour: '9', period: null } },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', "We'll see you now at 9."),
+        quote('/scheduling/confirmed_start_at', 'caller', "Okay, 9 o'clock tomorrow"),
+        quote('/scheduling/caller_accepted_slot', 'caller', "Okay, 9 o'clock tomorrow"),
+      ],
+    }), "Caller: Okay, 9 o'clock tomorrow.\nAgent: We'll see you now at 9.")).toMatchObject({ ok: false });
+    // An availability phrase must govern the moved visit, with no "but".
+    const movedFri = (callerLine, movedQuote) => ground(v2({
+      scheduling: { moved_appointment_date: '2026-09-25', moved_appointment_words: 'Friday', agreed_slot_words: thu },
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/confirmed_start_at', 'agent', 'We will see you Thursday at two'),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        quote('/scheduling/moved_appointment_date', 'caller', movedQuote),
+      ],
+    }), `Caller: ${callerLine}\nAgent: We will see you Thursday at two.\nCaller: ${ACCEPT}`);
+    expect(movedFri("I'm not going to be home tomorrow, but my appointment is Friday.", 'my appointment is Friday')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(movedFri("I'm not going to be home Friday.", "I'm not going to be home Friday").ok).toBe(true);
+    // Codex #5207 r2.
+    expect(movedFri("I'm not home tomorrow, but Friday works.", 'but Friday works')).toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    expect(agreedAt(THURSDAY_2PM, 'No, we will see you Thursday at two PM or Friday at three PM.', { day: 'Thursday', hour: 'two', period: 'PM' }).ok).toBe(false);
+    expect(agreedAt('2026-09-24T09:00:00-04:00', "We'll see you tomorrow at 9, right.", { day: 'tomorrow', hour: '9', period: null }).ok).toBe(false);
+    expect(agreedAt('2026-10-10T09:00:00-04:00', "We'll see you at 9 for your 10th appointment.", { day: '10th', hour: '9', period: null }).ok).toBe(false);
   });
 
   // The fixtures above inject the fields; this pins them to the stored V2

@@ -24,6 +24,20 @@ const COMMERCIAL_RISK_TYPES = [
   { value: 'multifamily', label: 'Multifamily' },
 ];
 
+// Words that name each bucket's property type in plain text (a blog keyword
+// or title). The blog price card reads these to keep commercial topics off
+// the residential list-price feed; a new bucket must add its terms here.
+const COMMERCIAL_RISK_TYPE_TERMS = {
+  office_low: ['office', 'offices', 'office building'],
+  retail_standard: ['retail', 'storefront', 'shopping center', 'strip mall'],
+  hoa_common_area: ['hoa', 'homeowners association', 'common area', 'condo association'],
+  warehouse_distribution: ['warehouse', 'warehouses', 'distribution center'],
+  restaurant_food: ['restaurant', 'restaurants', 'food service', 'commercial kitchen'],
+  healthcare_childcare: ['healthcare', 'medical office', 'clinic', 'hospital', 'daycare', 'childcare', 'school'],
+  hotel_resort: ['hotel', 'hotels', 'motel', 'resort'],
+  multifamily: ['multifamily', 'multi-family', 'apartment', 'apartments', 'apartment complex'],
+};
+
 // Pest / rodent visits per year per bucket (owner-locked). Warehouse rodent is
 // MONTHLY (12) — roll-up doors / docks / dumpsters under-service on quarterly.
 const COMMERCIAL_RISK_TYPE_CADENCE = {
@@ -90,6 +104,7 @@ function resolveCommercialLawnCadenceOverride(cadence) {
 
 module.exports = {
   COMMERCIAL_RISK_TYPES,
+  COMMERCIAL_RISK_TYPE_TERMS,
   COMMERCIAL_RISK_TYPE_CADENCE,
   COMMERCIAL_RISK_TYPE_VALUES,
   COMMERCIAL_PEST_CADENCE_VISITS,

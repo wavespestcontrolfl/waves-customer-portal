@@ -1549,10 +1549,17 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     logger.warn(`[appt-remind] No phone for customer ${customerId}, skipping SMS`);
     return false;
   }
+  // window_unknown: the body quotes no arrival window (a windowless
+  // reschedule: "at a time we'll confirm"). Its rendered_slot_ms still feeds
+  // the move guard, but is never recorded as the promised window — the
+  // no-show detector reads that key as the window the customer was told.
+  const windowUnknown = metaExtra.window_unknown === true;
+  const recordedMeta = { ...metaExtra };
+  if (windowUnknown) delete recordedMeta.rendered_slot_ms;
 
   const appSelected = await require('./messaging/push-channel-routing').wantsAppFirst({
     to: phone, channel: 'sms', audience: 'customer', customerId, purpose, operatorInitiated,
-    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
+    metadata: { original_message_type: messageType, ...recordedMeta, useCustomerChannel: true },
   });
   if (!appSelected && await isLandline(customerId, phone)) {
     return false;
@@ -1602,7 +1609,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // route through the handler — never defaulted true, and cron/
     // customer-driven callers leave it false so they stay fenced.
     ...(operatorInitiated === true ? { operatorInitiated: true } : {}),
-    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
+    metadata: { original_message_type: messageType, ...recordedMeta, useCustomerChannel: true },
     // Canonical visit linkage for the audit row (messaging_audit_log.
     // appointment_id) — sms_log metadata does NOT survive the provider
     // handoff (twilio-sms.js forwards an allowlist), so the audit record is
@@ -1611,6 +1618,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // ABA guard input (codex r39): the slot this body was rendered against,
     // verified live at both canonical move-hold checkpoints.
     ...(Number.isFinite(metaExtra.rendered_slot_ms) ? { renderedSlotMs: metaExtra.rendered_slot_ms } : {}),
+    ...(windowUnknown ? { promisedWindowUnknown: true } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran. (The
@@ -2767,6 +2775,26 @@ const AppointmentReminders = {
           .first();
 
         if (existing) {
+          // The 15-minute self-heal sweep can land between the booking's
+          // commit and this registration; it inserts the row with the
+          // confirmation marked handled (it never sends one). A booking that
+          // asks for its confirmation re-arms it — the sweep sent nothing.
+          // Never a sibling-suppressed row (the slot's primary row owns that
+          // confirmation), a pre-closed placeholder, or a cancelled row.
+          if (sendConfirmation && existing.source === 'cron_selfheal' && existing.confirmation_sent
+            && !existing.suppressed_by_sibling && !existing.windows_preclosed && !existing.cancelled) {
+            const [rearmed] = await trx('appointment_reminders')
+              .where({
+                id: existing.id, source: 'cron_selfheal', confirmation_sent: true,
+                suppressed_by_sibling: false, windows_preclosed: false, cancelled: false,
+              })
+              // The row takes the booking's own source, so the re-arm is a
+              // one-time transition: a later registration of this visit sees
+              // a normal row and never re-arms a confirmation already sent.
+              .update({ confirmation_sent: false, confirmation_sent_at: null, source })
+              .returning('*');
+            if (rearmed) return { record: rearmed, serviceLabel: rearmed.service_type, inserted: false, reason: 'rearmed_selfheal' };
+          }
           return { record: existing, serviceLabel: existing.service_type, inserted: false, reason: 'already_registered' };
         }
 
@@ -2857,7 +2885,7 @@ const AppointmentReminders = {
       });
 
       const { record } = registration;
-      if (!registration.inserted) {
+      if (!registration.inserted && registration.reason !== 'rearmed_selfheal') {
         if (registration.reason === 'same_appointment') {
           logger.info(
             `[appt-remind] Same customer appointment already registered: ` +
@@ -4272,12 +4300,25 @@ const AppointmentReminders = {
               day,
               date,
               time,
+              // The 2-hour arrival window, same phrase as the reminders. A
+              // windowless visit resolves to a bookkeeping 08:00 slot, so it
+              // gets the reminders' unknown-window phrase, never a window
+              // nobody chose.
+              window: resolved?.windowless
+                ? require('../utils/sms-time-format').UNKNOWN_ARRIVAL_WINDOW
+                : formatArrivalWindow(newApptTime),
             }, {
               workflow: 'appointment_rescheduled',
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId, rendered_slot_ms: newApptTime.getTime() }, { sendOutcome: rescheduleNoticeOutcome });
+          }, 'appointment_rescheduled', 'appointment_confirmation', {
+            scheduled_service_id: scheduledServiceId,
+            rendered_slot_ms: newApptTime.getTime(),
+            // A windowless notice promised no window: the slot still guards
+            // the send, but it is recorded as an unknown-window promise.
+            ...(resolved?.windowless ? { window_unknown: true } : {}),
+          }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -5730,6 +5771,7 @@ AppointmentReminders.handOffToOffice = handOffToOffice;
 AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 
 AppointmentReminders._test = {
+  safeSend,
   maskPhone,
   sanitizeLookupError,
   acceptedMixServiceName,

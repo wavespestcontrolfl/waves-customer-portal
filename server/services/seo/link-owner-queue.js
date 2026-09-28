@@ -232,7 +232,10 @@ async function listOwnerQueue(db) {
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   const executionById = new Map(liveRows.filter((r) => r.dimension === 'execution' && r.instance_kind === '-').map((r) => [r.prospect_id, r]));
   const domains = await db('seo_link_domains').whereIn('id', [...new Set(candidates.map((p) => p.domain_id))])
-    .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
+    // source_detail + enrichment: the durable discovery-only provenance
+    // isDiscoveryOnlyDomain reads after a rollback relabels `source` — the card
+    // must decide on the same inputs as the bridge, which loads the whole row.
+    .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'source_detail', 'enrichment', 'discovery_priority');
   const domainById = new Map(domains.map((d) => [d.id, d]));
   const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...candidates.map((p) => p.path_id)].filter(Boolean))];
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];

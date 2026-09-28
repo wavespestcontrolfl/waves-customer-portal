@@ -324,7 +324,8 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(matched.message).toMatchObject({ id: queue.id, created_at: sentAt, message_body: provider.message_body,
         from_phone: provider.from_phone, to_phone: provider.to_phone });
       return require('../services/sms-operational-extractor').groundExtraction({ facts: [], additional_properties: [], obligations: [{
-        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise', answered_by_payment: false,
+        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise',
+        answered_by_payment: false, answered_by_reply: false,
         property_id: context.properties[0].id, due_text: 'tomorrow at 10 AM', due_at: null,
       }] }, matched);
     });
@@ -1862,8 +1863,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
-  test('R2 rule 6: for a customer with a property history, a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
+  test('R2 rule 6: for a customer with a property history, a property-scoped ask takes the invoice\'s own visit property and an unlinked ledger payment, never a payment for another property', async () => {
     await giveFormerProperty(message.customer_id);
+    const [former] = await mockPg('customer_properties').where({ customer_id: message.customer_id, active: false }).pluck('id');
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: context.properties[0].id,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
@@ -1880,16 +1882,27 @@ postgres('SMS commitments on PostgreSQL', () => {
     // An unlinked ledger prepayment, same customer, tied to no property at all.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after });
+    // A payment toward a visit at the customer's former property.
+    const [elsewhere] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: former,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(after), window_start: '09:00:00', status: 'completed', created_at: before }).returning('id');
+    const [elsewhereInvoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0414',
+      title: 'Quarterly Pest Control', total: 95, subtotal: 95, line_items: '[]', status: 'paid', paid_at: after, scheduled_service_id: elsewhere.id }).returning('id');
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 95, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: elsewhereInvoice.id, settled_event_at: after.toISOString() }), created_at: after });
     const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
     const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
     expect(verify).toHaveBeenCalledTimes(1);
     const paymentRecords = verify.mock.calls[0][1].records.filter((r) => r.type === 'payment');
-    const linked = paymentRecords.find((r) => r.payment_source === 'invoice');
+    const linked = paymentRecords.find((r) => r.invoice_id === invoice.id);
+    const other = paymentRecords.find((r) => r.invoice_id === elsewhereInvoice.id);
     const ledger = paymentRecords.find((r) => r.payment_source === 'ledger');
     expect(linked.property_id).toBe(context.properties[0].id);
+    expect(other.property_id).toBe(former);
+    expect(ledger.property_id).toBeNull();
     const scopedAsk = { kind: 'other', sms_context: { property_id: context.properties[0].id, money_answerable: true } };
     expect(admissibleWitness(linked, scopedAsk)).toBe(true);
-    expect(admissibleWitness(ledger, scopedAsk)).toBe(false);
+    expect(admissibleWitness(ledger, scopedAsk)).toBe(true);
+    expect(admissibleWitness(other, scopedAsk)).toBe(false);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
@@ -2372,7 +2385,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     } finally { await writer.rollback(); }
   });
 
-  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and never when they have had another', async () => {
+  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and still counts for a scoped ask once they have had another', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const propertyId = context.properties[0].id;
@@ -2394,12 +2407,14 @@ postgres('SMS commitments on PostgreSQL', () => {
     }
     // An unscoped ask attributes nothing: it needs no property.
     expect((await payments(unscoped))[autopay.id].property_id).toBeNull();
-    // Once the customer has had another property, a payment with no link could be for either.
+    // Once the customer has had another property, a payment with no link is
+    // no longer attributed to either, but nothing ties it to the other one,
+    // so it still counts (owner ruling 2026-09-27).
     await giveFormerProperty(message.customer_id);
     const history = await payments(scoped);
     for (const id of [office.id, autopay.id]) {
       expect(history[id].property_id).toBeNull();
-      expect(admissibleWitness(history[id], scoped)).toBe(false);
+      expect(admissibleWitness(history[id], scoped)).toBe(true);
     }
   });
 
@@ -2780,6 +2795,153 @@ postgres('SMS commitments on PostgreSQL', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const outcome = await refreshSmsCommitments({ conn: mockPg, now });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: intake stamps sms_context.reply_answerable for kind \'other\' from the extraction\'s own answered_by_reply judgement', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ reply_answerable: true, money_answerable: false });
+  });
+
+  test('owner ruling 2026-09-28: reply_answerable is never stamped for a non-\'other\' kind', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], answered_by_reply: true };
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('call_commitments').first()).sms_context).not.toHaveProperty('reply_answerable');
+  });
+
+  test('owner ruling 2026-09-28: a DUE plain-information "other" ask closes on a human staff sms reply that actually answers it', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'The Zelle number is 941-555-0101.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The Zelle number is 941-555-0101.' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
+  test('owner ruling 2026-09-28: Codex #5169 r1 P1: a completed call never closes a reply-answerable "other" ask — call_log records no human provenance', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'The Zelle number is 941-555-0101.', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'The Zelle number is 941-555-0101.' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+  });
+
+  test('Codex #5169 r1 P1: a staff text closes a reply-answerable ask only with persisted operator provenance — a bare manual type never does, the composer stamp does', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'The Zelle number is 941-555-0101.', message_type: 'manual', admin_user_id: null,
+      status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The Zelle number is 941-555-0101.' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    await mockPg('sms_log').where({ id: reply.id }).update({ metadata: JSON.stringify({ human_authored: true }) });
+    expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 1000) })).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
+  test('Codex #5169 r1 P2: a plain question that names an email address still closes on the staff text that answers it', async () => {
+    result.facts = [];
+    const quote = 'Is sample.customer@example.com the email on my account?';
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(), quote, description: quote };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Yes, that is the email we have on file.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'Yes, that is the email we have on file.' } });
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ scanned: 1, fulfilled: 1 });
+  });
+
+  test('owner ruling 2026-09-28: a short (<60s) call never closes a reply-answerable "other" ask', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [call] = await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 30,
+      transcription: 'The Zelle number is 941-555-0101.', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'The Zelle number is 941-555-0101.' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: an automated notice can never close a reply-answerable "other" ask even when the model cites it', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: true,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    const [notice] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Your appointment is confirmed for Tuesday.', message_type: 'confirmation',
+      status: 'delivered', created_at: after }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${notice.id}`, quote: 'Your appointment is confirmed for Tuesday.' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('owner ruling 2026-09-28: an "other" ask the extraction did NOT mark reply-answerable (stamped false, the R3 case) — the same staff sms reply that would close a reply-answerable ask does not', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, answered_by_reply: false,
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: "What's the Zelle number?", description: "What's the Zelle number?" };
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ reply_answerable: false });
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'The Zelle number is 941-555-0101.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
