@@ -117,6 +117,9 @@ async function sendViaTwilio(input, hooks = {}) {
 
 async function sendViaTwilioOnce(input, {
   preSendCheck, providerPreSendCheck, onDispatchStart, onDispatchAbort, withSmsHandoff, providerHandoffReservation,
+  // codex #5018 structural fix (post-r7): threaded straight through, same
+  // as onDispatchStart/onDispatchAbort above.
+  logInHandoff,
 } = {}) {
   const providerCoordination = require('../provider-handoff-reservation');
   const internalProviderReservation = providerCoordination.isProviderHandoffHandle(providerHandoffReservation)
@@ -216,6 +219,11 @@ async function sendViaTwilioOnce(input, {
       // when twilio.js's post-onDispatchStart window recheck refuses.
       onDispatchAbort,
       withSmsHandoff,
+      // codex #5018 structural fix (post-r7): gates twilio.js's in-
+      // transaction sms_log insert (dispatch()'s own comment there).
+      // Omitted (the default), twilio.js falls back to origin/main's
+      // post-handoff, out-of-transaction insert.
+      logInHandoff,
       providerHandoffReservation: internalProviderReservation,
       // The opaque owner token is issued only from the complete canonical
       // input and callback contract. Raw Twilio callers cannot bypass the

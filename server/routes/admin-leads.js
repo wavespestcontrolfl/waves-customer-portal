@@ -1478,6 +1478,14 @@ router.post('/:id/send-sms', async (req, res, next) => {
         await lockSmsPhone(trx, lead.phone);
         return dispatch(trx);
       }),
+      // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
+      // transaction sms_log insert so linkSentRecently (this send's own
+      // race target above) sees the evidence before the phone lock
+      // releases. Safe: this handoff takes only the advisory lockSmsPhone
+      // above — no row lock (customers, leads, etc.) is held before the
+      // insert takes sms_log's customer_id FK KEY SHARE, so there is
+      // nothing for that KEY SHARE to invert against.
+      logInHandoff: true,
       metadata: {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,

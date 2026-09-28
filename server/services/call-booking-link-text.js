@@ -1384,6 +1384,16 @@ async function dispatchClaimedCall(conn, call, now) {
     // "ambiguous, never resent" for a send that was provably never
     // attempted.
     onDispatchAbort: () => markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del(),
+    // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
+    // transaction sms_log insert. This lane's own withSmsHandoff below
+    // already takes lockCustomerComms for every candidate customer id
+    // BEFORE lockSmsPhone — the insert's customer_id FK KEY SHARE lock on
+    // `customers` lands on a customer this handoff has already locked, so
+    // it cannot invert against anything this transaction itself acquires.
+    // Opting in is what lets linkSentRecently (this lane's own dedupe read)
+    // see the evidence before the phone lock releases — the ONE reader
+    // this in-transaction write exists for.
+    logInHandoff: true,
     // codex #5018 r11 P1: without a locked handoff, a STOP committed after
     // send-customer-message.js's FIRST suppression/consent read (well before
     // this call even reaches the provider) and before this hook's own

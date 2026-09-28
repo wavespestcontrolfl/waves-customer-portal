@@ -1065,6 +1065,13 @@ router.post('/sms', async (req, res, next) => {
         await lockSmsPhone(trx, to);
         return dispatch(trx);
       }),
+      // codex #5018 structural fix (post-r7): opts INTO twilio.js's in-
+      // transaction sms_log insert so linkSentRecently (the race target
+      // named in the comment above) sees the evidence before the phone
+      // lock releases. Safe: this handoff takes only the advisory
+      // lockSmsPhone above — no row lock (customers, leads, etc.) is held
+      // before the insert takes sms_log's customer_id FK KEY SHARE.
+      logInHandoff: true,
       providerHandoffReservation: reservationId
         ? require('../services/messaging/provider-handoff-reservation').borrowProviderHandoffReservation({
           reservationId,

@@ -356,6 +356,13 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck: suppliedProviderPreSendCheck,
     onDispatchStart,
     onDispatchAbort,
+    // codex #5018 structural fix (post-r7): opts a caller's sms_log insert
+    // INTO the handoff transaction (twilio.js's dispatch() reads this same
+    // option). Threaded unchanged, alongside onDispatchStart/onDispatchAbort,
+    // through dispatchToProvider -> providers/twilio-sms.js -> twilio.js.
+    // Omitted (the default for every caller that doesn't name it), twilio.js
+    // falls back to origin/main's own post-handoff, out-of-transaction insert.
+    logInHandoff,
     withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
     // Invoice-send-via-SMS's explicit billing Email leg only (see
@@ -1071,6 +1078,10 @@ async function sendCustomerMessageCore(input) {
     // window has closed — otherwise a send that never reached
     // messages.create() would be misclassified as ambiguous forever.
     onDispatchAbort,
+    // codex #5018 structural fix (post-r7): threaded straight through, same
+    // as onDispatchStart/onDispatchAbort above — see this file's own
+    // destructure comment and twilio.js's dispatch() for what it gates.
+    logInHandoff,
     providerHandoffReservation,
   });
   };

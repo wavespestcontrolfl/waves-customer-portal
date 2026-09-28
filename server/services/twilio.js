@@ -1351,39 +1351,42 @@ const TwilioService = {
         providerCoordination.recordProviderOutcome(providerHandoffReservation, {
           deliveryOutcome: 'accepted', providerMessageId: message.sid, channel: 'sms',
         });
-        // codex #5018 r15 pre-push P1: moved INSIDE dispatch(), on the SAME
-        // trx a caller's own withSmsHandoff still holds (trx || db falls
-        // back exactly like every other trx-optional read in this
-        // function) — this row is the ONE piece of durable evidence
-        // linkSentRecently (call-booking-link-text.js) and its siblings
-        // read to prove a link/message was actually delivered. Writing it
-        // AFTER the handoff's transaction had already committed (its
-        // original position, just after the whole withSmsHandoff block
-        // below) released the phone lock before this evidence existed —
-        // a second locker waiting on that SAME key (e.g. a manual send
-        // racing this lane's own worker) could acquire it, see nothing
-        // yet, and send a duplicate. Writing it here closes that gap: the
-        // lock cannot release until this commits (or the transaction
-        // rolls back with it, exactly like any other write inside it).
-        try {
-          await (trx || db)("sms_log").insert(buildSmsLogRow());
-        } catch (logErr) {
-          logger.error(`SMS log failed: ${logErr.message}`);
-          // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
-          // leaves Postgres's transaction aborted — its later COMMIT does
-          // not error, it silently performs a ROLLBACK instead (standard
-          // Postgres protocol behavior for a COMMIT issued on an aborted
-          // transaction), so swallowing this error here would let the
-          // caller's own `conn.transaction(...)` resolve as if it had
-          // succeeded. That would skip the withSmsHandoff catch's own
-          // accepted-send recovery entirely (it only runs when
-          // withSmsHandoff's promise actually REJECTS), losing the sms_log
-          // row with no recovery attempt at all. Rethrow so the caller's
-          // transaction genuinely rolls back and rejects, landing in that
-          // recovery path. A bare `dispatch()` call (no trx) has no
-          // transaction to abort — this insert's own failure is already
-          // the final word there, so it stays swallowed, unchanged.
-          if (trx) throw logErr;
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // below is now OPT-IN (`options.logInHandoff`). r15 moved it inside
+        // dispatch() unconditionally so linkSentRecently and its siblings
+        // could see the evidence before a caller's phone lock released —
+        // but every OTHER withSmsHandoff caller in the repo already holds
+        // its own row locks (customers, call_log, etc.) when this insert
+        // takes sms_log's customer_id FK's KEY SHARE lock, and each new
+        // caller found so far (reschedule links, review requests, executeMerge)
+        // needed its own lock-order fix to avoid an inversion against THIS
+        // insert. Narrowing it to only the callers whose evidence actually
+        // needs to commit before the lock releases stops that from
+        // recurring for every future withSmsHandoff caller. Non-opt-in
+        // callers get main's original post-handoff, plain-`db`, out-of-
+        // transaction insert further down (`if (!options.logInHandoff)`),
+        // byte-identical to origin/main's behavior.
+        if (options.logInHandoff) {
+          try {
+            await (trx || db)("sms_log").insert(buildSmsLogRow());
+          } catch (logErr) {
+            logger.error(`SMS log failed: ${logErr.message}`);
+            // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
+            // leaves Postgres's transaction aborted — its later COMMIT does
+            // not error, it silently performs a ROLLBACK instead (standard
+            // Postgres protocol behavior for a COMMIT issued on an aborted
+            // transaction), so swallowing this error here would let the
+            // caller's own `conn.transaction(...)` resolve as if it had
+            // succeeded. That would skip the withSmsHandoff catch's own
+            // accepted-send recovery entirely (it only runs when
+            // withSmsHandoff's promise actually REJECTS), losing the sms_log
+            // row with no recovery attempt at all. Rethrow so the caller's
+            // transaction genuinely rolls back and rejects, landing in that
+            // recovery path. A bare `dispatch()` call (no trx) has no
+            // transaction to abort — this insert's own failure is already
+            // the final word there, so it stays swallowed, unchanged.
+            if (trx) throw logErr;
+          }
         }
       };
       if (typeof options.withSmsHandoff === 'function') {
@@ -1426,11 +1429,16 @@ const TwilioService = {
             // The read-only guard may fail to commit after Twilio accepts.
             // Preserve that known acceptance so callers cannot retry the SMS.
             logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
-            // codex #5018 round-2 P1: dispatch()'s own sms_log insert ran
-            // INSIDE the caller's handoff transaction (trx || db, above) —
-            // if that transaction rolled back, or its own commit itself
-            // failed (this catch), the insert rolls back with it even
-            // though Twilio genuinely accepted the message. Readers like
+            // codex #5018 round-2 P1, now scoped to the opt-in path only:
+            // dispatch()'s own sms_log insert only ran INSIDE the caller's
+            // handoff transaction when `options.logInHandoff` is set (see
+            // dispatch() above) — a non-opt-in caller's insert hasn't
+            // happened yet at all (it runs post-handoff, further down,
+            // unconditionally, main's original behavior), so there is
+            // nothing to recover here for it. For an opt-in caller: if that
+            // transaction rolled back, or its own commit itself failed
+            // (this catch), the insert rolls back with it even though
+            // Twilio genuinely accepted the message. Readers like
             // linkSentRecently and delivery reconciliation would then see
             // no evidence at all and permit a duplicate send. Recreate the
             // row on the base connection, outside the now-dead
@@ -1440,11 +1448,13 @@ const TwilioService = {
             // SUCCEEDED and only threw some later, unrelated error (e.g.
             // releasing its own advisory lock after commit) must never get
             // a duplicate row for the one send that already landed.
-            try {
-              const alreadyLogged = await db('sms_log').where({ twilio_sid: message.sid }).first('id');
-              if (!alreadyLogged) await db('sms_log').insert(buildSmsLogRow());
-            } catch (recoveryErr) {
-              logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
+            if (options.logInHandoff) {
+              try {
+                const alreadyLogged = await db('sms_log').where({ twilio_sid: message.sid }).first('id');
+                if (!alreadyLogged) await db('sms_log').insert(buildSmsLogRow());
+              } catch (recoveryErr) {
+                logger.error(`SMS log recovery insert failed after handoff rollback: ${recoveryErr.message}`);
+              }
             }
           }
         }
@@ -1478,13 +1488,30 @@ const TwilioService = {
         }).catch(() => {});
       }
 
-      // sms_log itself is now written INSIDE dispatch() (codex #5018 r15
-      // pre-push P1 — see its own comment there), on the caller's held
-      // trx when one exists, so the evidence linkSentRecently and its
-      // siblings read commits before any lock guarding this send releases.
-      // The dual-write to unified messages below is unaffected — it is a
-      // fire-and-forget `.then()`, never awaited into the send path, and
-      // not the row that evidence.
+      if (options.logInHandoff) {
+        // sms_log was already written INSIDE dispatch() (codex #5018 r15
+        // pre-push P1, now opt-in — see dispatch()'s own comment), on the
+        // caller's held trx, so the evidence linkSentRecently and its
+        // siblings read commits before any lock guarding this send
+        // releases. Nothing left to do here for this caller.
+      } else {
+        // origin/main's original sms_log insert, unchanged: post-handoff,
+        // on the plain base connection (never `trx`), log-and-swallow on
+        // failure. Every withSmsHandoff caller that does not opt into
+        // `logInHandoff` gets exactly this — the transaction it already
+        // committed (or rolled back) by this point never sees this insert,
+        // so it can hold whatever row locks it needs without a new
+        // ordering conflict against sms_log's customer_id FK KEY SHARE.
+        try {
+          await db("sms_log").insert(buildSmsLogRow());
+        } catch (logErr) {
+          logger.error(`SMS log failed: ${logErr.message}`);
+        }
+      }
+      // The dual-write to unified messages below is unaffected either way —
+      // it is a fire-and-forget `.then()`, never awaited into the send
+      // path, and not the row linkSentRecently or delivery reconciliation
+      // read as evidence.
       require("./conversations")
         .recordTouchpoint({
           customerId: options.customerId || null,

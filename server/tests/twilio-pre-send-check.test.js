@@ -178,6 +178,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
         notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // this test proves is now opt-in.
+        logInHandoff: true,
         withSmsHandoff: async dispatch => {
           events.push('locked');
           jest.setSystemTime(acquiredAt);
@@ -205,6 +208,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', {
         messageType: 'manual', fromNumber: FROM,
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // this test proves is now opt-in.
+        logInHandoff: true,
         withSmsHandoff: async dispatch => { await dispatch(trx); return { ok: true }; },
       });
       expect(result.success).toBe(true);
@@ -241,6 +247,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', {
         messageType: 'manual', fromNumber: FROM, customerId: 'cust-1', adminUserId: 'admin-1',
         notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // this test proves is now opt-in.
+        logInHandoff: true,
         withSmsHandoff: async (dispatch) => {
           // The SDK call and the in-transaction sms_log insert both
           // "succeed" on trx — then the caller's own transaction fails to
@@ -296,6 +305,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', {
         messageType: 'manual', fromNumber: FROM,
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // this test proves is now opt-in.
+        logInHandoff: true,
         withSmsHandoff: async (dispatch) => {
           await dispatch(trx);
           throw new Error('some unrelated post-commit error');
@@ -334,6 +346,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', {
         messageType: 'manual', fromNumber: FROM,
+        // codex #5018 structural fix (post-r7): the in-transaction insert
+        // this test proves is now opt-in.
+        logInHandoff: true,
         // No explicit throw of its own — the propagation must come from
         // dispatch()'s own rethrow, not from anything this wrapper adds.
         withSmsHandoff: async (dispatch) => dispatch(trx),
@@ -353,6 +368,45 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM });
       expect(result.success).toBe(true);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  // codex #5018 structural fix (post-r7): a withSmsHandoff caller that does
+  // NOT opt into logInHandoff must get origin/main's exact original
+  // behavior — the sms_log write happens on the plain base connection,
+  // AFTER the handoff's own transaction has already resolved, never on the
+  // held trx. This is what makes it safe for a caller to hold whatever row
+  // locks it needs across the handoff without a new ordering conflict
+  // against sms_log's customer_id FK KEY SHARE.
+  test('a withSmsHandoff caller that does not opt into logInHandoff gets the post-handoff insert on the plain db, never on its own trx (origin/main behavior)', async () => {
+    const trxInsert = jest.fn(async () => { throw new Error('non-opt-in caller must never insert on trx'); });
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    const baseInserted = [];
+    const events = [];
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      return { insert: async (row) => { events.push('sms_log'); baseInserted.push(row); } };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM, customerId: 'cust-1',
+        // No logInHandoff — the default for every caller that doesn't name it.
+        withSmsHandoff: async (dispatch) => {
+          events.push('locked');
+          await dispatch(trx);
+          events.push('released');
+          return { ok: true };
+        },
+      });
+      expect(result.success).toBe(true);
+      // dispatch() itself never touched sms_log at all on the non-opt-in path.
+      expect(trxInsert).not.toHaveBeenCalled();
+      // The write lands after the handoff released, on the plain db.
+      expect(events).toEqual(['locked', 'released', 'sms_log']);
+      expect(baseInserted).toHaveLength(1);
+      expect(baseInserted[0]).toMatchObject({
+        customer_id: 'cust-1', twilio_sid: 'SM_ok', status: 'sent',
+      });
     } finally { require('../models/db').mockReset(); }
   });
 

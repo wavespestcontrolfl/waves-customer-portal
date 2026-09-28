@@ -1527,24 +1527,21 @@ async function dispatch(conn, row, context, { now, clock, send, buildLink, rende
       // attempt fences until that request returns, so an office verdict or
       // replacement recording cannot cancel a checked attempt mid-handoff.
       withSmsHandoff: (handoff) => conn.transaction(async (trx) => {
-        // codex #5018 pre-push P1: customers BEFORE call_log — the
-        // established lock order this whole codebase uses whenever both are
-        // held in one transaction (call-recording-processor.js's own claim
-        // transaction takes `customers` FOR UPDATE, then the `call_log`
-        // claim UPDATE, "matching the correction lane's customers→call_log
-        // lock order, so the two never deadlock"; visit-completion-
-        // summary.js's claimDispatchThroughHandoff does the same). This
-        // handoff used to lock call_log FIRST and only reach `customers`
-        // implicitly at the very end, when the sms_log insert inside
-        // dispatch()/handoff() takes a KEY SHARE on it through the FK
-        // (twilio.js) — the opposite order, which can deadlock against a
-        // concurrent reprocess claim (customers FOR UPDATE, then call_log)
-        // after Twilio has already accepted the send. FOR SHARE is
-        // sufficient here (this handoff never writes the customer row) and
-        // is compatible with a concurrent FOR SHARE/KEY SHARE, but blocks
-        // until any FOR UPDATE claimant already in flight commits first —
-        // exactly the ordering the rest of the codebase already relies on.
-        await trx('customers').where({ id: customer.id }).forShare().first('id');
+        // codex #5018 pre-push P1 (round 2) added a `customers` FOR SHARE
+        // lock here, BEFORE call_log, to fix a lock-order inversion against
+        // a concurrent reprocess claim (customers FOR UPDATE, then
+        // call_log): dispatch()'s sms_log insert, unconditionally inside
+        // this handoff's own transaction at the time, took a KEY SHARE on
+        // `customers` through its FK at the very end, the opposite order.
+        // The structural fix (post-r7) made that insert OPT-IN
+        // (`logInHandoff`), and this lane never opts in — reschedule links
+        // are not one of the callers whose evidence must commit before a
+        // lock releases, so the insert now runs post-handoff, on the plain
+        // db, outside any transaction, exactly like every other non-opt-in
+        // caller (see twilio.js's dispatch()). With no in-transaction FK
+        // lock on `customers` left to invert against, the customers-first
+        // lock this fix added has nothing left to fix — removed rather than
+        // kept as dead defensive code (CLAUDE.md: remove superseded code).
         await lockTriageCall(trx, row.related_call_log_id);
         // The recording processor may advance call_log without this advisory
         // lock. Its generation/transcript must stay fixed while the source
