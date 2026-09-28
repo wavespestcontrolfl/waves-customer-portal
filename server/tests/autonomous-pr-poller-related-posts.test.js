@@ -116,3 +116,12 @@ describe('relatedPostsLivenessVerdict — every surface', () => {
   });
 });
 
+// Codex r4 on #5272 ("Recheck multiline reference-style related links").
+test('a frozen related post linked through a multi-line reference definition is rechecked', async () => {
+  relatedPosts.getLiveRelatedPaths.mockResolvedValue(new Set());
+  const file = '---\ntitle: T\nslug: /pest-control/t/\ndomains: ["wavespestcontrol.com"]\n---\n\nSee [ants][fire].\n\n[fire]:\n  /pest-control/fire-ants/\n';
+  const res = await relatedPostsLivenessVerdict(file, { paths: ['/pest-control/fire-ants/'] });
+  expect(res.ok).toBe(false);
+  expect(res.reason).toContain('/pest-control/fire-ants/');
+});
+

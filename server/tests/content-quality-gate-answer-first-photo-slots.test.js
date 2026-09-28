@@ -821,3 +821,21 @@ describe('#5272 r3: multi-line reference definitions, one credit per copy', () =
   });
 });
 
+// ── Codex r4 on #5272 ────────────────────────────────────────────────
+describe('#5272 r4: expression props and visible components', () => {
+  test('a pitch in a static-expression prop is still a pitch', () => {
+    const body = '<BottomLineBox verdict={"Yes, they sting."} recommendation={"Call today."} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'sales_pitch_inside_verdict_box' });
+  });
+  test('an expression-prop verdict is read as the answer', () => {
+    const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+    const body = '<BottomLineBox verdict={"Yes, some species can."} recommendation={"Seal gaps."} />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body }, { target_keyword: 'Can cockroaches fly?' })).toEqual({ ok: true });
+  });
+  test('a visible component between the image and its credit breaks adjacency', () => {
+    const body = `Intro.\n\n![${PHOTO.alt}](${PHOTO_URL})\n\n<InlineCTA ctaHref="/contact/" />\n\n${ATTR}\n\nMore.`;
+    expect(checkPhotoSlotsLicensedOnly(diag(body), slotsBrief())).toEqual({ ok: false, reason: `identification_photo_attribution_missing:${PHOTO_URL}` });
+  });
+});
+

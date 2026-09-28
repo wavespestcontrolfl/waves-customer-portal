@@ -5106,10 +5106,21 @@ function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
 // gate and by the refresh grandfathering pass over the prior live body.
 // Every internal link destination the body RENDERS — the same text
 // preparation and extraction internalRouteFinding uses (the PR poller
-// rechecks related-post liveness on it at merge time, Codex r2 on #5272).
+// rechecks related-post liveness on it at merge time, Codex r2 on #5272),
+// plus reference-style links resolved through the multi-line-aware
+// definition parser (Codex r4 on #5272: `[ants][fire]` + a `[fire]:`
+// definition whose destination sits on the next line).
 function renderedInternalDestinations(body) {
-  return collectInternalDestinations(blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false }))
-    .map((d) => d.dest);
+  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(String(body || '')), { attrValues: false });
+  const dests = collectInternalDestinations(text).map((d) => d.dest);
+  const defs = markdownReferenceDefinitions(text);
+  for (const span of eachMarkdownLink(text)) {
+    if (span.isImage || span.kind === 'inline' || span.kind === 'malformed') continue;
+    const tail = span.kind === 'reference' ? text.slice(span.refStart, span.refEnd + 1) : '';
+    const label = normalizeReferenceLabel(tail || text.slice(span.labelStart + 1, span.labelEnd));
+    if (label && defs.has(label)) dests.push(defs.get(label));
+  }
+  return [...new Set(dests)];
 }
 
 function collectInternalDestinations(text) {
@@ -7027,6 +7038,7 @@ module.exports = {
   blankLinkDefinitionsAndTitles,
   blankMarkdownLinkDestinations,
   markdownReferenceDefinitions,
+  blankReferenceDefinitions,
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,

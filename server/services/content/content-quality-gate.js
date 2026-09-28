@@ -667,14 +667,24 @@ function checkLocalBusinessServiceSchema(draft) {
 // box's verdict IS the first answer: its text is judged, never the raw
 // component tag, and a direct verdict ("Yes, some species can.") need not
 // repeat a noun from the question (Codex r4 on #5216).
+// A box prop's rendered value: a quoted attribute, or a static string
+// expression ({"…"}, {'…'}, {`…`}) that MDX renders the same (Codex r4 on
+// #5272).
+function boxProp(tag, name) {
+  const quoted = attrValue(tag, name);
+  if (quoted !== null && quoted !== undefined) return String(quoted);
+  const m = String(tag).match(new RegExp(`\\b${name}\\s*=\\s*\\{\\s*(["'\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1\\s*\\}`));
+  return m ? m[2] : '';
+}
+
 function leadingVerdictBox(body) {
   const trimmed = String(body || '').replace(/^\s+/, '');
   if (!/^<BottomLineBox\b/.test(trimmed)) return null;
   const tag = trimmed.match(BOTTOM_LINE_BOX_TAG_RE);
   if (!tag || tag.index !== 0) return null;
   return {
-    verdict: String(attrValue(tag[0], 'verdict') || '').trim(),
-    recommendation: String(attrValue(tag[0], 'recommendation') || '').trim(),
+    verdict: boxProp(tag[0], 'verdict').trim(),
+    recommendation: boxProp(tag[0], 'recommendation').trim(),
   };
 }
 
@@ -1339,7 +1349,7 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   // is a pitch before the answer just like a link (Codex r8 on #5216).
   // Same sales-copy detectors the blog meta gate uses; "call a licensed
   // pro" style advice is not sales copy.
-  const boxText = `${attrValue(boxMatch[0], 'verdict') || ''} ${attrValue(boxMatch[0], 'recommendation') || ''}`;
+  const boxText = `${boxProp(boxMatch[0], 'verdict')} ${boxProp(boxMatch[0], 'recommendation')}`;
   if (SALESY_META_RE.test(boxText) || metaHasSalesCopy(boxText) || PHONE_TOKEN_RE.test(boxText) || CITY_PHONE_TOKEN_RE.test(boxText) || BOX_PHONE_RE.test(boxText) || BARE_PHONE_DIGITS_RE.test(boxText)) {
     return { ok: false, reason: 'sales_pitch_inside_verdict_box' };
   }
@@ -1479,8 +1489,10 @@ function checkPhotoSlotsLicensedOnly(draft, brief, context) {
   // counts as showing its slot.
   const cg = require('./content-guardrails');
   const renderedBody = cg.blankDefinitelyHiddenContent(cg.blankNonRenderedMarkdown(body));
-  const { renderedBodyView } = require('../content-astro/astro-publisher')._internals;
-  const viewLines = renderedBodyView(cg.blankDefinitelyHiddenContent(body), { mdx }).text.split('\n');
+  // Lines to skip between an image and its credit: blank once reference
+  // definitions (any length) are blanked — a visible MDX component on the
+  // way still counts as content (Codex r4 on #5272).
+  const viewLines = cg.blankReferenceDefinitions(renderedBody).split('\n');
   const allowed = allowedIdentificationPhotoSrcs(brief, context);
   const occurrences = collectBodyImageOccurrences(body, { mdx });
   const usedCreditLines = new Set();
