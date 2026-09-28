@@ -31,7 +31,6 @@ const { hashBuffer } = require('./service-report/photo-chain');
 const { uploadFunnelPhotoToS3 } = require('../utils/funnel-photos');
 const { isRecurringLineageVisit } = require('../utils/recurring-lineage');
 const { dateOnlyString } = require('../utils/datetime-et');
-const { TECH_DEAD_ASSIGNMENT_STATUSES } = require('./technician-visit-scope');
 // The same location-chip set the customer portal's service-request form
 // uses (server/routes/requests.js) — reused rather than redefined, the same
 // route-module-from-a-service pattern already used by several services
@@ -479,22 +478,24 @@ async function createVisitPrepSubmission({
 // (handleChildStopChanged), so `stopMemberIds` can include rows now on
 // another technician or day. The caller authorized `svc` only; a member
 // counts here only while it is still on svc's CURRENT technician and date
-// (read from the database, not the caller's copy) and not in a dead status
-// (technician-visit-scope.js's list). `stopMemberIds` keeps its wider set
-// for the customer-side cap counts, which are about the visit, not access.
+// (read from the database, not the caller's copy). Its status does not
+// matter: a cancelled service on the same technician's same stop is still
+// this customer's property on this visit, and nobody else sees it, so its
+// photos stay useful (the stop chip, PR 3b, uses the same rule so the chip
+// and this brief always agree). `stopMemberIds` keeps its wider set for the
+// customer-side cap counts, which are about the visit, not access.
 async function techStopMemberIds(svc, conn) {
   if (!svc?.id) return [];
   if (!svc.visit_id) return [svc.id];
   const rows = await conn('scheduled_services')
     .where({ visit_id: svc.visit_id })
-    .select('id', 'technician_id', 'scheduled_date', 'status');
+    .select('id', 'technician_id', 'scheduled_date');
   const self = rows.find((r) => String(r.id) === String(svc.id)) || svc;
   const techKey = self.technician_id == null ? null : String(self.technician_id);
   const dateKey = dateOnlyString(self.scheduled_date);
   const others = rows.filter((r) => String(r.id) !== String(svc.id)
     && (r.technician_id == null ? null : String(r.technician_id)) === techKey
-    && dateOnlyString(r.scheduled_date) === dateKey
-    && !TECH_DEAD_ASSIGNMENT_STATUSES.includes(r.status));
+    && dateOnlyString(r.scheduled_date) === dateKey);
   return [svc.id, ...others.map((r) => r.id)];
 }
 

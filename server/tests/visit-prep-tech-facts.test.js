@@ -149,15 +149,17 @@ describe('techStopMemberIds (Codex #5239 r1 P1)', () => {
     { id: 'svc-cancelled', visit_id: 'visit-9', technician_id: 'tech-1', scheduled_date: '2026-10-02', status: 'cancelled' },
   ];
 
-  test('keeps only members still on svc\'s current technician and date, not dead; svc itself always first', async () => {
+  test('keeps members still on svc\'s current technician and date, whatever their status; svc itself always first', async () => {
     const conn = fakeConn({ scheduled_services: members });
-    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A', 'svc-B']);
+    // A cancelled service on the same technician's same stop is the same
+    // customer's visit and nobody else sees it, so it still counts.
+    expect(await techStopMemberIds({ id: 'svc-A', visit_id: 'visit-9' }, conn)).toEqual(['svc-A', 'svc-B', 'svc-cancelled']);
   });
 
   test('reads svc\'s technician and date from the database, not the caller\'s copy', async () => {
     const conn = fakeConn({ scheduled_services: members });
     const stale = { id: 'svc-A', visit_id: 'visit-9', technician_id: 'tech-2', scheduled_date: '2026-10-05' };
-    expect(await techStopMemberIds(stale, conn)).toEqual(['svc-A', 'svc-B']);
+    expect(await techStopMemberIds(stale, conn)).toEqual(['svc-A', 'svc-B', 'svc-cancelled']);
   });
 
   test('facts and signed photos exclude a reassigned member\'s submission and photos', async () => {
