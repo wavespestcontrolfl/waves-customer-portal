@@ -1716,11 +1716,16 @@ function withoutEstimateWideTerms(context = {}) {
 // Recurrence wording counts only with a pest as its subject: "When will you
 // return for the next treatment?" is a scheduling question.
 const RECURRING_PEST = '(?:termites|pests|bugs|(?:cock)?roach(?:es)?|ants|spiders|rodents|rats|mice|mosquito(?:e)?s|fleas|ticks|wasps|bees|beetles)';
+// Word stems, so every inflection counts ("Is this guaranteed?", "Is it
+// warrantied?"), plus coverage ("Am I covered?") and a pronoun subject for
+// recurrence ("What if they come back?"). "bond" stays exact: "licensed and
+// bonded" asks about the company, not a termite bond (Codex #4982).
+const RECURRENCE_SUBJECT = `(?:${RECURRING_PEST}|they|it)`;
 const GUARANTEE_QUESTION_PATTERN = new RegExp(
-  '\\b(?:guarantees?|callbacks?|re-?treat\\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\\w*|annual inspection|coverage'
-  + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
-  + `|${RECURRING_PEST}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
-  + `|treat(?:ed|ing)?\\s+(?:them|the\\s+${RECURRING_PEST})\\s+again)\\b`,
+  '\\b(?:guarant\\w*|call[- ]?backs?|re-?treat\\w*|re-?service\\w*|money[- ]?back|satisf\\w*|risk[- ]?free|bonds?|warrant\\w*|annual inspection|cover(?:age|ed)'
+  + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+(?:come|comes|coming|came)\\s+back`
+  + `|${RECURRENCE_SUBJECT}(?:\\s+(?:ever|still|just|then))?\\s+return(?:s|ed|ing)?`
+  + `|treat(?:ed|ing)?\\s+(?:them|it|the\\s+${RECURRING_PEST})\\s+again)\\b`,
   'i',
 );
 // A price question gets the price: "How much does the 5-year bond cost?"

@@ -36,6 +36,12 @@ describe('Ask Waves routes guarantee questions before the live models', () => {
     'What happens if the termites come back?',
     'Will you treat them again if they return?',
     'What coverage comes with this?',
+    // Adjectival and pronoun forms (Codex #4982): a terse model reply such as
+    // "Yes, it is" would carry no claim wording for the output guard to see.
+    'Is this guaranteed?',
+    'Am I covered?',
+    'Is it warrantied?',
+    'What if they come back?',
   ])('recurrence wording is routed too: %s', async (question) => {
     const result = await answerEstimateQuestion({
       database: null,
@@ -49,6 +55,20 @@ describe('Ask Waves routes guarantee questions before the live models', () => {
     expect(result.source).toBe('fallback');
     expect(dispatch).not.toHaveBeenCalled();
     expect(result.answer).toContain(`Termite Bond: ${BOND}`);
+  });
+
+  test('a company question that names no guarantee still reaches the model', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Are you licensed and bonded?',
+      estimate: { id: 'synthetic-estimate', status: 'sent', monthly_total: 38 },
+      estData: { result: { recurring: { services: [
+        { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 216 },
+      ] } } },
+      noGuaranteeClaims: true,
+    });
+    expect(dispatch).toHaveBeenCalled();
+    expect(result.answer).toBe('model answer');
   });
 
   test('a model answer that makes a plan-terms claim is never served on a termite estimate', async () => {
