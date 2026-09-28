@@ -346,7 +346,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Appointment cancellation is unavailable in this bar because fees and invoice effects require Dispatch review. Direct the operator to the Dispatch cancellation controls; do not promise a confirmation card.',
+    description: 'Cancel ONE appointment through a confirmation card that shows its exact effects (invoices voided, inspection credit, customer name and date) before anything changes. Only simple visits qualify: no saved-card fee agreement or card hold, no card payment on its invoice, no estimate deposit, no plan make-up visit — and only while cancelling from the bar is enabled. When the tool refuses, relay the reason and point the operator to the Dispatch screen; never say a visit was cancelled until the card is confirmed.',
     input_schema: {
       type: 'object',
       properties: {
