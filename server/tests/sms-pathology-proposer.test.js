@@ -274,3 +274,29 @@ describe('reviewPatchProposal — pending-only transitions with audit', () => {
     await expect(reviewPatchProposal({ id: 'p1', action: 'explode', dbi: missing })).resolves.toMatchObject({ ok: false, status: 400 });
   });
 });
+
+
+// PR #5119 Codex r4: proposals are scoped to the LIVE prompt version — the
+// threshold count, the evidence and the per-cell watermark all filter on it,
+// and the proposal records which version it targets.
+describe('proposePatches — scoped to the live prompt version', () => {
+  test('cells rollup, watermark subquery and evidence fetch all filter on currentPromptVersion(); the proposal records it', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    const { createDeepMessage } = require('../services/llm/deep');
+    createDeepMessage.mockResolvedValue({ content: [{ text: 'Pattern… Proposed change… Expected effect…' }], model: 'm' });
+    const entryRows = Array.from({ length: 7 }, (_, i) => ({ id: `e-${i}`, intent: 'GENERAL', prompt_version: 'house_voice_v12_real_answers', verifier_missed: false, summary: `s${i}` }));
+    const dbi = makeProposerDb({ cells: [{ surface: 'facts_block_gap', failure_mode: 'invented_schedule_eta', fresh: '7' }], entries: entryRows });
+    try {
+      const out = await require('../services/sms-pathology-ledger').proposePatches({ dbi, anthropicClient: {} });
+      expect(out.proposed).toBe(1);
+      const versionWheres = dbi.kvWheres.filter((w) => w[2] === 'house_voice_v12_real_answers').map((w) => w[0]);
+      expect(versionWheres).toEqual(expect.arrayContaining(['prompt_version', 'pe.prompt_version']));
+      expect(versionWheres.filter((c) => c === 'prompt_version').length).toBeGreaterThanOrEqual(2); // watermark subquery + evidence fetch
+      const inserted = dbi.inserts.find((r) => r && r.proposal);
+      expect(inserted.prompt_version).toBe('house_voice_v12_real_answers');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

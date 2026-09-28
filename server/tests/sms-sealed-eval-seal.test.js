@@ -198,6 +198,18 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(dbi.calls.some(([name, args]) => name === 'orderBy' && args[0] === 'sealed_at' && args[1] === 'asc')).toBe(true);
   });
 
+  test('v12: an OVERSIZED pool with enough compatible items seals nothing but still prunes the pre-v12 overflow (Codex r4)', async () => {
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
+    const dbi = makeV12FakeDb({ activeCount: 200, compatibleCount: 100, candidates: [] });
+    const out = await sealEvalItems({ target: 100, dbi });
+    expect(out.sealed).toBe(0);
+    expect(out.retired).toBe(3); // the fake reports 3 rows updated
+    expect(dbi.inserts).toHaveLength(0);
+    expect(dbi.updates).toHaveLength(1);
+    expect(dbi.updates[0].patch).toEqual({ active: false });
+    expect(dbi.calls.some(([name, args]) => name === 'limit' && args[0] === 100)).toBe(true);
+  });
+
   test('v12: a pool with enough compatible items seals nothing', async () => {
     versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 100, candidates: [v12cand('a', '2026-08-01')] });

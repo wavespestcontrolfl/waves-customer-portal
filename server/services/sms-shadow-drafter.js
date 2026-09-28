@@ -453,6 +453,50 @@ function validateOfferedTimes({ offeredTimes, openTimesDays, reply, factsBlock =
   return { ok: violations.length === 0, violations };
 }
 
+// Single-pass (verifier OFF) day binding, Codex r4: validateOfferedTimes
+// proves each declared (date, window) is a real slot quoted in the reply,
+// but not that the reply names the DECLARED day next to that time — with
+// Tuesday and Wednesday both offering 9-11, "Tuesday 9-11" declaring
+// Wednesday would converge and the snapshot would recheck the wrong day.
+// The LLM verifier judges this when it runs; when it does not, this does:
+// every declared day must be named, and every occurrence of a declared
+// window must sit nearest to an anchor (weekday or "Month N") of a day
+// declared for that window.
+function replyBindsDeclaredDays(reply, offeredTimes) {
+  const text = String(reply || '');
+  const lower = text.toLowerCase();
+  const list = (Array.isArray(offeredTimes) ? offeredTimes : [])
+    .filter((e) => e && typeof e.date === 'string' && e.date && typeof e.window === 'string' && e.window);
+  if (!list.length) return true;
+  const anchorsOf = (date) => {
+    const label = String(date || '');
+    return [label.split(',')[0].trim(), label.split(',').slice(1).join(',').trim()].filter(Boolean).map((a) => a.toLowerCase());
+  };
+  const anchors = [];
+  for (const e of list) {
+    let named = false;
+    for (const a of anchorsOf(e.date)) {
+      let i = lower.indexOf(a);
+      while (i !== -1) { named = true; anchors.push({ pos: i, len: a.length, date: e.date }); i = lower.indexOf(a, i + 1); }
+    }
+    if (!named) return false;
+  }
+  for (const w of new Set(list.map((e) => e.window))) {
+    const datesFor = new Set(list.filter((e) => e.window === w).map((e) => e.date));
+    let i = text.indexOf(w);
+    while (i !== -1) {
+      let best = null;
+      for (const a of anchors) {
+        const d = a.pos < i ? i - (a.pos + a.len) : a.pos - (i + w.length);
+        if (best === null || d < best.d) best = { d, date: a.date };
+      }
+      if (!best || !datesFor.has(best.date)) return false;
+      i = text.indexOf(w, i + 1);
+    }
+  }
+  return true;
+}
+
 // The deterministic inverse of buildFactsBlock's OPEN TIMES section, for a
 // FROZEN facts block (sealed-exam replay — pre-push audit P1): the replay
 // must not fetch today's calendar, but it still has to validate the model's
@@ -634,6 +678,7 @@ function offerSpanInText(text, day, window) {
 // the estimate-review lane reused only hasPriceQuote and threw away every
 // grounded v12 answer). true when the reply carries an amount the facts
 // block did not authorize, or price grammar the extractor cannot verify.
+const PAYMENT_ACK_RE = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
 function replyQuotesUngroundedAmount(reply, context) {
   const suggestMode = require('./sms-suggest-mode');
   const centsOf = (v) => Math.round(Number(v) * 100);
@@ -641,7 +686,12 @@ function replyQuotesUngroundedAmount(reply, context) {
     context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
     context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
     ...require('./context-aggregator').authorizedDuesCents(context),
-    ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
+    // Payment-history amounts authorize ONLY a payment acknowledgement
+    // (Codex r4: a zero-balance account with a recent $95 payment must not
+    // let "your balance is $95" through). Same ack grammar as the
+    // scheduler's fire-time recheck: "payment" near received/processed/
+    // went through, or "thank you … payment".
+    ...(PAYMENT_ACK_RE.test(reply) ? (context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null)) : []),
   ].filter((v) => Number.isFinite(v)));
   // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
   // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
@@ -1552,6 +1602,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // booked visit; with that verifier OFF nothing can, so an undeclared
     // quote of any OPEN TIMES window is a violation outright.
     const singlePassCheck = validateOfferedTimes({ offeredTimes: parsed?.offered_times, openTimesDays, reply: parsed?.reply });
+    if (singlePassCheck.ok && !replyBindsDeclaredDays(parsed?.reply, parsed?.offered_times)) {
+      singlePassCheck.ok = false;
+      singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
+    }
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
@@ -2084,5 +2138,6 @@ module.exports = {
   replyPromisesFollowup: followupSla.replyPromisesFollowup,
   slaPhraseStatus: followupSla.slaPhraseStatus,
   replyQuotesUngroundedAmount,
+  replyBindsDeclaredDays,
   liveServiceType,
 };

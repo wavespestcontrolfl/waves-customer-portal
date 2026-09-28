@@ -460,3 +460,36 @@ describe('generateGroundedDraft — single-pass mode gives no grounded-elsewhere
     expect(r.openTimesSnapshot).toBeNull();
   });
 });
+
+// Codex r4: single-pass drafts must also bind each declared day to the day
+// the customer reads next to that time.
+describe('generateGroundedDraft — single-pass mode requires the reply to name each declared day', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; process.env.SHADOW_DRAFT_VERIFY = 'false'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY; else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  test('Tuesday and Wednesday both open 9-11; reply says Tuesday, declares Wednesday → not converged, no snapshot', async () => {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({
+      getAvailableSlots: jest.fn(async () => ({ days: [
+        { fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] },
+        { fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00' }] },
+      ] })),
+    }));
+    const drafter = require('../services/sms-shadow-drafter');
+    const client = makeClient([{
+      reply: 'How about Tuesday 9:00 AM - 11:00 AM?', intended_actions: [], missing_info: null,
+      offered_times: [{ date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' }],
+    }]);
+    const r = await drafter.generateGroundedDraft({
+      client, context: CTX, inboundMessage: 'Can we book?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: true, city: 'Venice',
+    });
+    expect(r.converged).toBe(false);
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+});

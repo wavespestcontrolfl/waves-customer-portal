@@ -1512,3 +1512,42 @@ describe('fetchOpenTimesData / openTimesStillOffered forward serviceType to the 
       .toEqual({ city: 'Venice', customerId: null, estimateId: null, serviceType: 'Lawn Fertilization' });
   });
 });
+
+describe('replyQuotesUngroundedAmount — payment-history amounts authorize only a payment acknowledgement (Codex r4)', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const context = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 95 }] } };
+  test('"your balance is $95" on a zero-balance account with a $95 payment → ungrounded', () => {
+    expect(replyQuotesUngroundedAmount('Your balance is $95.', context)).toBe(true);
+    expect(replyQuotesUngroundedAmount('Thanks for reaching out — your balance is $95.', context)).toBe(true);
+  });
+  test('a real acknowledgement of the $95 payment → grounded', () => {
+    expect(replyQuotesUngroundedAmount('We received your $95 payment — thank you!', context)).toBe(false);
+    expect(replyQuotesUngroundedAmount('Thank you for your payment of $95.', context)).toBe(false);
+  });
+  test('the current balance is authorized on its own terms, as before', () => {
+    expect(replyQuotesUngroundedAmount('Your balance is $120.50.', { billing: { outstandingBalance: 120.5, recentPayments: [] } })).toBe(false);
+  });
+});
+
+describe('replyBindsDeclaredDays — single-pass day binding (Codex r4)', () => {
+  const { replyBindsDeclaredDays } = require('../services/sms-shadow-drafter');
+  const TUE = { date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' };
+  const WED = { date: 'Wednesday, September 30', window: '9:00 AM - 11:00 AM' };
+  const WED2 = { date: 'Wednesday, September 30', window: '2:00 PM - 4:00 PM' };
+  test('reply names Tuesday, declaration says Wednesday (same window) → not bound', () => {
+    expect(replyBindsDeclaredDays('How about Tuesday 9:00 AM - 11:00 AM?', [WED])).toBe(false);
+  });
+  test('reply and declaration agree → bound; both days offered and declared → bound', () => {
+    expect(replyBindsDeclaredDays('How about Tuesday 9:00 AM - 11:00 AM?', [TUE])).toBe(true);
+    expect(replyBindsDeclaredDays('How about Tuesday 9:00 AM - 11:00 AM or Wednesday 9:00 AM - 11:00 AM?', [TUE, WED])).toBe(true);
+    expect(replyBindsDeclaredDays('How about Tuesday 9:00 AM - 11:00 AM or Wednesday 2:00 PM - 4:00 PM?', [TUE, WED2])).toBe(true);
+    expect(replyBindsDeclaredDays('September 29 from 9:00 AM - 11:00 AM works.', [TUE])).toBe(true); // calendar-date anchor
+  });
+  test('swapped days, or a declared day the reply never names → not bound', () => {
+    expect(replyBindsDeclaredDays('How about Tuesday 2:00 PM - 4:00 PM or Wednesday 9:00 AM - 11:00 AM?', [TUE, WED2])).toBe(false);
+    expect(replyBindsDeclaredDays('How about 9:00 AM - 11:00 AM?', [TUE])).toBe(false);
+  });
+  test('no declarations → trivially bound', () => {
+    expect(replyBindsDeclaredDays('I will confirm and get back to you.', [])).toBe(true);
+  });
+});

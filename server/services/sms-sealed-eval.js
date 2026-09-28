@@ -138,6 +138,22 @@ function hasFollowupSlaFact(factsBlock) {
  * recent first within each intent) so one chatty intent can't crowd out the
  * exam's coverage of the others.
  */
+// Retire (active=false, never delete) the OLDEST pre-v12 items beyond the
+// target; rows and every historical result stay. Returns the count retired.
+async function retireDisplacedPreV12Items({ dbi, overflow }) {
+  if (!(overflow > 0)) return 0;
+  const retired = await dbi('sms_sealed_eval_items')
+    .whereIn('id', dbi('sms_sealed_eval_items')
+      .select('id')
+      .where('active', true)
+      .whereRaw("COALESCE(facts_block, '') NOT LIKE ?", [`%${V12_FACTS_MARKER}%`])
+      .orderBy('sealed_at', 'asc')
+      .limit(overflow))
+    .update({ active: false });
+  if (retired) logger.info(`[sealed-eval] seal: retired ${retired} pre-v12 item(s) displaced by v12-compatible ones`);
+  return Number(retired) || 0;
+}
+
 async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   const startedAt = Date.now();
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items')
@@ -161,7 +177,13 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   }
   const remaining = target - compatibleCount;
   if (remaining <= 0) {
-    return { sealed: 0, activeCount: Number(activeCount), ms: Date.now() - startedAt };
+    // Codex r4: a prior run may have inserted compatible rows and then
+    // failed before retiring the displaced pre-v12 ones, leaving an
+    // oversized active pool that would otherwise never shrink (and trips
+    // the auto-exam spend cap). Prune here too, so the two steps need not
+    // be atomic to converge.
+    const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) - target }) : 0;
+    return { sealed: 0, retired, activeCount: Number(activeCount) - retired, ms: Date.now() - startedAt };
   }
 
   const cutoff = new Date(Date.now() - SEALED_EVAL_MIN_AGE_DAYS * 86400 * 1000);
@@ -230,21 +252,7 @@ async function sealEvalItems({ target = SEALED_EVAL_TARGET, dbi = db } = {}) {
   await dbi('sms_sealed_eval_items').insert(rows).onConflict('source_draft_id').ignore();
   // Keep the active pool at the target: retire the OLDEST pre-v12 items that
   // the new compatible ones displaced (never delete — results reference them).
-  let retired = 0;
-  if (v12) {
-    const overflow = Number(activeCount) + rows.length - target;
-    if (overflow > 0) {
-      retired = await dbi('sms_sealed_eval_items')
-        .whereIn('id', dbi('sms_sealed_eval_items')
-          .select('id')
-          .where('active', true)
-          .whereRaw("COALESCE(facts_block, '') NOT LIKE ?", [`%${V12_FACTS_MARKER}%`])
-          .orderBy('sealed_at', 'asc')
-          .limit(overflow))
-        .update({ active: false });
-      if (retired) logger.info(`[sealed-eval] seal: retired ${retired} pre-v12 item(s) displaced by v12-compatible ones`);
-    }
-  }
+  const retired = v12 ? await retireDisplacedPreV12Items({ dbi, overflow: Number(activeCount) + rows.length - target }) : 0;
 
   const summary = { sealed: rows.length, retired, activeCount: Number(activeCount) + rows.length - retired, ms: Date.now() - startedAt };
   logger.info(`[sealed-eval] seal complete: ${JSON.stringify(summary)}`);
