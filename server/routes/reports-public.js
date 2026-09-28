@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -158,6 +158,8 @@ const {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
+  applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -183,6 +185,7 @@ const {
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_FL_LICENSE_LINE,
+  WAVES_PRODUCTS_SAFETY_URL,
 } = require('../constants/business');
 
 const PDF_NAVY = '#1B2C5B';
@@ -371,6 +374,16 @@ async function buildServiceReportV1ResponseData(service, token, {
   // under the general report limiter, repeatedly. Defaulting to off means a
   // future caller cannot inherit that cost by accident either.
   composeOffers = false,
+  // OPT-IN on the same terms: only the /data render shows the "Your plan"
+  // card, so only it pays for the membership + year-history reads
+  // (GATE_REPORT_PLAN_SUMMARY). The Q&A endpoint never reads the field.
+  planSummary = false,
+  // OPT-IN on the same terms (codex round-5 P2): only the /data render
+  // shows "Your upcoming visits", so only it pays for the paged
+  // scheduled_services scan (property/estimate/single-premises reads
+  // included) GATE_REPORT_UPCOMING_VISITS guards. report-assistant.js
+  // (the Q&A endpoint) never reads the field.
+  upcomingVisitsCard = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -382,7 +395,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
-    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity,
+    propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, planSummary, upcomingVisitsCard,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -677,6 +690,11 @@ async function findProjectByReportSegment(segment) {
       // Feed the canonical review resolver for the payload's reviewLocation.
       'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
       'c.nearest_location_id',
+      // technicianName stays sourced from the project's CREATOR (unchanged
+      // response field) — the resolved applicator identity for
+      // applicatorFdacsId/applicatorName is looked up separately by
+      // resolveProjectApplicatorTechnician (report-data.js), which does not
+      // assume the creator performed the visit.
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -866,6 +884,23 @@ router.get('/project/:token/data', async (req, res, next) => {
         && !filingBinaryMayDiscloseFee(lastFiling);
     }
 
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // judged against viewerProjectDate (the WDO last-filing date when one
+    // exists), same rules as the service report's applicatorFdacsId.
+    // Resolved from the technician who actually PERFORMED the linked
+    // service (service_records → scheduled_services → the project's
+    // created_by_tech_id only when genuinely unlinked) — never simply the
+    // staffer who typed up the project record, which the plain `t.name as
+    // technician_name` join above still reflects (codex P1: an admin
+    // creating a project for a tech-performed visit was publishing the
+    // ADMIN's own id/name). `technicianName` below is left as-is; the new
+    // `applicatorName` carries the corrected identity. Poison Control line
+    // eligibility (owner ruling 2026-09-26) rides the same shared resolver,
+    // computed from the project's RAW findings/followup_findings, before
+    // the internal-key/fee strip below (structured treatment fields, never
+    // free text, so nothing here needs scrubbing).
+    const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
+
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
     // raw payload, so the strip is enforced at the egress point too (audit
@@ -919,6 +954,9 @@ router.get('/project/:token/data', async (req, res, next) => {
         [project.city, [project.state, project.zip].filter(Boolean).join(' ')].filter(Boolean).join(', '),
       ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
+      applicatorFdacsId,
+      applicatorName,
+      poisonControl,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
@@ -1177,6 +1215,18 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
             // service_date/created_at feed the historical-report recency
             // gate (PR r9) — the click path must classify identically.
             'sr.service_date', 'sr.created_at',
+            // GATE_REPORT_CROSS_SELL_V2's findings priority reads the
+            // visit's typed companion identity off service_data (roach
+            // COMPANION vs a cockroach-PRIMARY report) — without it here
+            // the click path always resolved roachesIndoors === false via
+            // that leg (the service_findings-text leg still worked, since
+            // it queries by sr.id independently), silently re-deriving a
+            // DIFFERENT V2 offer than what the render path showed, on top
+            // of which the click/accept flow's own drift check would then
+            // 409 a fingerprint the customer actually saw. The click path
+            // must classify identically to the read path (same doctrine as
+            // scheduled_service_id/service_date above).
+            'sr.service_data',
             db.raw('COALESCE(ss.service_address_line1, c.address_line1) as address_line1'),
             db.raw(`${stampedLine2Sql('ss', 'c')} as address_line2`),
             db.raw('COALESCE(ss.service_address_city, c.city) as city'),
@@ -1736,7 +1786,11 @@ router.post('/:token/ask', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first();
 
     if (!service || service.report_template_version !== 'service_report_v1') {
@@ -1874,7 +1928,11 @@ router.get('/:token', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       // Frozen identity (report-identity-snapshot.js) overlays the live join
       // HERE, before the filename, the canonical lawn pin, and the cache
@@ -1931,6 +1989,7 @@ router.get('/:token', async (req, res, next) => {
       const smSignature = await stationMapPdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
+      const apSignature = await applicatorIdentityPdfSignature(service.id, db);
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
@@ -1942,7 +2001,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1960,6 +2019,8 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      // The applicator pair the render printed (store key), same contract.
+      let apRenderedSignature = apSignature;
       let cockroachRenderedSignature = cockroachV2Signature;
       let reserviceRenderedSignature = reserviceV2Signature;
       // The canonical snapshot the render is pinned to. Declared out here so
@@ -1987,6 +2048,7 @@ router.get('/:token', async (req, res, next) => {
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          apRenderedSignature = applicatorRenderedPdfSignature(data);
           cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
           reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
           renderedData = data;
@@ -2076,7 +2138,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -2144,7 +2206,11 @@ router.get('/:token/map.svg', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
@@ -2216,7 +2282,11 @@ router.get('/:token/data', async (req, res, next) => {
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
-        'technicians.photo_s3_key as technician_photo_s3_key')
+        'technicians.photo_s3_key as technician_photo_s3_key',
+        // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+        // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry')
       .first()
       .then((row) => (row ? applyReportIdentitySnapshot(row) : row));
 
@@ -2283,7 +2353,7 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2475,6 +2545,9 @@ function generateReportPDF(service, products, weather, dryTimes, irrigation, res
   doc.moveDown(0.5);
   doc.fontSize(8).font('Helvetica').fillColor(PDF_MUTED);
   doc.text(`This report is provided for your records. For questions contact Waves Pest Control at ${WAVES_SUPPORT_PHONE_DISPLAY}.`, { align: 'center' });
+  // Owner ask 2026-09-28: every report, legacy ones included, links to the
+  // public Products & Safety page. The URL prints in full for paper copies.
+  doc.text(`Every product we use and our safety protocol: ${WAVES_PRODUCTS_SAFETY_URL}`, { align: 'center', link: `${WAVES_PRODUCTS_SAFETY_URL}#safety-protocol` });
   doc.text(`Generated ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`, { align: 'center' });
 
   doc.end();
@@ -2485,12 +2558,16 @@ async function ensureReportToken(serviceRecordId) {
   const service = await db('service_records').where({ id: serviceRecordId }).first();
   if (service.report_view_token) return service.report_view_token;
 
+  // Conditional write (same rule as pdf-queue.js ensureReportToken): a
+  // concurrent mint never overwrites a token another writer already queued.
   const token = crypto.randomBytes(16).toString('hex');
-  await db('service_records').where({ id: serviceRecordId }).update({
+  const updated = await db('service_records').where({ id: serviceRecordId }).whereNull('report_view_token').update({
     report_view_token: token,
     report_generated_at: db.fn.now(),
   });
-  return token;
+  if (updated) return token;
+  const winner = await db('service_records').where({ id: serviceRecordId }).first('report_view_token');
+  return winner?.report_view_token || null;
 }
 
 module.exports = router;

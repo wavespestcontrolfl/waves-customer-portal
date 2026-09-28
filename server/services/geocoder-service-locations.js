@@ -28,11 +28,10 @@ async function pruneUnresolved(conn) {
   const rows = await conn('scheduled_services').whereIn('id', [...unresolved.keys()]).select(SNAPSHOT_COLUMNS);
   const review = require('./customer-geocode-review');
   if (review.reviewEnabled()) {
-    const verified = await conn('customer_geocode_reviews').where('status', 'verified')
-      .whereIn('customer_id', [...new Set(rows.map(row => row.customer_id))]);
-    const byCustomer = new Map(verified.map(row => [row.customer_id, row]));
+    const byCustomer = await review.serviceReviewContexts(rows.map(row => row.customer_id), conn);
     for (const row of rows) {
-      if (review.serviceReviewDecision(row, byCustomer.get(row.customer_id))?.location) unresolved.delete(row.id);
+      const context = byCustomer.get(row.customer_id);
+      if (context?.status === 'verified' && review.serviceReviewDecision(row, context)?.location) unresolved.delete(row.id);
     }
   }
   const current = new Map(rows.map(row => [row.id, fingerprint(row)]));

@@ -403,6 +403,8 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     await screen.findByText('Visit Summary');
     expect(container.querySelector('#products-applied')).toBeNull();
     expect(screen.queryByText(/product applied/)).toBeNull();
+    // Poison Control rides Products Applied — a cartridge check carries none.
+    expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
   });
 });
 
@@ -698,6 +700,88 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     // 2026-07-05), so #map only exists when the coverage card itself shows —
     // and lawn reports hide the per-area coverage map.
     expect(container.querySelectorAll('#map')).toHaveLength(0);
+  });
+
+  it('ends Products Applied with a tappable Poison Control line', async () => {
+    const { container } = renderReport(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+
+    const products = container.querySelector('#products-applied');
+    const note = within(products).getByTestId('poison-control-note');
+    const link = within(note).getByRole('link', { name: '1-800-222-1222' });
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(note.textContent).toMatch(/names each product applied/);
+    expect(container.querySelectorAll('a[href="tel:+18002221222"]')).toHaveLength(1);
+    // the fixture carries no applicator number, so no applicator line
+    expect(note.textContent).not.toMatch(/FDACS ID/);
+  });
+
+  it('prints the applicator FDACS ID card number in the Poison Control note', async () => {
+    const { container } = renderReport({ ...legacyLawnReport, applicatorFdacsId: 'JE000001' });
+    await screen.findByText('Visit Summary');
+    const note = within(container.querySelector('#products-applied')).getByTestId('poison-control-note');
+    expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
+  });
+
+  it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
+    const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    for (const payload of [
+      { ...legacyLawnReport, applications: [rodentBait], applicationMade: false, applicatorFdacsId: 'JE000001' },
+      { ...legacyLawnReport, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' },
+    ]) {
+      const { container, unmount } = renderReport(payload);
+      await screen.findByText('Visit Summary');
+      const section = container.querySelector('#poison-control');
+      expect(section).not.toBeNull();
+      expect(section.textContent).not.toMatch(/FDACS ID/);
+      unmount();
+    }
+  });
+
+  it('a productless treatment or rodent bait visit gets Poison Control on its own', async () => {
+    const rodentBait = { id: 'rb-1', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    for (const payload of [
+      { ...legacyLawnReport, applications: [], applicationMade: true },
+      { ...legacyLawnReport, applications: [rodentBait], applicationMade: false },
+    ]) {
+      const { container, unmount } = renderReport(payload);
+      await screen.findByText('Visit Summary');
+      expect(container.querySelector('#products-applied')).toBeNull();
+      const section = container.querySelector('#poison-control');
+      expect(section).not.toBeNull();
+      expect(within(section).getByRole('link', { name: '1-800-222-1222' })).toHaveAttribute('href', 'tel:+18002221222');
+      expect(section.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
+  });
+
+  // Owner ask 2026-09-28: legacy (pre-v1) reports link to the Products &
+  // Safety page too. They render LegacyReport, which never mounts the v1 footer.
+  it('links legacy reports to the Products & Safety page', async () => {
+    renderReport({ ...legacyLawnReport, reportVersion: undefined });
+    const link = await screen.findByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('link', { name: /download pdf/i })).toBeInTheDocument();
+  });
+
+  // Owner ask 2026-09-28: every report links to the portal login and the
+  // public Products & Safety page. The safety link sits in the footer, so a
+  // visit that applied nothing carries it too.
+  it.each([
+    ['with products applied', legacyLawnReport],
+    ['with nothing applied', { ...legacyLawnReport, applications: [], applicationMade: false }],
+  ])('links to the portal login and the Products & Safety page (%s)', async (_label, report) => {
+    const { container } = renderReport(report);
+    await screen.findByText('Visit Summary');
+
+    expect(screen.getByRole('link', { name: /portal login/i })).toHaveAttribute('href', '/login');
+    const footer = container.querySelector('footer.sr-footer');
+    const safetyLink = within(footer).getByRole('link', { name: /see every product we use and our safety protocol/i });
+    expect(safetyLink).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(safetyLink).toHaveAttribute('target', '_blank');
+    expect(safetyLink).toHaveAttribute('rel', 'noopener noreferrer');
   });
 
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {
@@ -1133,5 +1217,91 @@ describe('Consolidated lawn report', () => {
     const finding = await screen.findByText(payload.protocol.structuredObservations[0]);
     expect(document.getElementById('visit-summary')).toContainElement(finding);
     expect(document.body.textContent).not.toContain(payload.protocol.structuredObservations[1]);
+  });
+});
+
+// "Your upcoming visits" card (owner-approved 2026-09-27,
+// GATE_REPORT_UPCOMING_VISITS) — regression coverage for codex round-2 P2:
+// the glass theme hides EVERY .section-eyebrow outside the hero kicker
+// (html[data-glass-theme] .service-report-v1 .section-eyebrow), so the
+// card's title must ride a real heading element instead, the same way its
+// sibling live-report cards (e.g. the companion section header) do.
+describe('ReportViewPage — "Your upcoming visits" card title', () => {
+  it('renders the title as a real <h2> heading, not a glass-suppressed .section-eyebrow', async () => {
+    const payload = {
+      ...pestReportV2,
+      upcomingVisitsCard: {
+        visits: [
+          { serviceType: 'Lawn Care Treatment', scheduledDate: '2026-12-01', windowStart: '09:00:00' },
+        ],
+      },
+    };
+    renderReport(payload);
+
+    const heading = await screen.findByRole('heading', { name: 'Your upcoming visits', level: 2 });
+    expect(heading.tagName).toBe('H2');
+    // The glass suppression rule targets .section-eyebrow specifically —
+    // the title must not ALSO ride on one inside this card.
+    expect(heading.closest('[data-section="upcoming-visits"]')?.querySelector('.section-eyebrow')).toBeNull();
+    expect(screen.getByText('Dates and windows are subject to change')).toBeInTheDocument();
+  });
+});
+
+// "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
+// re-service COUNTS for this year (never a price — prices only ever live on
+// estimate pages, and no "at no charge" money claim), live mode only.
+describe('ReportViewPage — "Your plan" section (planSummary)', () => {
+  it('live mode with planSummary renders the section and the count line with the re-service clause, no money claim', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 4, reservicesThisYear: 1 };
+    const { container } = renderReport(payload);
+
+    await screen.findByText('Your plan');
+    const section = container.querySelector('#your-plan');
+    expect(section).not.toBeNull();
+    expect(within(section).getByText('This year: 4 visits, including 1 re-service')).toBeInTheDocument();
+    expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
+  });
+
+  it('omits the re-service clause and keeps singular/plural correct when there are no re-services', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    payload.planSummary = { year: 2026, visitsThisYear: 1, reservicesThisYear: 0 };
+    const { container } = renderReport(payload);
+
+    await screen.findByText('Your plan');
+    const section = container.querySelector('#your-plan');
+    expect(within(section).getByText('This year: 1 visit')).toBeInTheDocument();
+    // Scoped to this section — the page footer separately mentions
+    // WaveGuard's free re-service perk, which is unrelated copy.
+    expect(within(section).queryByText(/re-service/)).toBeNull();
+  });
+
+  it('renders nothing when the payload carries no planSummary', async () => {
+    const payload = structuredClone(legacyLawnReport);
+    delete payload.planSummary;
+    const { container } = renderReport(payload);
+
+    await screen.findByText(payload.customerName, { exact: false });
+    expect(screen.queryByText('Your plan')).toBeNull();
+    expect(container.querySelector('#your-plan')).toBeNull();
+  });
+
+  it('stays hidden in pdf mode even when the payload carries planSummary (belt-and-braces — the server already strips it)', async () => {
+    // `mode` reads window.location.search directly (not react-router's
+    // location — MemoryRouter never touches the real jsdom location), so
+    // pdf mode has to be set the same way the app itself reads it.
+    const originalUrl = window.location.href;
+    window.history.pushState({}, '', '/report/test-legacy-lawn?mode=pdf');
+    try {
+      const payload = structuredClone(legacyLawnReport);
+      payload.planSummary = { year: 2026, visitsThisYear: 3, reservicesThisYear: 0 };
+      const { container } = renderReport(payload);
+
+      await screen.findByText(payload.customerName, { exact: false });
+      expect(screen.queryByText('Your plan')).toBeNull();
+      expect(container.querySelector('#your-plan')).toBeNull();
+    } finally {
+      window.history.pushState({}, '', originalUrl);
+    }
   });
 });

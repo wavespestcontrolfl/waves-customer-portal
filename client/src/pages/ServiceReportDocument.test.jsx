@@ -65,6 +65,20 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('10 g/gal')).toBeInTheDocument();
   });
 
+  // Owner ask 2026-09-28: every record of service links to the public Products
+  // & Safety page from its footer, product rows or not. The URL prints in full.
+  it.each([
+    ['with product rows', BASE_DATA],
+    ['with no product rows', { ...BASE_DATA, applications: [] }],
+  ])('links to the public Products & Safety page (%s)', (_label, data) => {
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Every product we use and our safety protocol:/)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'https://www.wavespestcontrol.com/products-and-safety/' });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/products-and-safety/#safety-protocol');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
   it('is a service record, not an invoice — no pricing ever renders', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('This is not an invoice.');
@@ -197,6 +211,80 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(container.textContent.split(rec).length - 1).toBe(1);
     expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
+  });
+
+  it('prints a tappable Poison Control line when a product was applied', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const line = screen.getByTestId('doc-poison-control');
+    const link = screen.getByRole('link', { name: '1-800-222-1222' });
+    expect(line).toContainElement(link);
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(line.textContent).toMatch(/call 911/);
+  });
+
+  it('prints no Poison Control line on a visit that applied nothing', () => {
+    const termiteCheck = {
+      id: 'st-1',
+      method: 'station_check',
+      product: { name: 'Trelona ATBS Termite Bait Station', category: 'termite bait' },
+    };
+    for (const applications of [[], [termiteCheck]]) {
+      const { container, unmount } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications }} token="tok123" />);
+      expect(container.textContent).not.toContain('Poison Control');
+      expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('prints Poison Control on its own for a rodent bait-station visit or a productless treatment', () => {
+    // a station device row: servicing it is not an application, but the
+    // station holds rodenticide
+    const rodentCheck = {
+      id: 'st-2',
+      method: 'station_check',
+      product: { name: 'Protecta Rodent Bait Station' },
+    };
+    for (const data of [
+      { ...BASE_DATA, applications: [rodentCheck] },
+      { ...BASE_DATA, applications: [], typedReport: { ...BASE_DATA.typedReport, type: 'rodent_bait_station' } },
+      { ...BASE_DATA, applications: [], applicationMade: true },
+    ]) {
+      const { container, unmount } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(screen.queryByText('Products applied')).toBeNull();
+      expect(screen.getByText('Poison Control')).toBeInTheDocument();
+      const block = screen.getByTestId('doc-poison-control');
+      expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+      // no product list on the page, so the line never points at one
+      expect(block.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
+  });
+
+  it('names the applicator only on application evidence, never on a bait-station check', () => {
+    const rodentCheck = { id: 'st-3', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    const withId = { ...BASE_DATA, applicatorFdacsId: 'JE000001' };
+    const { unmount } = render(<ServiceReportDocument data={{ ...withId, applications: [rodentCheck], applicationMade: false }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+    unmount();
+    render(<ServiceReportDocument data={{ ...withId, applications: [], applicationMade: true }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('FDACS ID card #JE000001');
+  });
+
+  it('prints Poison Control when the application verdict is unknown (product read failed)', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    const block = screen.getByTestId('doc-poison-control');
+    expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+    expect(block.textContent).not.toContain('FDACS ID');
+  });
+
+  it('prints the applicator FDACS ID card number beside Poison Control when the server sends one', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('Applicator: Adam · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: null }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
   });
 
   it('does not claim treatment areas on a visit with no applications', () => {

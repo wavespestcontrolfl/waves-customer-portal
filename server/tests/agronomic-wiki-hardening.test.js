@@ -196,6 +196,35 @@ describe('generatePage', () => {
     expect(errorLog.description).toMatch(/existing content preserved/);
   });
 
+  test('never saves a page cut off at max_tokens — existing content preserved', async () => {
+    const existing = {
+      id: 'ke-1',
+      slug: 'product/talstar-p',
+      content: '# Talstar P\n\nHard-won existing analysis.',
+      data_point_count: 3,
+      source_treatment_ids: ['o1', 'o2', 'o3'],
+      stale_flag: false,
+    };
+    const state = useDb({ knowledge_entries: [existing] });
+    global.__anthropicCreate = jest.fn(async () => ({
+      stop_reason: 'max_tokens',
+      content: [{ type: 'text', text: '# Talstar P\n\n| Metric | Avg. Delta | Direction | |' }],
+      usage: { input_tokens: 100, output_tokens: 16000 },
+    }));
+
+    const result = await wiki.generatePage(
+      'product/talstar-p', 'product',
+      { outcomes: [{ id: 'o1' }, { id: 'o2' }, { id: 'o3' }, { id: 'o4' }] },
+      'Product: Talstar P'
+    );
+
+    expect(global.__anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+    expect(result.writeState).toBe('failed');
+    expect(result.entry.content).toBe(existing.content);
+    const contentPatch = (state.updates.knowledge_entries || []).find((u) => 'content' in u);
+    expect(contentPatch).toBeUndefined();
+  });
+
   test('still creates a placeholder stub for a brand-new page when the AI call fails', async () => {
     const state = useDb({ knowledge_entries: [] });
     global.__anthropicCreate = jest.fn(async () => { throw new Error('api down'); });

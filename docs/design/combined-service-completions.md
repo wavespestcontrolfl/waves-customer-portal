@@ -45,7 +45,8 @@ At completion time each companion snapshot freezes its delivery
 ## /complete contract
 
 New payload field `companionFindings`:
-`[{ type, values, nextStepChips, activityScore, activityScoreSource }]`.
+`[{ type, values, activityScore, activityScoreSource }]`. (`nextStepChips` was
+retired 2026-09-27 — a stale client that still sends it is ignored.)
 
 - AUTHORIZATION: every submitted type must be in `profile.companions`
   (409 `companion_type_mismatch`) — the profile is authoritative, never the
@@ -56,8 +57,8 @@ New payload field `companionFindings`:
 - Each companion validates EXACTLY like a typed completion, reusing the
   existing machinery per type: `validateTypedFindings` (enforceRequired:
   true — a declared companion is by definition cut over),
-  `validateNextStepChips(chips, type, values)`, `nextStepRequiredForType`,
-  derive-then-pin scoring, trend types require a score (422
+  derive-then-pin scoring (a derive-mapped indicator always takes the
+  findings-derived score), trend types require a score (422
   `companion_activity_score_required` naming the section),
   `validateActivityScoreConsistency`.
 - INDICATOR UNIQUENESS: a companion whose activity indicator collides with
@@ -71,7 +72,8 @@ New payload field `companionFindings`:
   One `service_activity_scores` insert per companion with activity.
 - Photos, photo AI summary, follow-up suggestions, AI-drafted
   recommendations, and pest pressure remain PRIMARY-ONLY in v1 (companion
-  sections are chips-first deterministic copy). Disclosed for ratification.
+  sections are deterministic copy from their typed fields). Disclosed for
+  ratification.
 
 ## Report
 
@@ -97,11 +99,11 @@ New payload field `companionFindings`:
 - Companion schemas ship in the dispatch payloads alongside `findingsSchema`
   (`companionSchemas`) — mobile must not block on a registry fetch.
 - One `TypedFindingsSection` per companion (both mobile and desktop
-  variants) with per-companion values/chips/gauge state. The recommendations
+  variants) with per-companion values/gauge state. The recommendations
   textarea + AI draft controls stay primary-only.
 - Every client pre-submit mirror applies PER COMPANION:
-  `typedFieldRequiredNow` (requiredUnless), required-chips, score-required,
-  `typedNextStepChipConflict`, `typedActivityScoreConflict`. Server-side
+  `typedFieldRequiredNow` (requiredUnless), score-required (tech-set-only
+  indicators), `typedActivityScoreConflict`. Server-side
   conditional checks without client mirrors are a known Codex flag.
 - Companion draft state participates in the existing completion draft
   autosave/restore, with the same type-aware pruning on restore.

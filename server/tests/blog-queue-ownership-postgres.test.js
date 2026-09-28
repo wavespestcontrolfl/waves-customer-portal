@@ -30,6 +30,7 @@ postgres('blog queue ownership on PostgreSQL', () => {
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
     await mockPg.schema.createTable('opportunity_queue', (t) => {
       t.uuid('id').primary(); t.text('status'); t.text('action_type'); t.text('skip_reason'); t.text('bucket');
+      t.text('page_url'); // read by the claim route fence
       t.integer('attempt_count').defaultTo(0); t.integer('score').defaultTo(90); t.jsonb('signal_metadata');
       for (const c of ['claimed_at', 'completed_at', 'updated_at', 'available_at', 'expires_at', 'mined_at']) t.timestamp(c, { useTz: true });
     });

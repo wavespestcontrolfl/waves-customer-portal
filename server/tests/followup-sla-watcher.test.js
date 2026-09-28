@@ -13,15 +13,24 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: j
 jest.mock('../services/voice-agent/relay-protocol', () => ({ whereNotSandboxCall: jest.fn((qb) => qb.whereRaw('not_sandbox')) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
-  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
+  return {
+    ...actual,
+    listOpenCommitments: jest.fn(),
+    refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+    stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)),
+    // Defaults to the real implementation; individual tests override with
+    // mockRejectedValueOnce to prove a failure propagates rather than
+    // silently reading as "no renewal".
+    obligationRenewedAt: jest.fn(actual.obligationRenewedAt),
+  };
 });
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt } = require('../services/call-commitments');
 const {
-  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, ROLLING_KEY,
+  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, ROLLING_KEY,
 } = require('../services/followup-sla-watcher');
 
 // ET is UTC-4 in late September.
@@ -425,6 +434,39 @@ test('the tick reads the office closure calendar for the scan window', async () 
   expect(getBlackoutLayers).toHaveBeenCalled();
 });
 
+describe('followedUpIds — renewal-boundary propagation', () => {
+  test('a failed obligationRenewedAt lookup propagates rather than reading as "no renewal"', async () => {
+    obligationRenewedAt.mockRejectedValueOnce(new Error('synthetic audit_log lookup failure'));
+    const reopenedRow = {
+      id: 'fixture-reopened-1', kind: 'callback', party: 'waves', human_state: 'confirmed',
+      customer_id: 'fixture-customer-1', created_at: NOW, call_started_at: NOW, source: 'ai',
+    };
+    // Old evidence from BEFORE the reopen must never silently count as
+    // fulfillment when the renewal boundary itself couldn't be verified —
+    // every existing caller (the pager's own runInner, promise-chaser-bell)
+    // already treats a thrown followedUpIds as "unverified, hold for retry".
+    await expect(followedUpIds(db, [reopenedRow])).rejects.toThrow('synthetic audit_log lookup failure');
+  });
+
+  test('a row the pager itself would ever pass (no human_state) touches no renewal-boundary query at all', async () => {
+    // renewedFloors no longer short-circuits on kind/human_state itself
+    // (Codex #5019 r12 P1: obligationRenewedAt is the single source of
+    // truth for which rows it renews, so this file never duplicates —
+    // or drifts from — that decision), so it IS called for every row now.
+    // The real guarantee this test pins is unchanged: obligationRenewedAt's
+    // OWN human_state guard returns before ever touching audit_log, so a
+    // row the pager's own candidates always look like (no human_state)
+    // still causes zero DB work — `db` (the bare mock) is never invoked.
+    const untouchedRow = {
+      id: 'fixture-untouched-1', kind: 'callback', party: 'waves', human_state: null,
+      customer_id: null, created_at: NOW, call_started_at: NOW, source: 'ai', from_phone: null, to_phone: null, direction: 'inbound',
+    };
+    await followedUpIds(db, [untouchedRow]).catch(() => {}); // db is a bare mock; only proving the call pattern here
+    expect(obligationRenewedAt).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
 describe('pagerHealthy — judged against the pager schedule', () => {
   test.each([
     ['2:07 PM → the 2:00 PM tick', et('14:07'), et('14:00')],
@@ -544,6 +586,43 @@ test('a quote hint from before a floor time does not keep the promise', async ()
   mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association', matched_at: et('13:30').toISOString() }) } });
   listOpenCommitments.mockResolvedValue([row('q', { kind: 'send_estimate', call_started_at: et('13:00').toISOString(), due_at: et('14:00').toISOString(), due_type: 'floor' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+});
+
+test('a booking after the call FOR the stated slot keeps a scheduling promise before that time (it is the appointment); another slot, or a quote promise, still waits for it', async () => {
+  mockDb();
+  const base = db.getMockImplementation();
+  // Each booked at 13:58, on a 12:45 call, against a 2 PM stated time.
+  // As pg returns them: DATE a UTC-midnight Date, TIME an 'HH:MM:SS' string.
+  const booked = {
+    'cust-visit': ['2026-09-26', '14:00:00'],
+    'cust-untyped': ['2026-09-26', '14:00:00'],
+    'cust-sameday': ['2026-09-26', '10:00:00'],
+    'cust-later': ['2026-09-30', '14:00:00'],
+    'cust-quote': ['2026-09-26', '14:00:00'],
+  };
+  db.mockImplementation((t) => {
+    const q = base(t);
+    if (t === 'scheduled_services') q.select = async () => Object.entries(booked).map(([customer_id, [day, start]]) => ({
+      customer_id, created_at: et('13:58').toISOString(), scheduled_date: new Date(`${day}T00:00:00Z`), window_start: start,
+    }));
+    return q;
+  });
+  const stated = { call_started_at: et('12:45').toISOString(), due_at: et('14:00').toISOString() };
+  listOpenCommitments.mockResolvedValue([
+    row('visit', { kind: 'schedule_visit', ...stated, due_type: 'floor' }), // "on the schedule for around 2"
+    row('untyped', { kind: 'schedule_visit', ...stated }),
+    // "schedule it after the 2 PM inspection": unrelated visits that day or at 2 PM another day
+    row('sameday', { kind: 'schedule_visit', ...stated, due_type: 'floor' }),
+    row('later', { kind: 'schedule_visit', ...stated, due_type: 'floor' }),
+    row('quote', { kind: 'send_estimate', ...stated, due_type: 'floor' }),
+  ]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['later', 'quote', 'sameday']);
+  // The scan (the lock's re-check covers only the listed quote): bookings are
+  // read from the call's end, texts still from the stated time.
+  const scanSince = (t) => queriesOn(t)[0].calls.filter(([m, col]) => m === 'where' && col === 'created_at').map(([, , , v]) => new Date(v).toISOString());
+  expect(scanSince('scheduled_services')).toEqual([et('12:45').toISOString()]);
+  expect(scanSince('sms_log')).toEqual([et('14:00').toISOString()]);
 });
 
 test('a pager run in progress right now counts as healthy; a stuck one does not', async () => {

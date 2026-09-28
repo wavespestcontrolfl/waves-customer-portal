@@ -17,8 +17,9 @@
  * (this.sandbox === true) and takes precedence over the inbound override, so
  * the owner can A/B a candidate model on the sandbox line without touching
  * production inbound calls. Precedence, highest first:
- *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
- *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE
+ *   sandbox session:      VOICE_RELAY_SANDBOX_MODEL → VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ *   production inbound:                                VOICE_RELAY_INBOUND_MODEL → VOICE_RELAY_MODEL → MODELS.VOICE → MODELS.DEFAULTS.VOICE
+ * (every link before the code default is validated; a refused one falls to the next)
  * Every override is checked against an allowlist derived from
  * MODELS.MODEL_CATALOG (Anthropic, text-capable, not `requires: 'deep'` —
  * this lane always runs `thinking: 'disabled'`, which Fable/Mythos ids
@@ -32,6 +33,27 @@
  * MODEL export stays the plain VOICE_RELAY_MODEL/MODELS.VOICE resolution for
  * any other importer (e.g. collections-conversation.js's own independent
  * read of the same env).
+ *
+ * GATE_VOICE_RELAY_OPENAI (off in production): while live, the SANDBOX and
+ * INBOUND override envs above may also resolve to an OpenAI model
+ * MODEL_CATALOG marks voice-eligible (`voice: {...}` — config/models.js), but
+ * only for a sandbox session or an eval-harness session (`evalHarness`,
+ * voice-relay-replay.js) — an ordinary production inbound call is
+ * Anthropic-only even with the gate on, and so is the shared
+ * VOICE_RELAY_MODEL fallback (isAllowedOverrideModel /
+ * allowedOverrideModelIds read the gate at call time; see there). The
+ * resolved session picks its client by MODEL_CATALOG[this.model].provider
+ * (`this._provider`, pinned alongside `this.model`): 'anthropic' runs the
+ * unchanged `anthropic.messages.stream(...)` path below; 'openai' runs
+ * relay-openai-client.js's adapter, which exposes the same
+ * stream/on/finalMessage surface. NO SILENT FALLBACK — an OpenAI leg that
+ * errors or aborts rejects `finalMessage()` like any other provider failure
+ * and runs through this file's EXISTING model-failure handling
+ * (`_modelFailures`, the provider-failure handoff); it never quietly re-runs
+ * on Claude. voiceEffortFor returns null for any non-Anthropic model id
+ * (its capability regexes only match `claude-*`), so an OpenAI round never
+ * sends `output_config` — the OpenAI adapter maps its own per-model
+ * reasoning effort from MODEL_CATALOG's `voice.reasoning` instead.
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
@@ -81,6 +103,7 @@ const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 const { splitSentences, needsHold: sentenceNeedsHold, isStreamSafe: sentenceIsStreamSafe } = require('./relay-stream-renderer');
+const { anthropicMaxTokens } = require('../llm/anthropic-wire');
 
 /**
  * GATE_VOICE_RELAY_INTERRUPT_CONTEXT — interruption-aware conversation
@@ -134,6 +157,14 @@ function deriveRelayEventsSubscribed(relayProfileId) {
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
+// The shared chain under the inbound overrides, read at the same moment as
+// MODEL: VOICE_RELAY_MODEL, then the VOICE tier (MODEL_VOICE) — each link
+// taken only as an allowlisted Anthropic id (resolveSessionModel), the same
+// links the Models tab's inbound row walks (model-switchboard.js voice_relay).
+const SHARED_MODEL_CHAIN = [
+  { source: 'VOICE_RELAY_MODEL', value: process.env.VOICE_RELAY_MODEL || null },
+  { source: 'MODEL_VOICE', value: MODELS.VOICE },
+];
 
 // Env names for the two inbound-only override levers (see the file header),
 // used in log/stamp text. The reads below name process.env.VOICE_RELAY_* directly
@@ -147,20 +178,98 @@ const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
 // (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
 // a new/retired Anthropic id needs no change here. Anthropic + text-capable
 // only (this lane never sends images); `requires: 'deep'` ids (Fable/Mythos)
-// are excluded because only services/llm/deep.js knows how to run them — this
-// lane sends `thinking: { type: 'disabled' }`, which those models reject.
+// are excluded because only services/llm/deep.js knows how to run them, and
+// thinking-always-on ids (Opus 5.5+ — MODELS.anthropicThinkingAlwaysOn) are
+// excluded for the same reason as Fable/Mythos: this production allowlist
+// backs a request that always sends `thinking: { type: 'disabled' }`, which
+// both reject. A thinking-always-on id is still reachable — see
+// ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS below — just never through this
+// production-wide Set.
 const ALLOWED_OVERRIDE_MODEL_IDS = new Set(
   Object.entries(MODELS.MODEL_CATALOG)
-    .filter(([, meta]) => meta
+    .filter(([id, meta]) => meta
       && meta.provider === 'anthropic'
       && Array.isArray(meta.caps) && meta.caps.includes('text')
       && meta.status !== 'unavailable'
-      && !meta.requires)
+      && !meta.requires
+      && !MODELS.anthropicThinkingAlwaysOn(id))
     .map(([id]) => id)
 );
 
-function isAllowedOverrideModel(id) {
-  return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
+// GATE_VOICE_RELAY_OPENAI (server/config/feature-gates.js voiceRelayOpenaiLive,
+// unset/off in production): the SAME override envs above may also resolve to
+// an OpenAI model — server/services/voice-agent/relay-openai-client.js — for
+// the benchmark/sandbox lane, but ONLY a model MODEL_CATALOG marks
+// voice-eligible (a `voice` object — see config/models.js) AND only while
+// this gate is live. Read at CALL time (not baked into the Set above) so a
+// gate flip needs no redeploy and never widens the allowlist for a session
+// that already resolved before the flip (resolveSessionModel runs once, at
+// construction). Off ⇒ isAllowedOverrideModel behaves exactly as before this
+// lane existed — Anthropic text models only.
+const OPENAI_VOICE_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([, meta]) => meta
+      && meta.provider === 'openai'
+      && meta.voice && typeof meta.voice === 'object'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable')
+    .map(([id]) => id)
+);
+
+// Thinking-always-on Anthropic ids the catalog marks voice-eligible (a
+// `voice` object — Opus 5.5; Fable/Mythos carry none, since only deep.js
+// handles their refusals), held out of the production allowlist above — reachable ONLY for a sandbox
+// test call or the eval/benchmark harness (the same `openaiContext` flag the
+// OpenAI ids use), never production inbound and never the shared
+// VOICE_RELAY_MODEL / MODEL_VOICE chain (SHARED_MODEL_CHAIN below is
+// validated against ALLOWED_OVERRIDE_MODEL_IDS alone, not this Set). Unlike
+// the OpenAI ids, these need no feature gate: they are plain Anthropic, run
+// through the exact same client, and only change the request shape (no
+// `thinking: disabled`, max_tokens raised — see the request build below).
+const ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([id, meta]) => meta
+      && meta.provider === 'anthropic'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable'
+      && meta.voice && typeof meta.voice === 'object'
+      && MODELS.anthropicThinkingAlwaysOn(id))
+    .map(([id]) => id)
+);
+
+/**
+ * GATE_VOICE_RELAY_OPENAI, live — feature-gates.js's canonical
+ * voiceRelayOpenaiLive() alone (same convention as discountStackingLive, so
+ * the gate shows up in that module's status listing too). Read only for a
+ * sandbox or eval-harness session (allowedOverrideModelIds), so a suite that
+ * stubs feature-gates and builds one of those exposes voiceRelayOpenaiLive
+ * in its stub.
+ */
+function voiceRelayOpenaiGateLive() {
+  return require('../../config/feature-gates').voiceRelayOpenaiLive();
+}
+
+/**
+ * The override allowlist for ONE session — gate-aware, always fresh. OpenAI
+ * ids join it only when `openaiContext` is set — a sandbox test call or the
+ * eval/benchmark harness, never an ordinary production inbound call — AND
+ * the gate is live. Thinking-always-on Anthropic ids (Opus 5.5+) join it
+ * under the SAME `openaiContext` flag but need no gate — they are plain
+ * Anthropic, just a different request shape (see ANTHROPIC_SANDBOX_OVERRIDE_
+ * MODEL_IDS above). With no context (the default, and what the Models tab's
+ * inbound row reads) the list is Anthropic-only, thinking-always-on ids
+ * excluded, whatever the gate or the override envs say: production inbound
+ * stays on Claude (docs/sandy-benchmark.md "OpenAI candidates").
+ */
+function allowedOverrideModelIds({ openaiContext = false } = {}) {
+  if (openaiContext !== true) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+  const ids = new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS]);
+  if (voiceRelayOpenaiGateLive()) for (const id of OPENAI_VOICE_OVERRIDE_MODEL_IDS) ids.add(id);
+  return ids;
+}
+
+function isAllowedOverrideModel(id, opts) {
+  return typeof id === 'string' && id.length > 0 && allowedOverrideModelIds(opts).has(id);
 }
 
 // A misconfigured override is re-read by every new call; the per-session
@@ -168,11 +277,11 @@ function isAllowedOverrideModel(id) {
 // the whole allowlist) is logged once per process per source/value — the
 // relay-profiles.js warnOnce pattern — so a busy line cannot flood the logs.
 const warnedOverrides = new Set();
-function warnRejectedOverrideOnce(source, value) {
+function warnRejectedOverrideOnce(source, value, opts) {
   const key = `${source}=${value}`;
   if (warnedOverrides.has(key)) return;
   warnedOverrides.add(key);
-  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...allowedOverrideModelIds(opts)].join(', ')})`);
 }
 
 /**
@@ -188,8 +297,26 @@ function warnRejectedOverrideOnce(source, value) {
  * `fallbackReason` even if a lower-precedence override or the shared default
  * ends up running instead — the version stamp must show a rejection happened
  * even when the call still ran on a legitimate (if less-preferred) model.
+ *
+ * The shared chain (VOICE_RELAY_MODEL, then MODELS.VOICE / MODEL_VOICE, both
+ * read at module load) is validated here too — the resolved model no longer
+ * only shapes request params, it SELECTS THE PROVIDER CLIENT (providerFor,
+ * used by the constructor right after this returns). Each link is taken only
+ * as an allowlisted Anthropic id; a refused one (an OpenAI id, one this
+ * registry never marked voice-eligible, or any id it does not recognize) is
+ * logged once, recorded as `fallbackReason` if it is the first rejection,
+ * and falls to the next link, finally the registry's own code default
+ * (MODELS.DEFAULTS.VOICE — always a valid, allowlisted Anthropic id). The
+ * Models tab's inbound row walks the same validated chain
+ * (model-switchboard.js voice_relay), so it shows what actually runs.
+ *
+ * OpenAI ids are eligible only for a sandbox session or an eval-harness
+ * session (`evalHarness`, set by services/eval/voice-relay-replay.js alone —
+ * the Twilio relay server never passes it); an ordinary production inbound
+ * session rejects them even with the gate on and an OpenAI inbound override.
  */
-function resolveSessionModel({ sandbox } = {}) {
+function resolveSessionModel({ sandbox, evalHarness } = {}) {
+  const allowOpts = { openaiContext: sandbox === true || evalHarness === true };
   const candidates = [];
   if (sandbox === true) {
     const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
@@ -200,15 +327,28 @@ function resolveSessionModel({ sandbox } = {}) {
 
   let fallbackReason = null;
   for (const { source, value } of candidates) {
-    if (isAllowedOverrideModel(value)) {
+    if (isAllowedOverrideModel(value, allowOpts)) {
       return { model: value, fallbackReason };
     }
     if (!fallbackReason) {
       fallbackReason = `unknown_model_override:${source}=${value}`;
+      warnRejectedOverrideOnce(source, value, allowOpts);
+    }
+  }
+  // The shared chain — VOICE_RELAY_MODEL, then MODEL_VOICE — takes the
+  // Anthropic allowlist alone, gate or no gate: VOICE_RELAY_MODEL is shared
+  // with collections-conversation.js, which only speaks Anthropic, and
+  // OpenAI is reachable only via the inbound/sandbox overrides above. A
+  // rejected link falls to the next one, then to the registry's code default.
+  for (const { source, value } of SHARED_MODEL_CHAIN) {
+    if (!value) continue;
+    if (ALLOWED_OVERRIDE_MODEL_IDS.has(value)) return { model: value, fallbackReason };
+    if (!fallbackReason) {
+      fallbackReason = `unknown_shared_model:${source}=${value}`;
       warnRejectedOverrideOnce(source, value);
     }
   }
-  return { model: MODEL, fallbackReason };
+  return { model: MODELS.DEFAULTS.VOICE, fallbackReason };
 }
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
@@ -333,6 +473,61 @@ try {
   anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 } catch {
   anthropic = null;
+}
+
+// GATE_VOICE_RELAY_OPENAI (benchmark/sandbox only — see the file header and
+// isAllowedOverrideModel below). A shared singleton, same convention as
+// `anthropic` above; relay-openai-client.js resolves its own fetch at call
+// time, so this can be constructed even before OPENAI_API_KEY is set.
+let openaiClient = null;
+try {
+  const { OpenAIRelayClient } = require('./relay-openai-client');
+  openaiClient = new OpenAIRelayClient({ apiKey: process.env.OPENAI_API_KEY });
+} catch {
+  openaiClient = null;
+}
+
+/** MODEL_CATALOG's provider for `model`, defaulting to 'anthropic' for an unlisted id. */
+function providerFor(model) {
+  const meta = MODELS.MODEL_CATALOG[model];
+  return (meta && meta.provider) || 'anthropic';
+}
+
+// Anthropic requires a `thinking` (or `redacted_thinking`) content block to
+// stay the FIRST block of an assistant message — a thinking-always-on model
+// (Opus 5.5+) 400s on the next request if a history rewrite below moved a
+// synthesized text block ahead of one. Every site that reconstructs history
+// funnels its content array through this first. A no-op for every other
+// model: `msg.content` never carries a thinking block when this session sent
+// `thinking: { type: 'disabled' }` (see this._thinkingAlwaysOn), so this
+// never changes their existing history shape.
+function withThinkingFirst(blocks) {
+  const isThinking = (b) => b && (b.type === 'thinking' || b.type === 'redacted_thinking');
+  const thinking = blocks.filter(isThinking);
+  if (!thinking.length) return blocks;
+  return [...thinking, ...blocks.filter((b) => !isThinking(b))];
+}
+
+/**
+ * The effort this session's model requests actually carry, for the version
+ * and per-turn stamps: the Anthropic `output_config` effort (voiceEffortFor)
+ * on an Anthropic session, or, on an OpenAI session, the Responses
+ * `reasoning.effort` relay-openai-client.js reads from MODEL_CATALOG's
+ * `voice.reasoning` ('none' included — distinct from no effort at all). Only
+ * the Anthropic value is ever sent as `output_config`.
+ */
+function stampedEffortFor(provider, model, anthropicEffort) {
+  if (provider !== 'openai') return anthropicEffort;
+  try {
+    return require('./relay-openai-client').reasoningEffortFor(model);
+  } catch {
+    return null;
+  }
+}
+
+/** The provider client for a resolved session — never a silent Claude substitute. */
+function clientFor(provider) {
+  return provider === 'openai' ? openaiClient : anthropic;
 }
 
 // The gate-off pricing rule. Defined ONCE and referenced inside SYSTEM_PROMPT
@@ -700,7 +895,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -715,10 +910,28 @@ class RelayConversation {
     // stamp below reads this.model, never the module-level MODEL, so a
     // mid-call env change or a concurrent call under a different env can
     // never leak into an in-flight session.
-    const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
+    // `evalHarness` is set only by the eval/benchmark replay
+    // (services/eval/voice-relay-replay.js) — the one non-sandbox context in
+    // which resolveSessionModel may pick a gated OpenAI candidate.
+    const modelResolution = resolveSessionModel({ sandbox: this.sandbox, evalHarness: evalHarness === true });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    // Which client this session's model rounds run on — resolved once here,
+    // alongside the model itself, and never re-read mid-call (see the file
+    // header + resolveSessionModel). voiceEffortFor already returns null for
+    // any non-Anthropic id (its capability regexes only match claude-*), so
+    // no separate check is needed to keep output_config off an OpenAI round.
+    this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
+    // Thinking-always-on Anthropic ids (Opus 5.5+, sandbox/eval-harness
+    // only — see ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS) reject the
+    // `thinking: { type: 'disabled' }` this lane otherwise always sends.
+    // Pinned once here, alongside the model, so the request build below
+    // never re-derives it mid-call.
+    this._thinkingAlwaysOn = MODELS.anthropicThinkingAlwaysOn(this.model);
+    // What the stamps record: the effort actually sent, whichever provider
+    // carries it (an OpenAI session's reasoning effort is not `_effort`).
+    this._stampedEffort = stampedEffortFor(this._provider, this.model, this._effort);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
     // behavior; only 'stream' runs the new sentence-chunked path below.
@@ -1266,8 +1479,9 @@ class RelayConversation {
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
+      provider: this._provider,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: this._effort,
+      effort: this._stampedEffort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
@@ -1702,9 +1916,19 @@ class RelayConversation {
     streamState.closed = true;
     const sentText = streamState.entry ? streamState.entry.planned.trim() : '';
     const toolUseBlocks = msg ? msg.content.filter((b) => b.type === 'tool_use') : [];
+    // A thinking block rides along ONLY when there are tool_use blocks to
+    // pair it with (the "must survive to the next request" case for a tool
+    // loop) — an abandoned round with nothing said and no tool call keeps
+    // its prior (empty, not pushed) shape exactly as before this model
+    // existed.
+    const thinkingBlocks = toolUseBlocks.length && msg
+      ? msg.content.filter((b) => b.type === 'thinking' || b.type === 'redacted_thinking')
+      : [];
     const assistantMessage = {
       role: 'assistant',
-      content: sentText ? [{ type: 'text', text: sentText }, ...toolUseBlocks] : toolUseBlocks,
+      content: sentText
+        ? [...thinkingBlocks, { type: 'text', text: sentText }, ...toolUseBlocks]
+        : [...thinkingBlocks, ...toolUseBlocks],
     };
     if (assistantMessage.content.length) {
       // Interrupt-context gate (PR 1B): on a normal barge-in caught earlier
@@ -1718,7 +1942,7 @@ class RelayConversation {
       // already `entry.planned`) stands as-is.
       if (streamState.entry && streamState.entry.interrupted && isInterruptContextEnabled()) {
         const kept = assistantMessage.content.filter((b) => b.type !== 'text');
-        assistantMessage.content = [{ type: 'text', text: streamState.entry.text }, ...kept];
+        assistantMessage.content = withThinkingFirst([{ type: 'text', text: streamState.entry.text }, ...kept]);
       }
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
@@ -1802,7 +2026,7 @@ class RelayConversation {
     const keep = msg.content.filter((b) => b.type !== 'text');
     const assistantMessage = {
       role: 'assistant',
-      content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
+      content: withThinkingFirst(sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep),
     };
     if (hasPendingWrite && tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
     this.messages.push(assistantMessage);
@@ -1953,7 +2177,7 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: this._effort,
+      effort: this._stampedEffort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,
@@ -2061,10 +2285,14 @@ class RelayConversation {
    * "[not played — caller interrupted]", "[interrupted — played text
    * unknown]") — so the rewrite reads played text by construction, never
    * `planned`. Tool-use blocks on that message are kept (their tool_result
-   * must still pair). The next caller message then carries what the caller
-   * heard, so the model resumes from there instead of repeating the clause
-   * the caller never heard. Utterances with no history message (copy()
-   * fallbacks) get the note only. Gate off ⇒ nothing here runs.
+   * must still pair) — and so is any thinking block (a thinking-always-on
+   * model, sandbox/eval only), kept FIRST via withThinkingFirst since
+   * Anthropic requires it precede text and this rewrite would otherwise put
+   * the replacement text ahead of it. The next caller message then carries
+   * what the caller heard, so the model resumes from there instead of
+   * repeating the clause the caller never heard. Utterances with no history
+   * message (copy() fallbacks) get the note only. Gate off ⇒ nothing here
+   * runs.
    */
   _noteInterruptForModel(cut, laters) {
     if (!isInterruptContextEnabled()) return;
@@ -2072,7 +2300,7 @@ class RelayConversation {
       const msg = entry.historyMessage;
       if (!msg || !Array.isArray(msg.content)) continue;
       const kept = msg.content.filter((b) => b && b.type !== 'text');
-      msg.content = [{ type: 'text', text: entry.text }, ...kept];
+      msg.content = withThinkingFirst([{ type: 'text', text: entry.text }, ...kept]);
     }
     const heard = cut.playedUnknown ? null : String(cut.played || '').trim();
     this._pendingInterruptNote = { heard: heard || null };
@@ -2762,8 +2990,13 @@ class RelayConversation {
   }
 
   async _runLoop(callerText = null) {
-    if (this.ended || !anthropic) {
-      if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
+    // Resolved from this session's PINNED provider (this._provider, set at
+    // construction) — never re-checked against the live gate mid-call, so a
+    // gate flip during an in-flight call can neither add nor remove a
+    // client from under it.
+    const client = clientFor(this._provider);
+    if (this.ended || !client) {
+      if (!client) this.say(require('./relay-language').copy('unavailable', this.language));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -2934,12 +3167,18 @@ class RelayConversation {
       const modelStartAt = now();
       stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
-        const stream = anthropic.messages.stream(
+        const stream = client.messages.stream(
           {
             model: this.model,
-            max_tokens: MAX_TOKENS,
+            // Thinking-always-on ids reject `thinking: { type: 'disabled' }`
+            // and spend from max_tokens before the reply — raise the cap by
+            // the same registry floor `anthropic-wire.js` uses elsewhere so
+            // thinking cannot starve the spoken reply. Every other model's
+            // request is byte-identical to before (this._thinkingAlwaysOn is
+            // false for all of them, sandbox or not).
+            max_tokens: this._thinkingAlwaysOn ? anthropicMaxTokens(this.model, MAX_TOKENS) : MAX_TOKENS,
             system: this._systemBlocks,
-            thinking: { type: 'disabled' },
+            ...(this._thinkingAlwaysOn ? {} : { thinking: { type: 'disabled' } }),
             // LIVE PHONE CALL. The default effort is `high`, which buys depth
             // this lane cannot spend: every extra second of deliberation is dead
             // air on an open line, and the work here is short receptionist turns
@@ -3802,4 +4041,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, ANTHROPIC_SANDBOX_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, withThinkingFirst, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

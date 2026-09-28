@@ -13,6 +13,7 @@ const {
   serviceCategoryForOneTimeChoice,
   applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
+  applySelectedTermiteBondToEstimateData,
   assertExistingAppointmentUpdateApplied,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
@@ -105,6 +106,36 @@ function savedAdminEstimateData() {
 }
 
 describe('public estimate one-time breakdown', () => {
+  test.each(['one_year_retreat', 'three_year_repair_retreat', 'none'])(
+    'live and cached recurring pricing keeps the actual add-on warranty scope: %s', async (warrantyTier) => {
+      const data = { engineInputs: {
+        homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family',
+        services: {
+          pest: { frequency: 'quarterly' },
+          trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier },
+        },
+      } };
+      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft',
+        show_one_time_option: false, monthly_total: 55, onetime_total: 2400, estimate_data: data };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const pricing = await buildPricingBundle(estimate, { monthlyBilled: true });
+        expect(pricing.source).toBe('engine_invocation');
+        const context = buildEstimateAssistantContext({ estimate, estData: data, pricingBundle: pricing,
+          noGuaranteeClaims: true, serviceMode: 'one_time' });
+        expect(context.serviceMode).toBe('recurring');
+        const answer = answerEstimateQuestionFallback('What warranty does the trenching include?', context);
+        if (warrantyTier === 'none') {
+          expect(answer).not.toContain('Annual inspection during the warranty period');
+          // The engine's bare "trenching" inclusion placeholder is not a service line.
+          expect(answer).not.toMatch(/\btrenching:/i);
+          expect(answer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+        } else {
+          expect(answer).toContain('Termite Treatment: Annual inspection during the warranty period.');
+        }
+      }
+    },
+  );
+
   test('public pricing bundle prefers the send snapshot when present', async () => {
     const bundle = await buildPricingBundle({
       id: 'estimate-snapshot',
@@ -3405,6 +3436,9 @@ describe('public estimate one-time breakdown', () => {
     // Review card renders in place of the self-book slot picker.
     expect(html).toContain('id="trenching-review-card"');
     expect(html).toContain('Review your termite trenching quote with Waves');
+    const reviewCard = html.match(/<section[^>]*id="trenching-review-card"[\s\S]*?<\/section>/)?.[0];
+    expect(reviewCard).toContain('confirms the treatment plan, access, exact footage, and product');
+    expect(reviewCard).not.toMatch(/warrant|guarantee|callback/i);
     // No self-book affordances: no slot-picker booking card, no "Pick a time and book".
     expect(html).not.toContain('id="booking-card"');
     expect(html).not.toContain('class="cta pick-time-cta"');
@@ -4516,6 +4550,135 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("if (document.getElementById('booking-card') && !bookingRequiresPaymentSetup())");
     expect(html).toContain("toast('Choose a payment option first.')");
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
+  });
+
+  test('a neutral estimate retains payment refund details without recurring contract promises', () => {
+    const html = renderPage('terms-noguarantee-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      noGuaranteeClaims: true,
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
+    expect(html).not.toMatch(/no contracts?|no lock-in|no long.term commitment|cancel anytime|cancellation fee/i);
+    expect(html).toContain('Your written service scope and terms apply.');
+    expect(html).toContain('setup is refundable');
+    expect(html).toContain('Annual prepay is prorated');
+    expect(html).not.toContain('our guarantee');
+    expect(html).not.toContain('Money-back guarantee');
+  });
+
+  test('a neutral mixed proposal keeps commercial scope without included re-service or no-contract promises', () => {
+    const html = renderPage('mixed-proposal-terms-token', {
+      id: 'mixed-proposal-terms', status: 'sent', customerName: 'Fixture Customer',
+      address: '1 Main St', monthlyTotal: 55, annualTotal: 660, onetimeTotal: 900,
+      noGuaranteeClaims: true,
+    }, {
+      proposal: { enabled: true, buildings: [{ name: 'Fixture', lineItems: [
+        { description: 'Pest Control', quantity: 1, unitPrice: 55, frequency: 'monthly' },
+        { description: 'Termite Trenching', quantity: 1, unitPrice: 900, frequency: 'one_time' },
+      ] }] },
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] },
+        oneTime: { items: [] }, results: { pest: { apps: 4 } },
+      },
+    });
+    expect(html).toContain('Recurring exterior treatment');
+    expect(html).toContain('Termite Trenching');
+    expect(html).toContain('$900.00');
+    expect(html).not.toMatch(/re-service requests are included|no long.term contract|cancel anytime/i);
+  });
+
+  test.each([
+    ['extended', true, 'Extended 5-yr warranty'],
+    ['basic', false, 'Basic 1-yr warranty'],
+  ])('the legacy page keeps a pre-slab %s row scope under the no-guarantee policy', (_tier, extended, label) => {
+    const html = renderPage('preslab-legacy-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 950, noGuaranteeClaims: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{
+          service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 950,
+          detail: `1,850 sf | Termidor SC | 12 oz | ${label}`,
+          warrantyExtendedSelected: extended,
+          warrantyStatus: extended ? 'Extended 5-year warranty' : 'No extended warranty selected',
+        }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('1,850 sf | Termidor SC | 12 oz');
+    if (extended) expect(html).toContain('Extended 5-yr warranty');
+    else expect(html).not.toContain('Basic 1-yr warranty');
+  });
+
+  test('a commercial one-time job on the legacy page states its scope but no guarantee (Codex #4982)', () => {
+    const html = renderPage('commercial-one-time-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 650, noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true, isCommercial: true }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Interceptor traps under bed legs');
+    expect(html).not.toContain('Written 30-day guarantee');
+  });
+
+  test('on the legacy page a residential bed bug job keeps its own guarantee beside a rodent job', () => {
+    const html = renderPage('bed-bug-rodent-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 1550, noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [
+          { service: 'bed_bug', name: 'Bed Bug Heat Treatment', price: 650, warrantyEligible: true },
+          { service: 'rodent_exclusion', name: 'Full Rodent Exclusion', price: 900 },
+        ], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Written 30-day guarantee on the treated areas');
+    expect(html).toContain('Pay on service day. No contract.');
+    expect(html).toContain('<div class="onetime-terms">Pay on service day.</div>');
+  });
+
+  test('a rodent plan keeps its cancel/refund terms but no estimate-wide guarantee item', () => {
+    const html = renderPage('terms-rodent-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 40, annualTotal: 480, onetimeTotal: 0, tier: 'Bronze',
+      noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Rodent Bait Stations', mo: 40 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
+    expect(html).not.toContain('Money-back guarantee');
+    expect(html).not.toContain('our guarantee');
+    // Rodent is terms-neutral: no generic contract or cancellation promise either.
+    expect(html).not.toContain('No contracts and no lock-in');
+    expect(html).not.toContain('Cancel anytime &mdash; no contract');
   });
 
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
@@ -5815,9 +5978,67 @@ describe('public estimate one-time breakdown', () => {
     expect(billing).not.toContain('12-month');
 
     const guarantee = answerEstimateQuestionFallback('Is there a callback guarantee?', context);
-    expect(guarantee).toContain('one-time service');
-    expect(guarantee).toContain('30-day callback');
+    expect(guarantee).toContain('written service scope and terms');
+    expect(guarantee).not.toContain('30-day callback');
     expect(guarantee).not.toContain('90-day');
+  });
+
+  test('one-time general pest context retains its conditional written callback terms', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 171 },
+      pricingBundle: {
+        anchorOneTimePrice: 171,
+        frequencies: [],
+        oneTimeBreakdown: {
+          total: 171,
+          items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 171 }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    const guarantee = answerEstimateQuestionFallback('Is there a callback guarantee?', context);
+    expect(guarantee).toContain('one-time service');
+    expect(guarantee).toContain('30-day callback period when shown on the estimate');
+    expect(guarantee).not.toContain('90-day');
+  });
+
+  test.each(['none', '5yr'].flatMap((term) => ['current', 'bait-only', 'missing'].map((pricing) => [term, pricing])))('assistant honors the persisted bond selector change to %s with %s pricing', (term, pricing) => {
+    const bait = { service: 'termite_bait', name: 'Termite Bait Monitoring', mo: 34, perTreatment: 102, visitsPerYear: 4 };
+    const oldBond = { service: 'termite_bond_10yr', name: 'Termite Bond (10-Year Term)',
+      bondTerm: '10yr', bondYears: 10, mo: 15, monthly: 15, perTreatment: 45, visitsPerYear: 4, annual: 180 };
+    const estData = {
+      inputs: { svcTermiteBait: true, termiteBondTerm: '10yr' },
+      result: {
+        recurring: { services: [bait, oldBond], monthlyTotal: 49, annualAfterDiscount: 588 },
+        results: { tmBait: { selectedBondTerm: '10yr', bondOptions: [
+          { key: '5yr', years: 5, label: '5-Year', monthly: 18, annual: 216, perApp: 54 },
+          { key: '10yr', years: 10, label: '10-Year', monthly: 15, annual: 180, perApp: 45 },
+        ] } },
+      },
+      engineResult: { lineItems: [{ ...bait }, { ...oldBond }] },
+    };
+    expect(applySelectedTermiteBondToEstimateData(estData, term)).toMatchObject({ ok: true, changed: true });
+    // The mapped selector intentionally leaves this historical raw engine row.
+    expect(estData.engineResult.lineItems[1].bondTerm).toBe('10yr');
+    const selectedRows = estData.result.recurring.services;
+    const pricingRows = pricing === 'bait-only' ? [bait] : selectedRows;
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: term === 'none' ? 34 : 52 },
+      estData,
+      pricingBundle: pricing === 'missing' ? {} : { frequencies: [{ key: 'quarterly', monthly: term === 'none' ? 34 : 52,
+        included: pricingRows, perServiceTreatments: pricingRows,
+      }] },
+      noGuaranteeClaims: true,
+    });
+    const terms = context.recurringServices.flatMap((row) => row.purchasedTerms || []);
+    expect(terms).toEqual(term === 'none' ? [] : ['Purchased termite bond: 5-year term with re-treatment coverage.']);
+    if (term === '5yr') {
+      expect(context.recurringServices.find((row) => row.label === 'Termite Bond'))
+        .toMatchObject({ service: 'termite_bond_5yr', monthly: 18, perApplication: 54 });
+    }
+    const answer = answerEstimateQuestionFallback('What warranty did I buy?', context);
+    expect(answer).not.toContain('10-year');
+    expect(answer).toMatch(term === 'none' ? /written service scope and terms/i : /5-year term/);
   });
 
   test('estimate assistant uses invoice-mode billing copy', () => {

@@ -478,3 +478,54 @@ describe('GET /:token/data — quote-first, first-load-only rules (Codex #4853 r
     });
   });
 });
+
+// Missing-contact prompt (owner ruling 2026-09-27) — reuses this file's
+// harness (composeEstimateDataPayload direct-call pattern above) rather
+// than duplicating its heavy module mocking for one more field on the same
+// endpoint. Gap-computation itself is unit-tested in isolation in
+// estimate-contact-gaps.test.js; this pins the ROUTE wiring: the
+// isEstimateAcceptActive/isPdfRenderPass gate, the customer_id lookup, and
+// that contactGaps lands in the /data payload the client actually reads.
+describe('composeEstimateDataPayload — contactGaps wiring', () => {
+  test('unlinked estimate, single-token name, no email: both gaps present', async () => {
+    const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: null });
+    dbRows = { estimates: row };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
+  });
+
+  test('unlinked estimate with a full name and an email: both gaps false, field still present', async () => {
+    const row = estimateRow({ customer_name: 'Testy Sample', customer_email: 'testy@example.com', customer_id: null });
+    dbRows = { estimates: row };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
+  });
+
+  test('linked customer with a real last name/email on file closes both gaps even off a single-token estimate name', async () => {
+    const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
+    dbRows = { estimates: row, customers: { last_name: 'Sample', email: 'testy@example.com' } };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: false, email: false });
+  });
+
+  test('linked customer with the "Customer" placeholder and no email leaves both gaps open', async () => {
+    const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: 'cust-1' });
+    dbRows = { estimates: row, customers: { last_name: 'Customer', email: null } };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(payload.contactGaps).toEqual({ firstName: false, lastName: true, email: true });
+  });
+
+  test('a terminal (accepted) estimate never carries contactGaps (isEstimateAcceptActive false)', async () => {
+    const row = estimateRow({ status: 'accepted', customer_name: 'Testy', customer_email: null, customer_id: null });
+    dbRows = { estimates: row };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(Object.prototype.hasOwnProperty.call(payload, 'contactGaps')).toBe(false);
+  });
+
+  test('the headless PDF render pass never carries contactGaps', async () => {
+    const row = estimateRow({ customer_name: 'Testy', customer_email: null, customer_id: null });
+    dbRows = { estimates: row };
+    const payload = await composeEstimateDataPayload(row, { isPdfRenderPass: true });
+    expect(Object.prototype.hasOwnProperty.call(payload, 'contactGaps')).toBe(false);
+  });
+});
