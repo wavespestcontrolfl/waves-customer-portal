@@ -1177,153 +1177,182 @@ async function dispatchIneligibleReason(ctx) {
 // recordSendOutcome's own final fallback then records it as a terminal
 // skip under that code, exactly as if dispatchIneligibleReason itself had
 // caught it moments earlier.
+// Table-driven, like DISPATCH_CHECKS/STAGING_CHECKS above (CLAUDE.md rule
+// 20 — a complexity fix must remove decisions, not relocate them into
+// one-use wrappers). Order matters and several entries populate `ctx` for
+// the ones that follow — read each entry's own comment before reordering:
+//   - ctx.lead is set by the FIRST entry and read by every entry after it.
+//   - ctx.freshCall/ctx.freshEntry are set partway through and read by
+//     every entry after THAT point.
+// Each entry returns null (pass, keep going) or a verdict object
+// ({ code } for a permanent block, or { code, retryable: true } for the
+// one in-flight-reprocess case) — the runner below returns the first one.
+const NEVER_SEND_RECHECK_STEPS = [
+  // .forUpdate() (codex #5018 r12 P1): a plain SELECT let a phone
+  // correction committed between this read and messages.create() go
+  // unnoticed — admin-leads.js's own PATCH updates leads.phone under a
+  // row lock (routes/admin-leads.js ~1155-1180: `trx('leads')…forUpdate()`
+  // then `.update(...)`), and without a competing lock here that write
+  // can land in the gap and this hook would still send to the phone it
+  // read a moment earlier. Locking on dbi — the SAME connection the
+  // phone-locked handoff (withSmsHandoff) already holds — makes that
+  // writer wait until this whole handoff (through the SDK request)
+  // finishes, exactly like the phone-consent lock already does for a
+  // STOP. LOCK ORDER: lockSmsPhone (an advisory key, taken by
+  // withSmsHandoff BEFORE this function ever runs) always precedes this
+  // row lock — the same order lead-response-tools.js's own locked
+  // handoff documents ("Booking and estimate acceptance hold this
+  // advisory key before rows. Join their fence before either row
+  // lock..." — resolveLeadSubject/withLockedLeadSubject). admin-leads.js
+  // takes ONLY this row lock, never the phone key, so there is no
+  // second writer that could take these two in the opposite order —
+  // no inversion, no deadlock risk.
+  async (ctx) => {
+    ctx.lead = await ctx.dbi('leads').where({ id: ctx.leadId }).whereNull('deleted_at').forUpdate().first();
+    return (!ctx.lead || !isOpenLeadRow(ctx.lead)) ? { code: 'lead_no_longer_open' } : null;
+  },
+  (ctx) => (ctx.lead.estimate_id ? { code: 'estimate_linked' } : null),
+  // codex #5018 P2: the FK alone misses a quote-wizard draft the lead
+  // never opened (see leadHasOpenEstimateMirror's own doc comment) —
+  // re-checked here too, on `dbi`, the freshest possible read, for the
+  // same reason every other check on this hook repeats.
+  async (ctx) => ((await leadHasOpenEstimateMirror(ctx.dbi, ctx.leadId)) ? { code: 'estimate_linked' } : null),
+  // Re-verified on the freshest possible read, same reason as every
+  // other check on this hook (codex #5018 r10 P2): dispatchIneligibleReason's
+  // own check ran moments earlier, and either fact can change in the
+  // gap between there and the actual provider request — a manual
+  // merge into an existing customer, or a commercial flag correction.
+  (ctx) => (leadLinkedToExistingCustomer(ctx.call, ctx.lead) ? { code: 'existing_customer' } : null),
+  (ctx) => (ctx.lead.is_commercial === true ? { code: 'commercial_lead' } : null),
+  // Re-verifies the SAME fact dispatchClaimedCall's own earlier
+  // phone_changed_before_send check made, on the freshest possible read
+  // (codex r6 P1): that earlier check compared built.phone against
+  // lead.phone at THAT moment, but staff can correct the phone in the
+  // gap between there and this hook's own call — the actual last thing
+  // that runs before messages.create(). Sending the minted bearer link
+  // (/inspection/:token) to a number staff just retired for THIS lead
+  // would hand whoever now holds it the lead's current name and address
+  // (inspection-public.js's buildLeadPayload) — worse than merely
+  // losing the send. Compared by canonical phone identity, matching
+  // consentedDestination's own comparator, never a raw string match.
+  (ctx) => (phoneIdentityKey(ctx.lead.phone) !== phoneIdentityKey(ctx.destinationPhone) ? { code: 'phone_changed_before_send' } : null),
+  // Re-verified even though nothing between the earlier send-time check
+  // and here can change the destination string itself (codex r5 P1) —
+  // the same last-moment-before-the-provider-request discipline every
+  // other check on this hook already follows. Against the STALE `call` —
+  // the entry below re-verifies again, against the FRESH one.
+  (ctx) => (!consentedDestination(ctx.call, extractionOf(ctx.call), ctx.destinationPhone) ? { code: 'destination_not_consented' } : null),
+  // Reload + lock call_log too (codex #5018 r13 P1): everything above
+  // re-verifies the LEAD, but a forced reprocess can claim
+  // call_log.processing_token AFTER dispatchIneligibleReason ran and
+  // rewrite the extraction or lead linkage while THIS handoff is
+  // already in flight — the `call` this function closes over goes
+  // stale the moment that claim lands, and the checks worth repeating
+  // on a fresh read are readiness, lead linkage, and the extraction-
+  // derived never-send predicates.
+  //
+  // LOCK ORDER: leads BEFORE call_log — taken in that order here too,
+  // verified against the call processor's OWN established order for a
+  // writer that locks both inside one transaction (never guessed, per
+  // the review's own instruction):
+  //   - call-recording-processor.js finalization, ~line 19477-19479:
+  //     "Keep the established leads -> call_log lock order." —
+  //     `if (liveLeadConversation) await trx('leads')…forUpdate()`
+  //     runs BEFORE the `trx('call_log')…update(...)` that clears
+  //     processing_token.
+  //   - call-recording-processor.js's lead-stamp reconciliation,
+  //     ~line 4334-4341: "[the lead lock is] acquired BEFORE the
+  //     call_log clear so every stamp writer follows one lock order
+  //     (leads → call_log) and two transactions can never deadlock."
+  // Both sites are explicit and consistent: the established order is
+  // leads THEN call_log — the opposite of "call_log then leads." This
+  // function already takes the lead lock first (above); the call_log
+  // lock below preserves that same relative order.
+  //
+  // Also checked (per the review's own instruction): the processor's
+  // OWN processing_token CLAIM — server/services/call-recording-
+  // processor.js:7946-8086 — runs inside a real `db.transaction()`,
+  // never a bare autocommit UPDATE, but that transaction's own lock
+  // set is `customers` (forUpdate, conditional on call.customer_id,
+  // line 7948) THEN the `call_log` claim UPDATE itself (lines 7970 and
+  // 8042) — it never touches `leads` at all (grepped its exact
+  // extent). No shared pair of resources can be locked in opposite
+  // orders by the claim and this handoff, so no deadlock risk between
+  // them either.
+  async (ctx) => {
+    ctx.freshCall = await ctx.dbi('call_log').where({ id: ctx.call.id }).forUpdate().first();
+    return ctx.freshCall ? null : { code: 'call_not_found' };
+  },
+  // An in-flight reprocess ('wait') is retryable, never a permanent
+  // block — the same principle as dispatchClaimedCall's own pre-
+  // handoff readiness check; any other truthy reason (the reprocess
+  // already ended non-valid) is terminal, matching that check's own
+  // non-wait branch.
+  (ctx) => {
+    ctx.freshEntry = parseMetadata(ctx.freshCall)[METADATA_KEY] || {};
+    const readiness = sendReadiness(ctx.freshCall, ctx.freshEntry, new Date());
+    if (readiness === 'wait') return { code: 'call_reprocessing', retryable: true };
+    return readiness ? { code: readiness } : null;
+  },
+  // The lead linkage itself, re-derived exactly like staging did — an
+  // attribution correction/merge landing in this same gap must skip
+  // rather than send under a linkage this dispatch was never judged
+  // against (mirrors dispatchClaimedCall's own pre-handoff check).
+  async (ctx) => ((await resolveLeadId(ctx.dbi, ctx.freshCall)) !== ctx.leadId ? { code: 'lead_linkage_changed' } : null),
+  // Every extraction-derived never-send predicate, re-run fresh —
+  // stagingIneligibleReason's own last entry already folds in the
+  // canonical merge (finalTriageFlagsFor: low_extraction_confidence,
+  // address flags, caller_phone_missing, …), so a call a reprocess just
+  // reclassified as low-confidence, commercial, unauthorized, or
+  // explicitly non-consenting is caught here too, never reinvented.
+  (ctx) => {
+    const staleReason = stagingIneligibleReason(ctx.freshCall, extractionOf(ctx.freshCall), ctx.leadId);
+    return staleReason ? { code: staleReason } : null;
+  },
+  // Re-verified against the FRESH extraction, not the stale `call` the
+  // earlier entry above judged (codex #5018 r14 P1): a reprocess can
+  // correct the spoken alternate number, or withdraw its explicit
+  // sms_consent_given, between that earlier check and this hook's own
+  // reload — stagingIneligibleReason's own sms_consent_refused entry
+  // only catches an EXPLICIT false for the call's general eligibility,
+  // never this narrower "is THIS destination number itself consented"
+  // question. Sending on stale consent evidence would violate the
+  // TCPA-consent-before-SMS invariant.
+  (ctx) => (!consentedDestination(ctx.freshCall, extractionOf(ctx.freshCall), ctx.destinationPhone) ? { code: 'destination_not_consented' } : null),
+  // Re-verified against the FRESH row (codex #5018 r15 P1):
+  // stagingIneligibleReason's own table never re-derives outbound
+  // eligibility — that lives entirely in outboundStagingReason, a
+  // SEPARATE staging-only check dispatchIneligibleReason already ran
+  // once against the (by-then already stale) call. The evidence itself
+  // (a prior qualifying inbound call/text, or a non-call customer-
+  // originated lead) can be reassigned to a DIFFERENT lead by a
+  // concurrent merge/correction in the gap between that check and this
+  // hook's own reload; re-deriving it fresh here closes that race the
+  // same way every other check on this hook already does.
+  // outboundPriorContactMissing itself already no-ops for an inbound
+  // call (its own opening line). Passed `dbi` (codex #5018 pre-push
+  // P1) — the SAME connection this handoff already holds — so its
+  // probes never reach for a second pool slot; a genuine probe failure
+  // now throws instead of being read as "missing," and lands in this
+  // function's own catch below, which already treats an uncaught
+  // throw here as a retryable infrastructure hiccup, never a
+  // permanent block.
+  async (ctx) => ((await outboundPriorContactMissing(ctx.dbi, ctx.freshCall)) ? { code: 'outbound_without_prior_contact' } : null),
+  async (ctx) => {
+    const callStart = callStartedAt(ctx.call) || new Date(ctx.call.created_at);
+    return (await bookedSinceCall(ctx.dbi, ctx.lead.customer_id, callStart, ctx.lead.phone)) ? { code: 'booked_since_call' } : null;
+  },
+  async (ctx) => ((await linkSentRecently(ctx.dbi, ctx.leadId, new Date())) ? { code: 'link_sent_recently' } : null),
+];
+
 function neverSendRecheck(call, leadId, destinationPhone) {
   return async ({ dbi }) => {
     try {
-      // .forUpdate() (codex #5018 r12 P1): a plain SELECT let a phone
-      // correction committed between this read and messages.create() go
-      // unnoticed — admin-leads.js's own PATCH updates leads.phone under a
-      // row lock (routes/admin-leads.js ~1155-1180: `trx('leads')…forUpdate()`
-      // then `.update(...)`), and without a competing lock here that write
-      // can land in the gap and this hook would still send to the phone it
-      // read a moment earlier. Locking on dbi — the SAME connection the
-      // phone-locked handoff (withSmsHandoff) already holds — makes that
-      // writer wait until this whole handoff (through the SDK request)
-      // finishes, exactly like the phone-consent lock already does for a
-      // STOP. LOCK ORDER: lockSmsPhone (an advisory key, taken by
-      // withSmsHandoff BEFORE this function ever runs) always precedes this
-      // row lock — the same order lead-response-tools.js's own locked
-      // handoff documents ("Booking and estimate acceptance hold this
-      // advisory key before rows. Join their fence before either row
-      // lock..." — resolveLeadSubject/withLockedLeadSubject). admin-leads.js
-      // takes ONLY this row lock, never the phone key, so there is no
-      // second writer that could take these two in the opposite order —
-      // no inversion, no deadlock risk.
-      const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').forUpdate().first();
-      if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
-      if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
-      // codex #5018 P2: the FK alone misses a quote-wizard draft the lead
-      // never opened (see leadHasOpenEstimateMirror's own doc comment) —
-      // re-checked here too, on `dbi`, the freshest possible read, for the
-      // same reason every other check on this hook repeats.
-      if (await leadHasOpenEstimateMirror(dbi, leadId)) return { ok: false, code: 'estimate_linked' };
-      // Re-verified on the freshest possible read, same reason as every
-      // other check on this hook (codex #5018 r10 P2): dispatchIneligibleReason's
-      // own check ran moments earlier, and either fact can change in the
-      // gap between there and the actual provider request — a manual
-      // merge into an existing customer, or a commercial flag correction.
-      if (leadLinkedToExistingCustomer(call, lead)) return { ok: false, code: 'existing_customer' };
-      if (lead.is_commercial === true) return { ok: false, code: 'commercial_lead' };
-      // Re-verifies the SAME fact dispatchClaimedCall's own earlier
-      // phone_changed_before_send check made, on the freshest possible read
-      // (codex r6 P1): that earlier check compared built.phone against
-      // lead.phone at THAT moment, but staff can correct the phone in the
-      // gap between there and this hook's own call — the actual last thing
-      // that runs before messages.create(). Sending the minted bearer link
-      // (/inspection/:token) to a number staff just retired for THIS lead
-      // would hand whoever now holds it the lead's current name and address
-      // (inspection-public.js's buildLeadPayload) — worse than merely
-      // losing the send. Compared by canonical phone identity, matching
-      // consentedDestination's own comparator, never a raw string match.
-      if (phoneIdentityKey(lead.phone) !== phoneIdentityKey(destinationPhone)) return { ok: false, code: 'phone_changed_before_send' };
-      // Re-verified even though nothing between the earlier send-time check
-      // and here can change the destination string itself (codex r5 P1) —
-      // the same last-moment-before-the-provider-request discipline every
-      // other check on this hook already follows.
-      if (!consentedDestination(call, extractionOf(call), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
-      // Reload + lock call_log too (codex #5018 r13 P1): everything above
-      // re-verifies the LEAD, but a forced reprocess can claim
-      // call_log.processing_token AFTER dispatchIneligibleReason ran and
-      // rewrite the extraction or lead linkage while THIS handoff is
-      // already in flight — the `call` this function closes over goes
-      // stale the moment that claim lands, and the checks worth repeating
-      // on a fresh read are readiness, lead linkage, and the extraction-
-      // derived never-send predicates.
-      //
-      // LOCK ORDER: leads BEFORE call_log — taken in that order here too,
-      // verified against the call processor's OWN established order for a
-      // writer that locks both inside one transaction (never guessed, per
-      // the review's own instruction):
-      //   - call-recording-processor.js finalization, ~line 19477-19479:
-      //     "Keep the established leads -> call_log lock order." —
-      //     `if (liveLeadConversation) await trx('leads')…forUpdate()`
-      //     runs BEFORE the `trx('call_log')…update(...)` that clears
-      //     processing_token.
-      //   - call-recording-processor.js's lead-stamp reconciliation,
-      //     ~line 4334-4341: "[the lead lock is] acquired BEFORE the
-      //     call_log clear so every stamp writer follows one lock order
-      //     (leads → call_log) and two transactions can never deadlock."
-      // Both sites are explicit and consistent: the established order is
-      // leads THEN call_log — the opposite of "call_log then leads." This
-      // function already takes the lead lock first (above); the call_log
-      // lock below preserves that same relative order.
-      //
-      // Also checked (per the review's own instruction): the processor's
-      // OWN processing_token CLAIM — server/services/call-recording-
-      // processor.js:7946-8086 — runs inside a real `db.transaction()`,
-      // never a bare autocommit UPDATE, but that transaction's own lock
-      // set is `customers` (forUpdate, conditional on call.customer_id,
-      // line 7948) THEN the `call_log` claim UPDATE itself (lines 7970 and
-      // 8042) — it never touches `leads` at all (grepped its exact
-      // extent). No shared pair of resources can be locked in opposite
-      // orders by the claim and this handoff, so no deadlock risk between
-      // them either.
-      const freshCall = await dbi('call_log').where({ id: call.id }).forUpdate().first();
-      if (!freshCall) return { ok: false, code: 'call_not_found' };
-      // An in-flight reprocess ('wait') is retryable, never a permanent
-      // block — the same principle as dispatchClaimedCall's own pre-
-      // handoff readiness check; any other truthy reason (the reprocess
-      // already ended non-valid) is terminal, matching that check's own
-      // non-wait branch.
-      const freshEntry = parseMetadata(freshCall)[METADATA_KEY] || {};
-      const readiness = sendReadiness(freshCall, freshEntry, new Date());
-      if (readiness === 'wait') return { ok: false, retryable: true, code: 'call_reprocessing' };
-      if (readiness) return { ok: false, code: readiness };
-      // The lead linkage itself, re-derived exactly like staging did — an
-      // attribution correction/merge landing in this same gap must skip
-      // rather than send under a linkage this dispatch was never judged
-      // against (mirrors dispatchClaimedCall's own pre-handoff check).
-      if ((await resolveLeadId(dbi, freshCall)) !== leadId) return { ok: false, code: 'lead_linkage_changed' };
-      // Every extraction-derived never-send predicate, re-run fresh —
-      // stagingIneligibleReason's own last entry already folds in the
-      // canonical merge (finalTriageFlagsFor: low_extraction_confidence,
-      // address flags, caller_phone_missing, …), so a call a reprocess just
-      // reclassified as low-confidence, commercial, unauthorized, or
-      // explicitly non-consenting is caught here too, never reinvented.
-      const staleReason = stagingIneligibleReason(freshCall, extractionOf(freshCall), leadId);
-      if (staleReason) return { ok: false, code: staleReason };
-      // Re-verified against the FRESH extraction, not the stale `call` the
-      // earlier check above (line ~1042) judged (codex #5018 r14 P1): a
-      // reprocess can correct the spoken alternate number, or withdraw its
-      // explicit sms_consent_given, between that earlier check and this
-      // hook's own reload — stagingIneligibleReason's own sms_consent_
-      // refused entry only catches an EXPLICIT false for the call's
-      // general eligibility, never this narrower "is THIS destination
-      // number itself consented" question. Sending on stale consent
-      // evidence would violate the TCPA-consent-before-SMS invariant.
-      if (!consentedDestination(freshCall, extractionOf(freshCall), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
-      // Re-verified against the FRESH row (codex #5018 r15 P1):
-      // stagingIneligibleReason's own table never re-derives outbound
-      // eligibility — that lives entirely in outboundStagingReason, a
-      // SEPARATE staging-only check dispatchIneligibleReason already ran
-      // once against the (by-then already stale) call. The evidence itself
-      // (a prior qualifying inbound call/text, or a non-call customer-
-      // originated lead) can be reassigned to a DIFFERENT lead by a
-      // concurrent merge/correction in the gap between that check and this
-      // hook's own reload; re-deriving it fresh here closes that race the
-      // same way every other check on this hook already does.
-      // outboundPriorContactMissing itself already no-ops for an inbound
-      // call (its own opening line). Passed `dbi` (codex #5018 pre-push
-      // P1) — the SAME connection this handoff already holds — so its
-      // probes never reach for a second pool slot; a genuine probe failure
-      // now throws instead of being read as "missing," and lands in this
-      // function's own catch below, which already treats an uncaught
-      // throw here as a retryable infrastructure hiccup, never a
-      // permanent block.
-      if (await outboundPriorContactMissing(dbi, freshCall)) return { ok: false, code: 'outbound_without_prior_contact' };
-      const callStart = callStartedAt(call) || new Date(call.created_at);
-      if (await bookedSinceCall(dbi, lead.customer_id, callStart, lead.phone)) return { ok: false, code: 'booked_since_call' };
-      if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
+      const ctx = { dbi, call, leadId, destinationPhone };
+      for (const step of NEVER_SEND_RECHECK_STEPS) {
+        const verdict = await step(ctx);
+        if (verdict) return { ok: false, ...verdict };
+      }
       return { ok: true };
     } catch (err) {
       // A DB read failing here is an infrastructure hiccup, not a
@@ -1630,65 +1659,92 @@ function pastRetryDeadline(entry, now) {
 // decisions out wholesale, it doesn't hide them behind a one-use wrapper —
 // every branch here is a DIFFERENT terminal outcome dispatchClaimedCall
 // would otherwise have to classify itself).
+// Send-outcome kinds recordSendOutcome branches on, normalized out of
+// send-customer-message.js's own outcome shape (CLAUDE.md rule 20 — this
+// classifier removes the compound sent/isRealProviderSend, isAmbiguous, and
+// retryable-or-deferred conditions from recordSendOutcome's own body,
+// leaving it exactly one branch per kind, each delegated to its own small
+// handler below). Order matters, same as the original if-chain: a real
+// provider send wins outright, then an ambiguous outcome, then a retryable
+// one — anything left over is a definite block.
+function classifySendOutcomeKind(result) {
+  if (result.sent && isRealProviderSend(result)) return 'sent';
+  if (isAmbiguousProviderOutcome(result)) return 'ambiguous';
+  if (result.retryable || result.deferred) return 'retryable';
+  return 'blocked';
+}
+
+async function recordSentDecision(conn, call, entry, leadId, now, result) {
+  await recordDecision(conn, call, {
+    status: 'sent', lead_id: leadId, send_at: entry.send_at, sent_at: now.toISOString(), provider_message_id: result.providerMessageId,
+  });
+  return { sent: true, providerMessageId: result.providerMessageId };
+}
+
+// Leave the row 'claimed' — a definitive outcome is not known yet and a
+// second claim attempt would risk a duplicate text. This mirrors the
+// reschedule-link-promises lane's own delivery-uncertain handling; a
+// human can always resolve it by hand if it never settles.
+function recordAmbiguousDecision(call) {
+  logger.warn(`[call-booking-link-text] ambiguous provider outcome for call ${call.id} — leaving claimed`);
+  return { sent: false, skipped: 'ambiguous_provider_outcome', ambiguous: true };
+}
+
+// A retryable/deferred outcome (send-customer-message.js's own
+// { retryable, deferred, nextAllowedAt } — a quiet-hours hold crossed by
+// this sweep, CONSENT_LOOKUP_FAILED, or a transient provider failure) is
+// a reason to WAIT, not to give up (codex r1 P1) — the same principle as
+// the send-window deferral in dispatchClaimedCall. Re-queue as 'pending'
+// at nextAllowedAt, or a short backoff when the result named none,
+// bounded by the SAME 24h give-up this lane already applies to a stalled
+// reprocess: past that, from the ORIGINAL send_at, stop retrying and
+// record a reason.
+async function recordRetryableDecision(conn, call, entry, leadId, now, result, skip) {
+  if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
+  // codex #5018 pre-push P1 (round 3): a DEFINITELY retryable outcome
+  // (e.g. Twilio's own 429/20429 rate-limit rejection — twilio-sms.js's
+  // own retryableTwilioCodes classification) can still arrive AFTER
+  // onDispatchStart already wrote the durable handoff marker: the marker
+  // only proves "messages.create() may have run," and reaching this
+  // branch (never the ambiguous kind above) means send-customer-
+  // message.js/twilio.js have ALREADY determined this exact attempt did
+  // NOT reach an ambiguous state — so a marker from it is safe to clear.
+  // Left in place, a LATER retry that crashes or throws before ever
+  // reaching Twilio again would find this stale marker and
+  // recoverAbandonedClaim would misclassify it 'ambiguous, never resend'
+  // for a follow-up that in fact never sent at all. Best-effort: a
+  // cleanup failure just leaves the stale marker for that same
+  // (already-handled) misclassification, never a duplicate send.
+  try {
+    await markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
+  } catch (markerErr) {
+    logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
+  }
+  const rawNextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
+  const nextAllowedAtValid = rawNextAllowedAt && !Number.isNaN(rawNextAllowedAt.getTime());
+  const send_at = (nextAllowedAtValid ? rawNextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
+  // original_send_at carries forward UNCHANGED through every deferral —
+  // it is the fixed anchor pastRetryDeadline reads, never the advancing
+  // send_at (codex r2 P1).
+  await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
+  return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
+}
+
+function blockedOutcomeReason(result) {
+  if (result.blocked) return result.code || result.reason || 'policy_block';
+  return result.code || result.reason || 'provider_failed';
+}
+
 async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   const skip = async (reason) => {
     await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
     return { sent: false, skipped: reason };
   };
-  if (result.sent && isRealProviderSend(result)) {
-    await recordDecision(conn, call, {
-      status: 'sent', lead_id: leadId, send_at: entry.send_at, sent_at: now.toISOString(), provider_message_id: result.providerMessageId,
-    });
-    return { sent: true, providerMessageId: result.providerMessageId };
-  }
-  if (isAmbiguousProviderOutcome(result)) {
-    // Leave the row 'claimed' — a definitive outcome is not known yet and a
-    // second claim attempt would risk a duplicate text. This mirrors the
-    // reschedule-link-promises lane's own delivery-uncertain handling; a
-    // human can always resolve it by hand if it never settles.
-    logger.warn(`[call-booking-link-text] ambiguous provider outcome for call ${call.id} — leaving claimed`);
-    return { sent: false, skipped: 'ambiguous_provider_outcome', ambiguous: true };
-  }
-  // A retryable/deferred outcome (send-customer-message.js's own
-  // { retryable, deferred, nextAllowedAt } — a quiet-hours hold crossed by
-  // this sweep, CONSENT_LOOKUP_FAILED, or a transient provider failure) is
-  // a reason to WAIT, not to give up (codex r1 P1) — the same principle as
-  // the send-window deferral in dispatchClaimedCall. Re-queue as 'pending'
-  // at nextAllowedAt, or a short backoff when the result named none,
-  // bounded by the SAME 24h give-up this lane already applies to a stalled
-  // reprocess: past that, from the ORIGINAL send_at, stop retrying and
-  // record a reason.
-  if (result.retryable || result.deferred) {
-    if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
-    // codex #5018 pre-push P1 (round 3): a DEFINITELY retryable outcome
-    // (e.g. Twilio's own 429/20429 rate-limit rejection — twilio-sms.js's
-    // own retryableTwilioCodes classification) can still arrive AFTER
-    // onDispatchStart already wrote the durable handoff marker: the marker
-    // only proves "messages.create() may have run," and reaching this
-    // branch (never isAmbiguousProviderOutcome above) means send-customer-
-    // message.js/twilio.js have ALREADY determined this exact attempt did
-    // NOT reach an ambiguous state — so a marker from it is safe to clear.
-    // Left in place, a LATER retry that crashes or throws before ever
-    // reaching Twilio again would find this stale marker and
-    // recoverAbandonedClaim would misclassify it 'ambiguous, never resend'
-    // for a follow-up that in fact never sent at all. Best-effort: a
-    // cleanup failure just leaves the stale marker for that same
-    // (already-handled) misclassification, never a duplicate send.
-    try {
-      await markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del();
-    } catch (markerErr) {
-      logger.warn(`[call-booking-link-text] stale handoff marker cleanup failed for call ${call.id} (${markerErr.code || markerErr.name || 'error'})`);
-    }
-    const nextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
-    const send_at = (nextAllowedAt && !Number.isNaN(nextAllowedAt.getTime()) ? nextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
-    // original_send_at carries forward UNCHANGED through every deferral —
-    // it is the fixed anchor pastRetryDeadline reads, never the advancing
-    // send_at (codex r2 P1).
-    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
-    return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
-  }
-  const blockedReason = result.blocked ? (result.code || result.reason || 'policy_block') : (result.code || result.reason || 'provider_failed');
-  return skip(blockedReason);
+  const kind = classifySendOutcomeKind(result);
+  if (kind === 'sent') return recordSentDecision(conn, call, entry, leadId, now, result);
+  if (kind === 'ambiguous') return recordAmbiguousDecision(call);
+  if (kind === 'retryable') return recordRetryableDecision(conn, call, entry, leadId, now, result, skip);
+  return skip(blockedOutcomeReason(result));
 }
 
 // A 'claimed' row a whole sweep tick failed to bring to a terminal status
@@ -1799,9 +1855,39 @@ async function pruneHandoffMarkers(conn, now) {
   return conn(HANDOFF_MARKER_TABLE).whereIn('call_log_id', stale).del();
 }
 
-async function sweep(conn = db, { now = new Date() } = {}) {
-  if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
-  const { staged, ineligible } = await stage(conn, { now });
+// One row's claim → dispatch → per-row-failure-recovery attempt, split out
+// of sweep()'s own dispatch loop (CLAUDE.md rule 20 — a genuinely separate
+// phase, not a relocated fragment): never throws — a genuine per-row
+// failure is exactly what recoverAbandonedClaim exists to resolve, and
+// either way this returns how the attempt should count toward the caller's
+// own sent/dispatchSkipped totals.
+async function dispatchDueRow(conn, row, now) {
+  try {
+    const claimed = await claimForDispatch(conn, row.id);
+    if (!claimed) return { sent: 0, dispatchSkipped: 0 };
+    const call = await conn('call_log').where({ id: row.id }).first();
+    const result = await dispatchClaimedCall(conn, call, now);
+    if (result.sent) return { sent: 1, dispatchSkipped: 0 };
+    return { sent: 0, dispatchSkipped: (result.ambiguous || result.deferred) ? 0 : 1 };
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] dispatch failed for call ${row.id} (${err.code || err.name || 'error'})`);
+    // A row left 'claimed' after a genuine failure would never be
+    // revisited by the 'pending'-only query above, so it must reach a
+    // terminal status here — but NEVER a blind worker_error the way this
+    // used to (codex r3 P2): recoverAbandonedClaim reads the handoff
+    // marker table (codex #5018 r13 P1) to decide whether the provider
+    // might already have this exact attempt (never resend) or whether
+    // it is safe to requeue through the ordinary retry rail instead of
+    // giving up outright on a failure that never reached Twilio at all.
+    const failedCall = await conn('call_log').where({ id: row.id }).first().catch(() => null);
+    const outcome = failedCall ? await recoverAbandonedClaim(conn, failedCall, now).catch(() => null) : null;
+    return { sent: 0, dispatchSkipped: (outcome && outcome.ambiguous) ? 0 : 1 };
+  }
+}
+
+// Claims and dispatches every row currently due — its own phase, split out
+// of sweep() for the same reason as dispatchDueRow above.
+async function dispatchDueCalls(conn, now) {
   const due = await conn('call_log')
     .modify((q) => require('./voice-agent/relay-protocol').whereNotSandboxCall(q)) // a sandbox test call is never texted
     .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
@@ -1811,27 +1897,17 @@ async function sweep(conn = db, { now = new Date() } = {}) {
   let sent = 0;
   let dispatchSkipped = 0;
   for (const row of due) {
-    try {
-      const claimed = await claimForDispatch(conn, row.id);
-      if (!claimed) continue;
-      const call = await conn('call_log').where({ id: row.id }).first();
-      const result = await dispatchClaimedCall(conn, call, now);
-      if (result.sent) sent += 1; else if (!result.ambiguous && !result.deferred) dispatchSkipped += 1;
-    } catch (err) {
-      logger.warn(`[call-booking-link-text] dispatch failed for call ${row.id} (${err.code || err.name || 'error'})`);
-      // A row left 'claimed' after a genuine failure would never be
-      // revisited by the 'pending'-only query above, so it must reach a
-      // terminal status here — but NEVER a blind worker_error the way this
-      // used to (codex r3 P2): recoverAbandonedClaim reads the handoff
-      // marker table (codex #5018 r13 P1) to decide whether the provider
-      // might already have this exact attempt (never resend) or whether
-      // it is safe to requeue through the ordinary retry rail instead of
-      // giving up outright on a failure that never reached Twilio at all.
-      const failedCall = await conn('call_log').where({ id: row.id }).first().catch(() => null);
-      const outcome = failedCall ? await recoverAbandonedClaim(conn, failedCall, now).catch(() => null) : null;
-      if (!outcome || !outcome.ambiguous) dispatchSkipped += 1;
-    }
+    const counted = await dispatchDueRow(conn, row, now);
+    sent += counted.sent;
+    dispatchSkipped += counted.dispatchSkipped;
   }
+  return { sent, dispatchSkipped };
+}
+
+async function sweep(conn = db, { now = new Date() } = {}) {
+  if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
+  const { staged, ineligible } = await stage(conn, { now });
+  const { sent, dispatchSkipped } = await dispatchDueCalls(conn, now);
   // Safety net for a worker that died between claimForDispatch and any
   // terminal write in a PAST sweep — this process's own per-row catch above
   // only ever covers a throw IT observes; nothing else would ever revisit
