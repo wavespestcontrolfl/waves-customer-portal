@@ -561,8 +561,10 @@ const CUSTOMER_VALUE_LABELS = {
     Yes: 'Nutrient stress signs present — addressed in today’s treatment plan',
     No: 'No nutrient stress signs observed today',
   },
+  // Self-contained: no "see recommendations" pointer — since the Next steps
+  // chips were retired a visit may carry no advice (Codex r6 #5116).
   palm_trunk_concern: {
-    Yes: 'A trunk concern was noted — see recommendations',
+    Yes: 'A trunk concern was noted',
     No: 'No trunk concerns observed today',
   },
   ganoderma_conk_observed: {
@@ -578,11 +580,11 @@ const CUSTOMER_VALUE_LABELS = {
     No: 'No new growth observed yet',
   },
   pruning_issue_observed: {
-    Yes: 'A pruning issue was observed — see recommendations',
+    Yes: 'A pruning issue was observed',
     No: 'No pruning issues observed today',
   },
   irrigation_issue_observed: {
-    Yes: 'An irrigation issue was observed — see recommendations',
+    Yes: 'An irrigation issue was observed',
     No: 'No irrigation issues observed today',
   },
   pre_emergent_applied: {
@@ -590,7 +592,7 @@ const CUSTOMER_VALUE_LABELS = {
     No: 'No pre-emergent applied this visit',
   },
   mulch_depth_concern: {
-    Yes: 'Mulch depth needs attention — see recommendations',
+    Yes: 'Mulch depth needs attention',
     No: 'Mulch depth looks good',
   },
   // Rodent family Yes/No selects render as findings sentences, never raw

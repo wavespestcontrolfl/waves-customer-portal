@@ -72,7 +72,8 @@ retired 2026-09-27 — a stale client that still sends it is ignored.)
   One `service_activity_scores` insert per companion with activity.
 - Photos, photo AI summary, follow-up suggestions, AI-drafted
   recommendations, and pest pressure remain PRIMARY-ONLY in v1 (companion
-  sections are chips-first deterministic copy). Disclosed for ratification.
+  sections are deterministic copy from their typed fields). Disclosed for
+  ratification.
 
 ## Report
 

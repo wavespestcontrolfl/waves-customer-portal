@@ -53,9 +53,12 @@ and bed bug (`20260731400000_bed_bug_untyped_completion.js`).
    items with customer labels, `serviceKey`/`serviceLabel`/`reportTypeLabel`).
    Reports render from the snapshot forever; never recomputed from live
    templates.
-5. Every typed report opens with **Today's Result** (headline + body +
-   next step). It must answer: was there a problem / what we did / is it
-   getting better / what should I do next.
+5. Every typed report opens with **Today's Result** (headline + body). It
+   must answer: was there a problem / what we did / is it getting better.
+   What the customer should do next comes from the technician's
+   Recommendations (when given) and the program position / next visit — never
+   a chip-derived sentence (retired 2026-09-27, §7), and no copy points to
+   recommendations that may not exist.
 6. **Zero states render.** `0`, `none_found`, `cleared`-class values, and
    meaningful `false` are results, displayed positively. Only
    null/undefined/"" are skipped.
