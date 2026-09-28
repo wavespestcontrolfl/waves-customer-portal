@@ -177,44 +177,6 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
   test('zero fee never bills', () => {
     expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: 0 })).toBe(false);
   });
-
-  // Owner ruling 2026-09-28 (real prod bug): a per-application visit
-  // deliberately stamped estimated_price 0 (Rodent Trapping Service,
-  // primary_line_price 0.00, create_invoice_on_complete true, source
-  // 'admin') billed the customer's $127 per_application_fee at completion.
-  // End-to-end proof through the SAME two functions complete-scheduled-
-  // service.js actually calls: completionInvoiceAmount resolves the
-  // invoiceAmount, then shouldAutoInvoiceCompletion decides whether to mint
-  // — exactly the real call chain (complete-scheduled-service.js ~line
-  // 4169 computes invoiceAmount this way before the shouldAutoInvoiceCompletion
-  // call ~line 2354).
-  test('a stamped 0/0 per-application visit completes with NO invoice end-to-end (prod bug fix)', () => {
-    const { completionInvoiceAmount } = require('../services/billing-lane');
-    const invoiceAmount = completionInvoiceAmount({
-      estimatedPrice: 0,
-      isCallback: false,
-      perApplicationBilling: true,
-      perApplicationFee: 127,
-      monthlyRate: null,
-      billingMode: 'per_application',
-      primaryLinePrice: 0,
-    });
-    expect(invoiceAmount).toBe(0);
-    expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount })).toBe(false);
-
-    // NULL (genuinely unpriced) still falls through to the fee — unchanged.
-    const nullPriceAmount = completionInvoiceAmount({
-      estimatedPrice: null,
-      isCallback: false,
-      perApplicationBilling: true,
-      perApplicationFee: 127,
-      monthlyRate: null,
-      billingMode: 'per_application',
-      primaryLinePrice: null,
-    });
-    expect(nullPriceAmount).toBe(127);
-    expect(shouldAutoInvoiceCompletion({ ...perApp, invoiceAmount: nullPriceAmount })).toBe(true);
-  });
 });
 
 // Completion invoice amount precedence: explicit visit price → per-app fee →

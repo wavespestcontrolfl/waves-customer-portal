@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, isStampedZeroEstimate, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -3152,57 +3152,6 @@ function lineExcludedFromPercentDiscount(serviceKey, catalog = percentExclusionC
   return alias ? serviceExcludedFromPercentDiscount(alias) : false;
 }
 
-// Owner ruling 2026-09-28 (#5181): refuse a price change while money is
-// committed at the old price. Unchanged prices pass. Read under the caller's
-// transaction (the visit row is already locked by update-details).
-async function assertRepriceAllowed(conn, scheduledServiceId, nextPrice) {
-  const current = await conn('scheduled_services').where({ id: scheduledServiceId }).first('estimated_price');
-  const cents = (v) => (v == null || v === '' ? null : Math.round(Number(v) * 100));
-  if (!current || cents(current.estimated_price) === cents(nextPrice)) return;
-  // The visit's own invoices plus a shared (combined-visit packet) invoice
-  // this visit is a member of.
-  const hasPacketItems = await conn.schema.hasTable('visit_completion_packet_items').catch(() => false);
-  const openInvoices = await conn('invoices')
-    .where(function ownOrPacket() {
-      this.where({ scheduled_service_id: scheduledServiceId });
-      // Most post-completion invoices carry only service_record_id.
-      this.orWhereIn('service_record_id', conn('service_records')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .select('id'));
-      if (hasPacketItems) {
-        this.orWhereIn('id', conn('visit_completion_packet_items')
-          .where({ scheduled_service_id: scheduledServiceId })
-          .whereNotNull('invoice_id')
-          .select('invoice_id'));
-      }
-    })
-    .whereNotIn('status', ['void', 'paid', 'prepaid', 'refunded', 'canceled', 'cancelled'])
-    .select('id', 'status', 'total', 'credit_applied');
-  const owed = (openInvoices || []).find((inv) => invoiceAmountDue(inv) > 0);
-  if (owed) {
-    throw Object.assign(
-      httpError(409, 'This visit has an open invoice at its current price. Void or adjust that invoice in Billing before changing the visit price.'),
-      { code: 'REPRICE_BLOCKED_OPEN_INVOICE' },
-    );
-  }
-  const hold = await conn('estimate_card_holds')
-    .where({ scheduled_service_id: scheduledServiceId })
-    // A settled (charged) hold is money already collected, not a pending
-    // commitment.
-    .whereNotIn('status', ['released', 'cancelled', 'failed', 'charged_completion', 'charged_no_show'])
-    .first('id');
-  if (hold) {
-    throw Object.assign(
-      httpError(409, 'This visit has a card hold at its accepted price. Release the hold before changing the visit price.'),
-      { code: 'REPRICE_BLOCKED_CARD_HOLD' },
-    );
-  }
-  // Card approvals are not blocked here: there is no staff path to retire
-  // one, and the card lane re-checks the live price at charge time — a visit
-  // re-priced to $0 authorizes no charge (completion-charge-verdict,
-  // appointment-card-request recap rail).
-}
-
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
   const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
@@ -4857,10 +4806,6 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       }
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
     }
-    // Same committed-money guard as the edited visit (owner 2026-09-28).
-    if (siblingUpdates.estimated_price !== undefined) {
-      await assertRepriceAllowed(conn, sibling.id, siblingUpdates.estimated_price);
-    }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
     updatedIds.push(sibling.id);
   }
@@ -5275,7 +5220,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // client/src/lib/siblingInvoiceCoverage.js is pure copy formatting of it,
   // never its own classifier.
   const { coverage: siblingCoverage, prediction: siblingPrediction } = svc?.source_estimate_id
-    ? await siblingCoverageForSchedule({ svc, dbConn: db, perApplicationBilling: svc?.billing_mode === 'per_application' }).catch(() => ({ coverage: null, prediction: null }))
+    ? await siblingCoverageForSchedule({ svc, dbConn: db }).catch(() => ({ coverage: null, prediction: null }))
     : { coverage: null, prediction: null };
   billingLane.siblingCoverage = siblingCoverage || {
     state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null,
@@ -13540,16 +13485,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // consumers append NULLs last.
           updates.route_order = null;
         }
-        // Owner ruling 2026-09-28: a visit's price cannot change while money
-        // is already committed at the old price — an open invoice with a
-        // balance, a live estimate card hold, or an approved appointment-card
-        // charge. Every collector (completion, the balance sweep, card holds,
-        // the card lane, grouped closeout) would otherwise still collect the
-        // old amount. Staff void / release it first. Only a FREE re-service
-        // conversion (which voids its own invoices) is exempt.
-        if (updates.estimated_price !== undefined && !reServiceConversionZeroPrice) {
-          await assertRepriceAllowed(trx, req.params.id, updates.estimated_price);
-        }
         // Assigning a payer must first release any UNCONFIRMED combined
         // pay-page session riding this visit's invoices (codex #3427 r8
         // P1): the browser confirms a combined ACH PI directly after the
@@ -15860,17 +15795,7 @@ async function resolveScheduledServiceCharge({
   // pure/unit-test caller, so this is a no-op for them.
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
-    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)
-    // Codex pre-push P0: only for a CURRENTLY per-application customer — see
-    // completionInvoiceAmount's own per-application branch. Crediting a bare
-    // stamped $0 for EVERY lane let a monthly_membership/legacy-null
-    // customer's estimate-linked $0 visit, still covered by a sibling's
-    // combined invoice, read as ineligible for the sibling lookup below —
-    // this resolver then skipped straight to completionInvoiceAmount's
-    // monthly_rate fallback and minted a SECOND charge beside the sibling's
-    // live invoice (repro: monthlyRate 74.7, estimated_price null → refused
-    // by the sibling guard; estimated_price 0 → returned 74.7).
-    || (billingMode === 'per_application' && isStampedZeroEstimate(estimatedPrice));
+    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
   // Codex P1 (round 6): this used to gate on the CUSTOMER'S CURRENT billing
   // mode — so a combined pay-per-application trip that already has its
   // first-application invoice on a sibling, whose customer later moves to a
@@ -15976,12 +15901,8 @@ async function resolveScheduledServiceCharge({
 // recheck, byte-identical to before.
 function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
-  // Codex pre-push P0: gated to per-application only — see
-  // resolveScheduledServiceCharge's own hasOwnPrice above for the exact
-  // double-charge repro this must avoid for monthly/legacy-null customers.
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
-    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice)
-    || (svc?.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc?.estimated_price));
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
   if (!isSiblingCoverageEligibleVisit({
     sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
   })) return null;
@@ -16857,8 +16778,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       // original generic copy — "bill it at completion" would be untrue for
       // those, since none of them ever bill anything at completion either.
       const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-        || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
+        || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
       const clearerCopy = isSiblingCoverageEligibleVisit({
         sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
       });
@@ -25349,4 +25269,3 @@ module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVis
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
 // Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
 module.exports.nextRecurringDate = nextRecurringDate;
-module.exports.assertRepriceAllowed = assertRepriceAllowed;

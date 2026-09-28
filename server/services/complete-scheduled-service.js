@@ -61,7 +61,7 @@ const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttribute
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice, isStampedZeroEstimate } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
@@ -8492,10 +8492,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // A billable per-application visit with no amount on file (multi-service
     // accept: fee + row prices intentionally NULL) completes UNINVOICED — flag
     // it loudly so the visit gets billed manually instead of leaking.
-    // A stamped $0 is a deliberately free visit (owner 2026-09-28), not a
-    // missing price — never flagged for manual invoicing.
     if (!packetEffects && (perApplicationBilling && !reviewedVisitPrice && !(invoiceAmount > 0)
-      && !isStampedZeroEstimate(svc.estimated_price)
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type))) {
       logger.warn(`[dispatch] per-application visit ${svc.id} (customer ${svc.customer_id}) completed with no billable amount on file (no visit price, no per_application_fee — multi-service plan?) — invoice manually`);
     }
@@ -8682,8 +8679,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // died. Reuses the EXISTING terminal-invoice park/alert
               // machinery above — no new completion-side mint/split logic.
               const hasOwnPrice = (svc.estimated_price != null && Number(svc.estimated_price) > 0)
-                || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price)
-                || (svc.cust_billing_mode === 'per_application' && isStampedZeroEstimate(svc.estimated_price));
+                || hasAuthoritativeZeroPrice(svc.estimated_price, svc.primary_line_price);
               if (isSiblingCoverageEligibleVisit({
                 sourceEstimateId: svc.source_estimate_id, hasOwnPrice, isCallback: svc.is_callback, serviceType: svc.service_type,
               })) {
@@ -10974,11 +10970,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } = await resolveExtendedLane({
       svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, apptCardOneTimeCharge, apptCardLaneUnresolved, customerAutopayActive,
     });
-    // A per-application visit stamped $0 is free (owner 2026-09-28): any
-    // positive invoice on it goes through the $0 cap (plus only a setup-fee
-    // allowance) below with its credit untouched — credit must never be
-    // consumed, or the invoice flipped prepaid, for a free visit.
-    const perAppStampedZeroVisit = perApplicationBilling && !svc.is_callback && isStampedZeroEstimate(svc.estimated_price);
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
@@ -10991,7 +10982,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !apptCardOverCap && !apptCardLaneUnresolved
       && !(extendedChargeCandidate && extendedLaneOverCap)
       && !annualPrepayOfficeReview
-      && !perAppStampedZeroVisit
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');

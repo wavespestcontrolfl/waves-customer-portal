@@ -5152,7 +5152,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         if (!split.existing) {
           const voidHold = await perApplicationCompletionVoidHold({
             isCallback: !!v.is_callback, serviceType: v.service_type, svc: v, dbConn: conn,
-            perApplicationBilling: v.billing_mode === 'per_application',
           });
           if (voidHold) continue;
         }

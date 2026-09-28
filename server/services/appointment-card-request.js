@@ -3357,18 +3357,12 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     let svc;
     try {
       svc = await db('scheduled_services').where({ id: scheduledServiceId })
-        .first('id', 'customer_id', 'service_type', 'is_recurring', 'prepaid_amount', 'estimated_price', 'is_callback');
+        .first('id', 'customer_id', 'service_type', 'is_recurring', 'prepaid_amount');
     } catch (err) {
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: laneRow.customer_id, reason: 'visit_lookup_failed' });
       return { charged: false, reason: 'visit_lookup_failed' };
     }
     if (!svc || svc.is_recurring === true) return { charged: false, reason: 'not_one_time' };
-    // A visit re-priced to exactly $0 after consent is free now (owner
-    // 2026-09-28): the old approval authorizes nothing — office review.
-    if (!svc.is_callback && svc.estimated_price != null && svc.estimated_price !== '' && Number(svc.estimated_price) === 0) {
-      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'visit_repriced_to_zero' });
-      return { charged: false, reason: 'visit_repriced_to_zero' };
-    }
     // The consent row must belong to the visit's CURRENT customer (Codex
     // #3153 r19 P0): a reassigned visit must never ride a prior customer's
     // accepted_amount into automatic collection.

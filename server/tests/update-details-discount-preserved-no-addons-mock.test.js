@@ -93,7 +93,7 @@ class Sentinel extends Error {}
 
 function chain(table) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'whereNotIn', 'orWhereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
+  for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereRaw', 'andWhere', 'orWhere', 'select', 'orderBy', 'limit', 'forUpdate', 'forNoKeyUpdate', 'forShare', 'leftJoin', 'join', 'groupBy', 'distinct', 'clone', 'transacting', 'skipLocked']) {
     c[m] = jest.fn().mockReturnThis();
   }
   c.first = jest.fn(async () => (table === 'scheduled_services' ? { ...STORED } : null));
@@ -181,8 +181,6 @@ beforeEach(() => {
     const trx = jest.fn((table) => db(table));
     trx.raw = jest.fn(() => 'raw');
     trx.fn = { now: jest.fn(() => 'now()') };
-    // The re-price fence (assertRepriceAllowed) probes for the packet table.
-    trx.schema = { hasTable: jest.fn(async () => false) };
     trx.commit = jest.fn();
     trx.rollback = jest.fn();
     return fn(trx);

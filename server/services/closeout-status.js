@@ -543,7 +543,6 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
     serviceType: visit.service_type,
     svc: visit,
     dbConn: knex,
-    perApplicationBilling: lane?.mode === 'per_application' || inputs.customer?.billing_mode === 'per_application',
   }));
   // Read-only projection (like the annual-coverage lookup just above): a
   // lookup failure here fails toward null — the ordinary prediction stands
