@@ -25,13 +25,17 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
   // a rental or second property must not have its visits credited to the
   // customer's primary address. Only performed visits count (status =
   // 'completed'; 'incomplete' is an office-handoff closeout for a visit
-  // that did NOT happen).
+  // that did NOT happen). Every completed visit counts toward the
+  // denominator whether or not it has technician_notes — a completed visit
+  // with blank notes still happened and must not silently shrink `visits`
+  // (and so understate the true visit volume behind the 5-visit floor and
+  // the percentage in getAreaIntelSentence); parsePestsNamed itself returns
+  // [] for blank notes, so no separate notes filter is needed for the
+  // pest-mention numerator either.
   const rows = await conn('service_records as sr')
     .join('customers as c', 'c.id', 'sr.customer_id')
     .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
     .where('sr.status', 'completed')
-    .whereNotNull('sr.technician_notes')
-    .whereRaw("btrim(sr.technician_notes) <> ''")
     .where('sr.service_date', '>=', monthStart)
     .where('sr.service_date', '<=', monthEnd)
     .select('sr.technician_notes', conn.raw('COALESCE(ss.service_address_city, c.city) as city'));

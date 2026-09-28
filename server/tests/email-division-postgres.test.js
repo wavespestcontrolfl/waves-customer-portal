@@ -204,6 +204,19 @@ suite('email division against real Postgres', () => {
     expect(rows.find((r) => r.pest_key === 'ticks')).toBeUndefined();
   });
 
+  test('computeAreaIntel: a completed visit with blank technician_notes still counts toward the visit denominator', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    const customerId = await makeCustomer({ city: 'Terra' });
+    await makeVisits(customerId, 3, { service_date: '2026-09-05', technician_notes: 'WHAT WE DID: treated for fleas.' });
+    // A completed visit with no notes at all still happened — it must add
+    // to `visits` (the denominator behind the 5-visit floor AND the
+    // percentage sentence), just not to any pest's numerator.
+    await makeVisits(customerId, 2, { service_date: '2026-09-06', technician_notes: null });
+    await computeAreaIntel({ month, conn: trx });
+    const rows = await trx('email_area_intel_monthly').where({ city: 'terra' });
+    expect(rows).toMatchObject([{ visits: 5, pest_key: 'fleas', visits_with_pest: 3 }]);
+  });
+
   test('computeAreaIntel: attributes a visit to the booked service_address_city, not the customer\'s own city', async () => {
     const month = new Date('2026-09-15T12:00:00Z');
     // The account's primary/current city is Bradenton, but every visit was
