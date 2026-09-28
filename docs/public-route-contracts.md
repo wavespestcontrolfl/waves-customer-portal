@@ -2281,7 +2281,7 @@ reader and hands a third party an identity they were never told. Do not
 reintroduce it. window_end is never returned — customer surfaces quote
 start + 2h only, and the range is derived server-side with
 `arrivalWindowRange()` so the page cannot drift from the reminders.
-The ONLY write is the confirm: a status-only `pending -> confirmed`
+The confirm write is a status-only `pending -> confirmed`
 transition guarded on the status AND the date/window that were read, plus
 a `job_status_history` row. The client posts the slot it rendered and the
 server confirms ONLY that slot — the office bulk reschedule moves
@@ -2289,7 +2289,55 @@ date/window while LEAVING the row pending, so a status-only guard would
 bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
-than duplicates).
+than duplicates.
+`POST /:token/photos` (dark server foundation, `GATE_VISIT_PREP_PHOTOS`,
+layered on `GATE_APPOINTMENT_PAGE` — this route rides the same router, so
+BOTH must be on): lets the customer attach up to 3 photos + a short note to
+THIS specific upcoming visit before the tech arrives (`server/services/
+visit-prep.js` owns storage). Guard order: the router-level gate/noStore/
+60-per-min limiter, then the SAME `TOKEN_RE` format check the GET uses, then
+the sub-gate — off answers the identical generic 404, BEFORE this route's
+own limiter runs (the house dark-`GATE_*` contract: a probe never sees a
+revealing 429), THEN a dedicated 6-per-min limiter, THEN `loadByToken`
+(additionally selects `s.property_id`) with the same missing-row/deleted-
+customer 404, THEN eligibility — a 409 `PREP_NOT_AVAILABLE` unless the SAME
+grouped/ungrouped state the GET computes is `'upcoming'`, the token's
+membership is known (not `visitUnknown`), `customers.active === true`, the
+visit is recurring-lineage (a one-time visit is out of scope for this lane),
+and the visit is not `dispatchOwnedUnreviewed` (the office hasn't reviewed
+it yet — same invariant the confirm write enforces) — THEN a cheap, unlocked
+cap pre-check (409 `PREP_CAP_REACHED` when the visit already has 3
+submissions or 6 photos) that runs BEFORE multer ever buffers a byte. ONLY
+THEN does `multer` (memory storage; 5 MB/file, 3 files, 6 fields, 2 KB field
+size, 10 parts) parse the body — a multer size limit is 413, every other
+multer limit is 400, both customer-safe and generic. Each file's declared
+mimetype AND its magic bytes (JPEG/PNG/WebP/HEIC-HEIF `ftyp` box) must agree
+on JPEG/PNG/WebP/HEIC/HEIF; HEIC/HEIF is converted to JPEG
+(`convertHeicToJpeg`) before storage, and a conversion failure 400s that
+photo. Photos are deduped by `sha256` of the STORED bytes per
+`scheduled_service_id`; an all-duplicate resubmit writes nothing and answers
+200 (idempotent). The whole request succeeds or fails atomically: uploads
+must all succeed (a storage failure is 503 `PREP_STORAGE_UNAVAILABLE`, no
+rows written, and any already-uploaded objects for that request are
+deleted), and the final cap check re-runs under a `SELECT … FOR UPDATE` on
+the token's `scheduled_services` row inside the same transaction that
+inserts the submission + photo rows — a locked-recount cap miss rolls back
+the transaction and deletes the uploaded S3 objects. `property_id`,
+`customer_id`, and `visit_id` are copied from the locked `scheduled_services`
+row, never from the request body. The response is `{ ok: true, prepPhotos:
+{ eligible, photoCount, photosRemaining } }` — 201 when a submission was
+created, 200 on the idempotent duplicate-only case — and NEVER carries a
+photo URL, an S3 key, the note, or any customer identity: the token is
+shared with whoever received the visit text, so nothing submitted through
+it is ever shown back. Sends NOTHING to anyone (no SMS/email/push/admin
+alert) and never touches `scheduled_services.status`, date, window, or
+technician. Additive on the existing GET: gate on adds a top-level
+`prepPhotos: { eligible, photoCount, photosRemaining }` (the same shape,
+computed whether or not the visit is currently eligible, so the client can
+render the right empty/full state); gate off, the key is absent and the GET
+payload is byte-identical to before this lane. A prepPhotos lookup failure
+on GET fails soft — the key is omitted and a warning is logged, never a
+500).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`

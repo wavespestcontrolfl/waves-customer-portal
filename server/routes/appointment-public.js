@@ -17,22 +17,30 @@
  *
  * GET  /:token               — appointment summary (see payload notes below).
  * GET  /:token/calendar.ics  — the same visit as a calendar file.
- * POST /:token/confirm       — marks a pending visit confirmed. The ONLY
- *   write here, and a deliberately tiny one: status pending -> confirmed
- *   plus a job_status_history row. It never touches date/window/tech and
- *   never sends anything — customer comms stay owner-driven, and a
- *   confirmation that texted the customer back would be noise.
+ * POST /:token/confirm       — marks a pending visit confirmed. A
+ *   deliberately tiny write: status pending -> confirmed plus a
+ *   job_status_history row. It never touches date/window/tech and never
+ *   sends anything — customer comms stay owner-driven, and a confirmation
+ *   that texted the customer back would be noise.
+ * POST /:token/photos        — GATE_VISIT_PREP_PHOTOS (dark server
+ *   foundation). Attaches up to 3 photos + a short note to THIS visit
+ *   (services/visit-prep.js owns storage/caps/dedupe). Same tiny-write
+ *   spirit as confirm: it never touches scheduled_services status, date,
+ *   window or tech, and sends nothing to anyone. See the handler below for
+ *   the full guard order.
  *
  * Dark until the owner flips GATE_APPOINTMENT_PAGE: every route 404s, so
  * the page is unreachable even by token until the templates that link it
- * are live. Kill switch = unset the var.
+ * are live. Kill switch = unset the var. The photos route additionally
+ * needs GATE_VISIT_PREP_PHOTOS.
  */
 
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, visitPrepPhotosLive } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
@@ -45,6 +53,7 @@ const {
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
+const visitPrep = require('../services/visit-prep');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -215,8 +224,8 @@ async function loadByToken(token) {
     .first(
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
-      's.recurring_parent_id', 's.reschedule_token', 's.visit_id',
-      's.source_action', 's.customer_confirmed',
+      's.recurring_parent_id', 's.recurring_pattern', 's.reschedule_token', 's.visit_id',
+      's.source_action', 's.customer_confirmed', 's.property_id',
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
@@ -631,6 +640,32 @@ async function stormOutlook(svc) {
   }
 }
 
+// GATE_VISIT_PREP_PHOTOS additive summary for the GET payload. Gate off:
+// `{}` — the key is absent and the payload is byte-identical to before this
+// lane. Gate on: `{ prepPhotos }`, always present regardless of eligibility
+// (a non-'upcoming' state simply reports eligible:false) so the client can
+// show the right empty/full state instead of inferring it. Fails soft: a
+// lookup error omits the key and logs a warning rather than 500ing the page.
+async function prepPhotosField(svc, state, visitUnknown) {
+  if (!visitPrepPhotosLive()) return {};
+  try {
+    const eligibility = visitPrep.visitPrepEligibility({
+      svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+    });
+    const summary = await visitPrep.visitPrepSummary(svc);
+    return {
+      prepPhotos: {
+        eligible: eligibility.eligible,
+        photoCount: summary.photoCount,
+        photosRemaining: summary.photosRemaining,
+      },
+    };
+  } catch (err) {
+    logger.warn(`[appointment-public] prepPhotos summary failed for ${svc.id}: ${err.message}`);
+    return {};
+  }
+}
+
 router.get('/:token', async (req, res, next) => {
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
@@ -679,6 +714,10 @@ router.get('/:token', async (req, res, next) => {
       calendarEligible: visitUnknown ? false : calendarEligible(svc, visitInfoRaw),
       // "Look for this van" scene under the header card (GATE_VAN_SCENE).
       vanScene: isEnabled('vanScene'),
+      // GATE_VISIT_PREP_PHOTOS (dark): additive only. Gate off = key absent,
+      // payload byte-identical to before this lane. Fails soft on any
+      // lookup error — never turns a summary read into a 500'd page.
+      ...(await prepPhotosField(svc, state, visitUnknown)),
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
 
@@ -1119,8 +1158,113 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
   }
 });
 
+// ── visit prep photos (GATE_VISIT_PREP_PHOTOS) ──────────────────────────────
+// Own limiter — 6/min, well under the router-wide 60/min, since a real
+// customer submits at most a couple of times per visit.
+const visitPrepLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again in a minute.' },
+});
+
+const visitPrepUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: visitPrep.VISIT_PREP_LIMITS.maxPhotoBytes,
+    files: visitPrep.VISIT_PREP_LIMITS.photosPerSubmission,
+    fields: 6,
+    fieldSize: 2 * 1024,
+    parts: 10,
+  },
+});
+
+router.post(
+  '/:token/photos',
+  // Token format + the sub-gate run BEFORE this route's own limiter (AGENTS.md:
+  // a dark GATE_* route skips its limiter so a probe never sees a revealing
+  // 429) — both answer the SAME generic 404 the router-level gate already gives.
+  (req, res, next) => {
+    if (!TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
+    if (!visitPrepPhotosLive()) return res.status(404).json({ error: 'Not found' });
+    return next();
+  },
+  visitPrepLimiter,
+  // Load the token row, prove eligibility, and run the cheap (unlocked) cap
+  // pre-check — all BEFORE multer ever buffers a byte, so an ineligible or
+  // already-capped request never costs the memory or the S3 round trip.
+  async (req, res, next) => {
+    try {
+      const svc = await loadByToken(req.params.token);
+      if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+
+      const visitInfoRaw = svc.visit_id ? await visitServicesFor(svc) : {};
+      const { state } = visitInfoRaw.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfoRaw);
+      const eligibility = visitPrep.visitPrepEligibility({
+        svc,
+        state,
+        visitUnknown: visitInfoRaw.visitUnknown,
+        dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+      });
+      if (!eligibility.eligible) {
+        return res.status(409).json({ error: "Photos can't be added to this visit online.", code: 'PREP_NOT_AVAILABLE' });
+      }
+
+      const summary = await visitPrep.visitPrepSummary(svc);
+      if (summary.submissionCount >= visitPrep.VISIT_PREP_LIMITS.submissionsPerVisit
+        || summary.photoCount >= visitPrep.VISIT_PREP_LIMITS.photosPerVisit) {
+        return res.status(409).json({ error: "You've reached the photo limit for this visit.", code: 'PREP_CAP_REACHED' });
+      }
+
+      req.visitPrepSvc = svc;
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  },
+  // Multer runs ONLY now — every prior guard has already refused a 404/409
+  // request without touching the multipart body.
+  (req, res, next) => {
+    visitPrepUpload.array('photos', visitPrep.VISIT_PREP_LIMITS.photosPerSubmission)(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Each photo must be 5 MB or smaller.' });
+      }
+      return res.status(400).json({ error: 'Could not read the uploaded photos.' });
+    });
+  },
+  async (req, res, next) => {
+    try {
+      const result = await visitPrep.createVisitPrepSubmission({
+        svc: req.visitPrepSvc,
+        files: req.files || [],
+        note: req.body?.note,
+        topic: req.body?.topic,
+        locationOnProperty: req.body?.locationOnProperty,
+        entry: 'appointment_page',
+      });
+      // Never photo URLs/keys, the note, or any customer identity — the
+      // token is shared with whoever received the visit text, and nothing
+      // submitted through it is ever shown back.
+      return res.status(result.created ? 201 : 200).json({
+        ok: true,
+        prepPhotos: {
+          eligible: true,
+          photoCount: result.summary.photoCount,
+          photosRemaining: result.summary.photosRemaining,
+        },
+      });
+    } catch (err) {
+      if (err && err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code });
+      return next(err);
+    }
+  },
+);
+
 router._test = {
   pageState,
+  prepPhotosField,
   confirmRaceVerdict,
   icsEscape,
   icsFold,
