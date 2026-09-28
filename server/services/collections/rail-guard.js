@@ -22,6 +22,15 @@
 
 const logger = require('../logger');
 
+// Shadow-spacing inputs are forwarded only when set, so every existing
+// caller's evaluate() arguments stay exactly as they were.
+function shadowSpacingArgs(source, spacingExcludeKey) {
+  return {
+    ...(source ? { source } : {}),
+    ...(spacingExcludeKey ? { spacingExcludeKey } : {}),
+  };
+}
+
 /**
  * Verdict-returning consult (codex r8): aggregate rails that quote a SET of
  * invoices must restrict that set to the policy's eligible ids — a boolean
@@ -103,8 +112,7 @@ async function collectionsChannelPermitted({
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
       ...(database ? { database } : {}),
-      ...(source ? { source } : {}),
-      ...(spacingExcludeKey ? { spacingExcludeKey } : {}),
+      ...shadowSpacingArgs(source, spacingExcludeKey),
     });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a
