@@ -1846,7 +1846,9 @@ describe('listicle_family scoring + action mapping', () => {
     // conflict class, not refresh alone.
     // hasCityService joined the guard with the local_gap revival: the
     // city-service in-flight fence rechecks under this same advisory lock.
-    expect(src).toMatch(/if \(!hasFamily && !hasPageEdit && !hasCityService && !lockEvenIfEmpty\) return opportunities;/);
+    // hasAeoQuestion joined it with the aeo_question_gap bucket: pinned
+    // articles are not page edits, but their target recheck needs the lock.
+    expect(src).toMatch(/if \(!hasFamily && !hasPageEdit && !hasCityService && !hasAeoQuestion && !lockEvenIfEmpty\) return opportunities;/);
     expect(src).toMatch(/const hasPageEdit = opportunities\.some\(\(o\) => GscOpportunityMiner\.PAGE_EDITING_ACTIONS\.includes\(o\.action_type\)\)/);
     expect(auditSrc).toMatch(/\.whereIn\('action_type', miner\.PAGE_EDITING_ACTIONS\)/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
@@ -3246,6 +3248,48 @@ describe('aeo_question_gap bucket', () => {
       if (OLD_GATE === undefined) delete process.env.GATE_AEO_QUESTION_GAP_MINING; else process.env.GATE_AEO_QUESTION_GAP_MINING = OLD_GATE;
       db.mockReset();
     }
+  });
+
+  test('incoming question rows are rechecked against route holders re-read inside the transaction', async () => {
+    const OLD_GATE = process.env.GATE_AEO_QUESTION_GAP_MINING;
+    process.env.GATE_AEO_QUESTION_GAP_MINING = 'true';
+    const db = require('../models/db');
+    db.mockImplementation(() => ({ whereIn() { return this; }, select: async () => [] }));
+    const upserts = [];
+    const trx = () => {
+      const q = { where: () => q, whereIn: () => q, whereNotNull: () => q, forUpdate: () => q, select: async () => [] };
+      return q;
+    };
+    trx.raw = async (_sql, bindings) => { upserts.push(bindings[12]); return { rowCount: 1 }; };
+    try {
+      const miner = new GscOpportunityMiner();
+      const refresh = buildAeoQuestionGapOpp(gapFor('Q36'), { liveUrl: `${HUB}/termite/termite-treatment-cost/`, impressions: 900 });
+      const article = buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null });
+      // Committed since the mine-time fence: another bucket's edit of the
+      // refresh page, and an overlapping mine's article for the same path.
+      const fence = jest.spyOn(miner, '_aeoQuestionPageFence').mockResolvedValue(new Map([
+        ['wavespestcontrol.com::/termite/termite-treatment-cost', new Set(['decay_refresh::x'])],
+        ['wavespestcontrol.com::/termite/termite-bond', new Set(['aeo_question_gap::Q37::wavespestcontrol.com::/termite/termite-bond'])],
+      ]));
+      expect(await miner.persistAll([refresh, article], trx)).toBe(0);
+      expect(fence).toHaveBeenCalledWith(28, trx);
+      // Holders under the row's OWN key do not reject it.
+      fence.mockResolvedValue(new Map([['wavespestcontrol.com::/termite/termite-bond', new Set([article.dedupe_key])]]));
+      expect(await miner.persistAll([article], trx)).toBe(1);
+      expect(upserts).toEqual([article.dedupe_key]);
+    } finally {
+      if (OLD_GATE === undefined) delete process.env.GATE_AEO_QUESTION_GAP_MINING; else process.env.GATE_AEO_QUESTION_GAP_MINING = OLD_GATE;
+      db.mockReset();
+    }
+  });
+
+  test('a batch carrying only pinned question articles still takes the page-edit advisory lock', async () => {
+    const miner = new GscOpportunityMiner();
+    const raws = [];
+    const trx = () => { const q = { where: () => q, forUpdate: () => q, select: async () => [] }; return q; };
+    trx.raw = async (sql) => { raws.push(sql); return { rows: [] }; };
+    await miner._revalidateFamilyBatch(trx, [buildAeoQuestionGapOpp(gapFor('Q26'), { liveUrl: null })]);
+    expect(raws.some((sql) => /pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/.test(sql))).toBe(true);
   });
 
   describe('mineAeoQuestionGaps', () => {

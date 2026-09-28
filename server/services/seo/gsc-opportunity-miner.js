@@ -3526,16 +3526,16 @@ class GscOpportunityMiner {
   // written inside the cooldown (done), by route identity → holder keys:
   // page edits from every bucket, plus this bucket's pinned articles (no
   // page_url yet — their route is the target_path they publish at).
-  async _aeoQuestionPageFence(cooldownDays) {
+  async _aeoQuestionPageFence(cooldownDays, runner = db) {
     const cutoff = new Date(Date.now() - cooldownDays * 86400_000);
     const recent = (b) => b.whereIn('status', ['pending', 'claimed', 'pending_review'])
       .orWhere((d) => d.where('status', 'done').where('updated_at', '>=', cutoff));
-    const edits = await db('opportunity_queue')
+    const edits = await runner('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNotNull('page_url')
       .where(recent)
       .select('page_url', 'dedupe_key');
-    const articles = await db('opportunity_queue')
+    const articles = await runner('opportunity_queue')
       .where({ bucket: AEO_QUESTION_GAP_BUCKET, action_type: 'new_supporting_blog' })
       .where(recent)
       .select('dedupe_key', db.raw("signal_metadata->>'target_path' as target_path"));
@@ -4203,19 +4203,33 @@ class GscOpportunityMiner {
   //     batch is expired — otherwise it stays claimable beside the new
   //     edit (it re-mines once that edit is done and the cooldown passes);
   //   - pages with a question write CLAIMED or in review are returned, and
-  //     other buckets' edits of those pages wait a mine.
-  // Runs only while the bucket's gate is on. The rows are read FOR UPDATE:
+  //     other buckets' edits of those pages wait a mine;
+  //   - INCOMING question rows are rechecked against the route holders
+  //     re-read here (the mine-time fence ran before the transaction, so a
+  //     same-route write committed since — another producer, or an
+  //     overlapping mine's question — rejects them).
+  // Runs only while the bucket's gate is on, after _revalidateFamilyBatch
+  // took the page-edit advisory lock. The rows are read FOR UPDATE:
   // claimNext skips locked rows (SKIP LOCKED), so a pending row cannot be
   // claimed between this classification and its expiry.
-  async _reconcileAeoQuestionPages(runner, arbitrated) {
-    if (!isEnabled('aeoQuestionGapMining')) return new Set();
+  async _reconcileAeoQuestionPages(runner, arbitrated, opportunities = []) {
+    const result = { busyPages: new Set(), rejectedKeys: new Set() };
+    if (!isEnabled('aeoQuestionGapMining')) return result;
+    const incoming = opportunities.filter((o) => o.bucket === AEO_QUESTION_GAP_BUCKET);
+    if (incoming.length) {
+      const holders = await this._aeoQuestionPageFence(envIntAtLeast('AEO_QUESTION_GAP_COOLDOWN_DAYS', 28, 0), runner);
+      for (const o of incoming) {
+        const keys = holders.get(aeoQuestionGapRoute(o));
+        if (keys && [...keys].some((k) => k !== o.dedupe_key)) result.rejectedKeys.add(o.dedupe_key);
+      }
+    }
     const rows = await runner('opportunity_queue')
       .where({ bucket: AEO_QUESTION_GAP_BUCKET })
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
       .forUpdate()
       .select('id', 'page_url', 'status');
-    const busy = new Set();
+    const busy = result.busyPages;
     const losers = [];
     for (const r of rows) {
       const id = routeIdentity(r.page_url);
@@ -4229,7 +4243,7 @@ class GscOpportunityMiner {
         .update({ status: 'expired', skip_reason: 'aeo_question_yielded_page_edit', updated_at: new Date() });
       logger.info(`[gsc-opp-miner] aeo_question_gap: ${losers.length} pending refresh(es) expired — another bucket edits the page`);
     }
-    return busy;
+    return result;
   }
 
   // An aeo_question_gap refresh yields to a floor-clearing, non-frozen edit
@@ -4290,7 +4304,10 @@ class GscOpportunityMiner {
     // conflict predicate, where a city-service creation is not an edit of
     // an existing page.
     const hasCityService = opportunities.some((o) => o.action_type === 'create_or_refresh_city_service_page');
-    if (!hasFamily && !hasPageEdit && !hasCityService && !lockEvenIfEmpty) return opportunities;
+    // aeo_question_gap pinned ARTICLES too: their target recheck in
+    // _reconcileAeoQuestionPages is only sound under the same lock.
+    const hasAeoQuestion = opportunities.some((o) => o.bucket === AEO_QUESTION_GAP_BUCKET);
+    if (!hasFamily && !hasPageEdit && !hasCityService && !hasAeoQuestion && !lockEvenIfEmpty) return opportunities;
     // Advisory transaction lock FIRST (Codex r27): FOR UPDATE only locks
     // rows that exist, so two overlapping mines could both see no row for
     // a fresh page and insert competing first refreshes. Every family
@@ -4828,12 +4845,13 @@ class GscOpportunityMiner {
     // and familyOppYields (family refreshes yield by PAGE, family blogs
     // by QUERY intent).
     const arbitrated = await this._arbitratedRefreshPages(opportunities);
-    const aeoBusyPages = await this._reconcileAeoQuestionPages(runner, arbitrated);
+    const aeo = await this._reconcileAeoQuestionPages(runner, arbitrated, opportunities);
     const admitted = opportunities.filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated)
       && !GscOpportunityMiner.aeoQuestionOppYields(o, arbitrated)
+      && !aeo.rejectedKeys.has(o.dedupe_key)
       && !(o.bucket !== AEO_QUESTION_GAP_BUCKET && o.page_url
         && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
-        && aeoBusyPages.has(routeIdentity(o.page_url))));
+        && aeo.busyPages.has(routeIdentity(o.page_url))));
 
     // Group by dedupe_key, keep highest-score entry per key.
     const winners = new Map();
