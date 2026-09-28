@@ -10687,6 +10687,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
           await acquireScheduledInvoiceMintLock(trx, acceptHoldRow.id);
         }
+        // EVERY adopted existing appointment, not only a reservation-held
+        // one, takes the mint lock here, before any row lock (Codex r5 P1 on
+        // #5253): update-details' re-price takes mint lock → customer row,
+        // while this txn updates the customer (service_preferences) before
+        // the adopt block's own mint acquisition — ABBA. Re-acquiring it
+        // there is a reentrant no-op. Same mint → catalog order the held
+        // path already uses; nothing later in this txn takes occupancy or
+        // tech-day locks for a non-held row.
+        if (existingAppointmentRow?.id && existingAppointmentRow.id !== acceptHoldRow?.id) {
+          const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+          await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
+        }
       }
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
       // existing customer's accept graduates a held slot / books visits, so
